@@ -17,7 +17,7 @@ from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.timeout import Timeout
-from openpilot.common.hardware.hw import Paths
+from openpilot.common.hardware.hw import Paths, TMP_DIR
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.system.loggerd.xattr_cache import getxattr
 from openpilot.system.loggerd.deleter import PRESERVE_ATTR_NAME, PRESERVE_ATTR_VALUE
@@ -57,7 +57,8 @@ class TestLoggerd(OpenpilotTestCase):
 
   def _gen_bootlog(self):
     with Timeout(5):
-      out = subprocess.check_output("./bootlog", cwd=os.path.join(BASEDIR, "openpilot/system/loggerd"), encoding='utf-8')
+      loggerd_dir = os.path.join(BASEDIR, "openpilot/system/loggerd")
+      out = subprocess.check_output(os.path.join(loggerd_dir, "bootlog"), cwd=loggerd_dir, encoding='utf-8')
 
     log_fn = self._get_log_fn(out)
 
@@ -215,7 +216,7 @@ class TestLoggerd(OpenpilotTestCase):
   def test_bootlog(self):
     # generate bootlog with fake launch log
     launch_log = ''.join(str(random.choice(string.printable)) for _ in range(100))
-    with open("/tmp/launch_log", "w") as f:
+    with open(os.path.join(TMP_DIR, "launch_log"), "w", newline="") as f:  # no newline translation on Windows
       f.write(launch_log)
 
     bootlog_path = self._gen_bootlog()

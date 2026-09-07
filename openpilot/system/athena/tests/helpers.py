@@ -1,3 +1,4 @@
+import contextlib
 import http.server
 import socket
 
@@ -30,7 +31,8 @@ class EchoSocket:
     finally:
       conn.shutdown(0)
       conn.close()
-      self.socket.shutdown(0)
+      with contextlib.suppress(OSError):  # Windows refuses to shut down a listening socket
+        self.socket.shutdown(0)
       self.socket.close()
 
 
@@ -46,7 +48,15 @@ class MockWebsocket:
   def __init__(self, recv_queue, send_queue):
     self.recv_queue = recv_queue
     self.send_queue = send_queue
-    self.sock = socket.socket()
+    # the proxy selects on this socket before calling recv() and sets IP_TOS on it, so it has to be a readable TCP
+    # socket: a connected loopback pair with a byte in flight (only Linux reports an unconnected socket readable)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(1)
+    self._peer = socket.create_connection(listener.getsockname())
+    self.sock, _ = listener.accept()
+    listener.close()
+    self._peer.send(b'x')
 
   def recv(self):
     data = self.recv_queue.get()
@@ -59,6 +69,7 @@ class MockWebsocket:
 
   def close(self):
     self.sock.close()
+    self._peer.close()
 
 
 class HTTPRequestHandler(http.server.SimpleHTTPRequestHandler):

@@ -55,6 +55,16 @@ def host():
   with http_server_context(handler=HTTPRequestHandler, setup=seed_athena_server) as (host, port):
     yield f"http://{host}:{port}"
 
+def send_device_state(started, end_event):
+  # module level: Windows spawns the process and cannot pickle a closure or a socket
+  pub_sock = messaging.pub_sock("deviceState")
+  started.set()
+  while not end_event.is_set():
+    msg = messaging.new_message('deviceState')
+    pub_sock.send(msg.to_bytes())
+    time.sleep(0.01)
+
+
 class TestAthenadMethods(OpenpilotTestCase):
   @classmethod
   def setup_class(cls):
@@ -121,18 +131,11 @@ class TestAthenadMethods(OpenpilotTestCase):
     with self.assertRaises(TimeoutError) as _:
       dispatcher["getMessage"]("controlsState")
 
-    end_event = multiprocessing.Event()
+    started, end_event = multiprocessing.Event(), multiprocessing.Event()
 
-    pub_sock = messaging.pub_sock("deviceState")
-
-    def send_deviceState():
-      while not end_event.is_set():
-        msg = messaging.new_message('deviceState')
-        pub_sock.send(msg.to_bytes())
-        time.sleep(0.01)
-
-    p = multiprocessing.Process(target=send_deviceState)
+    p = multiprocessing.Process(target=send_device_state, args=(started, end_event))
     p.start()
+    assert started.wait(10)  # spawning the process takes a while on Windows
     time.sleep(0.1)
     try:
       deviceState = dispatcher["getMessage"]("deviceState")
@@ -326,7 +329,10 @@ class TestAthenadMethods(OpenpilotTestCase):
 
     athenad.upload_queue.put_nowait(item)
     self._wait_for_upload()
-    time.sleep(0.1)
+    for _ in range(100):  # a refused connection takes a few seconds on Windows
+      if athenad.upload_queue.qsize():
+        break
+      time.sleep(0.1)
 
     # Check that upload item was put back in the queue with incremented retry count
     assert athenad.upload_queue.qsize() == 1
@@ -350,7 +356,7 @@ class TestAthenadMethods(OpenpilotTestCase):
   @with_upload_handler
   def test_cancel_expiry(self):
     t_future = datetime.now() - timedelta(days=40)
-    ts = int(t_future.strftime("%s")) * 1000
+    ts = int(t_future.timestamp()) * 1000
 
     # Item that would time out if actually uploaded
     fn = self._create_file('qlog.zst')

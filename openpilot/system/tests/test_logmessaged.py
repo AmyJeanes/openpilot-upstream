@@ -19,7 +19,12 @@ class TestLogmessaged(OpenpilotTestCase):
     self.sock = messaging.sub_sock("logMessage", timeout=1000, conflate=False)
     self.error_sock = messaging.sub_sock("logMessage", timeout=1000, conflate=False)
 
-    # ensure sockets are connected
+    # ensure sockets are connected and the daemon is up (spawning it takes a while on Windows)
+    for _ in range(100):
+      cloudlog.error("logmessaged ready check")
+      time.sleep(0.1)
+      if messaging.drain_sock(self.sock):
+        break
     time.sleep(0.5)
     messaging.drain_sock(self.sock)
     messaging.drain_sock(self.error_sock)
