@@ -51,7 +51,8 @@ public:
   void setLoop(bool loop) { loop ? flags_ &= ~REPLAY_FLAG_NO_LOOP : flags_ |= REPLAY_FLAG_NO_LOOP; }
   bool loop() const { return !(flags_ & REPLAY_FLAG_NO_LOOP); }
   const Route &route() const { return seg_mgr_->route_; }
-  inline double currentSeconds() const { return double(cur_mono_time_ - route_start_ts_) / 1e9; }
+  // signed: cur_mono_time_ starts 1 ns before route_start_ts_ so the first event is not skipped
+  inline double currentSeconds() const { return double(int64_t(cur_mono_time_ - route_start_ts_)) / 1e9; }
   inline std::time_t routeDateTime() const { return route_date_time_; }
   inline uint64_t routeStartNanos() const { return route_start_ts_; }
   inline double toSeconds(uint64_t mono_time) const { return (mono_time - route_start_ts_) / 1e9; }
@@ -92,7 +93,7 @@ private:
   Timeline timeline_;
 
 #ifndef _WIN32
-  pthread_t stream_thread_id = 0;  // Windows: the stream thread sleep cannot be interrupted, it just runs out
+  pthread_t stream_thread_id = 0;  // Windows: precise_nano_sleep polls interrupt_requested_ instead of taking a signal
 #endif
   std::thread stream_thread_;
   std::mutex stream_lock_;

@@ -4,6 +4,7 @@
 #include <cstdarg>
 #ifdef _WIN32
 #include <malloc.h>
+#include "common/win32.h"
 #endif
 #include <cstring>
 #include <iostream>
@@ -57,6 +58,28 @@ std::string getUrlWithoutQuery(const std::string &url) {
   return (idx == std::string::npos ? url : url.substr(0, idx));
 }
 
+#ifdef _WIN32
+// winpthreads' clock_nanosleep rejects CLOCK_MONOTONIC and Sleep() has a 15.6 ms granularity, so wait on a
+// high-resolution timer. Nothing can cut the wait short, so sleep in slices and poll the interrupt flag between them.
+void precise_nano_sleep(int64_t nanoseconds, std::atomic<bool> &interrupt_requested) {
+  struct Timer {
+    HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    Timer() { if (!h) h = CreateWaitableTimerW(nullptr, TRUE, nullptr); }
+    ~Timer() { CloseHandle(h); }
+  };
+  static thread_local Timer timer;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(nanoseconds);
+  while (!interrupt_requested) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::nanoseconds::zero()) break;
+    const auto slice = std::min<std::chrono::nanoseconds>(remaining, std::chrono::milliseconds(5));
+    LARGE_INTEGER due;
+    due.QuadPart = -std::max<int64_t>(slice.count() / 100, 1);  // relative, 100 ns units
+    SetWaitableTimer(timer.h, &due, 0, nullptr, nullptr, FALSE);
+    WaitForSingleObject(timer.h, INFINITE);
+  }
+}
+#else
 void precise_nano_sleep(int64_t nanoseconds, std::atomic<bool> &interrupt_requested) {
   struct timespec req, rem;
   req.tv_sec = nanoseconds / 1000000000;
@@ -75,6 +98,7 @@ void precise_nano_sleep(int64_t nanoseconds, std::atomic<bool> &interrupt_reques
     req = rem;
   }
 }
+#endif
 
 std::vector<std::string> split(std::string_view source, char delimiter) {
   std::vector<std::string> fields;
