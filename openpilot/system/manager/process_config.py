@@ -1,6 +1,7 @@
 import os
 import operator
 import platform
+import sys
 
 from opendbc.car.structs import car
 from openpilot.common.params import Params
@@ -77,8 +78,8 @@ procs = [
 
   NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(driverview, livestream), enabled=not WEBCAM),
   PythonProcess("webcamerad", "openpilot.system.camerad.webcam.camerad", driverview, enabled=WEBCAM),
-  PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
-  PythonProcess("journald", "openpilot.system.journald", only_onroad, platform.system() != "Darwin"),
+  PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=platform.system() == "Linux"),
+  PythonProcess("journald", "openpilot.system.journald", only_onroad, platform.system() == "Linux"),
   PythonProcess("micd", "openpilot.system.micd", iscar),
   PythonProcess("timed", "openpilot.system.timed", always_run, enabled=not PC),
 
@@ -116,7 +117,8 @@ procs = [
 
   # debug procs
   NativeProcess("bridge", "openpilot/cereal/messaging", ["./bridge"], notcar),
-  PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar)),
+  # TODO: drop the gate when teleoprtc installs on Windows (libdatachannel-py wheels)
+  PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar), enabled=sys.platform != "win32"),
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 ]
 
