@@ -326,7 +326,15 @@ int lock_file_exclusive(int fd) {
 
 int replace_file(const char *from, const char *to) {
 #ifdef _WIN32
-  return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+  // readers open files without FILE_SHARE_DELETE, so replacing a param that another process is reading fails with a
+  // sharing violation; reads take microseconds, so wait them out instead of dropping the write
+  for (int i = 0; i < 200; ++i) {
+    if (MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING)) return 0;
+    DWORD err = GetLastError();
+    if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED) break;
+    Sleep(1);
+  }
+  return -1;
 #else
   return rename(from, to);
 #endif
