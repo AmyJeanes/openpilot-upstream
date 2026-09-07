@@ -294,7 +294,7 @@ def main():
       for item in batch:
         mark, code = STATUS_MARKS[item["status"]]
         if args.verbose:
-          print(f"{paint(mark, code)} {item['id']} {item['time']:.2f}s")
+          print(f"{paint(mark, code)} {item['id']} {item['time']:.2f}s", flush=True)
         else:
           print(paint(mark, code), end="", flush=True)
           column += 1

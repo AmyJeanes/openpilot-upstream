@@ -149,7 +149,12 @@ class ManagerProcess(ABC):
       sig = signal.CTRL_BREAK_EVENT  # os.kill() terminates for any other signal; this one lets the daemon exit cleanly
     # Python daemons are multiprocessing children in the manager's own console group, which no console event can
     # target, so on Windows os.kill() terminates them outright (no KeyboardInterrupt cleanup): accepted for development
-    os.kill(self.proc.pid, sig)
+    try:
+      os.kill(self.proc.pid, sig)
+    except PermissionError:
+      if sys.platform != "win32":
+        raise
+      cloudlog.info(f"{self.name} is already terminating")  # Windows refuses to open a process that is going away
 
   def get_process_state_msg(self):
     state = log.ManagerState.ProcessState.new_message()
