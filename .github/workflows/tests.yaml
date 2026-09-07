@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - windows-dev  # --- FORK ONLY, NOT FOR UPSTREAM: CI on pushes to the fork's development branch ---
   pull_request:
   workflow_dispatch:
   workflow_call:
