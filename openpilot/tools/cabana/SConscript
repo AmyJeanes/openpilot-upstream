@@ -50,7 +50,7 @@ ui_libs = [replay_lib, common, messaging, visionipc, cereal, File(f"{imgui.LIB_D
 if arch == "Darwin":
   ui_env['FRAMEWORKS'] = ['OpenGL', 'Cocoa', 'IOKit', 'CoreFoundation', 'CoreVideo', 'CoreMedia', 'Security', 'VideoToolbox']
 elif arch == "Windows":
-  ui_libs += ['opengl32', 'gdi32', 'winmm', 'shell32', 'user32', 'setupapi', 'dl']
+  ui_libs += ['opengl32', 'gdi32', 'winmm', 'shell32', 'user32', 'setupapi', 'dwmapi', 'dl']
 else:
   ui_libs += ['GL', 'dl']
 cabana_ui = ui_env.Program('cabana', ui_objs, LIBS=ui_libs)

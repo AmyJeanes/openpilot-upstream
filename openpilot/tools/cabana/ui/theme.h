@@ -36,6 +36,7 @@ constexpr float UI_FONT_SIZE = 16.0f;
 void loadFonts();
 void applyTheme(int theme);  // Safe to call at runtime.
 bool isDarkTheme();
+void applyTitleBarTheme(bool dark);  // the OS-drawn title bar, where the OS allows it (Windows)
 const Palette &palette();
 
 CabanaColor signalFillColor(const CabanaColor &c);

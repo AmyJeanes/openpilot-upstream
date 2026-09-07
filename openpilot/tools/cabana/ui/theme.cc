@@ -83,6 +83,7 @@ void loadFonts() {
 
 void applyTheme(int theme) {
   g_dark = theme == DARK_THEME;
+  applyTitleBarTheme(g_dark);
   g_palette = g_dark ? &DARK_PALETTE : &LIGHT_PALETTE;
   const Palette &p = *g_palette;
   const ImVec4 none(0, 0, 0, 0);

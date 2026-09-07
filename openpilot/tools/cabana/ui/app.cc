@@ -17,6 +17,13 @@
 #include "imgui_impl_opengl3_loader.h"
 #include "implot.h"
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+// dwmapi.h needs the GDI types our lean windows.h leaves out; this is the only thing used from it
+extern "C" HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attribute, LPCVOID value, DWORD size);
+constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+#endif
 
 #include "tools/cabana/settings.h"
 #include "tools/cabana/ui/inistate.h"
@@ -202,6 +209,15 @@ public:
 
 std::vector<KeyEvent> takeKeyEvents() {
   return std::exchange(g_key_events, {});
+}
+
+void applyTitleBarTheme(bool dark) {
+#ifdef _WIN32
+  if (GLFWwindow *window = glfwGetCurrentContext()) {
+    BOOL value = dark;
+    DwmSetWindowAttribute(glfwGetWin32Window(window), DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
+  }
+#endif
 }
 
 int run(std::unique_ptr<AbstractStream> stream, StreamLoader stream_loader, const std::string &dbc_file) {

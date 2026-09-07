@@ -96,7 +96,7 @@ allowed_system_libs = {
   "EGL", "GLESv2", "GL",
   "dl", "drm", "gbm", "m", "pthread",
   # Windows SDK import libraries
-  "opengl32", "gdi32", "winmm", "shell32", "user32", "advapi32", "ws2_32", "bcrypt", "ole32", "setupapi", "shlwapi", "ntdll",
+  "opengl32", "gdi32", "winmm", "shell32", "user32", "advapi32", "ws2_32", "bcrypt", "ole32", "setupapi", "shlwapi", "dwmapi", "ntdll",
   "iphlpapi", "rpcrt4",
 }
 # static libzmq/capnp need these on every Windows link; import libs only pull in what is referenced
