@@ -4,6 +4,9 @@ set -e
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 ROOT="$(git -C "$DIR" rev-parse --show-toplevel)"
 
+VENV_BIN="bin"
+case "$(uname -s)" in MINGW*|MSYS*) VENV_BIN="Scripts" ;; esac  # native Python venv layout on Windows
+
 function retry() {
   local attempts=$1
   shift
@@ -93,6 +96,23 @@ function install_linux_deps() {
   fi
 }
 
+function install_windows_deps() {
+  if [[ "${MSYSTEM:-}" != "CLANG64" ]]; then
+    echo "Windows builds need an MSYS2 CLANG64 shell, this is ${MSYSTEM:-not MSYS2}"
+    exit 1
+  fi
+  # pycapnp's wheel links the MSVC C++ runtime, which Python does not ship; a fresh Windows (a sandbox) has no redistributable
+  if [[ ! -f "$(cygpath -u "$SYSTEMROOT")/System32/msvcp140.dll" ]]; then
+    echo "pycapnp needs the Microsoft Visual C++ Redistributable (x64): install https://aka.ms/vc14/vc_redist.x64.exe and rerun"
+    exit 1
+  fi
+  # clang, lld and libc++ (MSVC cannot build openpilot's GNU C); dlfcn provides dlopen; git is the native build,
+  # the venv's git-lfs mis-resolves the POSIX paths MSYS2's Cygwin-style git (the msys git package) reports
+  pacman -S --needed --noconfirm \
+    "$MINGW_PACKAGE_PREFIX-toolchain" "$MINGW_PACKAGE_PREFIX-pkgconf" "$MINGW_PACKAGE_PREFIX-ccache" \
+    "$MINGW_PACKAGE_PREFIX-dlfcn" "$MINGW_PACKAGE_PREFIX-git" file unzip  # unzip: the uv installer
+}
+
 function install_python_deps() {
   # Increase the pip timeout to handle TimeoutError
   export PIP_DEFAULT_TIMEOUT=200
@@ -113,7 +133,7 @@ function install_python_deps() {
 
   echo "installing python packages..."
   uv sync --frozen --all-extras
-  source .venv/bin/activate
+  source .venv/$VENV_BIN/activate
 }
 
 # --- Main ---
@@ -127,6 +147,9 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
   elif [[ $SHELL == "/bin/bash" ]]; then
     RC_FILE="$HOME/.bash_profile"
   fi
+elif [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+  install_windows_deps
+  echo "[ ] installed system dependencies t=$SECONDS"
 fi
 
 if [ -f "$ROOT/pyproject.toml" ]; then
