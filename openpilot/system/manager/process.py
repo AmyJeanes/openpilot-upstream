@@ -64,6 +64,9 @@ class PopenProcess:
   def exitcode(self) -> int | None:
     return self._popen.poll()
 
+  def is_alive(self) -> bool:
+    return self._popen.poll() is None
+
   def join(self, timeout: float | None = None) -> None:
     try:
       self._popen.wait(timeout)

@@ -12,6 +12,8 @@ from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 
 def unblock_stdout() -> None:
+  if sys.platform == "win32":
+    return  # no pty or fork on Windows; the console does not block the manager
   import fcntl  # POSIX only, keep the module importable on Windows
 
   # get a non-blocking stdout
@@ -55,7 +57,8 @@ def save_bootlog():
   def fn(tmpdir):
     env = os.environ.copy()
     env['PARAMS_COPY_PATH'] = tmpdir
-    subprocess.call("./bootlog", cwd=os.path.join(BASEDIR, "openpilot/system/loggerd"), env=env)
+    # absolute path: CreateProcess resolves "./bootlog" against the parent's cwd, not the cwd argument
+    subprocess.call(os.path.join(BASEDIR, "openpilot/system/loggerd/bootlog"), cwd=os.path.join(BASEDIR, "openpilot/system/loggerd"), env=env)
     shutil.rmtree(tmpdir)
   t = threading.Thread(target=fn, args=(tmp, ))
   t.daemon = True

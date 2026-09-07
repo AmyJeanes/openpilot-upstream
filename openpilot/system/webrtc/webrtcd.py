@@ -626,7 +626,10 @@ def webrtcd_thread(host: str, port: int):
     shutdown_task = loop.create_task(_shutdown(server, state, loop))
 
   for sig in (signal.SIGINT, signal.SIGTERM):
-    loop.add_signal_handler(sig, request_shutdown)
+    try:
+      loop.add_signal_handler(sig, request_shutdown)
+    except NotImplementedError:  # Windows event loops have no signal handlers
+      signal.signal(sig, lambda *_: loop.call_soon_threadsafe(request_shutdown))
 
   try:
     loop.run_forever()

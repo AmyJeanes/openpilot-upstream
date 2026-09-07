@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import fcntl
 import os
 import queue
 import struct
@@ -115,6 +114,7 @@ def set_offroad_alert_if_changed(offroad_alert: str, show_alert: bool, extra_tex
   set_offroad_alert(offroad_alert, show_alert, extra_text)
 
 def touch_thread(end_event):
+  import fcntl  # POSIX only; this thread reads the device's touch input, so keep the module importable on Windows
   count = 0
 
   pm = messaging.PubMaster(["touch"])
