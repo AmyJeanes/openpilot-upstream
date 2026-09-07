@@ -1,7 +1,11 @@
-import fcntl
 import numpy as np
 import os
+import sys
 import tempfile
+try:
+  import fcntl
+except ImportError:  # Windows
+  import msvcrt
 from collections import defaultdict
 from enum import Enum
 
@@ -100,6 +104,16 @@ def run_scenarios(scenario, logs):
   return get_select_fields_data(logs), get_select_fields_data(replayed_logs)
 
 
+def lock_exclusive(f):
+  if sys.platform == "win32":
+    while True:
+      try:
+        return msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)  # gives up after 10 s, keep waiting
+      except OSError:
+        pass
+  fcntl.flock(f, fcntl.LOCK_EX)
+
+
 class TestLocationdScenarios(OpenpilotTestCase):
   """
   Test locationd with different scenarios. In all these scenarios, we expect the following:
@@ -116,7 +130,7 @@ class TestLocationdScenarios(OpenpilotTestCase):
     ready_path = f"{lock_path}.ready"
     logs = None
     with open(lock_path, "w") as lock:
-      fcntl.flock(lock, fcntl.LOCK_EX)
+      lock_exclusive(lock)
       if not os.path.exists(ready_path):
         logs = list(LogReader(TEST_ROUTE))
         open(ready_path, "w").close()

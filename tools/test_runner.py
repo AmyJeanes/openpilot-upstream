@@ -140,6 +140,7 @@ def collect(targets, keyword):
   loader = unittest.TestLoader()
   tests = []
   errors = []
+  skipped = []
   names = []
   for target in targets:
     path_text, *nodes = target.split("::")
@@ -162,6 +163,9 @@ def collect(targets, keyword):
     before = len(loader.errors)
     try:
       suite = loader.loadTestsFromName(name)
+    except unittest.SkipTest:  # raised at import for a whole module, as unittest discovery allows
+      skipped.append(make_record(name, "skipped"))
+      continue
     except Exception:
       errors.append(f"Failed to collect {name}\n{traceback.format_exc()}")
       continue
@@ -174,7 +178,7 @@ def collect(targets, keyword):
         continue
       if not keyword or keyword.lower() in test.id().lower():
         tests.append(test)
-  return list({test.id(): test for test in tests}.values()), errors
+  return list({test.id(): test for test in tests}.values()), errors, skipped
 
 
 def make_batches(tests, workers):
@@ -272,13 +276,13 @@ def main():
   os.chdir(ROOT)
   warnings.simplefilter(args.warnings)
   started = time.monotonic()
-  tests, errors = collect(args.targets, args.k)
+  tests, errors, skipped = collect(args.targets, args.k)
   batches = make_batches(tests, args.jobs)
   workers = min(args.jobs, len(batches))
   summary = f"collected {len(tests)} test{'s' if len(tests) != 1 else ''} in {time.monotonic() - started:.2f}s "
   summary += f"• {workers} worker{'s' if workers != 1 else ''}"
   print(summary)
-  records = []
+  records = list(skipped)
   column = 0
   try:
     if workers < 2:

@@ -1,6 +1,9 @@
 import os
-import fcntl
 import ctypes
+try:
+  import fcntl
+except ImportError:  # Windows: only importable there, the ioctls need comma hardware
+  fcntl = None
 
 # I2C constants from /usr/include/linux/i2c-dev.h
 I2C_SLAVE = 0x0703

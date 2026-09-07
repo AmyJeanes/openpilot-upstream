@@ -1,11 +1,16 @@
 import asyncio
 import json
 import time
+import unittest
 
 import capnp
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.cereal import messaging, log
-from teleoprtc.tracks import VIDEO_CLOCK_RATE
+
+try:
+  from teleoprtc.tracks import VIDEO_CLOCK_RATE
+except ImportError as e:  # TODO: drop when teleoprtc installs on Windows (libdatachannel-py wheels)
+  raise unittest.SkipTest(f"teleoprtc unavailable: {e}") from None
 
 from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, ServerState, handle_get_stream
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack

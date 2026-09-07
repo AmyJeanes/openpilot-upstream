@@ -1,6 +1,9 @@
 import os
-import fcntl
 import ctypes
+try:
+  import fcntl
+except ImportError:  # Windows: only importable there, the ioctls need comma hardware
+  fcntl = None
 from functools import cache
 
 def gpio_init(pin: int, output: bool) -> None:
