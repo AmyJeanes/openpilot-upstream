@@ -18,10 +18,12 @@ OpenpilotPrefix::OpenpilotPrefix(std::string prefix) {
 }
 
 OpenpilotPrefix::~OpenpilotPrefix() {
+  // best effort: Windows refuses to delete queue files that sockets in this process still map
+  std::error_code ec;
   auto param_path = Params().getParamPath();
   if (util::file_exists(param_path)) {
 #ifdef _WIN32
-    std::filesystem::remove_all(param_path);  // a plain directory, see params.cc
+    std::filesystem::remove_all(param_path, ec);  // a plain directory, see params.cc
 #else
     std::string real_path = util::readlink(param_path);
     util::check_system(util::string_format("rm -rf %s", real_path.c_str()));
@@ -29,9 +31,9 @@ OpenpilotPrefix::~OpenpilotPrefix() {
 #endif
   }
   if (getenv("COMMA_CACHE") == nullptr) {
-    std::filesystem::remove_all(Path::download_cache_root());
+    std::filesystem::remove_all(Path::download_cache_root(), ec);
   }
-  std::filesystem::remove_all(Path::comma_home());
-  std::filesystem::remove_all(msgq_path);
+  std::filesystem::remove_all(Path::comma_home(), ec);
+  std::filesystem::remove_all(msgq_path, ec);
   unsetenv("OPENPILOT_PREFIX");
 }
