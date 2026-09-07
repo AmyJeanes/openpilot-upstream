@@ -152,7 +152,9 @@ public:
     std::signal(SIGINT, (sighandler_t)set_do_exit);
     std::signal(SIGTERM, (sighandler_t)set_do_exit);
 
-#if !defined(__APPLE__) && !defined(_WIN32)
+#ifdef _WIN32
+    std::signal(SIGBREAK, (sighandler_t)set_do_exit);  // CTRL_BREAK_EVENT from the manager
+#elif !defined(__APPLE__)
     std::signal(SIGPWR, (sighandler_t)set_do_exit);
 #endif
   }

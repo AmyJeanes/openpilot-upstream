@@ -1,6 +1,7 @@
 import importlib
 import os
 import signal
+import sys
 import time
 import subprocess
 from collections.abc import Callable, ValuesView
@@ -15,6 +16,8 @@ import openpilot.cereal.messaging as messaging
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)  # Windows: os.kill() terminates the process either way
 
 
 def launcher(proc: str, name: str) -> None:
@@ -42,6 +45,32 @@ def launcher(proc: str, name: str) -> None:
     raise
 
 
+class PopenProcess:
+  """The multiprocessing.Process view of a subprocess.Popen: os.execvp() cannot replace a process on Windows."""
+
+  def __init__(self, pargs: list[str], cwd: str, name: str):
+    self.name = name
+    if os.sep in pargs[0] or "/" in pargs[0]:
+      pargs = [os.path.join(cwd, pargs[0]), *pargs[1:]]  # CreateProcess resolves relative paths against the parent
+    env = {**os.environ, "MANAGER_DAEMON": name}
+    # its own process group so that CTRL_BREAK_EVENT reaches only this process (SIGBREAK in the C++ ExitHandler)
+    self._popen = subprocess.Popen(pargs, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+
+  @property
+  def pid(self) -> int:
+    return self._popen.pid
+
+  @property
+  def exitcode(self) -> int | None:
+    return self._popen.poll()
+
+  def join(self, timeout: float | None = None) -> None:
+    try:
+      self._popen.wait(timeout)
+    except subprocess.TimeoutExpired:
+      pass
+
+
 def nativelauncher(pargs: list[str], cwd: str, name: str) -> None:
   os.environ['MANAGER_DAEMON'] = name
 
@@ -50,7 +79,7 @@ def nativelauncher(pargs: list[str], cwd: str, name: str) -> None:
   os.execvp(pargs[0], pargs)
 
 
-def join_process(process: Process, timeout: float) -> None:
+def join_process(process: "Process | PopenProcess", timeout: float) -> None:
   # Process().join(timeout) will hang due to a python 3 bug: https://bugs.python.org/issue28382
   # We have to poll the exitcode instead
   t = time.monotonic()
@@ -62,7 +91,7 @@ class ManagerProcess(ABC):
   daemon = False
   sigkill = False
   should_run: Callable[[bool, Params, car.CarParams], bool]
-  proc: Process | None = None
+  proc: Process | PopenProcess | None = None
   enabled = True
   name = ""
   shutting_down = False
@@ -79,7 +108,7 @@ class ManagerProcess(ABC):
       if not self.shutting_down:
         cloudlog.info(f"killing {self.name}")
         if sig is None:
-          sig = signal.SIGKILL if self.sigkill else signal.SIGINT
+          sig = SIGKILL if self.sigkill else signal.SIGINT
         self.signal(sig)
         self.shutting_down = True
 
@@ -91,7 +120,7 @@ class ManagerProcess(ABC):
       # If process failed to die send SIGKILL
       if self.proc.exitcode is None and retry:
         cloudlog.info(f"killing {self.name} with SIGKILL")
-        self.signal(signal.SIGKILL)
+        self.signal(SIGKILL)
         self.proc.join()
 
     ret = self.proc.exitcode
@@ -116,6 +145,10 @@ class ManagerProcess(ABC):
       return
 
     cloudlog.info(f"sending signal {sig} to {self.name}")
+    if sys.platform == "win32" and isinstance(self.proc, PopenProcess) and sig != SIGKILL:
+      sig = signal.CTRL_BREAK_EVENT  # os.kill() terminates for any other signal; this one lets the daemon exit cleanly
+    # Python daemons are multiprocessing children in the manager's own console group, which no console event can
+    # target, so on Windows os.kill() terminates them outright (no KeyboardInterrupt cleanup): accepted for development
     os.kill(self.proc.pid, sig)
 
   def get_process_state_msg(self):
@@ -149,8 +182,11 @@ class NativeProcess(ManagerProcess):
 
     cwd = os.path.join(BASEDIR, self.cwd)
     cloudlog.info(f"starting process {self.name}")
-    self.proc = Process(name=self.name, target=self.launcher, args=(self.cmdline, cwd, self.name))
-    self.proc.start()
+    if sys.platform == "win32":
+      self.proc = PopenProcess(self.cmdline, cwd, self.name)
+    else:
+      self.proc = Process(name=self.name, target=self.launcher, args=(self.cmdline, cwd, self.name))
+      self.proc.start()
     self.shutting_down = False
 
 
