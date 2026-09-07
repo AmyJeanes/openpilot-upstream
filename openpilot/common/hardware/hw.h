@@ -56,18 +56,26 @@ namespace Path {
 #endif
   }
 
+  inline std::string tmp_dir() {  // Python's tempfile.gettempdir()
+#ifdef _WIN32
+    return util::getenv("TEMP", ".");
+#else
+    return "/tmp";
+#endif
+  }
+
   inline std::string download_cache_root() {
     if (const char *env = getenv("COMMA_CACHE")) {
       return env;
     }
-    return "/tmp/comma_download_cache" + Path::openpilot_prefix() + "/";
+    return tmp_dir() + "/comma_download_cache" + Path::openpilot_prefix() + "/";
   }
 
  inline std::string shm_path() {
     #ifdef __APPLE__
      return"/tmp";
     #elif defined(_WIN32)
-     return util::getenv("TEMP", ".");  // Python's tempfile.gettempdir()
+     return tmp_dir();
     #else
      return "/dev/shm";
     #endif

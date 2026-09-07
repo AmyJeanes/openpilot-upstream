@@ -6,7 +6,8 @@ from pathlib import Path
 
 from openpilot.common.hardware import PC
 
-DEFAULT_DOWNLOAD_CACHE_ROOT = "/tmp/comma_download_cache"
+TMP_DIR = tempfile.gettempdir() if sys.platform == "win32" else "/tmp"  # Path::tmp_dir()
+DEFAULT_DOWNLOAD_CACHE_ROOT = os.path.join(TMP_DIR, "comma_download_cache")
 
 class Paths:
   @staticmethod
