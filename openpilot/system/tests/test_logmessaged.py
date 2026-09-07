@@ -37,6 +37,9 @@ class TestLogmessaged(OpenpilotTestCase):
   def _get_log_files(self):
     return list(glob.glob(os.path.join(Paths.swaglog_root(), "swaglog.*")))
 
+  def _log_size(self):
+    return sum(os.path.getsize(f) for f in self._get_log_files())
+
   def test_simple_log(self):
     msgs = [f"abc {i}" for i in range(10)]
     for m in msgs:
@@ -49,12 +52,16 @@ class TestLogmessaged(OpenpilotTestCase):
   def test_big_log(self):
     n = 10
     msg = "a"*3*1024*1024
+    base = self._log_size()  # the ready checks from setup_method are in the same files
     for _ in range(n):
       cloudlog.info(msg)
-    time.sleep(0.5)
+    for _ in range(300):  # writing 30 MB takes a while on a loaded machine
+      time.sleep(0.1)
+      logsize = self._log_size() - base
+      if logsize > n * len(msg):
+        break
 
     msgs = messaging.drain_sock(self.sock)
     assert len(msgs) == 0
 
-    logsize = sum([os.path.getsize(f) for f in self._get_log_files()])
     assert (n*len(msg)) < logsize < (n*(len(msg)+1024))
