@@ -78,7 +78,8 @@ submodules = [
   "opendbc",
   "pandacan",
   "rednose",
-  "teleoprtc; sys_platform != 'win32'",  # TODO: drop the marker when libdatachannel-py publishes win_amd64 wheels; only webrtcd needs it
+  "teleoprtc",
+  "libdatachannel-py; sys_platform == 'win32'",  # teleoprtc's dependency; uv sources only apply to direct dependencies
   "tinygrad",
 ]
 
@@ -170,6 +171,7 @@ pandacan = { path = "panda", editable = true }
 rednose = { path = "rednose_repo", editable = true }
 teleoprtc = { path = "teleoprtc_repo", editable = true }
 tinygrad = { path = "tinygrad_repo", editable = true }
+libdatachannel-py = { index = "comma-deps-windows", marker = "sys_platform == 'win32'" }  # --- FORK ONLY, NOT FOR UPSTREAM: teleoprtc on Windows from the fork index until libdatachannel-py publishes win_amd64 wheels ---
 comma-deps-acados = { index = "comma-deps-windows", marker = "sys_platform == 'win32'" }
 comma-deps-bootstrap-icons = { index = "comma-deps-windows", marker = "sys_platform == 'win32'" }
 comma-deps-capnproto = { index = "comma-deps-windows", marker = "sys_platform == 'win32'" }

@@ -1,7 +1,6 @@
 import os
 import operator
 import platform
-import sys
 
 from opendbc.car.structs import car
 from openpilot.common.params import Params
@@ -117,8 +116,7 @@ procs = [
 
   # debug procs
   NativeProcess("bridge", "openpilot/cereal/messaging", ["./bridge"], notcar),
-  # TODO: drop the gate when teleoprtc installs on Windows (libdatachannel-py wheels)
-  PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar), enabled=sys.platform != "win32"),
+  PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar)),
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 ]
 

@@ -643,7 +643,21 @@ wheels = [
 [[package]]
 name = "libdatachannel-py"
 version = "2026.1.0.dev2"
+source = { registry = "https://github.com/AmyJeanes/commaai-dependencies/releases/download/windows-post115/index.html" }
+resolution-markers = [
+    "sys_platform == 'win32'",
+]
+wheels = [
+    { url = "https://github.com/AmyJeanes/commaai-dependencies/releases/download/windows-post115/libdatachannel_py-2026.1.0.dev2-cp312-cp312-win_amd64.whl", hash = "sha256:9600b9eaa1e1ec27511522126a2d6886af5d0808a0f3f6dc3d63b7247dacba2e" },
+]
+
+[[package]]
+name = "libdatachannel-py"
+version = "2026.1.0.dev2"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform != 'win32'",
+]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/2f/68e8306327ddef4b2133d2efb163cb05b319759ce8bd50b8b32dcd03dd95/libdatachannel_py-2026.1.0.dev2-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:6607fa1439e1b5bfceecd387c433470c9d45e439c3c06fa064f5c4669ad7e582", size = 1213155, upload-time = "2026-05-19T03:37:12.796Z" },
     { url = "https://files.pythonhosted.org/packages/fc/e3/10aed36ffaf1744795322aae612db777991575b72a9f04e2c677c2c022bf/libdatachannel_py-2026.1.0.dev2-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:a060b1250f57d1fccb36e3a6b36ac8f4fd34926a6b51c564e787e8b7206458aa", size = 1224706, upload-time = "2026-05-19T03:37:12.679Z" },
@@ -833,11 +847,12 @@ dependencies = [
 
 [package.optional-dependencies]
 submodules = [
+    { name = "libdatachannel-py", version = "2026.1.0.dev2", source = { registry = "https://github.com/AmyJeanes/commaai-dependencies/releases/download/windows-post115/index.html" }, marker = "sys_platform == 'win32'" },
     { name = "msgq" },
     { name = "opendbc" },
     { name = "pandacan" },
     { name = "rednose" },
-    { name = "teleoprtc", marker = "sys_platform != 'win32'" },
+    { name = "teleoprtc" },
     { name = "tinygrad" },
 ]
 testing = [
@@ -897,6 +912,7 @@ requires-dist = [
     { name = "coverage", marker = "extra == 'testing'" },
     { name = "inputs" },
     { name = "jeepney" },
+    { name = "libdatachannel-py", marker = "sys_platform == 'win32' and extra == 'submodules'", index = "https://github.com/AmyJeanes/commaai-dependencies/releases/download/windows-post115/index.html" },
     { name = "matplotlib", marker = "extra == 'tools'" },
     { name = "msgq", marker = "extra == 'submodules'", editable = "msgq_repo" },
     { name = "numpy", specifier = ">=2.0" },
@@ -911,7 +927,7 @@ requires-dist = [
     { name = "scons" },
     { name = "setproctitle" },
     { name = "sounddevice" },
-    { name = "teleoprtc", marker = "sys_platform != 'win32' and extra == 'submodules'", editable = "teleoprtc_repo" },
+    { name = "teleoprtc", marker = "extra == 'submodules'", editable = "teleoprtc_repo" },
     { name = "tinygrad", marker = "extra == 'submodules'", editable = "tinygrad_repo" },
     { name = "tqdm" },
     { name = "ty", marker = "extra == 'testing'" },
@@ -1238,7 +1254,8 @@ name = "teleoprtc"
 version = "1.0.1"
 source = { editable = "teleoprtc_repo" }
 dependencies = [
-    { name = "libdatachannel-py", marker = "sys_platform != 'win32'" },
+    { name = "libdatachannel-py", version = "2026.1.0.dev2", source = { registry = "https://github.com/AmyJeanes/commaai-dependencies/releases/download/windows-post115/index.html" }, marker = "sys_platform == 'win32'" },
+    { name = "libdatachannel-py", version = "2026.1.0.dev2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
 ]
 
 [package.metadata]
