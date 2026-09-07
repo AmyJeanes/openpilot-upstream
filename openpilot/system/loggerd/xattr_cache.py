@@ -18,6 +18,12 @@ def _raise_os_error(path: str) -> None:
 
 
 def _getxattr(path: str, attr_name: str) -> bytes:
+  if sys.platform == "win32":
+    try:
+      with open(f"{path}:{attr_name}", "rb") as f:  # NTFS alternate data stream
+        return f.read()
+    except FileNotFoundError:
+      raise OSError(errno.ENODATA, os.strerror(errno.ENODATA), path) from None
   if sys.platform != "darwin":
     return os.getxattr(path, attr_name)
 
@@ -39,6 +45,10 @@ def _getxattr(path: str, attr_name: str) -> bytes:
 
 
 def _setxattr(path: str, attr_name: str, attr_value: bytes) -> None:
+  if sys.platform == "win32":
+    with open(f"{path}:{attr_name}", "wb") as f:
+      f.write(attr_value)
+    return
   if sys.platform != "darwin":
     os.setxattr(path, attr_name, attr_value)
     return

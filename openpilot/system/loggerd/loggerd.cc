@@ -206,7 +206,9 @@ void handle_preserve_segment(LoggerdState *s) {
 #ifdef __APPLE__
   int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
 #elif defined(_WIN32)
-  int ret = 0;  // no extended attributes through the Windows CRT; preservation is a device feature anyway
+  // NTFS alternate data stream, the same place xattr_cache.py reads
+  std::ofstream stream(s->logger.segmentPath() + ":" + PRESERVE_ATTR_NAME, std::ios::binary);
+  int ret = stream.write(&PRESERVE_ATTR_VALUE, 1).good() ? 0 : -1;
 #else
   int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
 #endif

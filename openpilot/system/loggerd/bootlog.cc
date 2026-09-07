@@ -42,7 +42,7 @@ static kj::Array<capnp::word> build_boot_log() {
     lentry.setValue(capnp::Data::Reader((const kj::byte*)result.data(), result.size()));
   }
 
-  boot.setLaunchLog(util::read_file("/tmp/launch_log"));
+  boot.setLaunchLog(util::read_file(Path::tmp_dir() + "/launch_log"));
   return capnp::messageToFlatArray(msg);
 }
 

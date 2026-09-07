@@ -387,10 +387,10 @@ def scan_dir(path: str, prefix: str) -> list[str]:
   # (glob and friends traverse entire dir tree)
   with os.scandir(path) as i:
     for e in i:
-      rel_path = os.path.relpath(e.path, Paths.log_root())
+      rel_path = os.path.relpath(e.path, Paths.log_root()).replace(os.sep, '/')
       if e.is_dir(follow_symlinks=False):
         # add trailing slash
-        rel_path = os.path.join(rel_path, '')
+        rel_path += '/'
         # if prefix is a partial dir name, current dir will start with prefix
         # if prefix is a partial file name, prefix with start with dir name
         if rel_path.startswith(prefix) or prefix.startswith(rel_path):

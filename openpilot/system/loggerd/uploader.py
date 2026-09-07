@@ -100,7 +100,7 @@ class Uploader:
         continue
 
       for name in sorted(names, key=lambda n: self.immediate_priority.get(n, 1000)):
-        key = os.path.join(logdir, name)
+        key = f"{logdir}/{name}"  # the upload key, not a local path
         fn = os.path.join(path, name)
         # skip files already uploaded
         try:
@@ -128,7 +128,7 @@ class Uploader:
     upload_files = list(self.list_upload_files(metered))
 
     for name, key, fn in upload_files:
-      if any(f in fn for f in self.immediate_folders):
+      if any(key.startswith(f) for f in self.immediate_folders):
         return name, key, fn
 
     for name, key, fn in upload_files:
