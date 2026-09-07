@@ -352,10 +352,9 @@ SConscript([
   'openpilot/selfdrive/pandad/SConscript',
   'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
   'openpilot/selfdrive/locationd/SConscript',
+  'openpilot/selfdrive/modeld/SConscript',
   'openpilot/selfdrive/ui/SConscript',
 ])
-if arch != "Windows":  # TODO: tinygrad model compilation is untested on Windows
-  SConscript(['openpilot/selfdrive/modeld/SConscript'])
 
 # Build desktop-only tools
 if GetOption('extras') and arch != "comma_arm64":

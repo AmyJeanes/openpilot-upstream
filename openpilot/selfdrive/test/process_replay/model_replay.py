@@ -13,6 +13,7 @@ from openpilot.common.utils import tabulate
 
 from openpilot.common.git import get_commit
 from openpilot.common.hardware import PC
+from openpilot.common.hardware.hw import TMP_DIR
 from openpilot.tools.lib.openpilotci import get_url
 from openpilot.selfdrive.test.process_replay.compare_logs import compare_logs, format_diff
 from openpilot.selfdrive.test.process_replay.process_replay import get_process_config, replay_process
@@ -200,10 +201,10 @@ def model_replay(lr, frs):
 
 def get_frames():
   regen_cache = "--regen-cache" in sys.argv
-  frames_cache = '/tmp/model_replay_cache' if PC else '/data/model_replay_cache'
+  frames_cache = os.path.join(TMP_DIR, 'model_replay_cache') if PC else '/data/model_replay_cache'
   os.makedirs(frames_cache, exist_ok=True)
 
-  cache_name = f'{frames_cache}/{TEST_ROUTE}_{SEGMENT}_{START_FRAME}_{END_FRAME}.pkl'
+  cache_name = f'{frames_cache}/{TEST_ROUTE.replace("|", "_")}_{SEGMENT}_{START_FRAME}_{END_FRAME}.pkl'  # no '|' in Windows file names
   if os.path.isfile(cache_name) and not regen_cache:
     try:
       print(f"Loading frames from cache {cache_name}")

@@ -32,7 +32,7 @@ if arch == 'comma_arm64':
 else:
   camera_configs = [(c.width, c.height) for c in (_ar_ox_fisheye, _os_fisheye)]
   tg_backend = 'CPU'
-  tg_flags = f'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'
+  tg_flags = f'DEV=CPU' if arch in ('Darwin', 'Windows') else 'DEV=CPU:LLVM'
 
 tg_devices = { # which device to put jit inputs to at runtime
   'openpilot.selfdrive.modeld.dmonitoringmodeld': {
@@ -124,17 +124,19 @@ for cam_w, cam_h in camera_configs:
   lenv.Command(dm_pkl_path, tinygrad_files + compile_dm_warp_script + compile_modeld_script + [tg_devices_node], cmd)
 
 def tg_compile(flags, model_name):
-  pythonpath_string = 'PYTHONPATH="${PYTHONPATH}:' + env.Dir("#tinygrad_repo").abspath + '"'
+  pythonpath_string = 'PYTHONPATH="${PYTHONPATH}' + os.pathsep + env.Dir("#tinygrad_repo").abspath + '"'
   fn = File(f"models/{model_name}").abspath
   pkl = fn + "_tinygrad.pkl"
   onnx_path = fn + ".onnx"
+  # tinygrad's fetch() only takes paths starting with "/" or "." as local files, so give it a Windows drive path relative to the cwd
+  onnx_arg = onnx_path if arch != 'Windows' else "./" + os.path.relpath(onnx_path, env.Dir("#").abspath).replace(os.sep, "/")
   chunk_targets = get_chunk_targets(pkl, estimate_pickle_max_size(os.path.getsize(onnx_path)))
   def do_chunk(target, source, env):
     chunk_file(pkl, chunk_targets)
   return lenv.Command(
     chunk_targets,
     [onnx_path] + tinygrad_files + [Value(chunk_targets), chunker_file, tg_devices_node],
-    [f'{pythonpath_string} {flags} python3 {Dir("#tinygrad_repo").abspath}/examples/openpilot/compile3.py {fn}.onnx {pkl}',
+    [f'{pythonpath_string} {flags} python3 {Dir("#tinygrad_repo").abspath}/examples/openpilot/compile3.py {onnx_arg} {pkl}',
      Action(do_chunk, "  [CHUNK] $TARGET")],
   )
 
