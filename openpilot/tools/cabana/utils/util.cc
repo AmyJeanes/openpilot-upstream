@@ -14,9 +14,13 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#ifdef _WIN32
+#include "common/win32.h"
+#else
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -81,6 +85,33 @@ std::pair<double, double> SegmentTree::get_minmax(int n, int left, int right, in
 
 // UnixSignalHandler
 
+#ifdef _WIN32
+UnixSignalHandler::UnixSignalHandler(std::function<void()> on_signal) {
+  sig_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+  waiter = std::thread([this, on_signal = std::move(on_signal)]() {
+    WaitForSingleObject(sig_event, INFINITE);
+    if (shutting_down.load()) return;
+
+    on_signal();
+  });
+
+  std::signal(SIGINT, signalHandler);
+  std::signal(SIGTERM, UnixSignalHandler::signalHandler);
+}
+
+UnixSignalHandler::~UnixSignalHandler() {
+  shutting_down.store(true);
+  SetEvent(sig_event);
+  if (waiter.joinable()) waiter.join();
+  CloseHandle(sig_event);
+}
+
+void UnixSignalHandler::signalHandler(int s) {
+  (void)s;
+  SetEvent(sig_event);
+}
+#else
 UnixSignalHandler::UnixSignalHandler(std::function<void()> on_signal) {
   if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sig_fd)) {
     fprintf(stderr, "Couldn't create TERM socketpair\n");
@@ -113,6 +144,7 @@ UnixSignalHandler::~UnixSignalHandler() {
 void UnixSignalHandler::signalHandler(int s) {
   (void)!::write(sig_fd[0], &s, sizeof(s));
 }
+#endif
 
 // validators
 
@@ -243,13 +275,20 @@ static std::unordered_map<std::string, std::string> load_bootstrap_icons() {
 
 namespace utils {
 std::string homePath() {
+#ifdef _WIN32
+  const char *home = ::getenv("USERPROFILE");
+#else
   const char *home = ::getenv("HOME");
+#endif
   return home ? home : "";
 }
 
 std::filesystem::path configPath() {
 #ifdef __APPLE__
   return std::filesystem::path(homePath()) / "Library/Preferences";
+#elif defined(_WIN32)
+  const char *appdata = ::getenv("APPDATA");
+  return (appdata && appdata[0]) ? std::filesystem::path(appdata) : std::filesystem::path(homePath()) / ".config";
 #else
   const char *xdg = ::getenv("XDG_CONFIG_HOME");
   return (xdg && xdg[0]) ? std::filesystem::path(xdg) : std::filesystem::path(homePath()) / ".config";
@@ -259,6 +298,9 @@ std::filesystem::path configPath() {
 #ifdef __APPLE__
 static const char *clipboard_read_cmds[] = {"pbpaste"};
 static const char *clipboard_write_cmds[] = {"pbcopy"};
+#elif defined(_WIN32)
+static const char *clipboard_read_cmds[] = {"powershell -NoProfile -Command Get-Clipboard -Raw"};
+static const char *clipboard_write_cmds[] = {"clip"};
 #else
 static const char *clipboard_read_cmds[] = {"wl-paste --no-newline 2>/dev/null", "xclip -selection clipboard -o 2>/dev/null", "xsel -ob 2>/dev/null"};
 static const char *clipboard_write_cmds[] = {"wl-copy 2>/dev/null", "xclip -selection clipboard 2>/dev/null", "xsel -ib 2>/dev/null"};
@@ -284,7 +326,9 @@ bool getClipboardText(std::string *text) {
 }
 
 bool setClipboardText(const std::string &text) {
+#ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
+#endif
   for (const char *cmd : clipboard_write_cmds) {
     FILE *f = ::popen(cmd, "w");
     if (!f) continue;
@@ -317,6 +361,10 @@ std::filesystem::path executableDir() {
   std::error_code ec;
   auto path = std::filesystem::canonical(buf, ec);
   return (ec ? std::filesystem::path(buf) : path).parent_path();
+#elif defined(_WIN32)
+  char buf[MAX_PATH] = {};
+  GetModuleFileNameA(NULL, buf, sizeof(buf));
+  return std::filesystem::path(buf).parent_path();
 #else
   return std::filesystem::path(util::readlink("/proc/self/exe")).parent_path();
 #endif

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "common/hardware/base.h"
@@ -19,7 +20,11 @@ namespace Path {
   }
 
   inline std::string comma_home() {
+#ifdef _WIN32
+    return util::getenv("USERPROFILE") + "/.comma" + Path::openpilot_prefix();  // what Python's Path.home() uses
+#else
     return util::getenv("HOME") + "/.comma" + Path::openpilot_prefix();
+#endif
   }
 
   inline std::string log_root() {
@@ -38,7 +43,17 @@ namespace Path {
   }
 
   inline std::string swaglog_ipc() {
+#ifdef _WIN32
+    // libzmq has no ipc:// transport on MinGW: derive a loopback port from the prefix (FNV-1a, mirrored in hw.py)
+    uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : Path::openpilot_prefix()) {
+      h ^= c;
+      h *= 1099511628211ULL;
+    }
+    return "tcp://127.0.0.1:" + std::to_string(26000 + h % 1000);
+#else
     return "ipc:///tmp/logmessage" + Path::openpilot_prefix();
+#endif
   }
 
   inline std::string download_cache_root() {
@@ -51,6 +66,8 @@ namespace Path {
  inline std::string shm_path() {
     #ifdef __APPLE__
      return"/tmp";
+    #elif defined(_WIN32)
+     return util::getenv("TEMP", ".");  // Python's tempfile.gettempdir()
     #else
      return "/dev/shm";
     #endif

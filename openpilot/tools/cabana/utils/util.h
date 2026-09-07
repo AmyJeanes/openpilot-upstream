@@ -95,7 +95,11 @@ public:
   static void signalHandler(int s);
 
 private:
+#ifdef _WIN32
+  inline static void *sig_event = nullptr;  // HANDLE; the console control handler has no fds to write to
+#else
   inline static int sig_fd[2] = {};
+#endif
   std::atomic<bool> shutting_down{false};
   std::thread waiter;
 };

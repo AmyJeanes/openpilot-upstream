@@ -2,6 +2,9 @@
 
 #include <cassert>
 #include <cstdarg>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 #include <cstring>
 #include <iostream>
 #include <mutex>
@@ -100,7 +103,11 @@ void *MonotonicBuffer::allocate(size_t bytes, size_t alignment) {
   void *p = std::align(alignment, bytes, current_buf, available);
   if (p == nullptr) {
     available = next_buffer_size = std::max(next_buffer_size, bytes);
+#ifdef _WIN32
+    current_buf = buffers.emplace_back(_aligned_malloc(next_buffer_size, alignment));  // no aligned_alloc in the Windows CRT
+#else
     current_buf = buffers.emplace_back(std::aligned_alloc(alignment, next_buffer_size));
+#endif
     next_buffer_size *= growth_factor;
     p = current_buf;
   }
@@ -112,6 +119,10 @@ void *MonotonicBuffer::allocate(size_t bytes, size_t alignment) {
 
 MonotonicBuffer::~MonotonicBuffer() {
   for (auto buf : buffers) {
+#ifdef _WIN32
+    _aligned_free(buf);
+#else
     free(buf);
+#endif
   }
 }

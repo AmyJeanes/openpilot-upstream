@@ -1,4 +1,6 @@
+#ifndef _WIN32
 #include <sys/xattr.h>
+#endif
 
 #include <map>
 #include <memory>
@@ -203,6 +205,8 @@ void handle_preserve_segment(LoggerdState *s) {
 
 #ifdef __APPLE__
   int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
+#elif defined(_WIN32)
+  int ret = 0;  // no extended attributes through the Windows CRT; preservation is a device feature anyway
 #else
   int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
 #endif
@@ -334,7 +338,9 @@ void loggerd_thread() {
 
   if (do_exit.power_failure) {
     LOGE("power failure");
+#ifndef _WIN32
     sync();
+#endif
     LOGE("sync done");
   }
 

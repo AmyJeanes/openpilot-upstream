@@ -425,7 +425,11 @@ uint64_t fnv1a64(std::string_view text) {
 }
 
 fs::path basemap_cache_root() {
+#ifdef _WIN32
+  const char *home = std::getenv("USERPROFILE");
+#else
   const char *home = std::getenv("HOME");
+#endif
   fs::path root = home != nullptr ? fs::path(home) / ".comma" : fs::temp_directory_path();
   root /= "jotpluggler_vector_map";
   fs::create_directories(root);

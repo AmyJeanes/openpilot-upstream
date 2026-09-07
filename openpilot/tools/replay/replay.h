@@ -91,7 +91,9 @@ private:
   std::unique_ptr<SegmentManager> seg_mgr_;
   Timeline timeline_;
 
-  pthread_t stream_thread_id = 0;
+#ifndef _WIN32
+  pthread_t stream_thread_id = 0;  // Windows: the stream thread sleep cannot be interrupted, it just runs out
+#endif
   std::thread stream_thread_;
   std::mutex stream_lock_;
   bool user_paused_ = false;

@@ -8,7 +8,9 @@
 #include "common/params.h"
 #include "tools/replay/util.h"
 
+#ifndef _WIN32
 static void interrupt_sleep_handler(int signal) {}
+#endif
 
 // Helper function to notify events with safety checks
 template <typename Callback, typename... Args>
@@ -19,7 +21,9 @@ void notifyEvent(Callback &callback, Args &&...args) {
 Replay::Replay(const std::string &route, std::vector<std::string> allow, std::vector<std::string> block,
                SubMaster *sm, uint32_t flags, const std::string &data_dir, bool auto_source)
     : sm_(sm), flags_(flags), seg_mgr_(std::make_unique<SegmentManager>(route, flags, data_dir, auto_source)) {
+#ifndef _WIN32
   std::signal(SIGUSR1, interrupt_sleep_handler);
+#endif
 
   if (flags_ & REPLAY_FLAG_BENCHMARK) {
     benchmark_stats_.process_start_ts = nanos_since_boot();
@@ -104,9 +108,11 @@ bool Replay::load() {
 }
 
 void Replay::interruptStream(const std::function<bool()> &update_fn) {
+#ifndef _WIN32
   if (stream_thread_.joinable() && stream_thread_id) {
     pthread_kill(stream_thread_id, SIGUSR1);  // Interrupt sleep in stream thread
   }
+#endif
   {
     interrupt_requested_ = true;
     std::unique_lock lock(stream_lock_);
@@ -273,7 +279,9 @@ void Replay::publishFrame(const Event *e) {
 }
 
 void Replay::streamThread() {
+#ifndef _WIN32
   stream_thread_id = pthread_self();
+#endif
   std::unique_lock lk(stream_lock_);
 
   int last_processed_segment = -1;

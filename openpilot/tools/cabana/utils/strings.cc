@@ -5,6 +5,10 @@
 #include <ctime>
 #include <sstream>
 
+#ifdef _WIN32
+static void localtime_r(const std::time_t *t, std::tm *out) { localtime_s(out, t); }
+#endif
+
 #include "tools/cabana/dbc/dbc.h"
 
 namespace utils {

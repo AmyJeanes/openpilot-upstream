@@ -1,5 +1,7 @@
 #include "tools/cabana/routes.h"
 
+#include "common/util.h"
+
 #include <chrono>
 #include <cstdlib>
 #include <ctime>

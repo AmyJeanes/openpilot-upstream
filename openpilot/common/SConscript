@@ -2,6 +2,7 @@ Import('env')
 
 common_libs = [
   'params.cc',
+  'prefix.cc',
   'swaglog.cc',
   'util.cc',
   'ratekeeper.cc',

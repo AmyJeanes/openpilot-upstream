@@ -1,5 +1,10 @@
 #include "tools/cabana/panda.h"
 
+#ifdef _WIN32
+#include "common/win32.h"
+#endif
+#include <libusb-1.0/libusb.h>
+
 #include <unistd.h>
 #include <cassert>
 #include <stdexcept>

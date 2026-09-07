@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#ifdef _WIN32
+#include "common/win32.h"
+#include <shellapi.h>
+#endif
 
 namespace {
 
@@ -148,12 +152,16 @@ bool app_begin_popup_modal(const char *name, bool *p_open, ImGuiWindowFlags flag
 }
 
 void open_external_url(std::string_view url) {
+#ifdef _WIN32
+  ShellExecuteA(NULL, "open", std::string(url).c_str(), NULL, NULL, SW_SHOWNORMAL);
+#else
 #ifdef __APPLE__
   const std::string command = "open " + shell_quote(url) + " &";
 #else
   const std::string command = "xdg-open " + shell_quote(url) + " >/dev/null 2>&1 &";
 #endif
   util::check_system(command);
+#endif
 }
 
 std::string route_useradmin_url(const RouteIdentifier &route_id) {

@@ -17,6 +17,10 @@ protected:
   void start() override;
   void streamThread() override;
   void stopBridge();
+#ifdef _WIN32
+  void *bridge_process = nullptr;  // HANDLE
+#else
   pid_t bridge_pid = -1;
+#endif
   const std::string zmq_address;
 };

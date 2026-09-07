@@ -1,14 +1,23 @@
+#ifdef _WIN32
+#include "common/win32.h"
+#include <io.h>
+#endif
+
 #include "common/util.h"
 #include "common/swaglog.h"
 
-#include <sys/ioctl.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/file.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
+#endif
 
 #include <cassert>
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <random>
@@ -63,6 +72,10 @@ int set_core_affinity(std::vector<int> cores) {
 }
 
 int set_file_descriptor_limit(uint64_t limit_val) {
+#ifdef _WIN32
+  (void)limit_val;
+  return 0;
+#else
   struct rlimit limit;
   int status;
 
@@ -74,6 +87,7 @@ int set_file_descriptor_limit(uint64_t limit_val) {
     return status;
 
   return 0;
+#endif
 }
 
 std::string read_file(const std::string& fn) {
@@ -102,6 +116,14 @@ std::string read_file(const std::string& fn) {
 
 std::map<std::string, std::string> read_files_in_dir(const std::string &path) {
   std::map<std::string, std::string> ret;
+#ifdef _WIN32
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator(path, ec)) {
+    if (!entry.is_directory()) {
+      ret[entry.path().filename().string()] = util::read_file(entry.path().string());
+    }
+  }
+#else
   DIR *d = opendir(path.c_str());
   if (!d) return ret;
 
@@ -113,6 +135,7 @@ std::map<std::string, std::string> read_files_in_dir(const std::string &path) {
   }
 
   closedir(d);
+#endif
   return ret;
 }
 
@@ -152,6 +175,7 @@ int safe_fflush(FILE *stream) {
   return ret;
 }
 
+#ifndef _WIN32
 int safe_ioctl(int fd, unsigned long request, void *argp, const char* exception_msg) {
   int ret;
   do {
@@ -164,8 +188,13 @@ int safe_ioctl(int fd, unsigned long request, void *argp, const char* exception_
   }
   return ret;
 }
+#endif
 
 std::string readlink(const std::string &path) {
+#ifdef _WIN32
+  (void)path;
+  return "";  // no symlinks are created on Windows
+#else
   char buff[4096];
   ssize_t len = ::readlink(path.c_str(), buff, sizeof(buff)-1);
   if (len != -1) {
@@ -173,6 +202,7 @@ std::string readlink(const std::string &path) {
     return std::string(buff);
   }
   return "";
+#endif
 }
 
 bool file_exists(const std::string& fn) {
@@ -283,6 +313,23 @@ std::string strip(const std::string &str) {
   }
 
   return str.substr(start, end - start + 1);
+}
+
+int lock_file_exclusive(int fd) {
+#ifdef _WIN32
+  OVERLAPPED ov = {};
+  return LockFileEx((HANDLE)_get_osfhandle(fd), LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov) ? 0 : -1;
+#else
+  return HANDLE_EINTR(flock(fd, LOCK_EX));
+#endif
+}
+
+int replace_file(const char *from, const char *to) {
+#ifdef _WIN32
+  return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+#else
+  return rename(from, to);
+#endif
 }
 
 std::string check_output(const std::string& command) {

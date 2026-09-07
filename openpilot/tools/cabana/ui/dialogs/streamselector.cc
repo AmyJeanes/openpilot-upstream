@@ -1,5 +1,7 @@
 #include "tools/cabana/ui/dialogs/streamselector.h"
 
+#include "common/util.h"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>

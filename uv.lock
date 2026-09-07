@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = ">=3.12.3, <3.13"
+resolution-markers = [
+    "sys_platform == 'win32'",
+    "sys_platform != 'win32'",
+]
 
 [manifest]
 overrides = [{ name = "opendbc", editable = "opendbc_repo" }]
@@ -564,6 +568,7 @@ dependencies = [
 requires-dist = [
     { name = "cffi", marker = "extra == 'testing'" },
     { name = "codespell", marker = "extra == 'testing'" },
+    { name = "comma-deps-cppcheck", marker = "python_full_version >= '3.12' and extra == 'testing'" },
     { name = "cpplint", marker = "extra == 'testing'" },
     { name = "gcovr", marker = "extra == 'testing'" },
     { name = "inputs", marker = "extra == 'examples'" },
@@ -582,10 +587,7 @@ requires-dist = [
 provides-extras = ["testing", "examples"]
 
 [package.metadata.requires-dev]
-testing = [
-    { name = "comma-car-segments", url = "https://huggingface.co/datasets/commaai/commaCarSegments/resolve/main/dist/comma_car_segments-0.1.0-py3-none-any.whl" },
-    { name = "cppcheck", git = "https://github.com/commaai/dependencies.git?subdirectory=cppcheck&rev=release-cppcheck" },
-]
+testing = [{ name = "comma-car-segments", url = "https://huggingface.co/datasets/commaai/commaCarSegments/resolve/main/dist/comma_car_segments-0.1.0-py3-none-any.whl" }]
 
 [[package]]
 name = "openpilot"
@@ -622,7 +624,7 @@ submodules = [
     { name = "opendbc" },
     { name = "pandacan" },
     { name = "rednose" },
-    { name = "teleoprtc" },
+    { name = "teleoprtc", marker = "sys_platform != 'win32'" },
     { name = "tinygrad" },
 ]
 testing = [
@@ -677,7 +679,7 @@ requires-dist = [
     { name = "scons" },
     { name = "setproctitle" },
     { name = "sounddevice" },
-    { name = "teleoprtc", marker = "extra == 'submodules'", editable = "teleoprtc_repo" },
+    { name = "teleoprtc", marker = "sys_platform != 'win32' and extra == 'submodules'", editable = "teleoprtc_repo" },
     { name = "tinygrad", marker = "extra == 'submodules'", editable = "tinygrad_repo" },
     { name = "tqdm" },
     { name = "ty", marker = "extra == 'testing'" },
@@ -712,9 +714,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cffi", marker = "extra == 'dev'" },
-    { name = "cppcheck", marker = "extra == 'dev'", git = "https://github.com/commaai/dependencies.git?subdirectory=cppcheck&rev=release-cppcheck" },
+    { name = "comma-deps-cppcheck", marker = "python_full_version >= '3.12' and extra == 'dev'" },
+    { name = "comma-deps-gcc-arm-none-eabi", marker = "python_full_version >= '3.12' and extra == 'dev'" },
     { name = "flaky", marker = "extra == 'dev'" },
-    { name = "gcc-arm-none-eabi", marker = "extra == 'dev'", git = "https://github.com/commaai/dependencies.git?subdirectory=gcc-arm-none-eabi&rev=release-gcc-arm-none-eabi" },
     { name = "libusb-package" },
     { name = "libusb1" },
     { name = "opendbc", git = "https://github.com/commaai/opendbc.git?rev=master" },
@@ -1003,7 +1005,7 @@ name = "teleoprtc"
 version = "1.0.1"
 source = { editable = "teleoprtc_repo" }
 dependencies = [
-    { name = "libdatachannel-py" },
+    { name = "libdatachannel-py", marker = "sys_platform != 'win32'" },
 ]
 
 [package.metadata]

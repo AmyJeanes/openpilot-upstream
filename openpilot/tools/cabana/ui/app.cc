@@ -1,5 +1,9 @@
 #include "tools/cabana/ui/app.h"
 
+#ifdef _WIN32
+#include "common/win32.h"  // before the imgui OpenGL loader pulls in <windows.h> with its clashing macros
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>

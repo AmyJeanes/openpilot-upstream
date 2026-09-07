@@ -1,5 +1,7 @@
 #include "tools/replay/route.h"
 
+#include "common/util.h"
+
 #include <array>
 #include <filesystem>
 #include <regex>

@@ -9,6 +9,7 @@
 
 #include "common/prefix.h"
 #include "common/timing.h"
+#include "common/util.h"
 #include "tools/replay/consoleui.h"
 #include "tools/replay/replay.h"
 #include "tools/replay/util.h"
@@ -139,7 +140,9 @@ int main(int argc, char *argv[]) {
 
   // The vendored ncurses static library has a wrong compiled-in terminfo path.
   // Point it at the system terminfo database if not already set.
+#ifndef _WIN32
   setenv("TERMINFO_DIRS", "/usr/share/terminfo:/lib/terminfo:/usr/lib/terminfo", 0);
+#endif
 
   ReplayConfig config;
 

@@ -4,6 +4,8 @@ import sys
 import sysconfig
 import platform
 import shlex
+import shutil
+import tempfile
 import importlib
 import numpy as np
 
@@ -43,16 +45,21 @@ if external_pythonpath := os.environ.get("PYTHONPATH"):
   submodule_python_paths += [p for p in external_pythonpath.split(os.pathsep) if p and p not in submodule_python_paths]
 
 # Detect platform
-arch = subprocess.check_output(["uname", "-m"], encoding='utf8').rstrip()
+WINDOWS = platform.system() == "Windows"
 if platform.system() == "Darwin":
   arch = "Darwin"
-elif arch == "aarch64" and COMMA_HARDWARE:
-  arch = "comma_arm64"
+elif WINDOWS:
+  arch = "Windows"
+else:
+  arch = subprocess.check_output(["uname", "-m"], encoding='utf8').rstrip()
+  if arch == "aarch64" and COMMA_HARDWARE:
+    arch = "comma_arm64"
 assert arch in [
   "comma_arm64",  # linux comma hardware (AGNOS) arm64
   "aarch64",      # linux pc arm64
   "x86_64",       # linux pc x64
   "Darwin",       # macOS arm64 (x86 not supported)
+  "Windows",      # windows pc x64, development only (MSYS2 clang64 toolchain)
 ]
 
 pkg_names = ['acados', 'capnproto', 'ffmpeg', 'json11', 'ncurses', 'zeromq', 'zstd']
@@ -65,13 +72,13 @@ ffmpeg = pkgs[pkg_names.index('ffmpeg')]
 # TODO: drop the static fallback once device venvs have comma-deps-ffmpeg>=7.1.0.post94
 _ffmpeg_lib_names = os.listdir(ffmpeg.LIB_DIR) if os.path.isdir(ffmpeg.LIB_DIR) else []
 ffmpeg_shared = any(
-  n.startswith('libavcodec.so') or (n.startswith('libavcodec') and n.endswith('.dylib'))
+  n.startswith('libavcodec.so') or (n.startswith('libavcodec') and n.endswith(('.dylib', '.dll.a')))
   for n in _ffmpeg_lib_names
 )
 ffmpeg_libs = ['avformat', 'avcodec', 'swresample', 'avutil']
 if not ffmpeg_shared:
   ffmpeg_libs += ['x264', 'z']
-  if arch != "Darwin":
+  if arch not in ("Darwin", "Windows"):
     ffmpeg_libs += ['va', 'va-drm', 'drm']
 acados_include_dirs = [
   acados.INCLUDE_DIR,
@@ -88,15 +95,22 @@ acados_include_dirs = [
 allowed_system_libs = {
   "EGL", "GLESv2", "GL",
   "dl", "drm", "gbm", "m", "pthread",
+  # Windows SDK import libraries
+  "opengl32", "gdi32", "winmm", "shell32", "user32", "advapi32", "ws2_32", "bcrypt", "ole32", "setupapi", "shlwapi", "ntdll",
+  "iphlpapi", "rpcrt4",
 }
+# static libzmq/capnp need these on every Windows link; import libs only pull in what is referenced
+windows_link_libs = ["pthread", "ws2_32", "iphlpapi", "rpcrt4", "bcrypt", "advapi32", "ole32", "user32", "shell32"] if WINDOWS else []
 
 def _resolve_lib(env, name):
   for d in env.Flatten(env.get('LIBPATH', [])):
     p = Dir(str(d)).abspath
-    for ext in ('.a', '.so', '.dylib'):
+    for ext in ('.a', '.so', '.dylib', '.dll.a', '.lib'):
       f = File(os.path.join(p, f'lib{name}{ext}'))
       if f.exists() or f.has_builder():
         return name
+    if WINDOWS and File(os.path.join(p, f'{name}.lib')).exists():  # MSVC-style import library, e.g. python312.lib
+      return name
   if name in allowed_system_libs:
     return name
   raise SCons.Errors.UserError(f"Unexpected non-vendored library '{name}'")
@@ -114,11 +128,39 @@ def _libflags(target, source, env, for_signature):
         libs.append(_resolve_lib(env, lib))
     else:
       libs.append(lib)
+  libs += [_resolve_lib(env, lib) for lib in windows_link_libs]
   return _stripixes(env['LIBLINKPREFIX'], libs, env['LIBLINKSUFFIX'],
                     env['LIBPREFIXES'], env['LIBSUFFIXES'], env, env['LIBLITERALPREFIX'])
 
+if WINDOWS:
+  # Run every build command through MSYS2 bash so the POSIX shell syntax used by the
+  # SConscripts (cd x && ..., VAR=1 ./script.py, shebang scripts) keeps working. This
+  # replaces the platform spawn so it also covers Environments created by submodules.
+  # bash must be resolved via PATH: CreateProcess searches System32 first, which
+  # would pick the WSL launcher.
+  import SCons.Platform.posix
+  import SCons.Platform.win32
+  _bash = shutil.which("bash")
+  if not _bash or "system32" in _bash.lower():
+    raise SCons.Errors.UserError("MSYS2 bash must be on PATH before System32 (run scons from an MSYS2 CLANG64 shell)")
+
+  def _bash_spawn(sh, escape, cmd, args, env):
+    # bash treats backslashes as escapes, so hand it SCons' Windows paths with forward
+    # slashes. Arguments carrying quotes (defines such as -DSWAGLOG="\"...\"") are kept as is.
+    args = [a if '"' in a else a.replace("\\", "/") for a in args]
+    return subprocess.call([_bash, "-c", " ".join(args)], env=env)
+  SCons.Platform.win32.spawn = _bash_spawn
+  SCons.Platform.win32.escape = SCons.Platform.posix.escape
+
+# Windows child processes need the system variables cmd/python rely on; POSIX builds keep the strict env
+_windows_env = {k: os.environ[k] for k in (
+  "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME",
+  "APPDATA", "LOCALAPPDATA", "USERNAME", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "MSYSTEM", "MSYSTEM_PREFIX", "VIRTUAL_ENV",
+) if k in os.environ} if WINDOWS else {}
+
 env = Environment(
   ENV={
+    **_windows_env,
     "PATH": os.environ['PATH'],
     "PYTHONPATH": os.pathsep.join(submodule_python_paths),
     "ACADOS_SOURCE_DIR": acados.DIR,
@@ -132,7 +174,7 @@ env = Environment(
     "-O2",
     "-Wunused",
     "-Werror",
-    "-Wshadow" if arch in ("Darwin", "comma_arm64") else "-Wshadow=local",
+    "-Wshadow" if arch in ("Darwin", "comma_arm64", "Windows") else "-Wshadow=local",
     "-Wno-unknown-warning-option",
     "-Wno-inconsistent-missing-override",
     "-Wno-c99-designator",
@@ -163,7 +205,7 @@ env = Environment(
   CYTHONCFILESUFFIX=".cpp",
   COMPILATIONDB_USE_ABSPATH=True,
   REDNOSE_ROOT="#rednose_repo",
-  tools=["default", "cython", "compilation_db", "rednose_filter"],
+  tools=["mingw" if WINDOWS else "default", "cython", "compilation_db", "rednose_filter"],
   toolpath=["#msgq_repo/site_scons/site_tools", "#rednose_repo/site_scons/site_tools"],
 )
 # SCons' Darwin linker tool doesn't define the variables used to expand RPATH.
@@ -173,6 +215,20 @@ if arch == "Darwin":
   env["_RPATH"] = "${_concat(RPATHPREFIX, RPATH, RPATHSUFFIX, __env__)}"
 if arch != "comma_arm64":
   env['_LIBFLAGS'] = _libflags
+if WINDOWS:
+  # clang and lld through the mingw tool, whose defaults are gcc; shared libraries keep the lib prefix the SConscripts expect
+  env["CC"], env["CXX"] = "clang", "clang++"
+  env["SHLIBPREFIX"] = "lib"
+  # PE has no rpath; DLLs are found next to the executable or via PATH
+  env["_RPATH"] = ""
+  # Self-contained binaries: Python 3.8+ does not search PATH for the DLLs an extension
+  # module needs, so the libc++/winpthreads runtime must not be dynamic
+  env.Append(LINKFLAGS=["-static"])
+
+  # uv venvs on Windows only ship python.exe, but scripts and shebangs here expect python3
+  _python3 = os.path.join(os.path.dirname(sys.executable), "python3.exe")
+  if not os.path.exists(_python3):
+    shutil.copy2(sys.executable, _python3)
 
 # Arch-specific flags and paths
 if arch == "comma_arm64":
@@ -190,6 +246,10 @@ elif arch == "Darwin":
   ])
   env.Append(CCFLAGS=["-DGL_SILENCE_DEPRECATION"])
   env.Append(CXXFLAGS=["-DGL_SILENCE_DEPRECATION"])
+elif arch == "Windows":
+  # -std=c++1z is strict ANSI; mingw then hides vasprintf, M_PI and friends without these
+  # ZMQ_STATIC: the vendored libzmq is a static archive, without it zmq.h asks for DLL imports
+  env.Append(CCFLAGS=["-D_GNU_SOURCE", "-D_USE_MATH_DEFINES", "-DZMQ_STATIC"])
 
 _extra_cc = shlex.split(GetOption('ccflags') or '')
 if _extra_cc:
@@ -217,13 +277,18 @@ if not GetOption('verbose'):
 
 # ********** Cython build environment **********
 envCython = env.Clone()
-envCython["CPPPATH"] += [sysconfig.get_paths()['include'], np.get_include()]
+# in a Windows venv sysconfig points at the (empty) venv Include dir, headers live with the base interpreter
+envCython["CPPPATH"] += [sysconfig.get_paths(vars={"installed_base": sys.base_prefix})['include'], np.get_include()]
 envCython["CCFLAGS"] += ["-Wno-#warnings", "-Wno-cpp", "-Wno-shadow", "-Wno-deprecated-declarations"]
 envCython["CCFLAGS"].remove("-Werror")
 
 envCython["LIBS"] = []
 if arch == "Darwin":
   envCython["LINKFLAGS"] = env["LINKFLAGS"] + ["-bundle", "-undefined", "dynamic_lookup"]
+elif arch == "Windows":
+  envCython["LINKFLAGS"] = ["-shared", "-static"]
+  envCython["LIBPATH"] += [os.path.join(sys.base_prefix, "libs")]
+  envCython["LIBS"] += [f"python{sys.version_info.major}{sys.version_info.minor}"]
 else:
   envCython["LINKFLAGS"] = ["-pthread", "-shared"]
 
@@ -233,7 +298,7 @@ Export('envCython', 'np_version')
 Export('env', 'arch', 'acados', 'ffmpeg_libs')
 
 # Setup cache dir
-cache_dir = '/data/scons_cache' if arch == "comma_arm64" else '/tmp/scons_cache'
+cache_dir = '/data/scons_cache' if arch == "comma_arm64" else os.path.join(tempfile.gettempdir(), 'scons_cache') if WINDOWS else '/tmp/scons_cache'
 cache_size_limit = 4e9 if "CI" in os.environ else 2e9
 CacheDir(cache_dir)
 Clean(["."], cache_dir)
@@ -287,9 +352,10 @@ SConscript([
   'openpilot/selfdrive/pandad/SConscript',
   'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
   'openpilot/selfdrive/locationd/SConscript',
-  'openpilot/selfdrive/modeld/SConscript',
   'openpilot/selfdrive/ui/SConscript',
 ])
+if arch != "Windows":  # TODO: tinygrad model compilation is untested on Windows
+  SConscript(['openpilot/selfdrive/modeld/SConscript'])
 
 # Build desktop-only tools
 if GetOption('extras') and arch != "comma_arm64":

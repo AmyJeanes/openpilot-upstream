@@ -5,14 +5,18 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <thread>
+#include <vector>
+#ifdef _WIN32
+#include "common/win32.h"
+#else
 #include <spawn.h>
 #ifdef __APPLE__
 #include <crt_externs.h>
 #endif
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
-#include <vector>
+#endif
 
 #include "tools/replay/util.h"
 
@@ -30,6 +34,129 @@ void reportProgress(const char *line) {
 
 // Run a Python command and capture stdout. Stderr is scanned for PROGRESS lines and otherwise passed
 // through to the parent's stderr. Returns stdout content. If abort is signaled, kills the child process.
+#ifdef _WIN32
+// CreateProcess with pipes instead of fork/exec; stderr still carries the progress lines
+std::string runPython(const std::vector<std::string> &args, std::atomic<bool> *abort = nullptr) {
+  std::string cmdline = "python3 -m openpilot.tools.lib.file_downloader";
+  for (const auto &a : args) {
+    cmdline += " \"" + a + "\"";
+  }
+
+  // Clear OPENPILOT_PREFIX for the child only so the Python process uses default
+  // paths (e.g. ~/.comma/auth.json). The prefix is only for IPC in the parent.
+  std::string env_block;
+  if (LPCH env = GetEnvironmentStringsA()) {
+    for (const char *p = env; *p; p += strlen(p) + 1) {
+      if (strncmp(p, "OPENPILOT_PREFIX=", 17) != 0) {
+        env_block.append(p, strlen(p) + 1);
+      }
+    }
+    FreeEnvironmentStringsA(env);
+  }
+  env_block.push_back('\0');
+
+  SECURITY_ATTRIBUTES sa = {};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE out_r = NULL, out_w = NULL, err_r = NULL, err_w = NULL;
+  if (!CreatePipe(&out_r, &out_w, &sa, 0) || !CreatePipe(&err_r, &err_w, &sa, 0)) {
+    rWarning("py_downloader: CreatePipe() failed");
+    return {};
+  }
+  SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOA si = {};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = out_w;
+  si.hStdError = err_w;
+  si.hStdInput = INVALID_HANDLE_VALUE;
+  PROCESS_INFORMATION pi = {};
+  BOOL ok = CreateProcessA(NULL, cmdline.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, env_block.data(), NULL, &si, &pi);
+  CloseHandle(out_w);
+  CloseHandle(err_w);
+  if (!ok) {
+    CloseHandle(out_r);
+    CloseHandle(err_r);
+    rWarning("py_downloader: CreateProcess() failed: %lu", GetLastError());
+    return {};
+  }
+  CloseHandle(pi.hThread);
+
+  std::thread stderr_thread([err_r]() {
+    std::string line;
+    char buf[4096];
+    DWORD n = 0;
+    auto flush_line = [&line]() {
+      if (strncmp(line.c_str(), "PROGRESS:", 9) == 0) {
+        reportProgress(line.c_str());
+      } else {
+        fprintf(stderr, "%s\n", line.c_str());
+      }
+      line.clear();
+    };
+    while (ReadFile(err_r, buf, sizeof(buf), &n, NULL) && n > 0) {
+      for (DWORD i = 0; i < n; i++) {
+        if (buf[i] == '\n') {
+          flush_line();
+        } else {
+          line.push_back(buf[i]);
+        }
+      }
+    }
+    if (!line.empty()) flush_line();
+    CloseHandle(err_r);
+  });
+
+  std::string stdout_data;
+  char buf[4096];
+  DWORD n = 0;
+  // Poll the pipe so abort can interrupt while waiting for Python output
+  while (true) {
+    if (abort && *abort) {
+      TerminateProcess(pi.hProcess, 1);
+      break;
+    }
+    DWORD avail = 0;
+    if (!PeekNamedPipe(out_r, NULL, 0, NULL, &avail, NULL)) break;  // writer gone and pipe drained
+    if (avail == 0) {
+      if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) {
+        if (!PeekNamedPipe(out_r, NULL, 0, NULL, &avail, NULL) || avail == 0) break;
+      }
+      continue;
+    }
+    if (!ReadFile(out_r, buf, sizeof(buf), &n, NULL) || n == 0) break;
+    stdout_data.append(buf, n);
+  }
+  while (ReadFile(out_r, buf, sizeof(buf), &n, NULL) && n > 0) {
+    stdout_data.append(buf, n);
+  }
+  CloseHandle(out_r);
+  stderr_thread.join();
+
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+
+  const bool aborted = abort && *abort;
+  if (aborted || code != 0) {
+    if (!aborted) rWarning("py_downloader: process exited with code %lu", code);
+    std::lock_guard<std::mutex> lk(handler_mutex);
+    if (progress_handler) {
+      progress_handler(0, 0, false);
+    }
+    return {};
+  }
+
+  // Trim trailing newline
+  while (!stdout_data.empty() && (stdout_data.back() == '\n' || stdout_data.back() == '\r')) {
+    stdout_data.pop_back();
+  }
+  return stdout_data;
+}
+#else
 std::string runPython(const std::vector<std::string> &args, std::atomic<bool> *abort = nullptr) {
   // Build argv for the downloader module
   std::vector<const char *> argv;
@@ -200,6 +327,7 @@ std::string runPython(const std::vector<std::string> &args, std::atomic<bool> *a
 
   return stdout_data;
 }
+#endif
 
 }  // namespace
 

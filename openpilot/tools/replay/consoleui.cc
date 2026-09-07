@@ -139,7 +139,11 @@ void ConsoleUI::initWindows() {
 }
 
 void ConsoleUI::updateSize() {
+#ifdef _WIN32
+  if (is_termresized()) {  // PDCurses spelling
+#else
   if (is_term_resized(max_height, max_width)) {
+#endif
     for (auto win : w) {
       if (win) delwin(win);
     }

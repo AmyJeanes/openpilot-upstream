@@ -77,7 +77,7 @@ submodules = [
   "opendbc",
   "pandacan",
   "rednose",
-  "teleoprtc",
+  "teleoprtc; sys_platform != 'win32'",  # TODO: drop the marker when libdatachannel-py publishes win_amd64 wheels; only webrtcd needs it
   "tinygrad",
 ]
 
