@@ -76,6 +76,30 @@ jobs:
     - name: Building openpilot
       run: scons
 
+  build_windows:
+    name: build Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - uses: actions/checkout@v7
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: CLANG64
+        path-type: inherit  # Git for Windows and uv stay visible
+    - run: ./tools/op.sh setup
+    - name: Building openpilot
+      run: tools/op.sh build  # activates the venv first: the MSYS2 toolchain's own python3 shadows it in this shell
+    - name: Software OpenGL for the UI tests
+      # the runner's display driver has no OpenGL; Mesa's llvmpipe opengl32.dll next to the interpreter wins the DLL search
+      run: |
+        pacman -S --needed --noconfirm "$MINGW_PACKAGE_PREFIX-mesa"
+        source .venv/Scripts/activate
+        cp /clang64/bin/opengl32.dll "$(dirname "$(python -c 'import sys; print(sys._base_executable)')")"
+    - name: Run unit tests
+      timeout-minutes: 20
+      run: tools/op.sh test
   static_analysis:
     name: static analysis
     runs-on: ${{
