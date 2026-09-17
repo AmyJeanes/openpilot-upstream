@@ -263,7 +263,7 @@ class SeamMeter:
     in_ring2 = in_ring[::2, ::2] & vw2 & vn2
     sel2 = np.flatnonzero(in_ring2)[:: max(1, int(in_ring2.sum()) // (n_pairs // 2))][: n_pairs // 2]
     self.uv_w, self.uv_n = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
-    self.alpha, self.every, self.n_calls = alpha, every, 0  # measuring every frame is ~0.6 ms of CPU on a PC; the filter is slower than that anyway
+    self.alpha, self.every, self.n_calls, self.moving = alpha, every, 0, False  # measuring every frame is ~0.7 ms of CPU on a PC
     self.state = None  # filtered [gain_y, u_off, v_off, gx, gy, band gains...]
 
   def measure(self, wide, narrow):
@@ -302,10 +302,17 @@ class SeamMeter:
     """Filtered match for this frame as Reprojector kwargs; measured when the ring is usable, else decays to the exposure
     model with no colour offset, no gradient and a flat curve."""
     self.n_calls += 1
-    if self.state is None or self.n_calls % self.every == 0:
+    if self.state is None or self.moving or self.n_calls % self.every == 0:
       m = self.measure(wide, narrow)
       target = m if m is not None else np.array([model_gain, 0, 0, 0, 0] + [model_gain] * len(self.BANDS), np.float32)
-      self.state = target if self.state is None else self.state + self.alpha * (target - self.state)
+      if self.state is None:
+        self.state = target
+      else:
+        # the two auto-exposures diverge for a second at a time (one brightens while the other darkens): each measurement
+        # is a median over thousands of pairs, so when the match moves, follow it almost at once and measure every frame
+        jump = abs(float(target[0] - self.state[0])) / max(float(self.state[0]), 0.1)
+        self.state += min(self.alpha + 3 * jump, 0.9) * (target - self.state)
+        self.moving = jump > 0.03
     s = self.state
     return dict(gain_y=float(s[0]), gain_c=float(s[0]), u_off=float(s[1]), v_off=float(s[2]), gx=float(s[3]), gy=float(s[4]),
                 lut=luma_lut(s[5:], self.BANDS))
