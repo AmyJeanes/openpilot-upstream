@@ -32,7 +32,7 @@ ap.add_argument("--overlays", default="crop,telemetry,hud", help="comma list of 
 ap.add_argument("--meter", action=argparse.BooleanOptionalAction, default=True, help="live seam match (gain + U/V offsets) as on the device; --no-meter = exposure model only")
 ap.add_argument("--start", type=int, default=0, help="skip this many frames of each segment before rendering")
 ap.add_argument("--feather", type=float, default=RC.FEATHER_PX, help="composite seam width in comma 4 px")
-ap.add_argument("--compare", default=None, choices=["exposure", "soften", "feedforward", "bands"], help="A/B on the top row, bottom: raw narrow + reprojected wide. exposure: exposure model only (left) vs live seam meter (right); soften: inset as is (left) vs softened inset (right, --soften); feedforward: meter filtering the gain (left) vs filtering the correction to the exposure model (right)")
+ap.add_argument("--compare", default=None, choices=["exposure", "soften", "feedforward"], help="A/B on the top row, bottom: raw narrow + reprojected wide. exposure: exposure model only (left) vs live seam meter (right); soften: inset as is (left) vs softened inset (right, --soften); feedforward: meter filtering the gain (left) vs filtering the correction to the exposure model (right)")
 ap.add_argument("--soften", type=int, default=0, help="inset softening inside the blend zone: taps k narrow px apart (0 = off)")
 ap.add_argument("--calib", default="auto", help="auto = the unit's own self-cal when the route dir is a fleet device dir (harness/unit_calib.py), else the board calibration; board = always the board")
 a = ap.parse_args()
@@ -187,7 +187,6 @@ rp = RC.Reprojector(device=DEV, feather=a.feather, calib=calib, soften=a.soften 
 rp_b = RC.Reprojector(device=DEV, feather=a.feather, calib=calib, soften=a.soften) if a.compare == "soften" else None  # the tweaked kernel for the A/B
 meter = RC.SeamMeter(calib=calib)
 meter_a = RC.SeamMeter(calib=calib, feedforward=False) if a.compare == "feedforward" else None  # the previous behaviour for the A/B
-meter_b = RC.SeamMeter(calib=calib, bands=RC.SeamMeter.BANDS_8) if a.compare == "bands" else None
 enc = subprocess.Popen([FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", "20", "-i", "-",
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-movflags", "+faststart", a.out], stdin=subprocess.PIPE)
 segs = sorted(glob.glob(os.path.join(a.route, "*--*--*")), key=lambda p: int(p.rsplit("--", 1)[1]))
@@ -247,9 +246,6 @@ for p in segs:
     elif a.compare == "feedforward":
       match_a = meter_a.update(wide_np, narrow_np, g_model)
       on_model = from_nv12(rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match_a)[1].numpy(), DW, DH)
-    elif a.compare == "bands":
-      match_b = meter_b.update(wide_np, narrow_np, g_model)
-      on_model = from_nv12(rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match_b)[1].numpy(), DW, DH)
     elif a.compare == "soften":
       on_model = from_nv12(rp_b(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)[1].numpy(), DW, DH)
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
@@ -282,9 +278,6 @@ for p in segs:
     elif a.compare == "feedforward":
       top = np.hstack([label(fit(on_model, rd), f"BEFORE: meter filters the gain itself: wide gain {match_a['gain_y']:.2f}  |  segment {seg}  t = {t:5.1f} s"),
                        label(fit(on_bgr, rd), f"AFTER: meter filters the correction, applied on the exposure model's live value ({g_model:.2f}): wide gain {g:.2f}")])
-    elif a.compare == "bands":
-      top = np.hstack([label(fit(on_bgr, rd), f"BEFORE: tone curve from 4 brightness bands  |  segment {seg}  t = {t:5.1f} s  |  " + live_lab),
-                       label(fit(on_model, rd), "AFTER: tone curve from 8 brightness bands: " + "/".join(f"{v:.2f}" for v in match_b['lut'][[25, 45, 67, 92, 120, 150, 182, 217]] / [25, 45, 67, 92, 120, 150, 182, 217]))])
     elif a.compare == "soften":
       top = np.hstack([label(fit(on_bgr, rd), f"BEFORE: inset one sample per pixel  |  segment {seg}  t = {t:5.1f} s  |  " + live_lab),
                        label(fit(on_model, rd), f"AFTER: inset softened in the blend zone (5 taps {a.soften} px apart, fading over one feather width)")])

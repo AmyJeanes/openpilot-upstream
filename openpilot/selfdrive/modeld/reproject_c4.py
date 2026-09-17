@@ -245,9 +245,8 @@ class SeamMeter:
   differ (+-10 Y steps between shadows and highlights after the best single gain), measured as a gain per brightness band
   and applied as a lookup on the surround luma."""
   BANDS = ((16, 50), (50, 100), (100, 160), (160, 235))
-  BANDS_8 = ((16, 35), (35, 55), (55, 80), (80, 105), (105, 135), (135, 165), (165, 200), (200, 235))
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True, bands=None):
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True):
     """feedforward: filter the luma gains as a correction on top of the exposure model (from the camera states) and apply
     them times the model's live value, so a jump in either camera's exposure is followed the same frame."""
     sw, sh = src_wh; dw, dh = dst_wh
@@ -270,8 +269,6 @@ class SeamMeter:
     sel2 = np.flatnonzero(in_ring2)[:: max(1, int(in_ring2.sum()) // (n_pairs // 2))][: n_pairs // 2]
     self.uv_w, self.uv_n = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
     self.alpha, self.every, self.n_calls, self.moving, self.feedforward = alpha, every, 0, False, feedforward  # measuring every frame is ~0.7 ms of CPU on a PC
-    if bands is not None:
-      self.BANDS = bands
     self.state = None  # filtered [gain_y, u_off, v_off, gx, gy, band gains...]
 
   def measure(self, wide, narrow):
