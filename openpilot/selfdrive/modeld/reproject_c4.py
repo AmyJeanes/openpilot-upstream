@@ -254,6 +254,10 @@ class SeamMeter:
     sel = np.flatnonzero(in_ring)[:: max(1, int(in_ring.sum()) // n_pairs)][:n_pairs]
     self.y_w, self.y_n = iw.ravel()[sel], inn.ravel()[sel]
     self.pos = np.stack([(sel % dw + 0.5) / dw * 2 - 1, (sel // dw + 0.5) / dh * 2 - 1], 1).astype(np.float32)  # c4 pixel, -1..1
+    # the ring in 32x18 cells: a cell whose pairs persistently disagree with the fit (an obstruction on one lens, dirt, a
+    # wiper) is excluded from the fit rather than dragged along; passing objects average out before they count
+    self.cell = (np.floor((self.pos + 1) / 2 * [32, 18])).astype(int); self.cell = self.cell[:, 0] * 18 + self.cell[:, 1]
+    self.cell_bad = np.zeros(32 * 18, np.float32); self.CELL_ALPHA, self.CELL_LIMIT = 0.02, 0.2
     mw2, mn2 = sample_coords("narrow", dw // 2, dh // 2, 0.5, calib)
     iw2, vw2 = _nv12_index(mw2, sw, sh, s_stride, s_uv, True); inn2, vn2 = _nv12_index(mn2, sw, sh, s_stride, s_uv, True)
     in_ring2 = in_ring[::2, ::2] & vw2 & vn2
@@ -275,10 +279,17 @@ class SeamMeter:
     band = np.searchsorted([hi for _, hi in self.BANDS[:-1]], yw)
     A = np.zeros((len(yw), len(self.BANDS) + 2), np.float32); A[np.arange(len(yw)), band] = 1; A[:, -2:] = pos
     lr = np.log(np.clip(ratio, 0.25, 4.0))
-    c = np.linalg.lstsq(A, lr, rcond=None)[0]
-    keep = np.abs(lr - A @ c) < 0.25  # one refit without the outliers (saturated sky, the car's own bonnet, seam-crossing objects)
-    if keep.sum() >= 256:
-      c = np.linalg.lstsq(A[keep], lr[keep], rcond=None)[0]
+    cells = self.cell[good]; w = (self.cell_bad[cells] < self.CELL_LIMIT).astype(np.float32)
+    if w.sum() < 256:
+      w[:] = 1  # too much excluded: fit everything rather than nothing
+    c = np.linalg.lstsq(A * w[:, None], lr * w, rcond=None)[0]
+    for _ in range(2):  # reweight: a pair's pull falls off with its residual (Tukey-like), so outliers steer nothing
+      res = lr - A @ c; wr = w * np.clip(1 - (res / 0.3) ** 2, 0, 1) ** 2
+      if wr.sum() < 256:
+        break
+      c = np.linalg.lstsq(A * wr[:, None], lr * wr, rcond=None)[0]
+    bad = np.zeros_like(self.cell_bad); np.add.at(bad, cells, np.abs(lr - A @ c)); n = np.bincount(cells, minlength=len(bad))
+    seen = n > 0; self.cell_bad[seen] += self.CELL_ALPHA * (bad[seen] / n[seen] - self.cell_bad[seen])
     counts = np.bincount(band, minlength=len(self.BANDS))
     bands = [float(np.exp(c[i])) if counts[i] >= 100 else gy for i in range(len(self.BANDS))]
     gx, gyp = float(np.clip(c[-2], -0.5, 0.5)), float(np.clip(c[-1], -0.5, 0.5))
