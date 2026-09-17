@@ -246,7 +246,9 @@ class SeamMeter:
   and applied as a lookup on the surround luma."""
   BANDS = ((16, 50), (50, 100), (100, 160), (160, 235))
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3, every=2):
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True):
+    """feedforward: filter the luma gains as a correction on top of the exposure model (from the camera states) and apply
+    them times the model's live value, so a jump in either camera's exposure is followed the same frame."""
     sw, sh = src_wh; dw, dh = dst_wh
     s_stride, s_yh, _, _ = get_nv12_info(sw, sh); s_uv = s_stride * s_yh
     sc = (calib or DEFAULT_CALIB)["narrow"]["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0]
@@ -266,7 +268,7 @@ class SeamMeter:
     in_ring2 = in_ring[::2, ::2] & vw2 & vn2
     sel2 = np.flatnonzero(in_ring2)[:: max(1, int(in_ring2.sum()) // (n_pairs // 2))][: n_pairs // 2]
     self.uv_w, self.uv_n = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
-    self.alpha, self.every, self.n_calls, self.moving = alpha, every, 0, False  # measuring every frame is ~0.7 ms of CPU on a PC
+    self.alpha, self.every, self.n_calls, self.moving, self.feedforward = alpha, every, 0, False, feedforward  # measuring every frame is ~0.7 ms of CPU on a PC
     self.state = None  # filtered [gain_y, u_off, v_off, gx, gy, band gains...]
 
   def measure(self, wide, narrow):
@@ -308,6 +310,8 @@ class SeamMeter:
     if self.state is None or self.moving or self.n_calls % self.every == 0:
       m = self.measure(wide, narrow)
       target = m if m is not None else np.array([model_gain, 0, 0, 0, 0] + [model_gain] * len(self.BANDS), np.float32)
+      if self.feedforward:  # the luma entries are kept relative to the exposure model
+        target = target.copy(); target[0] /= model_gain; target[5:] /= model_gain
       if self.state is None:
         self.state = target
       else:
@@ -316,7 +320,9 @@ class SeamMeter:
         jump = abs(float(target[0] - self.state[0])) / max(float(self.state[0]), 0.1)
         self.state += min(self.alpha + 3 * jump, 0.9) * (target - self.state)
         self.moving = jump > 0.03
-    s = self.state
+    s = self.state.copy()
+    if self.feedforward:
+      s[0] *= model_gain; s[5:] *= model_gain
     return dict(gain_y=float(s[0]), gain_c=float(s[0]), u_off=float(s[1]), v_off=float(s[2]), gx=float(s[3]), gy=float(s[4]),
                 lut=luma_lut(s[5:], self.BANDS))
 
