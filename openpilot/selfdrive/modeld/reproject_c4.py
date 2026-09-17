@@ -73,6 +73,8 @@ def matrix_to_rotvec(M):
   if a < 1e-9:
     return np.zeros(3)
   return a / (2 * np.sin(a)) * np.array([M[2, 1] - M[1, 2], M[0, 2] - M[2, 0], M[1, 0] - M[0, 1]])
+
+
 ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wide pixel
 FEATHER_PX = 24  # composite seam width in comma 4 narrow px
 UV_FILL = 128
@@ -233,11 +235,15 @@ def load_tables(src_wh, dst_wh, cache_dir=None, calib=None, feather=FEATHER_PX):
 
 class SeamMeter:
   """Measures the narrow-inset / wide-surround match in the composite's seam ring straight from the two source NV12 buffers
-  (host memory, a few thousand nearest-neighbour pixel pairs): median Y ratio and the U/V offsets left after it. The two
-  cameras expose and white-balance independently and their constant differs per unit (fleet: +-8 % luma, +-2 U/V steps), so
-  the match is measured live and low-pass filtered; the exposure model is the fallback when the ring is too dark/saturated."""
+  (host memory, a few thousand nearest-neighbour pixel pairs). The two cameras expose and white-balance independently and
+  their constant differs per unit (fleet: +-8 % luma, +-2 U/V steps), so the match is measured live and low-pass filtered;
+  the exposure model is the fallback when the ring is too dark/saturated. Beyond one luma gain: the wide lens's shading is
+  uneven per unit (25 % side to side on some), measured as a gain gradient across the frame; and the two ISPs' tone curves
+  differ (+-10 Y steps between shadows and highlights after the best single gain), measured as a gain per brightness band
+  and applied as a lookup on the surround luma."""
+  BANDS = ((16, 50), (50, 100), (100, 160), (160, 235))
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3):
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3, every=2):
     sw, sh = src_wh; dw, dh = dst_wh
     s_stride, s_yh, _, _ = get_nv12_info(sw, sh); s_uv = s_stride * s_yh
     sc = (calib or DEFAULT_CALIB)["narrow"]["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0]
@@ -247,31 +253,56 @@ class SeamMeter:
     in_ring = vw & vn & (dist > ring[0]) & (dist < ring[1])
     sel = np.flatnonzero(in_ring)[:: max(1, int(in_ring.sum()) // n_pairs)][:n_pairs]
     self.y_w, self.y_n = iw.ravel()[sel], inn.ravel()[sel]
+    self.pos = np.stack([(sel % dw + 0.5) / dw * 2 - 1, (sel // dw + 0.5) / dh * 2 - 1], 1).astype(np.float32)  # c4 pixel, -1..1
     mw2, mn2 = sample_coords("narrow", dw // 2, dh // 2, 0.5, calib)
     iw2, vw2 = _nv12_index(mw2, sw, sh, s_stride, s_uv, True); inn2, vn2 = _nv12_index(mn2, sw, sh, s_stride, s_uv, True)
     in_ring2 = in_ring[::2, ::2] & vw2 & vn2
     sel2 = np.flatnonzero(in_ring2)[:: max(1, int(in_ring2.sum()) // (n_pairs // 2))][: n_pairs // 2]
     self.uv_w, self.uv_n = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
-    self.alpha = alpha
-    self.state = None  # filtered (gain_y, u_off, v_off)
+    self.alpha, self.every, self.n_calls = alpha, every, 0  # measuring every frame is ~0.6 ms of CPU on a PC; the filter is slower than that anyway
+    self.state = None  # filtered [gain_y, u_off, v_off, gx, gy, band gains...]
 
   def measure(self, wide, narrow):
-    """One frame's raw (gain_y, u_off, v_off) or None when fewer than 256 usable luma pairs (night, glare)."""
+    """One frame's raw state vector, or None when fewer than 256 usable luma pairs (night, glare)."""
     yw = wide[self.y_w].astype(np.float32); yn = narrow[self.y_n].astype(np.float32)
     good = (yw > 16) & (yw < 235) & (yn > 16) & (yn < 235)
     if good.sum() < 256:
       return None
-    gy = float(np.median(yn[good] / yw[good]))
+    yw, yn, pos = yw[good], yn[good], self.pos[good]
+    ratio = yn / yw; gy = float(np.median(ratio))
+    # gain gradient across the frame: least squares of the normalised ratio on the pixel position (clipped: robust enough at 4k pairs)
+    r = np.clip(ratio / gy, 0.4, 2.5) - 1
+    A = np.c_[pos, np.ones(len(pos), np.float32)]
+    c = np.linalg.lstsq(A, r, rcond=None)[0]
+    keep = np.abs(r - A @ c) < 0.3  # one refit without the outliers (saturated sky, the car's own bonnet, seam-crossing objects)
+    if keep.sum() >= 256:
+      c = np.linalg.lstsq(A[keep], r[keep], rcond=None)[0]
+    gx, gyp = float(np.clip(c[0], -0.5, 0.5)), float(np.clip(c[1], -0.5, 0.5))
+    flat = ratio / (1 + gx * pos[:, 0] + gyp * pos[:, 1])
+    bands = [float(np.median(flat[m])) if (m := (yw >= lo) & (yw < hi)).sum() >= 100 else gy for lo, hi in self.BANDS]
     uw, un = wide[self.uv_w].astype(np.float32), narrow[self.uv_n].astype(np.float32)
     vw, vn = wide[self.uv_w + 1].astype(np.float32), narrow[self.uv_n + 1].astype(np.float32)
-    return gy, float(np.median(un - UV_FILL - gy * (uw - UV_FILL))), float(np.median(vn - UV_FILL - gy * (vw - UV_FILL)))
+    du, dv = float(np.median(un - UV_FILL - gy * (uw - UV_FILL))), float(np.median(vn - UV_FILL - gy * (vw - UV_FILL)))
+    return np.array([gy, du, dv, gx, gyp, *bands], np.float32)
 
   def update(self, wide, narrow, model_gain=1.0):
-    """Filtered match for this frame: measured when the ring is usable, else decays to the exposure model with no colour offset."""
-    m = self.measure(wide, narrow)
-    target = np.array(m if m is not None else (model_gain, 0.0, 0.0), np.float32)
-    self.state = target if self.state is None else self.state + self.alpha * (target - self.state)
-    return tuple(float(v) for v in self.state)
+    """Filtered match for this frame as Reprojector kwargs; measured when the ring is usable, else decays to the exposure
+    model with no colour offset, no gradient and a flat curve."""
+    self.n_calls += 1
+    if self.state is None or self.n_calls % self.every == 0:
+      m = self.measure(wide, narrow)
+      target = m if m is not None else np.array([model_gain, 0, 0, 0, 0] + [model_gain] * len(self.BANDS), np.float32)
+      self.state = target if self.state is None else self.state + self.alpha * (target - self.state)
+    s = self.state
+    return dict(gain_y=float(s[0]), gain_c=float(s[0]), u_off=float(s[1]), v_off=float(s[2]), gx=float(s[3]), gy=float(s[4]),
+                lut=luma_lut(s[5:], self.BANDS))
+
+
+def luma_lut(band_gains, bands=SeamMeter.BANDS):
+  """Surround luma -> matched luma: the per-band gains interpolated over 0..255 (flat beyond the outer band centres)."""
+  v = np.arange(256, dtype=np.float32)
+  centres = [0.5 * (lo + hi) for lo, hi in bands]
+  return np.clip(v * np.interp(v, centres, band_gains), 0, 255).astype(np.float32)
 
 
 class Reprojector:
@@ -282,14 +313,22 @@ class Reprojector:
     self.size, self.body, self.uv_offset = T["wide"]["size"], T["wide"]["body"], T["wide"]["uv_offset"]
     self.device = device
     self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
-    # on QCOM the jit reads the gains straight from host memory: a per-call upload costs a scheduled copy (~4 ms of Python)
-    self.gains_np = np.array([1, 1, 0, 0], np.float32) if str(device or "").startswith("QCOM") else None  # gain_y, gain_c, u_off, v_off
-    if self.gains_np is not None:
-      self.gains = Tensor.from_blob(self.gains_np.ctypes.data, (4,), dtype="float32", device=device)
+    # per-frame match parameters: [gain_c, u_off, v_off, gx, gy, 0, 0, 0] and a 256-entry surround-luma lookup; on QCOM the
+    # jit reads them straight from host memory (a per-call upload costs a scheduled copy, ~4 ms of Python)
+    self.params_np = np.zeros(8, np.float32); self.params_np[0] = 1; self.lut_np = np.arange(256, dtype=np.float32)
+    if str(device or "").startswith("QCOM"):
+      self.gains = Tensor.from_blob(self.params_np.ctypes.data, (8,), dtype="float32", device=device)
+      self.lut = Tensor.from_blob(self.lut_np.ctypes.data, (256,), dtype="float32", device=device)
+      self.host_params = True
     else:
-      self.gains = Tensor(np.array([1, 1, 0, 0], np.float32), device=device).contiguous().realize()
+      self.gains = Tensor(self.params_np, device=device).contiguous().realize(); self.lut = Tensor(self.lut_np, device=device).contiguous().realize()
+      self.host_params = False
     assert self.body == 3 * (self.body - self.uv_offset)  # NV12: the UV plane is the last third of the body
     self.plane = Tensor([0, 0, 1], dtype="uint8", device=device).realize()
+    # pixel position for the gain gradient, as two broadcast vectors (no per-pixel table): the body is rows x stride
+    d_stride = get_nv12_info(*dst_wh)[0]; self.rows = self.body // d_stride; self.stride = d_stride
+    self.xs = Tensor(((np.arange(d_stride) + 0.5) / dst_wh[0] * 2 - 1).astype(np.float32), device=device).reshape(1, d_stride).realize()
+    self.ys = Tensor(((np.arange(self.rows) + 0.5) / dst_wh[1] * 2 - 1).astype(np.float32), device=device).reshape(self.rows, 1).realize()
     self.dst = None
     self._run = TinyJit(self._both)
 
@@ -315,30 +354,33 @@ class Reprojector:
     pw = self.t["wide"]["pw"]
     return (pw < INVALID_BIT).where(wide[pw & IDX_BITS], self._chroma().cast("uint8") * UV_FILL)
 
-  def _narrow(self, wide, narrow, gains):
+  def _narrow(self, wide, narrow, gains, lut):
     t = self.t["narrow"]; pw = t["pw"]; chroma = self._chroma()
-    # exposure-match the wide surround to the narrow: luma gain on Y, chroma gain about the 128 midpoint plus a U/V offset
-    # (the cameras white-balance independently); the offset is a parity broadcast, U and V bytes alternate in NV12
-    off = gains[2:4].reshape(1, 2).expand(self.body // 2, 2).reshape(self.body)
-    w = wide[pw & IDX_BITS].float()
-    w = chroma.where((w - UV_FILL) * gains[1] + UV_FILL + off, w * gains[0]).clip(0, 255)
+    # match the wide surround to the narrow: luma through the lookup (tone curve) times a gain gradient over the frame
+    # (lens shading), chroma gain about the 128 midpoint plus a U/V offset (independent white balance); the offset is a
+    # parity broadcast (U and V bytes alternate in NV12) and the gradient a row/column broadcast, so neither reads a table
+    off = gains[1:3].reshape(1, 2).expand(self.body // 2, 2).reshape(self.body)
+    grad = (1 + gains[3] * self.xs + gains[4] * self.ys).expand(self.rows, self.stride).reshape(self.body)
+    w8 = wide[pw & IDX_BITS]; w = w8.float()
+    w = chroma.where((w - UV_FILL) * gains[0] + UV_FILL + off, lut[w8.cast("int32")] * grad).clip(0, 255)
     w = (pw < INVALID_BIT).where(w, chroma.cast("float32") * UV_FILL)
     a = ((pw >> ALPHA_SHIFT) & 0xff).float() * (1 / 255)
     return a * narrow[t["pn"]].float() + (1 - a) * w
 
-  def _both(self, wide, narrow, gains):
+  def _both(self, wide, narrow, gains, lut):
     out_w = self._wide(wide)
-    out_n = self._narrow(wide, narrow, gains).round().cast("uint8")
+    out_n = self._narrow(wide, narrow, gains, lut).round().cast("uint8")
     if self.dst is not None:
       out_w, out_n = self.dst[0].assign(out_w), self.dst[1].assign(out_n)
     return out_w.realize(), out_n.realize()
 
-  def __call__(self, wide, narrow, gain_y=1.0, gain_c=1.0, u_off=0.0, v_off=0.0):
+  def __call__(self, wide, narrow, gain_y=1.0, gain_c=1.0, u_off=0.0, v_off=0.0, gx=0.0, gy=0.0, lut=None):
     """wide/narrow: flat uint8 3X NV12 tensors (same buffers every call, e.g. the VisionIPC ring, so the jit can be replayed).
-    Returns (c4_wide, c4_narrow): flat uint8 NV12 tensors of `body` bytes (stride * (y_height + uv_height), the part of the
-    comma 4 buffer a consumer reads); with bind() they are views of the bound host arrays."""
-    if self.gains_np is not None:
-      self.gains_np[:] = (gain_y, gain_c, u_off, v_off)
-    else:
-      self.gains.assign(Tensor(np.array([gain_y, gain_c, u_off, v_off], np.float32), device=self.gains.device)).realize()
-    return self._run(wide, narrow, self.gains)
+    Match parameters as SeamMeter.update() returns them (lut None = a flat gain_y). Returns (c4_wide, c4_narrow): flat
+    uint8 NV12 tensors of `body` bytes (stride * (y_height + uv_height), the part of the comma 4 buffer a consumer reads);
+    with bind() they are views of the bound host arrays."""
+    self.params_np[:5] = (gain_c, u_off, v_off, gx, gy)
+    self.lut_np[:] = np.arange(256, dtype=np.float32) * gain_y if lut is None else lut
+    if not self.host_params:
+      self.gains.assign(Tensor(self.params_np, device=self.gains.device)).realize(); self.lut.assign(Tensor(self.lut_np, device=self.lut.device)).realize()
+    return self._run(wide, narrow, self.gains, self.lut)

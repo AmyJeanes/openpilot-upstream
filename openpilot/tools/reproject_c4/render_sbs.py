@@ -181,10 +181,10 @@ for p in segs:
     sn, sw_ = cs["road"].get(fid_n), cs["wide"].get(fid_w)
     g = float(np.clip(a.K * RC.exposure_gain(sn[0] * sn[1], sw_[0] * sw_[1]), 0.25, 4.0)) if sn and sw_ else 1.0
     if a.meter:  # what the device does: measure the match in the seam ring of these frames, the exposure model as fallback
-      g, du, dv = meter.update(wide_np, narrow_np, g)
+      match = meter.update(wide_np, narrow_np, g); g, du, dv = match["gain_y"], match["u_off"], match["v_off"]
     else:
-      du = dv = 0.0
-    ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), g, g, du, dv)
+      match = dict(gain_y=g, gain_c=g); du = dv = 0.0
+    ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)
     ow_bgr, on_bgr = from_nv12(ow.numpy(), DW, DH), from_nv12(on.numpy(), DW, DH)
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
     inputs = [model_input(raw_n, M_x3["n"]), model_input(raw_w, M_x3["w"]), model_input(on_bgr, M_c4["n"]), model_input(ow_bgr, M_c4["w"])] if "inputs" in OV else None
@@ -208,7 +208,7 @@ for p in segs:
     top = np.hstack([label(fit(raw_w, rs), f"3X wide, raw  |  segment {seg}  t = {t:5.1f} s" + ("  |  orange: stock's 512x256 warp crop" if "crop" in OV else "")),
                      label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
     bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "")),
-                     label(fit(on_bgr, rd), f"comma 4 narrow: narrow inset + wide surround, feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} (seam meter)" if a.meter else " (exposure model)") + expo)])
+                     label(fit(on_bgr, rd), f"comma 4 narrow: narrow inset + wide surround, feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} grad {match['gx']:+.2f},{match['gy']:+.2f} bands {'/'.join(f'{v:.2f}' for v in match['lut'][[33, 75, 130, 197]] / [33, 75, 130, 197])} (seam meter)" if a.meter else " (exposure model)") + expo)])
     frame = [top, bot]
     if inputs is not None:
       row = np.zeros((IH + LH, W, 3), np.uint8)

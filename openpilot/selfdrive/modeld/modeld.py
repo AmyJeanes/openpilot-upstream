@@ -270,7 +270,7 @@ class ModelState:
           inputs: dict[str, np.ndarray], after_enqueue: Callable[[], None] | None = None) -> dict[str, np.ndarray]:
     if self.rp is not None:
       t0 = time.perf_counter()
-      self.rp(self.src_tensor(bufs['big_img']), self.src_tensor(bufs['img']), *inputs.get('reproj_gains', (1.0, 1.0)))
+      self.rp(self.src_tensor(bufs['big_img']), self.src_tensor(bufs['img']), **inputs.get('reproj_match', {}))
       Device['QCOM'].synchronize()
       self.rp_time = time.perf_counter() - t0
     else:
@@ -493,9 +493,8 @@ def main(demo=False):
       ncs, wcs = sm['narrowRoadCameraState'], sm['wideRoadCameraState']
       g = RC.exposure_gain(ncs.gain * ncs.integLines, wcs.gain * wcs.integLines) if sm.seen['wideRoadCameraState'] else 1.0
       mt0 = time.perf_counter()
-      gy, du, dv = model.meter.update(np.frombuffer(bufs['big_img'].data, dtype=np.uint8), np.frombuffer(bufs['img'].data, dtype=np.uint8), g)
+      inputs['reproj_match'] = model.meter.update(np.frombuffer(bufs['big_img'].data, dtype=np.uint8), np.frombuffer(bufs['img'].data, dtype=np.uint8), g)
       meter_times.append(time.perf_counter() - mt0)
-      inputs['reproj_gains'] = (gy, gy, du, dv)
 
     mt1 = time.perf_counter()
     try:
@@ -518,9 +517,10 @@ def main(demo=False):
     exec_times.append(model_execution_time); stage_times.append(model.rp_time if model.rp is not None else 0.0)
     if len(exec_times) % 200 == 0:
       q = lambda t: f"{np.median(t[-200:]) * 1e3:.2f}/{np.percentile(t[-200:], 95) * 1e3:.2f}"
-      g4 = inputs.get('reproj_gains')
+      m4 = inputs.get('reproj_match')
       print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms; seam meter {q(meter_times) if meter_times else '-'} ms; "
-            f"gain {g4[0]:.3f} U {g4[2]:+.1f} V {g4[3]:+.1f} (model {g:.3f})" if g4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
+            f"gain {m4['gain_y']:.3f} U {m4['u_off']:+.1f} V {m4['v_off']:+.1f} grad {m4['gx']:+.3f},{m4['gy']:+.3f} bands {np.round(m4['lut'][[33, 75, 130, 197]] / [33, 75, 130, 197], 3)} (model {g:.3f})"
+            if m4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
 
     if model_output is not None and model.rp is not None:
       model.refine(model_output, v_ego)
