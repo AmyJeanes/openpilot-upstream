@@ -76,7 +76,7 @@ def matrix_to_rotvec(M):
 
 
 ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wide pixel
-FEATHER_PX = 24  # composite seam width in comma 4 narrow px
+FEATHER_PX = 50  # composite seam width in comma 4 narrow px (Amy picked 50 over 24 by eye on the drive clips)
 UV_FILL = 128
 # encoded-domain luma ratio narrow/wide vs the sensors' exposure ratio (gain*integLines), fitted in the seam ring on a
 # day-to-night drive (1607 frame pairs, 4 % residual): the exponent is the ISP tone curve, so a plain constant can't fit
@@ -208,7 +208,7 @@ def build_tables(src_wh, dst_wh, calib=None, feather=FEATHER_PX):
   return out
 
 
-TABLE_VERSION = 2  # bump when the lens numbers or the table layout change
+TABLE_VERSION = 3  # bump when the lens numbers, the feather or the table layout change
 
 
 def calib_tag(calib, feather=FEATHER_PX):
