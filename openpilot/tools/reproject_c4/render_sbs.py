@@ -32,6 +32,7 @@ ap.add_argument("--overlays", default="crop,telemetry,hud", help="comma list of 
 ap.add_argument("--meter", action=argparse.BooleanOptionalAction, default=True, help="live seam match (gain + U/V offsets) as on the device; --no-meter = exposure model only")
 ap.add_argument("--start", type=int, default=0, help="skip this many frames of each segment before rendering")
 ap.add_argument("--feather", type=float, default=RC.FEATHER_PX, help="composite seam width in comma 4 px")
+ap.add_argument("--compare", action="store_true", help="top row: the composite with the exposure model only (left) vs the live seam meter (right); bottom: raw narrow + reprojected wide")
 ap.add_argument("--calib", default="auto", help="auto = the unit's own self-cal when the route dir is a fleet device dir (harness/unit_calib.py), else the board calibration; board = always the board")
 a = ap.parse_args()
 OV = set(a.overlays.split(",")) - {"none", ""}
@@ -237,14 +238,20 @@ for p in segs:
     ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)
     ow_bgr, on_bgr = from_nv12(ow.numpy(), DW, DH), from_nv12(on.numpy(), DW, DH)
     comp_clean = on_bgr.copy() if "fit" in OV else None
+    if a.compare:
+      on_model = from_nv12(rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), gain_y=g_model, gain_c=g_model)[1].numpy(), DW, DH)
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
     inputs = [model_input(raw_n, M_x3["n"]), model_input(raw_w, M_x3["w"]), model_input(on_bgr, M_c4["n"]), model_input(ow_bgr, M_c4["w"])] if "inputs" in OV else None
     if "hud" in OV and cal and fid_n in hud:
       o = hud[fid_n]
       draw_hud(raw_n, o, view_from_calib, X3.narrow_road.intrinsics, path_z); draw_hud(raw_w, o, view_from_calib, X3.wide_road.intrinsics, path_z)
       draw_hud(on_bgr, o, view_from_calib, C4.narrow_road.intrinsics, path_z); draw_hud(ow_bgr, o, view_from_calib, C4.wide_road.intrinsics, path_z)
+      if a.compare:
+        draw_hud(on_model, o, view_from_calib, C4.narrow_road.intrinsics, path_z)
     if "crop" in OV:
       draw_crop(raw_n, M_x3["n"], (0, 200, 255)); draw_crop(raw_w, M_x3["w"], (0, 200, 255)); draw_crop(on_bgr, M_c4["n"], (80, 255, 80)); draw_crop(ow_bgr, M_c4["w"], (80, 255, 80))
+      if a.compare:
+        draw_crop(on_model, M_c4["n"], (80, 255, 80))
     t = n / 20
     tele = ""
     if "telemetry" in OV and fid_n is not None:
@@ -256,10 +263,17 @@ for p in segs:
       if mt:
         tele += f"  |  model {mt[0] * 1e3:.1f} ms, {mt[1]:.0f} % drops" + ("" if mt[2] else ", small model")
     expo = f"  |  exposure n {sn[0]:.1f}x{sn[1]} w {sw_[0]:.1f}x{sw_[1]}" if ("telemetry" in OV and sn and sw_) else ""
-    top = np.hstack([label(fit(raw_w, rs), f"3X wide, raw  |  segment {seg}  t = {t:5.1f} s" + ("  |  orange: stock's 512x256 warp crop" if "crop" in OV else "")),
-                     label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
-    bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "")),
-                     label(fit(on_bgr, rd), f"comma 4 narrow: narrow inset + wide surround, feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} grad {match['gx']:+.2f},{match['gy']:+.2f} bands {'/'.join(f'{v:.2f}' for v in match['lut'][[33, 75, 130, 197]] / [33, 75, 130, 197])} (seam meter)" if a.meter else " (exposure model)") + expo)])
+    live_lab = f"feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} grad {match['gx']:+.2f},{match['gy']:+.2f} bands {'/'.join(f'{v:.2f}' for v in match['lut'][[33, 75, 130, 197]] / [33, 75, 130, 197])} (seam meter)" if a.meter else " (exposure model)")
+    if a.compare:
+      top = np.hstack([label(fit(on_model, rd), f"comma 4 narrow, EXPOSURE MODEL only: wide gain {g_model:.2f}  |  segment {seg}  t = {t:5.1f} s"),
+                       label(fit(on_bgr, rd), "comma 4 narrow, LIVE SEAM METER: " + live_lab)])
+      bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "") + expo),
+                       label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
+    else:
+      top = np.hstack([label(fit(raw_w, rs), f"3X wide, raw  |  segment {seg}  t = {t:5.1f} s" + ("  |  orange: stock's 512x256 warp crop" if "crop" in OV else "")),
+                       label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
+      bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "")),
+                       label(fit(on_bgr, rd), "comma 4 narrow: narrow inset + wide surround, " + live_lab + expo)])
     frame = [top, bot]
     if inputs is not None:
       row = np.zeros((IH + LH, 2 * COL, 3), np.uint8)
