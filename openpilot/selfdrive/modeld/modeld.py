@@ -37,8 +37,11 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.common.file_chunker import open_file_chunked
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob
+from openpilot.selfdrive.modeld import reproject_c4 as RC
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
+REPROJECT_C4 = os.getenv('REPROJECT_C4', '1') != '0'  # 3X cameras -> comma 4 geometry on the QCOM, in front of the comma 4 big model
+C4_CAM = (1344, 760)
 
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
@@ -138,7 +141,14 @@ def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int
 class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
-  def __init__(self, cam_w: int, cam_h: int, chestnut: bool):
+  def __init__(self, cam_w: int, cam_h: int, chestnut: bool, reproject: bool = False):
+    self.rp = None
+    self.src_size = get_nv12_info(cam_w, cam_h)[3]
+    if reproject:
+      self.rp = RC.Reprojector((cam_w, cam_h), C4_CAM, device='QCOM', cache_dir=os.environ.get('XDG_CACHE_HOME', '/data/tgcache'))
+      self._src_tensors: dict[int, Tensor] = {}
+      self.rp_time = 0.0
+      cam_w, cam_h = C4_CAM  # the warp pkl + model see a comma 4 camera
     jits = load_oob(open_file_chunked(modeld_pkl_path(chestnut)))
     self.model_device = jits['input_specs']['new_img'][2]
     self.input_shapes = {name: (shape, np.dtype(dtype)) for name, (shape, dtype, _) in jits['input_specs'].items()}
@@ -152,6 +162,8 @@ class ModelState:
     stride, y_height, uv_height, _ = get_nv12_info(cam_w, cam_h)
     self.frame_copy_size = stride * (y_height + uv_height)
     self.pack_inputs()
+    if self.rp is not None:
+      self.rp.bind(self.frames[1], self.frames[0])  # the kernel writes the comma 4 frames straight into the packed upload
     with open(MODELS_DIR / f'{"big_" if chestnut else ""}driving_warp_{cam_w}x{cam_h}_tinygrad.pkl', 'rb') as f:
       self.run_warp = pickle.load(f)['run']
     self.run_model = jits['run']
@@ -183,10 +195,24 @@ class ModelState:
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     return {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
 
+  def src_tensor(self, buf) -> Tensor:
+    data = buf.data if hasattr(buf, 'data') else buf
+    ptr = np.frombuffer(data, dtype=np.uint8).ctypes.data
+    if ptr not in self._src_tensors:  # one mapping per VisionIPC ring slot
+      self._src_tensors[ptr] = Tensor.from_blob(ptr, (self.src_size,), dtype='uint8', device='QCOM')
+    return self._src_tensors[ptr]
+
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
           inputs: dict[str, np.ndarray], after_enqueue: Callable[[], None] | None = None) -> dict[str, np.ndarray]:
+    if self.rp is not None:
+      t0 = time.perf_counter()
+      self.rp(self.src_tensor(bufs['big_img']), self.src_tensor(bufs['img']), *inputs.get('reproj_gains', (1.0, 1.0)))
+      Device['QCOM'].synchronize()
+      self.rp_time = time.perf_counter() - t0
+    else:
+      for i, key in enumerate(self.vision_input_names):
+        np.copyto(self.frames[i], np.frombuffer(bufs[key].data, dtype=np.uint8, count=self.frame_copy_size))
     for i, key in enumerate(self.vision_input_names):
-      np.copyto(self.frames[i], np.frombuffer(bufs[key].data, dtype=np.uint8, count=self.frame_copy_size))
       self.npy['tfm'][i] = transforms[key]
 
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
@@ -211,11 +237,13 @@ class ModelState:
     return outputs_dict
 
   def warmup(self) -> None:
-    dummy_frames = {k: np.zeros(self.frame_copy_size, dtype=np.uint8) for k in self.vision_input_names}
+    dummy_frames = {k: np.zeros(self.src_size if self.rp is not None else self.frame_copy_size, dtype=np.uint8) for k in self.vision_input_names}
     eye = np.eye(3, dtype=np.float32)
     dims = {'desire_pulse': ModelConstants.DESIRE_LEN, 'traffic_convention': 2, 'action_t': 2}
     self.run(dummy_frames, dict.fromkeys(self.vision_input_names, eye), {k: np.zeros(v, dtype=np.float32) for k, v in dims.items()})
     self.packed_input[:] = 0
+    if self.rp is not None:
+      self._src_tensors.clear()
     for key in self.state_pairs:
       self.input_queues[key].assign(0).realize()
     self.prev_desire[:] = 0
@@ -264,7 +292,8 @@ def main(demo=False):
     def load_big():
       nonlocal big_model
       try:
-        m = ModelState(vipc_client_main.width, vipc_client_main.height, True)
+        m = ModelState(vipc_client_main.width, vipc_client_main.height, True,
+                       reproject=bool(REPROJECT_C4) and use_extra_client and (vipc_client_main.width, vipc_client_main.height) == (1928, 1208))
         m.warmup()
         big_model = m
       except Exception:
@@ -284,7 +313,8 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "wideRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  stage_times: list[float] = []; exec_times: list[float] = []
 
   publish_state = PublishState()
   params = Params()
@@ -357,7 +387,7 @@ def main(demo=False):
     lat_delay = sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
-      dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))]
+      dc = DEVICE_CAMERAS[("mici", "os04c10") if model.rp is not None else (str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))]
       main_intrinsics = dc.wide_road.intrinsics if main_wide_camera else dc.narrow_road.intrinsics
       model_transform_main = get_warp_matrix(device_from_calib_euler, main_intrinsics, False).astype(np.float32)
       has_wide_camera = use_extra_client or main_wide_camera
@@ -393,6 +423,12 @@ def main(demo=False):
       'traffic_convention': traffic_convention,
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
+    if model.rp is not None:
+      # exposure-match the wide surround to the narrow inset from the sensors' exposure settings
+      # TODO: the constant lens/sensitivity factor between the two 3X cameras is not calibrated yet
+      ncs, wcs = sm['narrowRoadCameraState'], sm['wideRoadCameraState']
+      g = (ncs.gain * ncs.integLines) / (wcs.gain * wcs.integLines) if sm.seen['wideRoadCameraState'] and wcs.gain * wcs.integLines > 0 else 1.0
+      inputs['reproj_gains'] = (float(np.clip(g, 0.25, 4.0)),) * 2
 
     mt1 = time.perf_counter()
     try:
@@ -412,6 +448,10 @@ def main(demo=False):
       model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
+    exec_times.append(model_execution_time); stage_times.append(model.rp_time if model.rp is not None else 0.0)
+    if len(exec_times) % 200 == 0:
+      q = lambda t: f"{np.median(t[-200:]) * 1e3:.2f}/{np.percentile(t[-200:], 95) * 1e3:.2f}"
+      print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms; gains {inputs.get('reproj_gains', ('-',))[0]}", flush=True)
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')
