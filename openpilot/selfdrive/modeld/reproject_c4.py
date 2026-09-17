@@ -287,13 +287,16 @@ class SeamMeter:
     cells = self.cell[good]; w = (self.cell_bad[cells] < self.CELL_LIMIT).astype(np.float32)
     if w.sum() < 256:
       w[:] = 1  # too much excluded: fit everything rather than nothing
-    c = np.linalg.lstsq(A * w[:, None], lr * w, rcond=None)[0]
-    for _ in range(2):  # reweight: a pair's pull falls off with its residual (Tukey-like), so outliers steer nothing
-      res = lr - A @ c; wr = w * np.clip(1 - (res / 0.3) ** 2, 0, 1) ** 2
-      if wr.sum() < 256:
-        break
-      c = np.linalg.lstsq(A * wr[:, None], lr * wr, rcond=None)[0]
-    bad = np.zeros_like(self.cell_bad); np.add.at(bad, cells, np.abs(lr - A @ c)); n = np.bincount(cells, minlength=len(bad))
+    # weighted least squares by the normal equations (6x6, ridge 1e-3 so an empty band stays solvable): the general solver
+    # costs 1.3 ms per call on the device CPU, this ~0.1 ms
+    def solve(wt):
+      Aw = A * wt[:, None]
+      return np.linalg.solve(A.T @ Aw + 1e-3 * np.eye(A.shape[1], dtype=np.float32), Aw.T @ lr)
+    c = solve(w)
+    res = lr - A @ c; wr = w * np.clip(1 - (res / 0.3) ** 2, 0, 1) ** 2  # reweight once: a pair's pull falls off with its residual (Tukey-like)
+    if wr.sum() >= 256:
+      c = solve(wr)
+    n = np.bincount(cells, minlength=len(self.cell_bad)); bad = np.bincount(cells, weights=np.abs(lr - A @ c), minlength=len(self.cell_bad))
     seen = n > 0; self.cell_bad[seen] += self.CELL_ALPHA * (bad[seen] / n[seen] - self.cell_bad[seen])
     counts = np.bincount(band, minlength=len(self.BANDS))
     bands = [float(np.exp(c[i])) if counts[i] >= 100 else gy for i in range(len(self.BANDS))]
