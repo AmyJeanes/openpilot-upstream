@@ -28,7 +28,7 @@ FFMPEG = os.environ.get("FFMPEG", "/usr/bin/ffmpeg" if os.path.exists("/usr/bin/
 ap = argparse.ArgumentParser()
 ap.add_argument("route"); ap.add_argument("out")
 ap.add_argument("--segs", default="all"); ap.add_argument("--K", type=float, default=1.0, help="extra multiplier on the fitted exposure gain"); ap.add_argument("--max-frames", type=int, default=10**9)
-ap.add_argument("--overlays", default="crop,telemetry,hud", help="comma list of crop,inputs,telemetry,hud (or none)")
+ap.add_argument("--overlays", default="crop,telemetry,hud", help="comma list of crop,inputs,telemetry,hud,fit (or none); fit = side panel showing the live seam match")
 ap.add_argument("--meter", action=argparse.BooleanOptionalAction, default=True, help="live seam match (gain + U/V offsets) as on the device; --no-meter = exposure model only")
 ap.add_argument("--start", type=int, default=0, help="skip this many frames of each segment before rendering")
 ap.add_argument("--feather", type=float, default=RC.FEATHER_PX, help="composite seam width in comma 4 px")
@@ -42,7 +42,8 @@ s_stride, s_yh, s_uvh, s_size = get_nv12_info(SW, SH)
 COL, LH = 960, 30
 rs = (COL, round(COL * SH / SW)); rd = (COL, round(COL * DH / DW)); ROW = rs[1]
 IN_S = 0.9; IW, IH = round(MW * IN_S), round(MH * IN_S); IN_ROW = (IH + LH) if "inputs" in OV else 0
-H, W = 2 * (ROW + LH) + IN_ROW, 2 * COL
+PW = 520 if "fit" in OV else 0  # seam-match panel on the right
+H, W = 2 * (ROW + LH) + IN_ROW, 2 * COL + PW
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 X3 = DEVICE_CAMERAS[("tizi", "ox03c10")]; C4 = DEVICE_CAMERAS[("mici", "os04c10")]
 PATH_Z_OFF = 1.22  # UI's _path_offset_z
@@ -132,6 +133,54 @@ if a.calib == "auto":
   except ImportError:
     pass
 print("calibration:", "unit's own self-cal" if calib else "board (reference unit)", flush=True)
+def fit_panel(comp_bgr, wide_np, narrow_np, match, model_gain, hist):
+  """Right-hand panel: the seam ring's measurement points on the composite, coloured by the mismatch left AFTER the
+  match (green = matched, red = surround still too bright, blue = too dark), and the meter's fitted values over time."""
+  P = np.zeros((H, PW, 3), np.uint8)
+  yw = wide_np[meter.y_w].astype(np.float32); yn = narrow_np[meter.y_n].astype(np.float32); pos = meter.pos
+  good = (yw > 16) & (yw < 235) & (yn > 16) & (yn < 235)
+  matched = match["lut"][yw.astype(int)] * (1 + match["gx"] * pos[:, 0] + match["gy"] * pos[:, 1])
+  res = np.where(good, yn / np.maximum(matched, 1) - 1, np.nan)           # after the full match
+  raw = np.where(good, yn / np.maximum(yw * model_gain, 1) - 1, np.nan)  # what the exposure model alone would leave
+  hist.append(dict(gain=match["gain_y"], model=model_gain, u=match["u_off"], v=match["v_off"], gx=match["gx"], gy=match["gy"],
+                   bands=match["lut"][[33, 75, 130, 197]] / np.array([33, 75, 130, 197]), res=float(np.nanmedian(np.abs(res))), raw=float(np.nanmedian(np.abs(raw)))))
+  # residual map
+  mw_, mh_ = PW - 20, round((PW - 20) * DH / DW)
+  small = cv2.resize(comp_bgr, (mw_, mh_), interpolation=cv2.INTER_AREA)
+  # single pixel pairs are noisy (the narrow is 4x finer than the wide), so the colour is the mean over small cells of the ring
+  cell = (np.floor((pos + 1) / 2 * [32, 18])).astype(int); key = cell[:, 0] * 18 + cell[:, 1]
+  sums = np.zeros(32 * 18); cnts = np.zeros(32 * 18); ok = np.isfinite(res)
+  np.add.at(sums, key[ok], res[ok]); np.add.at(cnts, key[ok], 1)
+  for (px, py), k, r in zip(pos, key, res):
+    if np.isfinite(r) and cnts[k] >= 3:
+      x, y = int((px + 1) / 2 * mw_), int((py + 1) / 2 * mh_)
+      c = max(-1.0, min(1.0, sums[k] / cnts[k] / 0.2))  # +-20 % -> full colour
+      col = (0, 200, 60) if abs(c) < 0.25 else ((0, int(120 * (1 - c)), 255) if c > 0 else (255, int(120 * (1 + c)), 0))
+      cv2.circle(small, (x, y), 2, col, -1)
+  cv2.putText(P, "seam ring after the match: green matched, red surround too bright, blue too dark", (8, 18), FONT, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
+  P[26:26 + mh_, 10:10 + mw_] = small
+  y0 = 26 + mh_ + 12
+  charts = (("surround luma gain: live vs exposure model", (("live", "gain", (80, 220, 120)), ("model", "model", (120, 120, 120))), 0.3, 1.5),
+            ("median |mismatch| in the ring: raw (grey) vs after match", (("after", "res", (80, 220, 120)), ("raw", "raw", (120, 120, 120))), 0.0, 0.4),
+            ("U / V offset (steps)", (("U", "u", (255, 160, 60)), ("V", "v", (60, 160, 255))), -8, 8),
+            ("gain gradient across the frame: x / y", (("x", "gx", (255, 160, 60)), ("y", "gy", (60, 160, 255))), -0.5, 0.5),
+            ("gain per brightness band: dark ... bright", (("16-50", 0, (90, 90, 255)), ("50-100", 1, (90, 200, 255)), ("100-160", 2, (90, 255, 160)), ("160-235", 3, (255, 255, 120))), 0.3, 1.5))
+  ch = (H - y0 - 10) // len(charts)
+  for name, series, lo, hi in charts:
+    cv2.putText(P, name, (10, y0 + 14), FONT, 0.42, (200, 200, 200), 1, cv2.LINE_AA)
+    top, bot = y0 + 20, y0 + ch - 8
+    cv2.rectangle(P, (10, top), (PW - 10, bot), (70, 70, 70), 1)
+    for k, (lab, key, col) in enumerate(series):
+      vals = [(h["bands"][key] if isinstance(key, int) else h[key]) for h in hist]
+      pts = [(int(10 + (PW - 20) * i / max(a.max_frames, 1)), int(bot - (bot - top) * (min(max(v, lo), hi) - lo) / (hi - lo))) for i, v in enumerate(vals)]
+      if len(pts) > 1:
+        cv2.polylines(P, [np.array(pts, np.int32)], False, col, 1, cv2.LINE_AA)
+      cv2.putText(P, f"{lab} {vals[-1]:+.2f}" if lo < 0 else f"{lab} {vals[-1]:.2f}", (PW - 10 - 95 * (len(series) - k), top + 14), FONT, 0.4, col, 1, cv2.LINE_AA)
+    cv2.putText(P, f"{hi:g}", (14, top + 12), FONT, 0.35, (120, 120, 120), 1, cv2.LINE_AA); cv2.putText(P, f"{lo:g}", (14, bot - 3), FONT, 0.35, (120, 120, 120), 1, cv2.LINE_AA)
+    y0 += ch
+  return P
+
+
 rp = RC.Reprojector(device=DEV, feather=a.feather, calib=calib)
 meter = RC.SeamMeter(calib=calib)
 enc = subprocess.Popen([FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", "20", "-i", "-",
@@ -139,7 +188,7 @@ enc = subprocess.Popen([FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt
 segs = sorted(glob.glob(os.path.join(a.route, "*--*--*")), key=lambda p: int(p.rsplit("--", 1)[1]))
 if a.segs != "all":
   want = {int(x) for x in a.segs.split(",")}; segs = [p for p in segs if int(p.rsplit("--", 1)[1]) in want]
-total = 0; t_start = time.time(); rpy = np.zeros(3, np.float32); path_z = PATH_Z_OFF
+total = 0; t_start = time.time(); rpy = np.zeros(3, np.float32); path_z = PATH_Z_OFF; fit_hist = []
 for p in segs:
   seg = int(p.rsplit("--", 1)[1])
   cs = {"road": {}, "wide": {}}; idx = {"road": {}, "wide": {}}; model = {}; hud = {}; v_ego = []; engaged = []; cal = []
@@ -180,12 +229,14 @@ for p in segs:
     fid_n, fid_w = idx["road"].get(n), idx["wide"].get(n)
     sn, sw_ = cs["road"].get(fid_n), cs["wide"].get(fid_w)
     g = float(np.clip(a.K * RC.exposure_gain(sn[0] * sn[1], sw_[0] * sw_[1]), 0.25, 4.0)) if sn and sw_ else 1.0
+    g_model = g
     if a.meter:  # what the device does: measure the match in the seam ring of these frames, the exposure model as fallback
       match = meter.update(wide_np, narrow_np, g); g, du, dv = match["gain_y"], match["u_off"], match["v_off"]
     else:
-      match = dict(gain_y=g, gain_c=g); du = dv = 0.0
+      match = dict(gain_y=g, gain_c=g, u_off=0.0, v_off=0.0, gx=0.0, gy=0.0, lut=np.arange(256, dtype=np.float32) * g); du = dv = 0.0
     ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)
     ow_bgr, on_bgr = from_nv12(ow.numpy(), DW, DH), from_nv12(on.numpy(), DW, DH)
+    comp_clean = on_bgr.copy() if "fit" in OV else None
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
     inputs = [model_input(raw_n, M_x3["n"]), model_input(raw_w, M_x3["w"]), model_input(on_bgr, M_c4["n"]), model_input(ow_bgr, M_c4["w"])] if "inputs" in OV else None
     if "hud" in OV and cal and fid_n in hud:
@@ -211,14 +262,17 @@ for p in segs:
                      label(fit(on_bgr, rd), f"comma 4 narrow: narrow inset + wide surround, feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} grad {match['gx']:+.2f},{match['gy']:+.2f} bands {'/'.join(f'{v:.2f}' for v in match['lut'][[33, 75, 130, 197]] / [33, 75, 130, 197])} (seam meter)" if a.meter else " (exposure model)") + expo)])
     frame = [top, bot]
     if inputs is not None:
-      row = np.zeros((IH + LH, W, 3), np.uint8)
+      row = np.zeros((IH + LH, 2 * COL, 3), np.uint8)
       names = ["stock model input: narrow (3X warp)", "stock: wide (3X warp)", "ours: narrow (comma 4 warp)", "ours: wide (comma 4 warp)"]
       for k, (im, nm) in enumerate(zip(inputs, names)):
         x0 = (k % 2) * (IW + 10) + (k // 2) * COL
         cv2.putText(row, nm, (x0 + 4, 20), FONT, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
         row[LH:LH + IH, x0:x0 + IW] = cv2.resize(im, (IW, IH), interpolation=cv2.INTER_AREA)
       frame.append(row)
-    enc.stdin.write(np.vstack(frame).tobytes())
+    out = np.vstack(frame)
+    if "fit" in OV:
+      out = np.hstack([out, fit_panel(comp_clean, wide_np, narrow_np, match, g_model, fit_hist)])
+    enc.stdin.write(out.tobytes())
     n += 1; total += 1
   for d in dec:
     d.kill()
