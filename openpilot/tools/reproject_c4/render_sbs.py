@@ -33,6 +33,7 @@ ap.add_argument("--meter", action=argparse.BooleanOptionalAction, default=True, 
 ap.add_argument("--start", type=int, default=0, help="skip this many frames of each segment before rendering")
 ap.add_argument("--feather", type=float, default=RC.FEATHER_PX, help="composite seam width in comma 4 px")
 ap.add_argument("--compare", default=None, choices=["exposure", "soften", "feedforward"], help="A/B on the top row, bottom: raw narrow + reprojected wide. exposure: exposure model only (left) vs live seam meter (right); soften: inset as is (left) vs softened inset (right, --soften); feedforward: meter filtering the gain (left) vs filtering the correction to the exposure model (right)")
+ap.add_argument("--stretch", action="store_true", help="three columns: raw 3X | 3X frames simply resized to comma 4 dimensions | our reprojection")
 ap.add_argument("--soften", type=int, default=0, help="inset softening inside the blend zone: taps k narrow px apart (0 = off)")
 ap.add_argument("--calib", default="auto", help="auto = the unit's own self-cal when the route dir is a fleet device dir (harness/unit_calib.py), else the board calibration; board = always the board")
 a = ap.parse_args()
@@ -45,7 +46,8 @@ COL, LH = 960, 30
 rs = (COL, round(COL * SH / SW)); rd = (COL, round(COL * DH / DW)); ROW = rs[1]
 IN_S = 0.9; IW, IH = round(MW * IN_S), round(MH * IN_S); IN_ROW = (IH + LH) if "inputs" in OV else 0
 PW = 520 if "fit" in OV else 0  # seam-match panel on the right
-H, W = 2 * (ROW + LH) + IN_ROW, 2 * COL + PW
+NCOL = 3 if a.stretch else 2
+H, W = 2 * (ROW + LH) + IN_ROW, NCOL * COL + PW
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 X3 = DEVICE_CAMERAS[("tizi", "ox03c10")]; C4 = DEVICE_CAMERAS[("mici", "os04c10")]
 PATH_Z_OFF = 1.22  # UI's _path_offset_z
@@ -249,17 +251,25 @@ for p in segs:
     elif a.compare == "soften":
       on_model = from_nv12(rp_b(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)[1].numpy(), DW, DH)
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
+    if a.stretch:
+      str_w, str_n = cv2.resize(raw_w, (DW, DH), interpolation=cv2.INTER_AREA), cv2.resize(raw_n, (DW, DH), interpolation=cv2.INTER_AREA)
     inputs = [model_input(raw_n, M_x3["n"]), model_input(raw_w, M_x3["w"]), model_input(on_bgr, M_c4["n"]), model_input(ow_bgr, M_c4["w"])] if "inputs" in OV else None
+    if a.stretch and inputs is not None:
+      inputs[2:2] = [model_input(str_n, M_c4["n"]), model_input(str_w, M_c4["w"])]
     if "hud" in OV and cal and fid_n in hud:
       o = hud[fid_n]
       draw_hud(raw_n, o, view_from_calib, X3.narrow_road.intrinsics, path_z); draw_hud(raw_w, o, view_from_calib, X3.wide_road.intrinsics, path_z)
       draw_hud(on_bgr, o, view_from_calib, C4.narrow_road.intrinsics, path_z); draw_hud(ow_bgr, o, view_from_calib, C4.wide_road.intrinsics, path_z)
       if a.compare:
         draw_hud(on_model, o, view_from_calib, C4.narrow_road.intrinsics, path_z)
+      if a.stretch:
+        draw_hud(str_n, o, view_from_calib, C4.narrow_road.intrinsics, path_z); draw_hud(str_w, o, view_from_calib, C4.wide_road.intrinsics, path_z)
     if "crop" in OV:
       draw_crop(raw_n, M_x3["n"], (0, 200, 255)); draw_crop(raw_w, M_x3["w"], (0, 200, 255)); draw_crop(on_bgr, M_c4["n"], (80, 255, 80)); draw_crop(ow_bgr, M_c4["w"], (80, 255, 80))
       if a.compare:
         draw_crop(on_model, M_c4["n"], (80, 255, 80))
+      if a.stretch:
+        draw_crop(str_n, M_c4["n"], (255, 80, 255)); draw_crop(str_w, M_c4["w"], (255, 80, 255))
     t = n / 20
     tele = ""
     if "telemetry" in OV and fid_n is not None:
@@ -284,6 +294,13 @@ for p in segs:
     if a.compare:
       bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "") + expo),
                        label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
+    elif a.stretch:
+      top = np.hstack([label(fit(raw_w, rs), f"3X wide, raw  |  segment {seg}  t = {t:5.1f} s" + ("  |  orange: stock's 512x256 warp crop" if "crop" in OV else "")),
+                       label(fit(str_w, rd), "3X wide simply resized to 1344x760, no geometry" + ("  |  magenta: comma 4 warp crop, HUD with comma 4 intrinsics" if "crop" in OV else "")),
+                       label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
+      bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "")),
+                       label(fit(str_n, rd), "3X narrow simply resized to 1344x760, no geometry"),
+                       label(fit(on_bgr, rd), "comma 4 narrow: narrow inset + wide surround, " + live_lab + expo)])
     else:
       top = np.hstack([label(fit(raw_w, rs), f"3X wide, raw  |  segment {seg}  t = {t:5.1f} s" + ("  |  orange: stock's 512x256 warp crop" if "crop" in OV else "")),
                        label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
@@ -291,8 +308,8 @@ for p in segs:
                        label(fit(on_bgr, rd), "comma 4 narrow: narrow inset + wide surround, " + live_lab + expo)])
     frame = [top, bot]
     if inputs is not None:
-      row = np.zeros((IH + LH, 2 * COL, 3), np.uint8)
-      names = ["stock model input: narrow (3X warp)", "stock: wide (3X warp)", "ours: narrow (comma 4 warp)", "ours: wide (comma 4 warp)"]
+      row = np.zeros((IH + LH, NCOL * COL, 3), np.uint8)
+      names = ["stock model input: narrow (3X warp)", "stock: wide (3X warp)"] + (["resized: narrow (comma 4 warp)", "resized: wide (comma 4 warp)"] if a.stretch else []) + ["ours: narrow (comma 4 warp)", "ours: wide (comma 4 warp)"]
       for k, (im, nm) in enumerate(zip(inputs, names)):
         x0 = (k % 2) * (IW + 10) + (k // 2) * COL
         cv2.putText(row, nm, (x0 + 4, 20), FONT, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
