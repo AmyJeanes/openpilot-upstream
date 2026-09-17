@@ -327,7 +327,7 @@ class SeamMeter:
     if self.feedforward:
       s[0] *= model_gain; s[5:] *= model_gain
     return dict(gain_y=float(s[0]), gain_c=float(s[0]), u_off=float(s[1]), v_off=float(s[2]), gx=float(s[3]), gy=float(s[4]),
-                lut=luma_lut(s[5:], self.BANDS))
+                bands=[float(v) for v in s[5:]], lut=luma_lut(s[5:], self.BANDS))
 
 
 def luma_lut(band_gains, bands=SeamMeter.BANDS):
@@ -350,22 +350,19 @@ class Reprojector:
     self.size, self.body, self.uv_offset = T["wide"]["size"], T["wide"]["body"], T["wide"]["uv_offset"]
     self.device = device
     self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
-    # per-frame match parameters: [gain_c, u_off, v_off, gx, gy, 0, 0, 0] and a 256-entry surround-luma lookup; on QCOM the
-    # jit reads them straight from host memory (a per-call upload costs a scheduled copy, ~4 ms of Python)
-    self.params_np = np.zeros(8, np.float32); self.params_np[0] = 1; self.lut_np = np.arange(256, dtype=np.float32)
+    # per-frame match parameters [gain_c, u_off, v_off, gx, gy, band gains x4, ...]; on QCOM the jit reads them straight
+    # from host memory (a per-call upload costs a scheduled copy, ~4 ms of Python)
+    self.params_np = np.zeros(12, np.float32); self.params_np[0] = 1; self.params_np[5:9] = 1
     if str(device or "").startswith("QCOM"):
-      self.gains = Tensor.from_blob(self.params_np.ctypes.data, (8,), dtype="float32", device=device)
-      self.lut = Tensor.from_blob(self.lut_np.ctypes.data, (256,), dtype="float32", device=device)
-      self.host_params = True
+      self.gains = Tensor.from_blob(self.params_np.ctypes.data, (12,), dtype="float32", device=device); self.host_params = True
     else:
-      self.gains = Tensor(self.params_np, device=device).contiguous().realize(); self.lut = Tensor(self.lut_np, device=device).contiguous().realize()
-      self.host_params = False
+      self.gains = Tensor(self.params_np, device=device).contiguous().realize(); self.host_params = False
     assert self.body == 3 * (self.body - self.uv_offset)  # NV12: the UV plane is the last third of the body
     self.plane = Tensor([0, 0, 1], dtype="uint8", device=device).realize()
-    # pixel position for the gain gradient, as two broadcast vectors (no per-pixel table): the body is rows x stride
-    d_stride = get_nv12_info(*dst_wh)[0]; self.rows = self.body // d_stride; self.stride = d_stride
-    self.xs = Tensor(((np.arange(d_stride) + 0.5) / dst_wh[0] * 2 - 1).astype(np.float32), device=device).reshape(1, d_stride).realize()
-    self.ys = Tensor(((np.arange(self.rows) + 0.5) / dst_wh[1] * 2 - 1).astype(np.float32), device=device).reshape(self.rows, 1).realize()
+    # pixel position for the gain gradient from the byte index (x = i % stride, y = i // stride): a plain sequential read;
+    # broadcast row/column vectors cost 4 ms on the Adreno, per-pixel gathers 1.5 ms
+    d_stride = get_nv12_info(*dst_wh)[0]; self.stride = d_stride; self.dw, self.dh = dst_wh
+    self.idx = Tensor.arange(self.body, dtype="int32").to(device).realize()
     self.dst = None
     self._run = TinyJit(self._both)
 
@@ -391,15 +388,19 @@ class Reprojector:
     pw = self.t["wide"]["pw"]
     return (pw < INVALID_BIT).where(wide[pw & IDX_BITS], self._chroma().cast("uint8") * UV_FILL)
 
-  def _narrow(self, wide, narrow, gains, lut):
+  def _narrow(self, wide, narrow, gains):
     t = self.t["narrow"]; pw = t["pw"]; chroma = self._chroma()
-    # match the wide surround to the narrow: luma through the lookup (tone curve) times a gain gradient over the frame
-    # (lens shading), chroma gain about the 128 midpoint plus a U/V offset (independent white balance); the offset is a
-    # parity broadcast (U and V bytes alternate in NV12) and the gradient a row/column broadcast, so neither reads a table
+    # match the wide surround to the narrow: luma times a gain per brightness band (the two ISPs' tone curves; piecewise
+    # linear between the band centres, flat beyond) times a gain gradient over the frame (lens shading); chroma gain about
+    # the 128 midpoint plus a U/V offset (independent white balance), the offset a parity broadcast: U and V bytes alternate
     off = gains[1:3].reshape(1, 2).expand(self.body // 2, 2).reshape(self.body)
-    grad = (1 + gains[3] * self.xs + gains[4] * self.ys).expand(self.rows, self.stride).reshape(self.body)
-    w8 = wide[pw & IDX_BITS]; w = w8.float()
-    w = chroma.where((w - UV_FILL) * gains[0] + UV_FILL + off, lut[w8.cast("int32")] * grad).clip(0, 255)
+    w = wide[pw & IDX_BITS].float()
+    c = [0.5 * (lo + hi) for lo, hi in SeamMeter.BANDS]
+    tone = gains[5]
+    for i in range(1, len(c)):
+      tone = tone + (gains[5 + i] - gains[4 + i]) * ((w - c[i - 1]) * (1 / (c[i] - c[i - 1]))).clip(0, 1)
+    x = (self.idx % self.stride).float() * (2.0 / self.dw) - 1; y = (self.idx // self.stride).float() * (2.0 / self.dh) - 1
+    w = chroma.where((w - UV_FILL) * gains[0] + UV_FILL + off, w * tone * (1 + gains[3] * x + gains[4] * y)).clip(0, 255)
     w = (pw < INVALID_BIT).where(w, chroma.cast("float32") * UV_FILL)
     a = ((pw >> ALPHA_SHIFT) & 0xff).float() * (1 / 255)
     pn = t["pn"]; idx = pn & IDX_BITS; n = narrow[idx].float()
@@ -412,20 +413,22 @@ class Reprojector:
       n = n + sft * (blur - n)
     return a * n + (1 - a) * w
 
-  def _both(self, wide, narrow, gains, lut):
+  def _both(self, wide, narrow, gains):
     out_w = self._wide(wide)
-    out_n = self._narrow(wide, narrow, gains, lut).round().cast("uint8")
+    out_n = self._narrow(wide, narrow, gains).round().cast("uint8")
     if self.dst is not None:
       out_w, out_n = self.dst[0].assign(out_w), self.dst[1].assign(out_n)
     return out_w.realize(), out_n.realize()
 
-  def __call__(self, wide, narrow, gain_y=1.0, gain_c=1.0, u_off=0.0, v_off=0.0, gx=0.0, gy=0.0, lut=None):
+  def __call__(self, wide, narrow, gain_y=1.0, gain_c=1.0, u_off=0.0, v_off=0.0, gx=0.0, gy=0.0, bands=None, lut=None):
     """wide/narrow: flat uint8 3X NV12 tensors (same buffers every call, e.g. the VisionIPC ring, so the jit can be replayed).
-    Match parameters as SeamMeter.update() returns them (lut None = a flat gain_y). Returns (c4_wide, c4_narrow): flat
-    uint8 NV12 tensors of `body` bytes (stride * (y_height + uv_height), the part of the comma 4 buffer a consumer reads);
-    with bind() they are views of the bound host arrays."""
-    self.params_np[:5] = (gain_c, u_off, v_off, gx, gy)
-    self.lut_np[:] = np.arange(256, dtype=np.float32) * gain_y if lut is None else lut
+    Match parameters as SeamMeter.update() returns them: `bands` = the surround luma gain per brightness band (None = a flat
+    gain_y; `lut` is accepted for callers that hold the 256-entry form). Returns (c4_wide, c4_narrow): flat uint8 NV12
+    tensors of `body` bytes (stride * (y_height + uv_height), the part of the comma 4 buffer a consumer reads); with bind()
+    they are views of the bound host arrays."""
+    if bands is None:
+      bands = [lut[int(0.5 * (lo + hi))] / (0.5 * (lo + hi)) for lo, hi in SeamMeter.BANDS] if lut is not None else [gain_y] * len(SeamMeter.BANDS)
+    self.params_np[:5] = (gain_c, u_off, v_off, gx, gy); self.params_np[5:5 + len(bands)] = bands
     if not self.host_params:
-      self.gains.assign(Tensor(self.params_np, device=self.gains.device)).realize(); self.lut.assign(Tensor(self.lut_np, device=self.lut.device)).realize()
-    return self._run(wide, narrow, self.gains, self.lut)
+      self.gains.assign(Tensor(self.params_np, device=self.gains.device)).realize()
+    return self._run(wide, narrow, self.gains)
