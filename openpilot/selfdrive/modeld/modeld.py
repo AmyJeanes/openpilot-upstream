@@ -44,6 +44,7 @@ from openpilot.selfdrive.modeld import reproject_c4 as RC
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 REPROJECT_C4 = os.getenv('REPROJECT_C4', '1') != '0'  # 3X cameras -> comma 4 geometry on the QCOM, in front of the comma 4 big model
+REPROJECT_C4_REFINE = os.getenv('REPROJECT_C4_REFINE', '1') != '0'  # continual rotation fit (table rebuild + swap while driving)
 C4_CAM = (1344, 760)
 
 LAT_SMOOTH_SECONDS = 0.0
@@ -232,32 +233,23 @@ class ModelState:
     return {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
 
   def refine(self, model_output: dict[str, np.ndarray], v_ego: float) -> None:
-    """Continual rotation fit from the model's wide_from_device_euler; a step rebuilds the tables out of process."""
+    """Continual rotation fit from the model's wide_from_device_euler. A step is saved and its tables prebuilt out of
+    process for the NEXT start: swapping tables in a running modeld re-captures the jit (~1.3 s without a modelV2), which
+    selfdrived reports as a comms issue."""
     if 'wide_from_device_euler' not in model_output:
       return
     new = self.refiner.push(model_output['wide_from_device_euler'][0], model_output['wide_from_device_euler_stds'][0], v_ego)
-    if new is None or self.rebuild is not None:
+    if new is None:
       return
     old = self.rotation; self.rotation = new
     save_rotation(new)
     cloudlog.warning(f"reproject_c4: rotation step {self.refiner.steps}: residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
-                     f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; rebuilding tables")
-    calib = RC.calib_from_rotvec(new)
-    self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
-                                     'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
-                                     json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(calib)])
-
-  def poll_rebuild(self) -> None:
-    if self.rebuild is None or self.rebuild.poll() is None:
-      return
-    ok, self.rebuild = self.rebuild.returncode == 0, None
-    if not ok:
-      cloudlog.error("reproject_c4: table rebuild failed"); return
-    self.calib = RC.calib_from_rotvec(self.rotation)
-    t0 = time.perf_counter()
-    self.rp.reload(RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, self.calib))  # the subprocess left the npz in the cache
-    self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
-    cloudlog.warning(f"reproject_c4: tables swapped in {(time.perf_counter() - t0) * 1e3:.0f} ms")
+                     f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; saved for the next start")
+    if self.rebuild is None or self.rebuild.poll() is not None:
+      calib = RC.calib_from_rotvec(new)
+      self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
+                                       'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
+                                       json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(calib)])
 
   def src_tensor(self, buf) -> Tensor:
     data = buf.data if hasattr(buf, 'data') else buf
@@ -522,9 +514,8 @@ def main(demo=False):
             f"gain {m4['gain_y']:.3f} U {m4['u_off']:+.1f} V {m4['v_off']:+.1f} grad {m4['gx']:+.3f},{m4['gy']:+.3f} bands {np.round(m4['bands'], 3)} (model {g:.3f})"
             if m4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
 
-    if model_output is not None and model.rp is not None:
+    if model_output is not None and model.rp is not None and REPROJECT_C4_REFINE:
       model.refine(model_output, v_ego)
-      model.poll_rebuild()
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')
