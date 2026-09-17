@@ -246,7 +246,7 @@ class SeamMeter:
   and applied as a lookup on the surround luma."""
   BANDS = ((16, 50), (50, 100), (100, 160), (160, 235))
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True):
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=2048, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True):
     """feedforward: filter the luma gains as a correction on top of the exposure model (from the camera states) and apply
     them times the model's live value, so a jump in either camera's exposure is followed the same frame."""
     sw, sh = src_wh; dw, dh = dst_wh
