@@ -182,7 +182,7 @@ class ModelState:
       self.rp = RC.Reprojector(self.src_wh, C4_CAM, device='QCOM', cache_dir=self.cache_dir, calib=self.calib)
       self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
       self.refiner = RC.RotationRefiner(self.rotation)
-      self.rebuild: subprocess.Popen | None = None
+      self.rebuild: subprocess.Popen | None = None; self.pending_T = None; self.pending_calib = None
       self._src_tensors: dict[int, Tensor] = {}
       self.rp_time = 0.0
       cam_w, cam_h = C4_CAM  # the warp pkl + model see a comma 4 camera
@@ -233,23 +233,35 @@ class ModelState:
     return {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
 
   def refine(self, model_output: dict[str, np.ndarray], v_ego: float) -> None:
-    """Continual rotation fit from the model's wide_from_device_euler. A step is saved and its tables prebuilt out of
-    process for the NEXT start: swapping tables in a running modeld re-captures the jit (~1.3 s without a modelV2), which
-    selfdrived reports as a comms issue."""
+    """Continual rotation fit from the model's wide_from_device_euler: a step saves the rotation, builds its tables out of
+    process, loads them in a thread and swaps them in between runs (the tables are jit inputs, so a swap is one upload)."""
     if 'wide_from_device_euler' not in model_output:
       return
     new = self.refiner.push(model_output['wide_from_device_euler'][0], model_output['wide_from_device_euler_stds'][0], v_ego)
-    if new is None:
+    if new is None or self.rebuild is not None:
       return
     old = self.rotation; self.rotation = new
     save_rotation(new)
     cloudlog.warning(f"reproject_c4: rotation step {self.refiner.steps}: residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
-                     f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; saved for the next start")
-    if self.rebuild is None or self.rebuild.poll() is not None:
-      calib = RC.calib_from_rotvec(new)
-      self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
-                                       'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
-                                       json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(calib)])
+                     f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; rebuilding tables")
+    self.pending_calib = RC.calib_from_rotvec(new)
+    self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
+                                     'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
+                                     json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(self.pending_calib)])
+
+  def poll_rebuild(self) -> None:
+    if self.rebuild is not None and self.rebuild.poll() is not None:
+      ok, self.rebuild = self.rebuild.returncode == 0, None
+      if not ok:
+        cloudlog.error("reproject_c4: table rebuild failed"); return
+      # the npz decompresses ~20 MB (~150 ms of CPU on the device): off the model loop
+      self.loader = threading.Thread(target=lambda: setattr(self, 'pending_T', RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, self.pending_calib)), daemon=True)
+      self.loader.start()
+    if getattr(self, 'pending_T', None) is not None:
+      T, self.pending_T = self.pending_T, None
+      t0 = time.perf_counter()
+      self.rp.reload(T); self.calib = self.pending_calib
+      cloudlog.warning(f"reproject_c4: tables swapped in {(time.perf_counter() - t0) * 1e3:.0f} ms")
 
   def src_tensor(self, buf) -> Tensor:
     data = buf.data if hasattr(buf, 'data') else buf
@@ -516,6 +528,7 @@ def main(demo=False):
 
     if model_output is not None and model.rp is not None and REPROJECT_C4_REFINE:
       model.refine(model_output, v_ego)
+      model.poll_rebuild()
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')

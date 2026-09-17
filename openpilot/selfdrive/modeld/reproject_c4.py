@@ -47,8 +47,8 @@ class RotationRefiner:
   the rotation steps by `k` of it (the model under-reports by a unit-dependent factor, so it converges over a few steps
   rather than in one). Gate: moving, finite, confident output."""
 
-  def __init__(self, rotvec, n_frames=600, k=0.7, max_step=np.radians(1.0), min_speed=8.0, max_std=np.radians(0.5)):
-    self.rotvec = np.array(rotvec, np.float64); self.n_frames, self.k, self.max_step, self.min_speed, self.max_std = n_frames, k, max_step, min_speed, max_std
+  def __init__(self, rotvec, n_frames=600, k=0.7, max_step=np.radians(1.0), min_step=np.radians(0.02), min_speed=8.0, max_std=np.radians(0.5)):
+    self.rotvec = np.array(rotvec, np.float64); self.n_frames, self.k, self.max_step, self.min_step, self.min_speed, self.max_std = n_frames, k, max_step, min_step, min_speed, max_std
     self.acc = np.zeros(3); self.n = 0; self.steps = 0; self.last_residual = None
 
   def push(self, euler, stds, v_ego):
@@ -62,6 +62,8 @@ class RotationRefiner:
     res = np.array(rotvec_from_wide_from_device_euler(self.acc / self.n)); self.acc[:] = 0; self.n = 0
     self.last_residual = res
     step = res * self.k; mag = np.linalg.norm(step)
+    if mag < self.min_step:  # converged: under half a pixel, not worth a table swap
+      return None
     if mag > self.max_step:
       step *= self.max_step / mag
     self.rotvec = matrix_to_rotvec(rotvec_to_matrix(self.rotvec) @ rotvec_to_matrix(step)); self.steps += 1
@@ -376,20 +378,19 @@ class Reprojector:
     self._run = TinyJit(self._both)
 
   def reload(self, T):
-    """Swap in freshly built tables (same sizes) between runs, e.g. after the rotation was refined; the jit is re-captured."""
+    """Swap in freshly built tables (same sizes) between runs, e.g. after the rotation was refined. The tables are jit
+    inputs, so this is one upload and no re-capture (a re-capture is ~1.3 s on the 3X with no model output)."""
     assert T["wide"]["body"] == self.body and T["wide"]["uv_offset"] == self.uv_offset
     self.t = {cam: {k: Tensor(v, device=self.device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
-    self._run = TinyJit(self._both)
 
   def _chroma(self):
     return self.plane.reshape(3, 1).expand(3, self.body // 3).reshape(self.body).bool()  # a broadcast: no table read
 
-  def _wide(self, wide):
-    pw = self.t["wide"]["pw"]
+  def _wide(self, wide, pw):
     return (pw < INVALID_BIT).where(wide[pw & IDX_BITS], self._chroma().cast("uint8") * UV_FILL)
 
-  def _narrow(self, wide, narrow, gains):
-    t = self.t["narrow"]; pw = t["pw"]; chroma = self._chroma()
+  def _narrow(self, wide, narrow, gains, pw, pn):
+    chroma = self._chroma()
     # match the wide surround to the narrow: luma times a gain per brightness band (the two ISPs' tone curves; piecewise
     # linear between the band centres, flat beyond) times a gain gradient over the frame (lens shading); chroma gain about
     # the 128 midpoint plus a U/V offset (independent white balance), the offset a parity broadcast: U and V bytes alternate
@@ -403,7 +404,7 @@ class Reprojector:
     w = chroma.where((w - UV_FILL) * gains[0] + UV_FILL + off, w * tone * (1 + gains[3] * x + gains[4] * y)).clip(0, 255)
     w = (pw < INVALID_BIT).where(w, chroma.cast("float32") * UV_FILL)
     a = ((pw >> ALPHA_SHIFT) & 0xff).float() * (1 / 255)
-    pn = t["pn"]; idx = pn & IDX_BITS; n = narrow[idx].float()
+    idx = pn & IDX_BITS; n = narrow[idx].float()
     if self.soften:
       # 5 taps k px apart (2k bytes across for chroma: U and V alternate), edge-clamped to the buffer, faded by the packed weight
       k = self.soften; dx = chroma.where(2 * k, k); dy = k * self.s_stride; last = self.src_size - 1
@@ -413,9 +414,9 @@ class Reprojector:
       n = n + sft * (blur - n)
     return a * n + (1 - a) * w
 
-  def _both(self, wide, narrow, gains):
-    out_w = self._wide(wide)
-    out_n = self._narrow(wide, narrow, gains).round().cast("uint8")
+  def _both(self, wide, narrow, gains, pw_w, pw_n, pn):
+    out_w = self._wide(wide, pw_w)
+    out_n = self._narrow(wide, narrow, gains, pw_n, pn).round().cast("uint8")
     if self.dst is not None:
       out_w, out_n = self.dst[0].assign(out_w), self.dst[1].assign(out_n)
     return out_w.realize(), out_n.realize()
@@ -431,4 +432,4 @@ class Reprojector:
     self.params_np[:5] = (gain_c, u_off, v_off, gx, gy); self.params_np[5:5 + len(bands)] = bands
     if not self.host_params:
       self.gains.assign(Tensor(self.params_np, device=self.gains.device)).realize()
-    return self._run(wide, narrow, self.gains)
+    return self._run(wide, narrow, self.gains, self.t["wide"]["pw"], self.t["narrow"]["pw"], self.t["narrow"]["pn"])
