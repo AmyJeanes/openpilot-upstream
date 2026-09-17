@@ -32,7 +32,8 @@ ap.add_argument("--overlays", default="crop,telemetry,hud", help="comma list of 
 ap.add_argument("--meter", action=argparse.BooleanOptionalAction, default=True, help="live seam match (gain + U/V offsets) as on the device; --no-meter = exposure model only")
 ap.add_argument("--start", type=int, default=0, help="skip this many frames of each segment before rendering")
 ap.add_argument("--feather", type=float, default=RC.FEATHER_PX, help="composite seam width in comma 4 px")
-ap.add_argument("--compare", action="store_true", help="top row: the composite with the exposure model only (left) vs the live seam meter (right); bottom: raw narrow + reprojected wide")
+ap.add_argument("--compare", default=None, choices=["exposure", "soften"], help="A/B on the top row, bottom: raw narrow + reprojected wide. exposure: exposure model only (left) vs live seam meter (right); soften: inset as is (left) vs softened inset (right, --soften)")
+ap.add_argument("--soften", type=int, default=0, help="inset softening inside the blend zone: taps k narrow px apart (0 = off)")
 ap.add_argument("--calib", default="auto", help="auto = the unit's own self-cal when the route dir is a fleet device dir (harness/unit_calib.py), else the board calibration; board = always the board")
 a = ap.parse_args()
 OV = set(a.overlays.split(",")) - {"none", ""}
@@ -182,7 +183,8 @@ def fit_panel(comp_bgr, wide_np, narrow_np, match, model_gain, hist):
   return P
 
 
-rp = RC.Reprojector(device=DEV, feather=a.feather, calib=calib)
+rp = RC.Reprojector(device=DEV, feather=a.feather, calib=calib, soften=a.soften if a.compare != "soften" else 0)
+rp_b = RC.Reprojector(device=DEV, feather=a.feather, calib=calib, soften=a.soften) if a.compare == "soften" else None  # the tweaked kernel for the A/B
 meter = RC.SeamMeter(calib=calib)
 enc = subprocess.Popen([FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", "20", "-i", "-",
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-movflags", "+faststart", a.out], stdin=subprocess.PIPE)
@@ -238,8 +240,10 @@ for p in segs:
     ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)
     ow_bgr, on_bgr = from_nv12(ow.numpy(), DW, DH), from_nv12(on.numpy(), DW, DH)
     comp_clean = on_bgr.copy() if "fit" in OV else None
-    if a.compare:
+    if a.compare == "exposure":
       on_model = from_nv12(rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), gain_y=g_model, gain_c=g_model)[1].numpy(), DW, DH)
+    elif a.compare == "soften":
+      on_model = from_nv12(rp_b(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), **match)[1].numpy(), DW, DH)
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
     inputs = [model_input(raw_n, M_x3["n"]), model_input(raw_w, M_x3["w"]), model_input(on_bgr, M_c4["n"]), model_input(ow_bgr, M_c4["w"])] if "inputs" in OV else None
     if "hud" in OV and cal and fid_n in hud:
@@ -264,9 +268,12 @@ for p in segs:
         tele += f"  |  model {mt[0] * 1e3:.1f} ms, {mt[1]:.0f} % drops" + ("" if mt[2] else ", small model")
     expo = f"  |  exposure n {sn[0]:.1f}x{sn[1]} w {sw_[0]:.1f}x{sw_[1]}" if ("telemetry" in OV and sn and sw_) else ""
     live_lab = f"feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} grad {match['gx']:+.2f},{match['gy']:+.2f} bands {'/'.join(f'{v:.2f}' for v in match['lut'][[33, 75, 130, 197]] / [33, 75, 130, 197])} (seam meter)" if a.meter else " (exposure model)")
-    if a.compare:
+    if a.compare == "exposure":
       top = np.hstack([label(fit(on_model, rd), f"comma 4 narrow, EXPOSURE MODEL only: wide gain {g_model:.2f}  |  segment {seg}  t = {t:5.1f} s"),
                        label(fit(on_bgr, rd), "comma 4 narrow, LIVE SEAM METER: " + live_lab)])
+    elif a.compare == "soften":
+      top = np.hstack([label(fit(on_bgr, rd), f"BEFORE: inset one sample per pixel  |  segment {seg}  t = {t:5.1f} s  |  " + live_lab),
+                       label(fit(on_model, rd), f"AFTER: inset softened in the blend zone (5 taps {a.soften} px apart, fading over one feather width)")])
       bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "") + expo),
                        label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
     else:

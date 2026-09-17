@@ -203,12 +203,15 @@ def build_tables(src_wh, dst_wh, calib=None, feather=FEATHER_PX):
     alpha = np.round(np.clip(dist / feather, 0, 1) * val_n * 255).astype(np.int64)
     pw = idx_w | (alpha << ALPHA_SHIFT) | (~val_w * INVALID_BIT)
     out[cam] = dict(pw=pw.astype(np.int32), size=d_size, body=n_body, uv_offset=d_uv)
+    # the inset is sharp and the surround soft (the wide upscaled ~4x), so the blend zone can read the narrow blurred:
+    # weight 1 across the feather, fading to 0 over the next feather width, packed above the narrow index
+    soft = np.round(np.clip(2 - dist / feather, 0, 1) * val_n * 255).astype(np.int64)
     if cam == "narrow":
-      out[cam]["pn"] = idx_n.astype(np.int32)
+      out[cam]["pn"] = (idx_n | (soft << ALPHA_SHIFT)).astype(np.int32)
   return out
 
 
-TABLE_VERSION = 3  # bump when the lens numbers, the feather or the table layout change
+TABLE_VERSION = 4  # bump when the lens numbers, the feather or the table layout change
 
 
 def calib_tag(calib, feather=FEATHER_PX):
@@ -328,8 +331,13 @@ def luma_lut(band_gains, bands=SeamMeter.BANDS):
 class Reprojector:
   """Holds the tables on `device` and runs the gathers. Call once per model run with the two 3X NV12 buffers."""
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), device=None, cache_dir=None, calib=None, feather=FEATHER_PX):
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), device=None, cache_dir=None, calib=None, feather=FEATHER_PX, soften=0):
+    """soften: 0 = the narrow is one sample per output byte; k > 0 = inside the blend zone it is the mean of 5 samples k
+    narrow px apart (a plus), so the inset's sharpness meets the soft surround; 4 extra gathers per byte."""
     T = load_tables(src_wh, dst_wh, cache_dir, calib, feather)
+    self.soften = soften
+    self.s_stride = get_nv12_info(*src_wh)[0]
+    self.src_size = get_nv12_info(*src_wh)[3]
     self.size, self.body, self.uv_offset = T["wide"]["size"], T["wide"]["body"], T["wide"]["uv_offset"]
     self.device = device
     self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
@@ -385,7 +393,15 @@ class Reprojector:
     w = chroma.where((w - UV_FILL) * gains[0] + UV_FILL + off, lut[w8.cast("int32")] * grad).clip(0, 255)
     w = (pw < INVALID_BIT).where(w, chroma.cast("float32") * UV_FILL)
     a = ((pw >> ALPHA_SHIFT) & 0xff).float() * (1 / 255)
-    return a * narrow[t["pn"]].float() + (1 - a) * w
+    pn = t["pn"]; idx = pn & IDX_BITS; n = narrow[idx].float()
+    if self.soften:
+      # 5 taps k px apart (2k bytes across for chroma: U and V alternate), edge-clamped to the buffer, faded by the packed weight
+      k = self.soften; dx = chroma.where(2 * k, k); dy = k * self.s_stride; last = self.src_size - 1
+      blur = (n + narrow[(idx + dx).minimum(last)].float() + narrow[(idx - dx).maximum(0)].float()
+              + narrow[(idx + dy).minimum(last)].float() + narrow[(idx - dy).maximum(0)].float()) * 0.2
+      sft = ((pn >> ALPHA_SHIFT) & 0xff).float() * (1 / 255)
+      n = n + sft * (blur - n)
+    return a * n + (1 - a) * w
 
   def _both(self, wide, narrow, gains, lut):
     out_w = self._wide(wide)
