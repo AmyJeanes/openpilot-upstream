@@ -8,6 +8,8 @@ gather per output byte (two plus a blend for the composite) - the same cost as t
 Outputs are NV12 buffers in the comma 4 camerad layout so the model pkl (keyed by its camera size) sees exactly what a
 comma 4 would have given it. Lens numbers come from the bench + multi-device work in ~/tizi-to-mici (see the memory file).
 """
+import hashlib
+import json
 import os
 
 import numpy as np
@@ -21,6 +23,8 @@ X3_WIDE = dict(f=596.669, cx=957.566, cy=581.537, k=(-0.014942, -0.0023814, -0.0
 X3_NARROW = dict(f=2600.85, cx=964.0, cy=604.0, k1=-0.36400)  # pinhole with radial barrel: r=f·x(1+k1·x²)
 C4_WIDE = dict(f=442.555, cx=672.380, cy=378.718, k=(0.0089611, 0.029156, -0.015066), tc=1.39626)
 R_NARROW_FROM_WIDE = (-0.0167946, 0.0022473, -0.0011422)  # rotvec: the 3X wide points ~1° above the narrow
+# the wide lens + narrow->wide rotation are per unit (the cameras' relative yaw spreads +-1.5 deg across the fleet); these are the board-calibrated reference unit's
+DEFAULT_CALIB = dict(wide=X3_WIDE, narrow=X3_NARROW, R=R_NARROW_FROM_WIDE)
 ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wide pixel
 FEATHER_PX = 24  # composite seam width in comma 4 narrow px
 UV_FILL = 128
@@ -83,8 +87,9 @@ def rotvec_to_matrix(v):
   return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * K @ K
 
 
-def sample_coords(out_cam, dst_w, dst_h, scale=1.0):
+def sample_coords(out_cam, dst_w, dst_h, scale=1.0, calib=None):
   """Float 3X wide / narrow coordinates for every comma 4 `out_cam` pixel (scale 0.5 = the half-res chroma plane)."""
+  calib = calib or DEFAULT_CALIB
   xs, ys = np.meshgrid((np.arange(dst_w) + 0.5) / scale, (np.arange(dst_h) + 0.5) / scale)
   px = np.stack([xs, ys], -1)
   if out_cam == "wide":
@@ -92,10 +97,10 @@ def sample_coords(out_cam, dst_w, dst_h, scale=1.0):
   else:
     Kn = DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics
     rays = unproject_pinhole(px, Kn[0, 0], Kn[0, 2], Kn[1, 2])
-  rays_w = rays @ rotvec_to_matrix(R_NARROW_FROM_WIDE).T
-  mw = project_fisheye(rays_w, X3_WIDE) * scale
+  rays_w = rays @ rotvec_to_matrix(calib["R"]).T
+  mw = project_fisheye(rays_w, calib["wide"]) * scale
   mw[rays_w[..., 2] < ZMIN] = -1
-  mn = project_pinhole_k1(rays, X3_NARROW) * scale
+  mn = project_pinhole_k1(rays, calib["narrow"]) * scale
   mn[rays[..., 2] <= 0] = -1
   return mw, mn
 
@@ -115,7 +120,7 @@ def _nv12_index(xy, src_w, src_h, stride, uv_offset, chroma):
 IDX_BITS, ALPHA_SHIFT, INVALID_BIT = 0x3fffff, 22, 1 << 30  # one int32 per output byte: wide index | alpha << 22 | invalid
 
 
-def build_tables(src_wh, dst_wh):
+def build_tables(src_wh, dst_wh, calib=None):
   """Flat gather tables over the whole destination NV12 buffer (comma 4 layout) for the wide output and the narrow
   composite. Byte b of the output = src[idx[b]] (or the fill value where invalid); for the composite,
   alpha[b]*narrow[pn[b]] + (1-alpha[b])*gain*wide[idx[b]]. The kernel is memory-bound, so the wide index, the blend
@@ -130,11 +135,11 @@ def build_tables(src_wh, dst_wh):
     idx_w = np.zeros(n_body, np.int64); idx_n = np.zeros(n_body, np.int64)
     val_w = np.zeros(n_body, bool); val_n = np.zeros(n_body, bool); dist = np.zeros(n_body, np.float32)
     for chroma in (False, True):
-      mw, mn = sample_coords(cam, dw // 2 if chroma else dw, dh // 2 if chroma else dh, 0.5 if chroma else 1.0)
+      mw, mn = sample_coords(cam, dw // 2 if chroma else dw, dh // 2 if chroma else dh, 0.5 if chroma else 1.0, calib)
       iw, vw = _nv12_index(mw, sw, sh, s_stride, s_uv, chroma)
       inn, vn = _nv12_index(mn, sw, sh, s_stride, s_uv, chroma)
       # distance to the narrow frame edge, in destination px: the composite feathers over FEATHER_PX of it
-      sc = (0.5 if chroma else 1.0) * (X3_NARROW["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0])
+      sc = (0.5 if chroma else 1.0) * ((calib or DEFAULT_CALIB)["narrow"]["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0])
       d = np.minimum(np.minimum(mn[..., 0], sw * (0.5 if chroma else 1) - mn[..., 0]),
                      np.minimum(mn[..., 1], sh * (0.5 if chroma else 1) - mn[..., 1])) / sc
       if chroma:
@@ -156,36 +161,83 @@ def build_tables(src_wh, dst_wh):
 TABLE_VERSION = 2  # bump when the lens numbers or the table layout change
 
 
-def load_tables(src_wh, dst_wh, cache_dir=None):
+def calib_tag(calib):
+  return "" if calib is None else "_" + hashlib.sha1(json.dumps(calib, sort_keys=True, default=float).encode()).hexdigest()[:10]
+
+
+def load_tables(src_wh, dst_wh, cache_dir=None, calib=None):
   """build_tables takes ~25 s of numpy on the device CPU, so keep a copy on disk (a few MB, compressed)."""
   if cache_dir is None:
-    return build_tables(src_wh, dst_wh)
+    return build_tables(src_wh, dst_wh, calib)
   os.makedirs(cache_dir, exist_ok=True)
-  p = os.path.join(cache_dir, f"reproject_c4_v{TABLE_VERSION}_{src_wh[0]}x{src_wh[1]}_{dst_wh[0]}x{dst_wh[1]}.npz")
+  p = os.path.join(cache_dir, f"reproject_c4_v{TABLE_VERSION}_{src_wh[0]}x{src_wh[1]}_{dst_wh[0]}x{dst_wh[1]}{calib_tag(calib)}.npz")
   if os.path.exists(p):
     z = np.load(p); T = {"wide": {}, "narrow": {}}
     for key in z.files:
       cam, k = key.split("_", 1); T[cam][k] = z[key] if z[key].ndim else int(z[key])
     return T
-  T = build_tables(src_wh, dst_wh)
+  T = build_tables(src_wh, dst_wh, calib)
   np.savez_compressed(p + ".tmp.npz", **{f"{cam}_{k}": v for cam, tab in T.items() for k, v in tab.items()})
   os.replace(p + ".tmp.npz", p)
   return T
 
 
+class SeamMeter:
+  """Measures the narrow-inset / wide-surround match in the composite's seam ring straight from the two source NV12 buffers
+  (host memory, a few thousand nearest-neighbour pixel pairs): median Y ratio and the U/V offsets left after it. The two
+  cameras expose and white-balance independently and their constant differs per unit (fleet: +-8 % luma, +-2 U/V steps), so
+  the match is measured live and low-pass filtered; the exposure model is the fallback when the ring is too dark/saturated."""
+
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=4096, ring=(30.0, 130.0), alpha=0.3):
+    sw, sh = src_wh; dw, dh = dst_wh
+    s_stride, s_yh, _, _ = get_nv12_info(sw, sh); s_uv = s_stride * s_yh
+    sc = (calib or DEFAULT_CALIB)["narrow"]["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0]
+    mw, mn = sample_coords("narrow", dw, dh, 1.0, calib)
+    dist = np.minimum(np.minimum(mn[..., 0], sw - mn[..., 0]), np.minimum(mn[..., 1], sh - mn[..., 1])) / sc
+    iw, vw = _nv12_index(mw, sw, sh, s_stride, s_uv, False); inn, vn = _nv12_index(mn, sw, sh, s_stride, s_uv, False)
+    in_ring = vw & vn & (dist > ring[0]) & (dist < ring[1])
+    sel = np.flatnonzero(in_ring)[:: max(1, int(in_ring.sum()) // n_pairs)][:n_pairs]
+    self.y_w, self.y_n = iw.ravel()[sel], inn.ravel()[sel]
+    mw2, mn2 = sample_coords("narrow", dw // 2, dh // 2, 0.5, calib)
+    iw2, vw2 = _nv12_index(mw2, sw, sh, s_stride, s_uv, True); inn2, vn2 = _nv12_index(mn2, sw, sh, s_stride, s_uv, True)
+    in_ring2 = in_ring[::2, ::2] & vw2 & vn2
+    sel2 = np.flatnonzero(in_ring2)[:: max(1, int(in_ring2.sum()) // (n_pairs // 2))][: n_pairs // 2]
+    self.uv_w, self.uv_n = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
+    self.alpha = alpha
+    self.state = None  # filtered (gain_y, u_off, v_off)
+
+  def measure(self, wide, narrow):
+    """One frame's raw (gain_y, u_off, v_off) or None when fewer than 256 usable luma pairs (night, glare)."""
+    yw = wide[self.y_w].astype(np.float32); yn = narrow[self.y_n].astype(np.float32)
+    good = (yw > 16) & (yw < 235) & (yn > 16) & (yn < 235)
+    if good.sum() < 256:
+      return None
+    gy = float(np.median(yn[good] / yw[good]))
+    uw, un = wide[self.uv_w].astype(np.float32), narrow[self.uv_n].astype(np.float32)
+    vw, vn = wide[self.uv_w + 1].astype(np.float32), narrow[self.uv_n + 1].astype(np.float32)
+    return gy, float(np.median(un - UV_FILL - gy * (uw - UV_FILL))), float(np.median(vn - UV_FILL - gy * (vw - UV_FILL)))
+
+  def update(self, wide, narrow, model_gain=1.0):
+    """Filtered match for this frame: measured when the ring is usable, else decays to the exposure model with no colour offset."""
+    m = self.measure(wide, narrow)
+    target = np.array(m if m is not None else (model_gain, 0.0, 0.0), np.float32)
+    self.state = target if self.state is None else self.state + self.alpha * (target - self.state)
+    return tuple(float(v) for v in self.state)
+
+
 class Reprojector:
   """Holds the tables on `device` and runs the gathers. Call once per model run with the two 3X NV12 buffers."""
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), device=None, cache_dir=None):
-    T = load_tables(src_wh, dst_wh, cache_dir)
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), device=None, cache_dir=None, calib=None):
+    T = load_tables(src_wh, dst_wh, cache_dir, calib)
     self.size, self.body, self.uv_offset = T["wide"]["size"], T["wide"]["body"], T["wide"]["uv_offset"]
     self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
     # on QCOM the jit reads the gains straight from host memory: a per-call upload costs a scheduled copy (~4 ms of Python)
-    self.gains_np = np.ones(2, np.float32) if str(device or "").startswith("QCOM") else None
+    self.gains_np = np.array([1, 1, 0, 0], np.float32) if str(device or "").startswith("QCOM") else None  # gain_y, gain_c, u_off, v_off
     if self.gains_np is not None:
-      self.gains = Tensor.from_blob(self.gains_np.ctypes.data, (2,), dtype="float32", device=device)
+      self.gains = Tensor.from_blob(self.gains_np.ctypes.data, (4,), dtype="float32", device=device)
     else:
-      self.gains = Tensor(np.ones(2, np.float32), device=device).contiguous().realize()
+      self.gains = Tensor(np.array([1, 1, 0, 0], np.float32), device=device).contiguous().realize()
     assert self.body == 3 * (self.body - self.uv_offset)  # NV12: the UV plane is the last third of the body
     self.plane = Tensor([0, 0, 1], dtype="uint8", device=device).realize()
     self.dst = None
@@ -207,28 +259,30 @@ class Reprojector:
     pw = self.t["wide"]["pw"]
     return (pw < INVALID_BIT).where(wide[pw & IDX_BITS], self._chroma().cast("uint8") * UV_FILL)
 
-  def _narrow(self, wide, narrow, gain_y, gain_c):
+  def _narrow(self, wide, narrow, gains):
     t = self.t["narrow"]; pw = t["pw"]; chroma = self._chroma()
-    # exposure-match the wide surround to the narrow: luma gain on Y, chroma gain about the 128 midpoint
+    # exposure-match the wide surround to the narrow: luma gain on Y, chroma gain about the 128 midpoint plus a U/V offset
+    # (the cameras white-balance independently); the offset is a parity broadcast, U and V bytes alternate in NV12
+    off = gains[2:4].reshape(1, 2).expand(self.body // 2, 2).reshape(self.body)
     w = wide[pw & IDX_BITS].float()
-    w = chroma.where((w - UV_FILL) * gain_c + UV_FILL, w * gain_y).clip(0, 255)
+    w = chroma.where((w - UV_FILL) * gains[1] + UV_FILL + off, w * gains[0]).clip(0, 255)
     w = (pw < INVALID_BIT).where(w, chroma.cast("float32") * UV_FILL)
     a = ((pw >> ALPHA_SHIFT) & 0xff).float() * (1 / 255)
     return a * narrow[t["pn"]].float() + (1 - a) * w
 
   def _both(self, wide, narrow, gains):
     out_w = self._wide(wide)
-    out_n = self._narrow(wide, narrow, gains[0], gains[1]).round().cast("uint8")
+    out_n = self._narrow(wide, narrow, gains).round().cast("uint8")
     if self.dst is not None:
       out_w, out_n = self.dst[0].assign(out_w), self.dst[1].assign(out_n)
     return out_w.realize(), out_n.realize()
 
-  def __call__(self, wide, narrow, gain_y=1.0, gain_c=1.0):
+  def __call__(self, wide, narrow, gain_y=1.0, gain_c=1.0, u_off=0.0, v_off=0.0):
     """wide/narrow: flat uint8 3X NV12 tensors (same buffers every call, e.g. the VisionIPC ring, so the jit can be replayed).
     Returns (c4_wide, c4_narrow): flat uint8 NV12 tensors of `body` bytes (stride * (y_height + uv_height), the part of the
     comma 4 buffer a consumer reads); with bind() they are views of the bound host arrays."""
     if self.gains_np is not None:
-      self.gains_np[:] = (gain_y, gain_c)
+      self.gains_np[:] = (gain_y, gain_c, u_off, v_off)
     else:
-      self.gains.assign(Tensor(np.array([gain_y, gain_c], np.float32), device=self.gains.device)).realize()
+      self.gains.assign(Tensor(np.array([gain_y, gain_c, u_off, v_off], np.float32), device=self.gains.device)).realize()
     return self._run(wide, narrow, self.gains)

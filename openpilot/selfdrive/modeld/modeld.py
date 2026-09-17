@@ -146,6 +146,7 @@ class ModelState:
     self.src_size = get_nv12_info(cam_w, cam_h)[3]
     if reproject:
       self.rp = RC.Reprojector((cam_w, cam_h), C4_CAM, device='QCOM', cache_dir=os.environ.get('XDG_CACHE_HOME', '/data/tgcache'))
+      self.meter = RC.SeamMeter((cam_w, cam_h), C4_CAM)
       self._src_tensors: dict[int, Tensor] = {}
       self.rp_time = 0.0
       cam_w, cam_h = C4_CAM  # the warp pkl + model see a comma 4 camera
@@ -314,7 +315,7 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "wideRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
-  stage_times: list[float] = []; exec_times: list[float] = []
+  stage_times: list[float] = []; exec_times: list[float] = []; meter_times: list[float] = []
 
   publish_state = PublishState()
   params = Params()
@@ -424,10 +425,14 @@ def main(demo=False):
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
     if model.rp is not None:
-      # exposure-match the wide surround to the narrow inset from the sensors' exposure settings
+      # match the wide surround to the narrow inset: measured in the seam ring of these frames, the sensors' exposure
+      # settings as the fallback when the ring is unusable
       ncs, wcs = sm['narrowRoadCameraState'], sm['wideRoadCameraState']
       g = RC.exposure_gain(ncs.gain * ncs.integLines, wcs.gain * wcs.integLines) if sm.seen['wideRoadCameraState'] else 1.0
-      inputs['reproj_gains'] = (g, g)
+      mt0 = time.perf_counter()
+      gy, du, dv = model.meter.update(np.frombuffer(bufs['big_img'].data, dtype=np.uint8), np.frombuffer(bufs['img'].data, dtype=np.uint8), g)
+      meter_times.append(time.perf_counter() - mt0)
+      inputs['reproj_gains'] = (gy, gy, du, dv)
 
     mt1 = time.perf_counter()
     try:
@@ -450,7 +455,9 @@ def main(demo=False):
     exec_times.append(model_execution_time); stage_times.append(model.rp_time if model.rp is not None else 0.0)
     if len(exec_times) % 200 == 0:
       q = lambda t: f"{np.median(t[-200:]) * 1e3:.2f}/{np.percentile(t[-200:], 95) * 1e3:.2f}"
-      print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms; gains {inputs.get('reproj_gains', ('-',))[0]}", flush=True)
+      g4 = inputs.get('reproj_gains')
+      print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms; seam meter {q(meter_times) if meter_times else '-'} ms; "
+            f"gain {g4[0]:.3f} U {g4[2]:+.1f} V {g4[3]:+.1f} (model {g:.3f})" if g4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')
