@@ -3,7 +3,7 @@
 states from the rlog, times the constant K). Optional overlays: the model's 512x256 warp crops (stock's on the raw 3X
 frames with 3X intrinsics, ours on the comma 4 frames with comma 4 intrinsics; both should frame the same scene), the
 four reconstructed model inputs, and a telemetry line from the rlog.
-DEV=CUDA python openpilot/tools/reproject_c4/render_sbs.py <route dir> <out.mp4>
+cd ~/git/sunnypilot && DEV=CUDA PYTHONPATH=. uv run python ~/tizi-to-mici/harness/render_sbs.py <route dir> <out.mp4>
     [--segs 3,4] [--K 1.0] [--max-frames N] [--overlays crop,inputs,telemetry]"""
 import argparse
 import glob
@@ -29,6 +29,10 @@ ap = argparse.ArgumentParser()
 ap.add_argument("route"); ap.add_argument("out")
 ap.add_argument("--segs", default="all"); ap.add_argument("--K", type=float, default=1.0, help="extra multiplier on the fitted exposure gain"); ap.add_argument("--max-frames", type=int, default=10**9)
 ap.add_argument("--overlays", default="crop,telemetry,hud", help="comma list of crop,inputs,telemetry,hud (or none)")
+ap.add_argument("--meter", action=argparse.BooleanOptionalAction, default=True, help="live seam match (gain + U/V offsets) as on the device; --no-meter = exposure model only")
+ap.add_argument("--start", type=int, default=0, help="skip this many frames of each segment before rendering")
+ap.add_argument("--feather", type=float, default=RC.FEATHER_PX, help="composite seam width in comma 4 px")
+ap.add_argument("--calib", default="auto", help="auto = the unit's own self-cal when the route dir is a fleet device dir (harness/unit_calib.py), else the board calibration; board = always the board")
 a = ap.parse_args()
 OV = set(a.overlays.split(",")) - {"none", ""}
 DEV = os.environ.get("DEV", Device.DEFAULT)
@@ -119,7 +123,17 @@ def draw_hud(img, out, view_from_calib, K, path_z=PATH_Z_OFF):
       cv2.polylines(img, [q], False, (60, 60, 255), 2, cv2.LINE_AA)
 
 
-rp = RC.Reprojector(device=DEV)
+calib = None
+if a.calib == "auto":
+  try:
+    import sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from unit_calib import calib_for
+    calib = calib_for(os.path.basename(os.path.abspath(a.route)))
+  except ImportError:
+    pass
+print("calibration:", "unit's own self-cal" if calib else "board (reference unit)", flush=True)
+rp = RC.Reprojector(device=DEV, feather=a.feather, calib=calib)
+meter = RC.SeamMeter(calib=calib)
 enc = subprocess.Popen([FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", "20", "-i", "-",
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-movflags", "+faststart", a.out], stdin=subprocess.PIPE)
 segs = sorted(glob.glob(os.path.join(a.route, "*--*--*")), key=lambda p: int(p.rsplit("--", 1)[1]))
@@ -156,19 +170,25 @@ for p in segs:
   dec = [subprocess.Popen([FFMPEG, "-v", "error", "-i", os.path.join(p, f), "-pix_fmt", "nv12", "-f", "rawvideo", "-"], stdout=subprocess.PIPE, bufsize=10**7)
          for f in ("ecamera.hevc", "fcamera.hevc")]
   n = 0
-  while n < a.max_frames:
+  while n < a.start + a.max_frames:
     raws = [d.stdout.read(SW * SH * 3 // 2) for d in dec]
     if any(len(r) < SW * SH * 3 // 2 for r in raws):
       break
+    if n < a.start:
+      n += 1; continue
     wide_np, narrow_np = (to_layout(np.frombuffer(r, np.uint8)) for r in raws)
     fid_n, fid_w = idx["road"].get(n), idx["wide"].get(n)
     sn, sw_ = cs["road"].get(fid_n), cs["wide"].get(fid_w)
     g = float(np.clip(a.K * RC.exposure_gain(sn[0] * sn[1], sw_[0] * sw_[1]), 0.25, 4.0)) if sn and sw_ else 1.0
-    ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), g, g)
+    if a.meter:  # what the device does: measure the match in the seam ring of these frames, the exposure model as fallback
+      g, du, dv = meter.update(wide_np, narrow_np, g)
+    else:
+      du = dv = 0.0
+    ow, on = rp(Tensor(wide_np, device=DEV).realize(), Tensor(narrow_np, device=DEV).realize(), g, g, du, dv)
     ow_bgr, on_bgr = from_nv12(ow.numpy(), DW, DH), from_nv12(on.numpy(), DW, DH)
     raw_w, raw_n = from_nv12(wide_np, SW, SH), from_nv12(narrow_np, SW, SH)
     inputs = [model_input(raw_n, M_x3["n"]), model_input(raw_w, M_x3["w"]), model_input(on_bgr, M_c4["n"]), model_input(ow_bgr, M_c4["w"])] if "inputs" in OV else None
-    if "hud" in OV and fid_n in hud:
+    if "hud" in OV and cal and fid_n in hud:
       o = hud[fid_n]
       draw_hud(raw_n, o, view_from_calib, X3.narrow_road.intrinsics, path_z); draw_hud(raw_w, o, view_from_calib, X3.wide_road.intrinsics, path_z)
       draw_hud(on_bgr, o, view_from_calib, C4.narrow_road.intrinsics, path_z); draw_hud(ow_bgr, o, view_from_calib, C4.wide_road.intrinsics, path_z)
@@ -188,7 +208,7 @@ for p in segs:
     top = np.hstack([label(fit(raw_w, rs), f"3X wide, raw  |  segment {seg}  t = {t:5.1f} s" + ("  |  orange: stock's 512x256 warp crop" if "crop" in OV else "")),
                      label(fit(ow_bgr, rd), "comma 4 wide, reprojected from the 3X wide" + ("  |  green: our warp crop" if "crop" in OV else ""))])
     bot = np.hstack([label(fit(raw_n, rs), "3X narrow, raw" + (f"  |  {tele}" if tele else "")),
-                     label(fit(on_bgr, rd), f"comma 4 narrow: narrow inset + wide surround, wide gain {g:.2f}" + expo)])
+                     label(fit(on_bgr, rd), f"comma 4 narrow: narrow inset + wide surround, feather {a.feather:g} px, wide gain {g:.2f}" + (f" U {du:+.1f} V {dv:+.1f} (seam meter)" if a.meter else " (exposure model)") + expo)])
     frame = [top, bot]
     if inputs is not None:
       row = np.zeros((IH + LH, W, 3), np.uint8)

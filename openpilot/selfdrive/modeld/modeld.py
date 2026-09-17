@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from collections.abc import Callable
 import base64
+import json
+import subprocess
+import sys
 import ctypes
 from functools import cached_property
 import os
@@ -138,6 +141,33 @@ def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int
   return Tensor(UOp.from_buffer(view)).reshape(shape)
 
 
+ROTATION_FILE = os.environ.get('REPROJECT_C4_ROTATION', '/data/reproject_c4/rotation.json')
+
+
+def load_rotation() -> tuple[float, float, float]:
+  """The unit's narrow->wide rotation: the refined value on disk, else seeded from the stock calibration's persisted
+  wideFromDeviceEuler (calibrationd's block average of the model output), else the fleet median."""
+  try:
+    return tuple(json.load(open(ROTATION_FILE))['rotvec'])
+  except (OSError, ValueError, KeyError):
+    pass
+  try:
+    with log.Event.from_bytes(Params().get("CalibrationParams")) as msg:
+      e = list(msg.extrinsicsCalibration.wideFromDeviceEuler)
+    if len(e) == 3 and np.isfinite(e).all():
+      r = RC.rotvec_from_wide_from_device_euler(e); cloudlog.warning(f"reproject_c4: rotation seeded from CalibrationParams {np.degrees(r).round(3)} deg")
+      return r
+  except Exception:
+    cloudlog.exception("reproject_c4: no CalibrationParams seed")
+  return RC.POP_ROTATION
+
+
+def save_rotation(rotvec) -> None:
+  os.makedirs(os.path.dirname(ROTATION_FILE), exist_ok=True)
+  tmp = ROTATION_FILE + '.tmp'
+  json.dump({'rotvec': list(rotvec), 'at': time.time()}, open(tmp, 'w')); os.replace(tmp, ROTATION_FILE)
+
+
 class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
@@ -145,8 +175,13 @@ class ModelState:
     self.rp = None
     self.src_size = get_nv12_info(cam_w, cam_h)[3]
     if reproject:
-      self.rp = RC.Reprojector((cam_w, cam_h), C4_CAM, device='QCOM', cache_dir=os.environ.get('XDG_CACHE_HOME', '/data/tgcache'))
-      self.meter = RC.SeamMeter((cam_w, cam_h), C4_CAM)
+      self.src_wh, self.cache_dir = (cam_w, cam_h), os.environ.get('XDG_CACHE_HOME', '/data/tgcache')
+      self.rotation = load_rotation()
+      self.calib = RC.calib_from_rotvec(self.rotation)
+      self.rp = RC.Reprojector(self.src_wh, C4_CAM, device='QCOM', cache_dir=self.cache_dir, calib=self.calib)
+      self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
+      self.refiner = RC.RotationRefiner(self.rotation)
+      self.rebuild: subprocess.Popen | None = None
       self._src_tensors: dict[int, Tensor] = {}
       self.rp_time = 0.0
       cam_w, cam_h = C4_CAM  # the warp pkl + model see a comma 4 camera
@@ -195,6 +230,34 @@ class ModelState:
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     return {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
+
+  def refine(self, model_output: dict[str, np.ndarray], v_ego: float) -> None:
+    """Continual rotation fit from the model's wide_from_device_euler; a step rebuilds the tables out of process."""
+    if 'wide_from_device_euler' not in model_output:
+      return
+    new = self.refiner.push(model_output['wide_from_device_euler'][0], model_output['wide_from_device_euler_stds'][0], v_ego)
+    if new is None or self.rebuild is not None:
+      return
+    old = self.rotation; self.rotation = new
+    save_rotation(new)
+    cloudlog.warning(f"reproject_c4: rotation step {self.refiner.steps}: residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
+                     f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; rebuilding tables")
+    calib = RC.calib_from_rotvec(new)
+    self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
+                                     'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
+                                     json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(calib)])
+
+  def poll_rebuild(self) -> None:
+    if self.rebuild is None or self.rebuild.poll() is None:
+      return
+    ok, self.rebuild = self.rebuild.returncode == 0, None
+    if not ok:
+      cloudlog.error("reproject_c4: table rebuild failed"); return
+    self.calib = RC.calib_from_rotvec(self.rotation)
+    t0 = time.perf_counter()
+    self.rp.reload(RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, self.calib))  # the subprocess left the npz in the cache
+    self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
+    cloudlog.warning(f"reproject_c4: tables swapped in {(time.perf_counter() - t0) * 1e3:.0f} ms")
 
   def src_tensor(self, buf) -> Tensor:
     data = buf.data if hasattr(buf, 'data') else buf
@@ -458,6 +521,10 @@ def main(demo=False):
       g4 = inputs.get('reproj_gains')
       print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms; seam meter {q(meter_times) if meter_times else '-'} ms; "
             f"gain {g4[0]:.3f} U {g4[2]:+.1f} V {g4[3]:+.1f} (model {g:.3f})" if g4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
+
+    if model_output is not None and model.rp is not None:
+      model.refine(model_output, v_ego)
+      model.poll_rebuild()
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')

@@ -25,6 +25,54 @@ C4_WIDE = dict(f=442.555, cx=672.380, cy=378.718, k=(0.0089611, 0.029156, -0.015
 R_NARROW_FROM_WIDE = (-0.0167946, 0.0022473, -0.0011422)  # rotvec: the 3X wide points ~1° above the narrow
 # the wide lens + narrow->wide rotation are per unit (the cameras' relative yaw spreads +-1.5 deg across the fleet); these are the board-calibrated reference unit's
 DEFAULT_CALIB = dict(wide=X3_WIDE, narrow=X3_NARROW, R=R_NARROW_FROM_WIDE)
+# fleet median of 40 self-calibrated 3X units: the lens a unit gets when only its rotation is calibrated (the model's and the
+# self-cal's rotations pair with this nominal centre, not with the board lens above)
+X3_WIDE_POP = dict(f=597.732, cx=963.936, cy=603.959, k=(-0.011968, 0.024043, -0.0091132), tc=1.51354)
+POP_ROTATION = (0.0154781, -0.0225994, -0.00068013)
+
+
+def calib_from_rotvec(rotvec):
+  return dict(wide=X3_WIDE_POP, narrow=X3_NARROW, R=tuple(float(v) for v in rotvec))
+
+
+def rotvec_from_wide_from_device_euler(euler):
+  """The model's wide_from_device_euler (device frame: roll, pitch, yaw) as our camera-axes rotvec (x=pitch, y=yaw, z=roll)."""
+  r, p, y = euler
+  return (float(p), float(y), float(r))
+
+
+class RotationRefiner:
+  """Continual narrow->wide rotation from the model's own wide_from_device_euler output. With the stage running, the model
+  sees the composite, so that output is the residual misalignment of what it sees: averaged over `n_frames` valid frames,
+  the rotation steps by `k` of it (the model under-reports by a unit-dependent factor, so it converges over a few steps
+  rather than in one). Gate: moving, finite, confident output."""
+
+  def __init__(self, rotvec, n_frames=600, k=0.7, max_step=np.radians(1.0), min_speed=8.0, max_std=np.radians(0.5)):
+    self.rotvec = np.array(rotvec, np.float64); self.n_frames, self.k, self.max_step, self.min_speed, self.max_std = n_frames, k, max_step, min_speed, max_std
+    self.acc = np.zeros(3); self.n = 0; self.steps = 0; self.last_residual = None
+
+  def push(self, euler, stds, v_ego):
+    """Feed one model run; returns the new rotvec when a step happened, else None."""
+    e = np.asarray(euler, np.float64); s = np.asarray(stds, np.float64)
+    if v_ego < self.min_speed or not (np.isfinite(e).all() and np.isfinite(s).all()) or (s > self.max_std).any():
+      return None
+    self.acc += e; self.n += 1
+    if self.n < self.n_frames:
+      return None
+    res = np.array(rotvec_from_wide_from_device_euler(self.acc / self.n)); self.acc[:] = 0; self.n = 0
+    self.last_residual = res
+    step = res * self.k; mag = np.linalg.norm(step)
+    if mag > self.max_step:
+      step *= self.max_step / mag
+    self.rotvec = matrix_to_rotvec(rotvec_to_matrix(self.rotvec) @ rotvec_to_matrix(step)); self.steps += 1
+    return tuple(float(v) for v in self.rotvec)
+
+
+def matrix_to_rotvec(M):
+  a = np.arccos(np.clip((np.trace(M) - 1) / 2, -1, 1))
+  if a < 1e-9:
+    return np.zeros(3)
+  return a / (2 * np.sin(a)) * np.array([M[2, 1] - M[1, 2], M[0, 2] - M[2, 0], M[1, 0] - M[0, 1]])
 ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wide pixel
 FEATHER_PX = 24  # composite seam width in comma 4 narrow px
 UV_FILL = 128
@@ -120,7 +168,7 @@ def _nv12_index(xy, src_w, src_h, stride, uv_offset, chroma):
 IDX_BITS, ALPHA_SHIFT, INVALID_BIT = 0x3fffff, 22, 1 << 30  # one int32 per output byte: wide index | alpha << 22 | invalid
 
 
-def build_tables(src_wh, dst_wh, calib=None):
+def build_tables(src_wh, dst_wh, calib=None, feather=FEATHER_PX):
   """Flat gather tables over the whole destination NV12 buffer (comma 4 layout) for the wide output and the narrow
   composite. Byte b of the output = src[idx[b]] (or the fill value where invalid); for the composite,
   alpha[b]*narrow[pn[b]] + (1-alpha[b])*gain*wide[idx[b]]. The kernel is memory-bound, so the wide index, the blend
@@ -138,7 +186,7 @@ def build_tables(src_wh, dst_wh, calib=None):
       mw, mn = sample_coords(cam, dw // 2 if chroma else dw, dh // 2 if chroma else dh, 0.5 if chroma else 1.0, calib)
       iw, vw = _nv12_index(mw, sw, sh, s_stride, s_uv, chroma)
       inn, vn = _nv12_index(mn, sw, sh, s_stride, s_uv, chroma)
-      # distance to the narrow frame edge, in destination px: the composite feathers over FEATHER_PX of it
+      # distance to the narrow frame edge, in destination px: the composite feathers over `feather` of it
       sc = (0.5 if chroma else 1.0) * ((calib or DEFAULT_CALIB)["narrow"]["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0])
       d = np.minimum(np.minimum(mn[..., 0], sw * (0.5 if chroma else 1) - mn[..., 0]),
                      np.minimum(mn[..., 1], sh * (0.5 if chroma else 1) - mn[..., 1])) / sc
@@ -150,7 +198,7 @@ def build_tables(src_wh, dst_wh, calib=None):
       else:
         flat = np.arange(dh)[:, None] * d_stride + np.arange(dw)[None, :]
         idx_w[flat] = iw; idx_n[flat] = inn; val_w[flat] = vw; val_n[flat] = vn; dist[flat] = d
-    alpha = np.round(np.clip(dist / FEATHER_PX, 0, 1) * val_n * 255).astype(np.int64)
+    alpha = np.round(np.clip(dist / feather, 0, 1) * val_n * 255).astype(np.int64)
     pw = idx_w | (alpha << ALPHA_SHIFT) | (~val_w * INVALID_BIT)
     out[cam] = dict(pw=pw.astype(np.int32), size=d_size, body=n_body, uv_offset=d_uv)
     if cam == "narrow":
@@ -161,22 +209,23 @@ def build_tables(src_wh, dst_wh, calib=None):
 TABLE_VERSION = 2  # bump when the lens numbers or the table layout change
 
 
-def calib_tag(calib):
-  return "" if calib is None else "_" + hashlib.sha1(json.dumps(calib, sort_keys=True, default=float).encode()).hexdigest()[:10]
+def calib_tag(calib, feather=FEATHER_PX):
+  tag = "" if calib is None else "_" + hashlib.sha1(json.dumps(calib, sort_keys=True, default=float).encode()).hexdigest()[:10]
+  return tag + ("" if feather == FEATHER_PX else f"_f{feather:g}")
 
 
-def load_tables(src_wh, dst_wh, cache_dir=None, calib=None):
+def load_tables(src_wh, dst_wh, cache_dir=None, calib=None, feather=FEATHER_PX):
   """build_tables takes ~25 s of numpy on the device CPU, so keep a copy on disk (a few MB, compressed)."""
   if cache_dir is None:
-    return build_tables(src_wh, dst_wh, calib)
+    return build_tables(src_wh, dst_wh, calib, feather)
   os.makedirs(cache_dir, exist_ok=True)
-  p = os.path.join(cache_dir, f"reproject_c4_v{TABLE_VERSION}_{src_wh[0]}x{src_wh[1]}_{dst_wh[0]}x{dst_wh[1]}{calib_tag(calib)}.npz")
+  p = os.path.join(cache_dir, f"reproject_c4_v{TABLE_VERSION}_{src_wh[0]}x{src_wh[1]}_{dst_wh[0]}x{dst_wh[1]}{calib_tag(calib, feather)}.npz")
   if os.path.exists(p):
     z = np.load(p); T = {"wide": {}, "narrow": {}}
     for key in z.files:
       cam, k = key.split("_", 1); T[cam][k] = z[key] if z[key].ndim else int(z[key])
     return T
-  T = build_tables(src_wh, dst_wh, calib)
+  T = build_tables(src_wh, dst_wh, calib, feather)
   np.savez_compressed(p + ".tmp.npz", **{f"{cam}_{k}": v for cam, tab in T.items() for k, v in tab.items()})
   os.replace(p + ".tmp.npz", p)
   return T
@@ -228,9 +277,10 @@ class SeamMeter:
 class Reprojector:
   """Holds the tables on `device` and runs the gathers. Call once per model run with the two 3X NV12 buffers."""
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), device=None, cache_dir=None, calib=None):
-    T = load_tables(src_wh, dst_wh, cache_dir, calib)
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), device=None, cache_dir=None, calib=None, feather=FEATHER_PX):
+    T = load_tables(src_wh, dst_wh, cache_dir, calib, feather)
     self.size, self.body, self.uv_offset = T["wide"]["size"], T["wide"]["body"], T["wide"]["uv_offset"]
+    self.device = device
     self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
     # on QCOM the jit reads the gains straight from host memory: a per-call upload costs a scheduled copy (~4 ms of Python)
     self.gains_np = np.array([1, 1, 0, 0], np.float32) if str(device or "").startswith("QCOM") else None  # gain_y, gain_c, u_off, v_off
@@ -250,6 +300,12 @@ class Reprojector:
     dev = self.gains.device
     self.dst = (Tensor.from_blob(host_wide.ctypes.data, (self.body,), dtype="uint8", device=dev),
                 Tensor.from_blob(host_narrow.ctypes.data, (self.body,), dtype="uint8", device=dev))
+    self._run = TinyJit(self._both)
+
+  def reload(self, T):
+    """Swap in freshly built tables (same sizes) between runs, e.g. after the rotation was refined; the jit is re-captured."""
+    assert T["wide"]["body"] == self.body and T["wide"]["uv_offset"] == self.uv_offset
+    self.t = {cam: {k: Tensor(v, device=self.device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
     self._run = TinyJit(self._both)
 
   def _chroma(self):
