@@ -155,7 +155,7 @@ def fit_panel(comp_bgr, wide_np, narrow_np, match, model_gain, hist):
     if np.isfinite(r) and cnts[k] >= 3:
       x, y = int((px + 1) / 2 * mw_), int((py + 1) / 2 * mh_)
       c = max(-1.0, min(1.0, sums[k] / cnts[k] / 0.2))  # +-20 % -> full colour
-      col = (0, 200, 60) if abs(c) < 0.25 else ((0, int(120 * (1 - c)), 255) if c > 0 else (255, int(120 * (1 + c)), 0))
+      col = (0, 200, 60) if abs(c) < 0.25 else ((255, int(120 * (1 - c)), 0) if c > 0 else (0, int(120 * (1 + c)), 255))  # res > 0: narrow brighter = surround too dark = blue
       cv2.circle(small, (x, y), 2, col, -1)
   cv2.putText(P, "seam ring after the match: green matched, red surround too bright, blue too dark", (8, 18), FONT, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
   P[26:26 + mh_, 10:10 + mw_] = small

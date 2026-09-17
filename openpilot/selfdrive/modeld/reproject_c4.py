@@ -270,16 +270,18 @@ class SeamMeter:
       return None
     yw, yn, pos = yw[good], yn[good], self.pos[good]
     ratio = yn / yw; gy = float(np.median(ratio))
-    # gain gradient across the frame: least squares of the normalised ratio on the pixel position (clipped: robust enough at 4k pairs)
-    r = np.clip(ratio / gy, 0.4, 2.5) - 1
-    A = np.c_[pos, np.ones(len(pos), np.float32)]
-    c = np.linalg.lstsq(A, r, rcond=None)[0]
-    keep = np.abs(r - A @ c) < 0.3  # one refit without the outliers (saturated sky, the car's own bonnet, seam-crossing objects)
+    # tone (a gain per brightness band of the wide) and lens shading (a gain gradient over the frame) are confounded in
+    # one frame - the sky is always at the top of the ring - so they are fitted jointly: log ratio = band gain + gx*x + gy*y
+    band = np.searchsorted([hi for _, hi in self.BANDS[:-1]], yw)
+    A = np.zeros((len(yw), len(self.BANDS) + 2), np.float32); A[np.arange(len(yw)), band] = 1; A[:, -2:] = pos
+    lr = np.log(np.clip(ratio, 0.25, 4.0))
+    c = np.linalg.lstsq(A, lr, rcond=None)[0]
+    keep = np.abs(lr - A @ c) < 0.25  # one refit without the outliers (saturated sky, the car's own bonnet, seam-crossing objects)
     if keep.sum() >= 256:
-      c = np.linalg.lstsq(A[keep], r[keep], rcond=None)[0]
-    gx, gyp = float(np.clip(c[0], -0.5, 0.5)), float(np.clip(c[1], -0.5, 0.5))
-    flat = ratio / (1 + gx * pos[:, 0] + gyp * pos[:, 1])
-    bands = [float(np.median(flat[m])) if (m := (yw >= lo) & (yw < hi)).sum() >= 100 else gy for lo, hi in self.BANDS]
+      c = np.linalg.lstsq(A[keep], lr[keep], rcond=None)[0]
+    counts = np.bincount(band, minlength=len(self.BANDS))
+    bands = [float(np.exp(c[i])) if counts[i] >= 100 else gy for i in range(len(self.BANDS))]
+    gx, gyp = float(np.clip(c[-2], -0.5, 0.5)), float(np.clip(c[-1], -0.5, 0.5))
     uw, un = wide[self.uv_w].astype(np.float32), narrow[self.uv_n].astype(np.float32)
     vw, vn = wide[self.uv_w + 1].astype(np.float32), narrow[self.uv_n + 1].astype(np.float32)
     du, dv = float(np.median(un - UV_FILL - gy * (uw - UV_FILL))), float(np.median(vn - UV_FILL - gy * (vw - UV_FILL)))
