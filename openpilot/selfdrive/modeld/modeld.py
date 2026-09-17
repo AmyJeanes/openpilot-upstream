@@ -425,10 +425,9 @@ def main(demo=False):
     }
     if model.rp is not None:
       # exposure-match the wide surround to the narrow inset from the sensors' exposure settings
-      # TODO: the constant lens/sensitivity factor between the two 3X cameras is not calibrated yet
       ncs, wcs = sm['narrowRoadCameraState'], sm['wideRoadCameraState']
-      g = (ncs.gain * ncs.integLines) / (wcs.gain * wcs.integLines) if sm.seen['wideRoadCameraState'] and wcs.gain * wcs.integLines > 0 else 1.0
-      inputs['reproj_gains'] = (float(np.clip(g, 0.25, 4.0)),) * 2
+      g = RC.exposure_gain(ncs.gain * ncs.integLines, wcs.gain * wcs.integLines) if sm.seen['wideRoadCameraState'] else 1.0
+      inputs['reproj_gains'] = (g, g)
 
     mt1 = time.perf_counter()
     try:

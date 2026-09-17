@@ -24,6 +24,17 @@ R_NARROW_FROM_WIDE = (-0.0167946, 0.0022473, -0.0011422)  # rotvec: the 3X wide 
 ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wide pixel
 FEATHER_PX = 24  # composite seam width in comma 4 narrow px
 UV_FILL = 128
+# encoded-domain luma ratio narrow/wide vs the sensors' exposure ratio (gain*integLines), fitted in the seam ring on a
+# day-to-night drive (1607 frame pairs, 4 % residual): the exponent is the ISP tone curve, so a plain constant can't fit
+# both dusk and night; the ring (not the whole overlap) because the wide lens falls off towards the seam
+EXPOSURE_GAIN_A, EXPOSURE_GAIN_P = 0.868, 0.708
+
+
+def exposure_gain(narrow_exposure, wide_exposure, lo=0.25, hi=4.0):
+  """Gain to apply to the 3X wide surround so it matches the narrow inset; exposures are gain*integLines from the camera states."""
+  if not (narrow_exposure > 0 and wide_exposure > 0):
+    return 1.0
+  return float(np.clip(EXPOSURE_GAIN_A * (narrow_exposure / wide_exposure) ** EXPOSURE_GAIN_P, lo, hi))
 
 
 def _theta_d(th, L):
