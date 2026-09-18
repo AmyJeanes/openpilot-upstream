@@ -99,6 +99,7 @@ class ChestnutGpuState:
     state = msg.chestnutGpuState
     self.sends += 1
     if self.big and "AMD" in Device._opened_devices and self.sends % 100 == 1:
+      t0 = time.perf_counter()
       try:
         smu = Device["AMD"].iface.dev_impl.smu
         metrics_t = smu.smu_mod.SmuMetricsExternal_t
@@ -118,6 +119,10 @@ class ChestnutGpuState:
           cloudlog.exception("chestnut state read failed")
         self.valid = False
         self.metrics.clear()
+      # the read goes over the USB link the model shares; measured: it is the ~100 ms modelV2 gap every 100 frames
+      self.smu_ms = (time.perf_counter() - t0) * 1e3; self.smu_max_ms = max(self.smu_ms, getattr(self, 'smu_max_ms', 0.0))
+      if self.smu_ms > 50:
+        cloudlog.warning(f"chestnut: SMU metrics read took {self.smu_ms:.0f} ms")
     if self.big:
       for k, v in self.metrics.items():
         setattr(state, k, v)
@@ -531,7 +536,8 @@ def main(demo=False):
                   gain=round(m4['gain_y'], 3), model_gain=round(float(g), 3), u=round(m4['u_off'], 1), v=round(m4['v_off'], 1), gx=round(m4['gx'], 3), gy=round(m4['gy'], 3),
                   bands=[round(b, 3) for b in m4['bands']], rot_deg=[round(float(x), 3) for x in np.degrees(model.rotation)],
                   residual_deg=[round(float(x), 3) for x in np.degrees(rf.last_residual)] if rf.last_residual is not None else None,
-                  steps=rf.steps, acc=rf.n, loading=model.loader is not None, fitted=bool(model.rot_file.get('fitted')), big=model is not small_model)
+                  steps=rf.steps, acc=rf.n, loading=model.loader is not None, fitted=bool(model.rot_file.get('fitted')), big=model is not small_model,
+                  smu_ms=round(getattr(chestnut_state, 'smu_ms', 0.0), 1), smu_max_ms=round(getattr(chestnut_state, 'smu_max_ms', 0.0), 1))
       try:
         tmp = '/data/reproject_c4/live.json.tmp'; json.dump(live, open(tmp, 'w')); os.replace(tmp, '/data/reproject_c4/live.json')
       except OSError:
