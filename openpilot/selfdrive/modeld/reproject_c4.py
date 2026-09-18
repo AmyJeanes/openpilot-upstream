@@ -8,6 +8,7 @@ gather per output byte (two plus a blend for the composite) - the same cost as t
 Outputs are NV12 buffers in the comma 4 camerad layout so the model pkl (keyed by its camera size) sees exactly what a
 comma 4 would have given it. Lens numbers come from the bench + multi-device work in ~/tizi-to-mici (see the memory file).
 """
+import glob
 import hashlib
 import json
 import os
@@ -368,10 +369,11 @@ def build_tables(src_wh, dst_wh, calib=None, feather=FEATHER_PX):
     soft = np.round(np.clip(2 - dist / feather, 0, 1) * val_n * 255).astype(np.int64)
     if cam == "narrow":
       out[cam]["pn"] = (idx_n | (soft << ALPHA_SHIFT)).astype(np.int32)
+  out["meter"] = SeamMeter.geometry(src_wh, dst_wh, calib)  # ~1 s of numpy on the 3X: not for modeld's swap
   return out
 
 
-TABLE_VERSION = 4  # bump when the lens numbers, the feather or the table layout change
+TABLE_VERSION = 5  # bump when the lens numbers, the feather or the table layout change
 
 
 def calib_tag(calib, feather=FEATHER_PX):
@@ -390,13 +392,20 @@ def load_tables(src_wh, dst_wh, cache_dir=None, calib=None, feather=FEATHER_PX):
   os.makedirs(cache_dir, exist_ok=True)
   p = table_path(src_wh, dst_wh, cache_dir, calib, feather)
   if os.path.exists(p):
-    z = np.load(p); T = {"wide": {}, "narrow": {}}
+    z = np.load(p); T = {"wide": {}, "narrow": {}, "meter": {}}
     for key in z.files:
       cam, k = key.split("_", 1); T[cam][k] = z[key] if z[key].ndim else int(z[key])
     return T
   T = build_tables(src_wh, dst_wh, calib, feather)
   np.savez(p + ".tmp.npz", **{f"{cam}_{k}": v for cam, tab in T.items() for k, v in tab.items()})  # uncompressed: zlib was half the build on the 3X
   os.replace(p + ".tmp.npz", p)
+  # every refit leaves a 19 MB file; keep the last few
+  old = sorted(glob.glob(os.path.join(cache_dir, "reproject_c4_*.npz")), key=os.path.getmtime)[:-4]
+  for f in old:
+    try:
+      os.remove(f)
+    except OSError:
+      pass
   return T
 
 
@@ -410,9 +419,20 @@ class SeamMeter:
   and applied as a lookup on the surround luma."""
   BANDS = ((16, 50), (50, 100), (100, 160), (160, 235))
 
-  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=2048, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True):
+  def __init__(self, src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=2048, ring=(30.0, 130.0), alpha=0.3, every=2, feedforward=True,
+               geometry=None):
     """feedforward: filter the luma gains as a correction on top of the exposure model (from the camera states) and apply
-    them times the model's live value, so a jump in either camera's exposure is followed the same frame."""
+    them times the model's live value, so a jump in either camera's exposure is followed the same frame.
+    geometry: the pixel pairs precomputed by `geometry` (kept in the table cache), else computed here."""
+    g = geometry if geometry is not None else self.geometry(src_wh, dst_wh, calib, n_pairs, ring)
+    self.y_w, self.y_n, self.pos, self.cell, self.uv_w, self.uv_n = (g[k] for k in ("y_w", "y_n", "pos", "cell", "uv_w", "uv_n"))
+    self.cell_bad = np.zeros(32 * 18, np.float32); self.CELL_ALPHA, self.CELL_LIMIT = 0.02, 0.2
+    self.alpha, self.every, self.n_calls, self.moving, self.feedforward = alpha, every, 0, False, feedforward  # measuring every frame is ~0.7 ms of CPU on a PC
+    self.state = None  # filtered [gain_y, u_off, v_off, gx, gy, band gains...]
+
+  @staticmethod
+  def geometry(src_wh=(1928, 1208), dst_wh=(1344, 760), calib=None, n_pairs=2048, ring=(30.0, 130.0)) -> dict:
+    """The NV12 byte indices of the sampled wide/narrow pairs in the seam ring, their comma 4 positions and ring cells."""
     sw, sh = src_wh; dw, dh = dst_wh
     s_stride, s_yh, _, _ = get_nv12_info(sw, sh); s_uv = s_stride * s_yh
     sc = (calib or DEFAULT_CALIB)["narrow"]["f"] / DEVICE_CAMERAS[("mici", "os04c10")].narrow_road.intrinsics[0, 0]
@@ -421,19 +441,17 @@ class SeamMeter:
     iw, vw = _nv12_index(mw, sw, sh, s_stride, s_uv, False); inn, vn = _nv12_index(mn, sw, sh, s_stride, s_uv, False)
     in_ring = vw & vn & (dist > ring[0]) & (dist < ring[1])
     sel = np.flatnonzero(in_ring)[:: max(1, int(in_ring.sum()) // n_pairs)][:n_pairs]
-    self.y_w, self.y_n = iw.ravel()[sel], inn.ravel()[sel]
-    self.pos = np.stack([(sel % dw + 0.5) / dw * 2 - 1, (sel // dw + 0.5) / dh * 2 - 1], 1).astype(np.float32)  # c4 pixel, -1..1
+    g = dict(y_w=iw.ravel()[sel], y_n=inn.ravel()[sel])
+    g["pos"] = np.stack([(sel % dw + 0.5) / dw * 2 - 1, (sel // dw + 0.5) / dh * 2 - 1], 1).astype(np.float32)  # c4 pixel, -1..1
     # the ring in 32x18 cells: a cell whose pairs persistently disagree with the fit (an obstruction on one lens, dirt, a
     # wiper) is excluded from the fit rather than dragged along; passing objects average out before they count
-    self.cell = (np.floor((self.pos + 1) / 2 * [32, 18])).astype(int); self.cell = self.cell[:, 0] * 18 + self.cell[:, 1]
-    self.cell_bad = np.zeros(32 * 18, np.float32); self.CELL_ALPHA, self.CELL_LIMIT = 0.02, 0.2
+    cell = (np.floor((g["pos"] + 1) / 2 * [32, 18])).astype(int); g["cell"] = cell[:, 0] * 18 + cell[:, 1]
     mw2, mn2 = sample_coords("narrow", dw // 2, dh // 2, 0.5, calib)
     iw2, vw2 = _nv12_index(mw2, sw, sh, s_stride, s_uv, True); inn2, vn2 = _nv12_index(mn2, sw, sh, s_stride, s_uv, True)
     in_ring2 = in_ring[::2, ::2] & vw2 & vn2
     sel2 = np.flatnonzero(in_ring2)[:: max(1, int(in_ring2.sum()) // (n_pairs // 2))][: n_pairs // 2]
-    self.uv_w, self.uv_n = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
-    self.alpha, self.every, self.n_calls, self.moving, self.feedforward = alpha, every, 0, False, feedforward  # measuring every frame is ~0.7 ms of CPU on a PC
-    self.state = None  # filtered [gain_y, u_off, v_off, gx, gy, band gains...]
+    g["uv_w"], g["uv_n"] = iw2.ravel()[sel2], inn2.ravel()[sel2]  # U byte; V is the next one
+    return g
 
   def measure(self, wide, narrow):
     """One frame's raw state vector, or None when fewer than 256 usable luma pairs (night, glare)."""
@@ -513,7 +531,8 @@ class Reprojector:
     self.src_size = get_nv12_info(*src_wh)[3]
     self.size, self.body, self.uv_offset = T["wide"]["size"], T["wide"]["body"], T["wide"]["uv_offset"]
     self.device = device
-    self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
+    self.meter_geometry = T.get("meter")
+    self.t = {cam: {k: Tensor(v, device=device).realize() for k, v in T[cam].items() if isinstance(v, np.ndarray)} for cam in ("wide", "narrow")}
     # per-frame match parameters [gain_c, u_off, v_off, gx, gy, band gains x4, ...]; on QCOM the jit reads them straight
     # from host memory (a per-call upload costs a scheduled copy, ~4 ms of Python)
     self.params_np = np.zeros(12, np.float32); self.params_np[0] = 1; self.params_np[5:9] = 1
@@ -543,7 +562,7 @@ class Reprojector:
     """Swap in freshly built tables (same sizes) between runs, e.g. after the rotation was refined. The tables are jit
     inputs, so this is one upload and no re-capture (a re-capture is ~1.3 s on the 3X with no model output)."""
     assert T["wide"]["body"] == self.body and T["wide"]["uv_offset"] == self.uv_offset
-    self.t = {cam: {k: Tensor(v, device=self.device).realize() for k, v in tab.items() if isinstance(v, np.ndarray)} for cam, tab in T.items()}
+    self.t = {cam: {k: Tensor(v, device=self.device).realize() for k, v in T[cam].items() if isinstance(v, np.ndarray)} for cam in ("wide", "narrow")}
 
   def _chroma(self):
     return self.plane.reshape(3, 1).expand(3, self.body // 3).reshape(self.body).bool()  # a broadcast: no table read

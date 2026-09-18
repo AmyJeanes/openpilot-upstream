@@ -153,7 +153,7 @@ class ModelState:
       cloudlog.warning(f"reproject_c4: rotation {np.degrees(self.rotation).round(3)} deg from {'rotation.json' + (' (fitted)' if self.rot_file.get('fitted') else '') if self.rot_file else 'CalibrationParams seed / fleet median'}")
       self.calib = RC.calib_from_rotvec(self.rotation)
       self.rp = RC.Reprojector(self.src_wh, C4_CAM, device='QCOM', cache_dir=self.cache_dir, calib=self.calib)
-      self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
+      self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib, geometry=self.rp.meter_geometry)
       self.refiner = RC.RotationRefiner(self.rotation)
       self.res_sum, self.res_n = np.zeros(3), 0  # window residuals against the applied rotation
       self.pending = None; self.loader: threading.Thread | None = None; self.rot_mtime = 0.0
@@ -247,10 +247,10 @@ class ModelState:
     calib = RC.calib_from_rotvec(d['rotvec'])
     if not os.path.exists(RC.table_path(self.src_wh, C4_CAM, self.cache_dir, calib)):
       cloudlog.warning("reproject_c4: fitted rotation has no tables yet"); self.rot_mtime = 0.0; return
-    def load():  # ~150 ms of npz decompression + the meter's ring: off the model loop
+    def load():  # one 19 MB read, off the model loop
       os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))  # inherited modeld's SCHED_FIFO 54 otherwise
       T = RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, calib)
-      self.pending = (T, calib, RC.SeamMeter(self.src_wh, C4_CAM, calib=calib), tuple(float(v) for v in d['rotvec']))
+      self.pending = (T, calib, RC.SeamMeter(self.src_wh, C4_CAM, calib=calib, geometry=T.get("meter")), tuple(float(v) for v in d['rotvec']))
     self.loader = threading.Thread(target=load, daemon=True); self.loader.start()
 
   def src_tensor(self, buf) -> Tensor:
