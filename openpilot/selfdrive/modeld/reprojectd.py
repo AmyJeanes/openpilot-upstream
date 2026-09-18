@@ -43,7 +43,7 @@ def write_progress(**kw) -> None:
 def main():
   os.nice(10)
   sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'])
-  clients = {'narrow': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_ROAD, True),
+  clients = {'narrow': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_NARROW_ROAD, True),
              'wide': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)}
   applied = tuple(RC.read_applied().get('rotvec') or RC.load_rotation()); calib = RC.calib_from_rotvec(applied)  # modeld's, once it has started
   state = RC.read_rotation_file()
