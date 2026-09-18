@@ -91,7 +91,7 @@ def main():
     if not (len(fits) >= MIN_N and se < SE_STOP) and len(fits) < MAX_N:
       continue
     final = np.array(mean)
-    # build the tables here (~15 s of numpy at low priority) so modeld's swap is just a load; then publish the fit
+    # build the tables here (~6 s of numpy at low priority) so modeld's swap is just a load; then publish the fit
     t0 = time.monotonic(); write_progress(n=len(fits), of=MAX_N, fitted=False, building=True, deg=[round(float(x), 3) for x in np.degrees(final)])
     RC.load_tables((bn.width, bn.height), C4_CAM, CACHE_DIR, RC.calib_from_rotvec(final))
     cloudlog.warning(f"reprojectd: tables built in {time.monotonic() - t0:.0f} s")

@@ -395,7 +395,7 @@ def load_tables(src_wh, dst_wh, cache_dir=None, calib=None, feather=FEATHER_PX):
       cam, k = key.split("_", 1); T[cam][k] = z[key] if z[key].ndim else int(z[key])
     return T
   T = build_tables(src_wh, dst_wh, calib, feather)
-  np.savez_compressed(p + ".tmp.npz", **{f"{cam}_{k}": v for cam, tab in T.items() for k, v in tab.items()})
+  np.savez(p + ".tmp.npz", **{f"{cam}_{k}": v for cam, tab in T.items() for k, v in tab.items()})  # uncompressed: zlib was half the build on the 3X
   os.replace(p + ".tmp.npz", p)
   return T
 
