@@ -131,9 +131,11 @@ def phase_shift(a, b):
   return -dx, -dy, float(psr)
 
 
-def match_rays(narrow_y, wide_y, calib, dst_wh=(1344, 760), patch=96, stride=64, min_psr=6.0, max_shift=None, min_matches=12):
+def match_rays(narrow_y, wide_y, calib, dst_wh=(1344, 760), patch=96, stride=64, min_psr=5.0, max_shift=None, min_matches=12):
   """Correspondences between the inset and the surround (patch centre -> centre + its measured shift) as narrow and wide
-  rays in the current calibration's geometry, or None when the frame has too few usable patches."""
+  rays in the current calibration's geometry, or None when the frame has too few usable patches. min_psr 5: at dusk only
+  a third of the textured patches reach 6 and frames fell under reprojectd's match floor; 5 doubles them at the same
+  per-frame accuracy (kabsch trims the rest)."""
   inset, surround, mw, valid = render_layers(narrow_y, wide_y, calib, dst_wh)
   dw, dh = dst_wh; max_shift = max_shift or patch / 3
   pa, pb = [], []
