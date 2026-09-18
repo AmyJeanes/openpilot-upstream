@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fits this unit's narrow->wide camera rotation for the 3X->comma 4 reprojection stage: a one-off, from frame pairs taken
-under calibrationd's own conditions (straight road, above 15 mph) while it is calibrating, or until a first fit exists.
+under calibrationd's own conditions (straight road, above 15 mph), about one frame a second until the estimate converges.
 The tables are built here and the result lands in rotation.json; modeld swaps it in (calibrationd holds until then, so the
 car cannot be engaged around the swap); afterwards this process only watches for a recalibration (device remounted),
 which starts a new fit. Numpy only, low priority, one frame pair every few seconds."""
@@ -17,8 +17,8 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER, MAX_YAW_RATE_FILTER
 from openpilot.selfdrive.modeld import reproject_c4 as RC
 
-N_FITS = 8            # frame pairs per fit (~25 s of straight driving, like calibrationd's 5 blocks)
-PERIOD = 3.0          # s between frame pairs
+MIN_N, MAX_N = 6, 40  # frames: stop when the mean has converged (SE below SE_STOP) or at MAX_N
+SE_STOP = 0.02        # deg, standard error of the trimmed mean's pitch/yaw
 MIN_MATCHES = 15
 MAX_RMS_DEG = 0.25    # per-frame residual after trimming (good frames 0.10-0.17 on the 3X)
 PROGRESS_FILE = '/data/reproject_c4/fit.json'
@@ -47,10 +47,9 @@ def main():
              'wide': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)}
   applied = tuple(RC.read_applied().get('rotvec') or RC.load_rotation()); calib = RC.calib_from_rotvec(applied)  # modeld's, once it has started
   state = RC.read_rotation_file()
-  fits: list[tuple] = []
-  last = 0.0
+  fits: list[tuple] = []; mean = applied
   cloudlog.warning(f"reprojectd: applied rotation {np.degrees(applied).round(3)} deg, {'fitted' if state.get('fitted') else 'not fitted yet'}")
-  write_progress(n=0, of=N_FITS, fitted=bool(state.get('fitted')))
+  write_progress(n=0, of=MAX_N, fitted=bool(state.get('fitted')))
   while True:
     sm.update(100)
     if not all(c.is_connected() for c in clients.values()):
@@ -63,42 +62,42 @@ def main():
     if state.get('fitted'):
       if cal in (Status.uncalibrated, Status.recalibrating) and sm.updated['extrinsicsCalibration']:
         cloudlog.warning("reprojectd: calibrationd is recalibrating: refitting the rotation")
-        state = {}; fits = []; write_progress(n=0, of=N_FITS, fitted=False)
+        state = {}; fits = []; write_progress(n=0, of=MAX_N, fitted=False)
       else:
         time.sleep(0.5)
         continue
     now = time.monotonic()
     straight_and_fast = (sm.all_checks(['carState', 'cameraOdometry']) and sm['carState'].vEgo > MIN_SPEED_FILTER
                          and abs(sm['cameraOdometry'].rot[2]) < MAX_YAW_RATE_FILTER)
-    if not straight_and_fast or now - last < PERIOD:
+    if not straight_and_fast:
       continue
-    last = now
     bn = clients['narrow'].recv(50); bw = clients['wide'].recv(50)
     if bn is None or bw is None or clients['narrow'].frame_id != clients['wide'].frame_id:
       continue
     narrow_y, wide_y = luma(bn), luma(bw)
     t0 = time.monotonic()
-    r = RC.fit_rotation(narrow_y, wide_y, calib)
+    # continuous: the first frame from the applied rotation with the coarse pass, later frames refined from the running
+    # mean (a quarter of the work, ~1 frame/s on the 3X), until the mean has converged
+    r = RC.fit_rotation(narrow_y, wide_y, calib) if not fits else RC.fit_rotation(narrow_y, wide_y, RC.calib_from_rotvec(mean), iters=1, coarse=False)
     if r is None or r[1] < MIN_MATCHES or r[2] > MAX_RMS_DEG:
       cloudlog.warning(f"reprojectd: frame {clients['narrow'].frame_id} rejected ({'no fit' if r is None else f'{r[1]} matches, rms {r[2]:.3f} deg'}), {time.monotonic() - t0:.1f} s")
       continue
     fits.append(r)
-    cloudlog.warning(f"reprojectd: fit {len(fits)}/{N_FITS}: {np.degrees(r[0]).round(3)} deg, {r[1]} matches, rms {r[2]:.3f} deg, {time.monotonic() - t0:.1f} s")
-    write_progress(n=len(fits), of=N_FITS, fitted=False, last_deg=[round(float(x), 3) for x in np.degrees(r[0])], rms=round(r[2], 3))
-    if len(fits) < N_FITS:
+    mean, keep, spread, se = RC.combine_fits([f[0] for f in fits])
+    cloudlog.warning(f"reprojectd: fit {len(fits)}: {np.degrees(r[0]).round(3)} deg, {r[1]} matches, rms {r[2]:.3f} deg, {time.monotonic() - t0:.1f} s; "
+                     f"mean {np.degrees(mean).round(3)} spread {spread:.3f} se {se:.3f} deg")
+    write_progress(n=len(fits), of=MAX_N, fitted=False, last_deg=[round(float(x), 3) for x in np.degrees(r[0])], rms=round(r[2], 3),
+                   mean_deg=[round(float(x), 3) for x in np.degrees(mean)], se_deg=round(se, 3))
+    if not (len(fits) >= MIN_N and se < SE_STOP) and len(fits) < MAX_N:
       continue
-    # drop the two frames farthest from the mean, then average the rest
-    rv = [f[0] for f in fits]; m = RC.mean_rotvec(rv)
-    dev = [np.linalg.norm(RC.matrix_to_rotvec(RC.rotvec_to_matrix(m).T @ RC.rotvec_to_matrix(v))) for v in rv]
-    keep = np.argsort(dev)[:len(rv) - 2]
-    final = RC.mean_rotvec([rv[i] for i in keep]); spread = float(np.degrees(max(dev[i] for i in keep)))
+    final = np.array(mean)
     # build the tables here (~15 s of numpy at low priority) so modeld's swap is just a load; then publish the fit
-    t0 = time.monotonic(); write_progress(n=N_FITS, of=N_FITS, fitted=False, building=True, deg=[round(float(x), 3) for x in np.degrees(final)])
+    t0 = time.monotonic(); write_progress(n=len(fits), of=MAX_N, fitted=False, building=True, deg=[round(float(x), 3) for x in np.degrees(final)])
     RC.load_tables((bn.width, bn.height), C4_CAM, CACHE_DIR, RC.calib_from_rotvec(final))
     cloudlog.warning(f"reprojectd: tables built in {time.monotonic() - t0:.0f} s")
-    RC.save_rotation(final, fitted=True, n=int(len(keep)), spread_deg=round(spread, 3), applied=[float(v) for v in applied])
+    RC.save_rotation(final, fitted=True, n=int(len(keep)), spread_deg=round(spread, 3), se_deg=round(se, 3), applied=[float(v) for v in applied])
     state = RC.read_rotation_file(); fits = []
-    write_progress(n=N_FITS, of=N_FITS, fitted=True, deg=[round(float(x), 3) for x in np.degrees(final)], spread_deg=round(spread, 3))
+    write_progress(n=len(keep), of=len(keep), fitted=True, deg=[round(float(x), 3) for x in np.degrees(final)], spread_deg=round(spread, 3), se_deg=round(se, 3))
     cloudlog.warning(f"reprojectd: rotation fitted {np.degrees(final).round(3)} deg (was {np.degrees(applied).round(3)}, spread {spread:.3f} deg)")
 
 

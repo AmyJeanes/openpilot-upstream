@@ -167,13 +167,14 @@ def kabsch(rays_n, rays_w):
   return matrix_to_rotvec(Rm), int(len(rays_n)), float(np.sqrt(np.mean(res[keep] ** 2)))
 
 
-def fit_rotation(narrow_y, wide_y, calib0, dst_wh=(1344, 760), iters=3):
-  """One frame pair -> (rotvec, n_matches, rms_deg) or None. The first pass uses big patches (a fleet-median seed can be
-  tens of px off); the later passes re-render with the fit and refine with small ones."""
+def fit_rotation(narrow_y, wide_y, calib0, dst_wh=(1344, 760), iters=3, coarse=True):
+  """One frame pair -> (rotvec, n_matches, rms_deg) or None. With `coarse` the first pass uses big patches (a fleet-median
+  seed can be tens of px off); the later passes re-render with the fit and refine with small ones. From a good seed (the
+  running mean of earlier frames) coarse=False, iters=2 is enough and about half the work."""
   calib = dict(calib0); R = np.asarray(calib0["R"], float)
   for it in range(iters):
     calib["R"] = tuple(R)
-    m = match_rays(narrow_y, wide_y, calib, dst_wh, patch=192, stride=96, max_shift=64) if it == 0 else match_rays(narrow_y, wide_y, calib, dst_wh)
+    m = match_rays(narrow_y, wide_y, calib, dst_wh, patch=192, stride=96, max_shift=64) if (it == 0 and coarse) else match_rays(narrow_y, wide_y, calib, dst_wh)
     if m is None:
       return None
     R, n, rms = kabsch(*m)
@@ -185,6 +186,17 @@ def mean_rotvec(rotvecs):
   M = sum(rotvec_to_matrix(v) for v in rotvecs) / len(rotvecs)
   U, _, Vt = np.linalg.svd(M); d = np.sign(np.linalg.det(U @ Vt))
   return tuple(float(v) for v in matrix_to_rotvec(U @ np.diag([1, 1, d]) @ Vt))
+
+
+def combine_fits(rotvecs, trim=0.2):
+  """Trimmed chordal mean of per-frame fits: drops the `trim` fraction farthest from the mean. Returns (mean, kept indices,
+  spread_deg = farthest kept, se_deg = standard error of the kept pitch/yaw, the convergence measure)."""
+  m = mean_rotvec(rotvecs)
+  dev = np.array([np.linalg.norm(matrix_to_rotvec(rotvec_to_matrix(m).T @ rotvec_to_matrix(v))) for v in rotvecs])
+  keep = np.argsort(dev)[:max(1, int(round(len(rotvecs) * (1 - trim))))]
+  kept = np.array([rotvecs[i] for i in keep]); mean = mean_rotvec(kept)
+  se = float(np.degrees(np.linalg.norm(kept[:, :2].std(0)) / np.sqrt(len(kept)))) if len(kept) > 1 else float("inf")
+  return mean, keep, float(np.degrees(dev[keep].max())), se
 
 
 class RotationRefiner:
