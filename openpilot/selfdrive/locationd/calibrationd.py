@@ -209,8 +209,9 @@ class Calibrator:
       except (OSError, ValueError):
         prev = None
       if rot is not None and prev is not None and not np.allclose(rot, prev, atol=1e-6) and (self.valid_blocks or self.idx):
-        cloudlog.warning(f"calibrationd: reprojection rotation changed {np.degrees(prev).round(3)} -> {np.degrees(rot).round(3)} deg: recalibrating")
-        self.reset(); self.cal_status = log.ExtrinsicsCalibration.Status.recalibrating
+        # uncalibrated, not recalibrating: that status means the mount moved and raises the offroad mounting alert
+        cloudlog.warning(f"calibrationd: reprojection rotation changed {np.degrees(prev).round(3)} -> {np.degrees(rot).round(3)} deg: calibrating again")
+        self.reset(); self.cal_status = log.ExtrinsicsCalibration.Status.uncalibrated
       if rot != prev:
         try:
           os.makedirs(os.path.dirname(REPROJECT_CALIBRATED_WITH), exist_ok=True)
