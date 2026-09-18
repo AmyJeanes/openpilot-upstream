@@ -186,7 +186,7 @@ class ModelState:
       self.res_sum, self.res_n = np.zeros(3), 0  # window residuals against the applied rotation (no-swap mode)
       self.rebuild: subprocess.Popen | None = None; self.pending_T = None; self.pending_calib = None
       self._src_tensors: dict[int, Tensor] = {}
-      self.rp_time = 0.0
+      self.rp_time = 0.0; self.rp_enqueue = 0.0
       cam_w, cam_h = C4_CAM  # the warp pkl + model see a comma 4 camera
     jits = load_oob(open_file_chunked(modeld_pkl_path(chestnut)))
     self.model_device = jits['input_specs']['new_img'][2]
@@ -291,6 +291,7 @@ class ModelState:
     if self.rp is not None:
       t0 = time.perf_counter()
       self.rp(self.src_tensor(bufs['big_img']), self.src_tensor(bufs['img']), **inputs.get('reproj_match', {}))
+      self.rp_enqueue = time.perf_counter() - t0  # the Python side of the stage; the rest is the GPU
       Device['QCOM'].synchronize()
       self.rp_time = time.perf_counter() - t0
     else:
@@ -398,7 +399,19 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "wideRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
-  stage_times: list[float] = []; exec_times: list[float] = []; meter_times: list[float] = []
+  stage_times: list[float] = []; exec_times: list[float] = []; meter_times: list[float] = []; enq_times: list[float] = []
+
+  def sys_stats() -> dict:
+    """Core clock, GPU load and this thread's context switches: for the on-road 4.4 vs 7.9 ms stage mystery."""
+    def rd(p):
+      try:
+        return open(p).read()
+      except OSError:
+        return ''
+    st = rd('/proc/thread-self/status')
+    sw = {k: int(st.split(k + ':')[1].split()[0]) for k in ('voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches') if k + ':' in st}
+    return dict(cpu_mhz=int(rd('/sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq').strip() or 0) // 1000,
+                gpu_busy=rd('/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage').strip(), vcsw=sw.get('voluntary_ctxt_switches'), nivcsw=sw.get('nonvoluntary_ctxt_switches'))
 
   publish_state = PublishState()
   params = Params()
@@ -534,11 +547,12 @@ def main(demo=False):
       model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
-    exec_times.append(model_execution_time); stage_times.append(model.rp_time if model.rp is not None else 0.0)
+    exec_times.append(model_execution_time); stage_times.append(model.rp_time if model.rp is not None else 0.0); enq_times.append(model.rp_enqueue if model.rp is not None else 0.0)
     if len(exec_times) % 20 == 0 and model.rp is not None and inputs.get('reproj_match'):
       # live fit metrics for the on-screen debug view (ui reads this file); once a second
       m4 = inputs['reproj_match']; rf = model.refiner
       live = dict(model_ms=round(float(np.median(exec_times[-20:])) * 1e3, 1), stage_ms=round(float(np.median(stage_times[-20:])) * 1e3, 2),
+                  stage_enq_ms=round(float(np.median(enq_times[-20:])) * 1e3, 2), **sys_stats(),
                   meter_ms=round(float(np.median(meter_times[-20:])) * 1e3, 2) if meter_times else None, drops=int(vipc_dropped_frames),
                   gain=round(m4['gain_y'], 3), model_gain=round(float(g), 3), u=round(m4['u_off'], 1), v=round(m4['v_off'], 1), gx=round(m4['gx'], 3), gy=round(m4['gy'], 3),
                   bands=[round(b, 3) for b in m4['bands']], rot_deg=[round(float(x), 3) for x in np.degrees(model.rotation)],
@@ -551,7 +565,7 @@ def main(demo=False):
     if len(exec_times) % 200 == 0:
       q = lambda t: f"{np.median(t[-200:]) * 1e3:.2f}/{np.percentile(t[-200:], 95) * 1e3:.2f}"
       m4 = inputs.get('reproj_match')
-      print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms; seam meter {q(meter_times) if meter_times else '-'} ms; "
+      print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms (enqueue {q(enq_times)}); {sys_stats()}; seam meter {q(meter_times) if meter_times else '-'} ms; "
             f"gain {m4['gain_y']:.3f} U {m4['u_off']:+.1f} V {m4['v_off']:+.1f} grad {m4['gx']:+.3f},{m4['gy']:+.3f} bands {np.round(m4['bands'], 3)} (model {g:.3f})"
             if m4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
 
