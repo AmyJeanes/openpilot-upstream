@@ -13,6 +13,7 @@ from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient
+from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER, MAX_YAW_RATE_FILTER
 from openpilot.selfdrive.modeld import reproject_c4 as RC
@@ -61,6 +62,9 @@ def main():
   applied = tuple(RC.read_applied().get('rotvec') or RC.load_rotation()); calib = RC.calib_from_rotvec(applied)  # modeld's, once it has started
   state = RC.read_rotation_file()
   fits: list[tuple] = []; mean = applied; prev_cal = None
+  if state.get('fitted') and Params().get("CalibrationParams") is None:
+    # a settings reset removes the calibration (and cycles onroad, so we start here again): fit again before it
+    cloudlog.warning("reprojectd: calibration was reset: refitting the rotation"); state = {}
   cloudlog.warning(f"reprojectd: applied rotation {np.degrees(applied).round(3)} deg, {'fitted' if state.get('fitted') else 'not fitted yet'}")
   write_progress(n=0, of=MAX_N, fitted=bool(state.get('fitted')))
   while True:
@@ -74,10 +78,6 @@ def main():
     cal = sm['extrinsicsCalibration'].calStatus
     if prev_cal is None:
       prev_cal = cal
-      # a calibration reset from the settings (offroad) only shows as calibrationd starting from nothing
-      if state.get('fitted') and cal == Status.uncalibrated and sm['extrinsicsCalibration'].calPerc == 0:
-        cloudlog.warning("reprojectd: no calibration at start: refitting the rotation")
-        state = {}; fits = []; write_progress(n=0, of=MAX_N, fitted=False)
     if state.get('fitted'):
       # only a calibration that was complete and got reset (user, or calibrationd's own mount check) means a refit; the
       # reset calibrationd does for our own swap must not, or fit -> swap -> reset -> refit loops forever
