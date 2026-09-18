@@ -47,7 +47,7 @@ def main():
              'wide': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)}
   applied = tuple(RC.read_applied().get('rotvec') or RC.load_rotation()); calib = RC.calib_from_rotvec(applied)  # modeld's, once it has started
   state = RC.read_rotation_file()
-  fits: list[tuple] = []; mean = applied
+  fits: list[tuple] = []; mean = applied; prev_cal = None
   cloudlog.warning(f"reprojectd: applied rotation {np.degrees(applied).round(3)} deg, {'fitted' if state.get('fitted') else 'not fitted yet'}")
   write_progress(n=0, of=MAX_N, fitted=bool(state.get('fitted')))
   while True:
@@ -59,13 +59,19 @@ def main():
     if not sm.all_checks(['extrinsicsCalibration']):
       continue
     cal = sm['extrinsicsCalibration'].calStatus
+    if prev_cal is None:
+      prev_cal = cal
     if state.get('fitted'):
-      if cal in (Status.uncalibrated, Status.recalibrating) and sm.updated['extrinsicsCalibration']:
-        cloudlog.warning("reprojectd: calibrationd is recalibrating: refitting the rotation")
+      # only a calibration that was complete and got reset (user, or calibrationd's own mount check) means a refit; the
+      # reset calibrationd does for our own swap must not, or fit -> swap -> reset -> refit loops forever
+      if prev_cal == Status.calibrated and cal in (Status.uncalibrated, Status.recalibrating):
+        cloudlog.warning("reprojectd: calibration was reset: refitting the rotation")
         state = {}; fits = []; write_progress(n=0, of=MAX_N, fitted=False)
       else:
+        prev_cal = cal
         time.sleep(0.5)
         continue
+    prev_cal = cal
     now = time.monotonic()
     straight_and_fast = (sm.all_checks(['carState', 'cameraOdometry']) and sm['carState'].vEgo > MIN_SPEED_FILTER
                          and abs(sm['cameraOdometry'].rot[2]) < MAX_YAW_RATE_FILTER)
@@ -96,7 +102,7 @@ def main():
     RC.load_tables((bn.width, bn.height), C4_CAM, CACHE_DIR, RC.calib_from_rotvec(final))
     cloudlog.warning(f"reprojectd: tables built in {time.monotonic() - t0:.0f} s")
     RC.save_rotation(final, fitted=True, n=int(len(keep)), spread_deg=round(spread, 3), se_deg=round(se, 3), applied=[float(v) for v in applied])
-    state = RC.read_rotation_file(); fits = []
+    state = RC.read_rotation_file(); fits = []; applied = tuple(float(v) for v in final); calib = RC.calib_from_rotvec(applied)
     write_progress(n=len(keep), of=len(keep), fitted=True, deg=[round(float(x), 3) for x in np.degrees(final)], spread_deg=round(spread, 3), se_deg=round(se, 3))
     cloudlog.warning(f"reprojectd: rotation fitted {np.degrees(final).round(3)} deg (was {np.degrees(applied).round(3)}, spread {spread:.3f} deg)")
 

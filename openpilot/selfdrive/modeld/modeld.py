@@ -248,6 +248,7 @@ class ModelState:
     if not os.path.exists(RC.table_path(self.src_wh, C4_CAM, self.cache_dir, calib)):
       cloudlog.warning("reproject_c4: fitted rotation has no tables yet"); self.rot_mtime = 0.0; return
     def load():  # ~150 ms of npz decompression + the meter's ring: off the model loop
+      os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))  # inherited modeld's SCHED_FIFO 54 otherwise
       T = RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, calib)
       self.pending = (T, calib, RC.SeamMeter(self.src_wh, C4_CAM, calib=calib), tuple(float(v) for v in d['rotvec']))
     self.loader = threading.Thread(target=load, daemon=True); self.loader.start()
