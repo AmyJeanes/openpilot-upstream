@@ -144,7 +144,7 @@ class HudRenderer(Widget):
       f"seam gain {d.get('gain')} (model {d.get('model_gain')})  U {d.get('u'):+}  V {d.get('v'):+}  grad {d.get('gx'):+.2f} {d.get('gy'):+.2f}",
       "bands " + " ".join(f"{b:.2f}" for b in d.get('bands', [])),
       f"rot p {rot[0]:+.2f} y {rot[1]:+.2f} r {rot[2]:+.2f} deg  steps {d.get('steps')}  acc {d.get('acc')}/600"
-      + (f"  resid p {r[1]:+.2f} y {r[2]:+.2f}" if r else "") + ("  REBUILDING" if d.get('rebuilding') else ""),
+      + (f"  resid p {r[0]:+.2f} y {r[1]:+.2f}" if r else "") + ("  REBUILDING" if d.get('rebuilding') else "") + ("" if d.get('live_swap') else "  next start"),
     ]
     size, pad = 30, 12
     w = max(measure_text_cached(self._font_medium, ln, size).x for ln in lines) + 2 * pad

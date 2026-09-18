@@ -44,7 +44,8 @@ from openpilot.selfdrive.modeld import reproject_c4 as RC
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 REPROJECT_C4 = os.getenv('REPROJECT_C4', '1') != '0'  # 3X cameras -> comma 4 geometry on the QCOM, in front of the comma 4 big model
-REPROJECT_C4_REFINE = os.getenv('REPROJECT_C4_REFINE', '1') != '0'  # continual rotation fit (table rebuild + swap while driving)
+REPROJECT_C4_REFINE = os.getenv('REPROJECT_C4_REFINE', '1') != '0'  # estimate the rotation from the model output while driving
+REPROJECT_C4_LIVE_SWAP = os.getenv('REPROJECT_C4_LIVE_SWAP', '0') != '0'  # ...and rebuild + swap the tables mid-drive (else applied at next start)
 C4_CAM = (1344, 760)
 
 LAT_SMOOTH_SECONDS = 0.0
@@ -182,6 +183,7 @@ class ModelState:
       self.rp = RC.Reprojector(self.src_wh, C4_CAM, device='QCOM', cache_dir=self.cache_dir, calib=self.calib)
       self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
       self.refiner = RC.RotationRefiner(self.rotation)
+      self.res_sum, self.res_n = np.zeros(3), 0  # window residuals against the applied rotation (no-swap mode)
       self.rebuild: subprocess.Popen | None = None; self.pending_T = None; self.pending_calib = None
       self._src_tensors: dict[int, Tensor] = {}
       self.rp_time = 0.0
@@ -239,6 +241,16 @@ class ModelState:
       return
     new = self.refiner.push(model_output['wide_from_device_euler'][0], model_output['wide_from_device_euler_stds'][0], v_ego)
     if new is None or self.rebuild is not None:
+      return
+    if not REPROJECT_C4_LIVE_SWAP:
+      # the tables stay as started, so every window measures against the same rotation: average them, write the
+      # estimate for the next start, and keep the refiner at the applied rotation so windows don't compound
+      self.res_sum += self.refiner.last_residual; self.res_n += 1
+      est = RC.matrix_to_rotvec(RC.rotvec_to_matrix(self.rotation) @ RC.rotvec_to_matrix(self.res_sum / self.res_n * self.refiner.k))
+      self.refiner.rotvec = np.array(self.rotation, np.float64)
+      save_rotation(tuple(float(v) for v in est))
+      cloudlog.warning(f"reproject_c4: rotation estimate {self.refiner.steps} ({self.res_n} windows): residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
+                       f"applied {np.degrees(self.rotation).round(3)} -> next start {np.degrees(est).round(3)} deg")
       return
     old = self.rotation; self.rotation = new
     save_rotation(new)
@@ -531,7 +543,7 @@ def main(demo=False):
                   gain=round(m4['gain_y'], 3), model_gain=round(float(g), 3), u=round(m4['u_off'], 1), v=round(m4['v_off'], 1), gx=round(m4['gx'], 3), gy=round(m4['gy'], 3),
                   bands=[round(b, 3) for b in m4['bands']], rot_deg=[round(float(x), 3) for x in np.degrees(model.rotation)],
                   residual_deg=[round(float(x), 3) for x in np.degrees(rf.last_residual)] if rf.last_residual is not None else None,
-                  steps=rf.steps, acc=rf.n, rebuilding=model.rebuild is not None, big=model is not small_model)
+                  steps=rf.steps, acc=rf.n, rebuilding=model.rebuild is not None, live_swap=REPROJECT_C4_LIVE_SWAP, big=model is not small_model)
       try:
         tmp = '/data/reproject_c4/live.json.tmp'; json.dump(live, open(tmp, 'w')); os.replace(tmp, '/data/reproject_c4/live.json')
       except OSError:
