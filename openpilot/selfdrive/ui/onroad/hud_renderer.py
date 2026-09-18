@@ -144,15 +144,24 @@ class HudRenderer(Widget):
       return
     r = d.get('residual_deg'); rot = d.get('rot_deg') or [0, 0, 0]
     lines = [
-      f"model {d.get('model_ms')} ms  stage {d.get('stage_ms')}  meter {d.get('meter_ms')}  drops {d.get('drops')}  {'big' if d.get('big') else 'SMALL'}",
+      f"model {d.get('model_ms')} ms  stage {d.get('stage_ms')} (py {d.get('stage_enq_ms')})  meter {d.get('meter_ms')}  drops {d.get('drops')}  "
+      f"cpu {d.get('cpu_mhz')} MHz  gpu {d.get('gpu_busy')}%  {'big' if d.get('big') else 'SMALL'}",
       f"seam gain {d.get('gain')} (model {d.get('model_gain')})  U {d.get('u'):+}  V {d.get('v'):+}  grad {d.get('gx'):+.2f} {d.get('gy'):+.2f}",
       "bands " + " ".join(f"{b:.2f}" for b in d.get('bands', [])),
-      f"rot p {rot[0]:+.2f} y {rot[1]:+.2f} r {rot[2]:+.2f} deg  steps {d.get('steps')}  acc {d.get('acc')}/600"
-      + (f"  resid p {r[0]:+.2f} y {r[1]:+.2f}" if r else "") + ("  REBUILDING" if d.get('rebuilding') else "") + ("" if d.get('live_swap') else "  next start"),
+      f"rot p {rot[0]:+.2f} y {rot[1]:+.2f} r {rot[2]:+.2f} deg  {'FITTED' if d.get('fitted') else 'seed'}"
+      + ("  LOADING" if d.get('loading') else "") + (f"   model resid p {r[0]:+.2f} y {r[1]:+.2f}  ({d.get('acc')}/600)" if r else f"   model resid: {d.get('acc')}/600 frames"),
     ]
     f = getattr(self, '_fit', None)
     if f:
-      lines.append(f"direct fit {f.get('n')}/{f.get('of')}" + (f"  {f['deg']} spread {f.get('spread_deg')}  FITTED" if f.get('fitted') else (f"  last {f['last_deg']} rms {f.get('rms')}" if f.get('last_deg') else "")))
+      if f.get('fitted'):
+        fit_txt = f"pre-calib: FITTED from {f.get('n')} frames  {f.get('deg')}  spread {f.get('spread_deg')}  se {f.get('se_deg')}"
+      elif f.get('building'):
+        fit_txt = f"pre-calib: building tables for {f.get('deg')}"
+      elif f.get('mean_deg'):
+        fit_txt = f"pre-calib: {f.get('n')} frames  mean {f.get('mean_deg')}  se {f.get('se_deg')}  last rms {f.get('rms')}"
+      else:
+        fit_txt = "pre-calib: waiting for straight road above 15 mph"
+      lines.append(fit_txt)
     size, pad = 30, 12
     w = max(measure_text_cached(self._font_medium, ln, size).x for ln in lines) + 2 * pad
     h = len(lines) * (size + 6) + 2 * pad
