@@ -6,7 +6,9 @@ While the roll calibration is a real value that can be estimated, here we assume
 and the image input into the neural network is not corrected for roll.
 '''
 
+import json
 import os
+import time
 import capnp
 import numpy as np
 from typing import NoReturn
@@ -57,6 +59,12 @@ def sanity_clip(rpy: np.ndarray) -> np.ndarray:
   return np.array([rpy[0],
                    np.clip(rpy[1], PITCH_LIMITS[0] - .005, PITCH_LIMITS[1] + .005),
                    np.clip(rpy[2], YAW_LIMITS[0] - .005, YAW_LIMITS[1] + .005)])
+
+# the 3X->comma 4 reprojection stage (modeld) writes what rotation it runs with; the calibration only counts once that is a
+# fitted one (reprojectd), and starts over when it changes: the model output this calibration is built on depends on it
+REPROJECT_APPLIED = '/data/reproject_c4/applied.json'
+REPROJECT_CALIBRATED_WITH = '/data/reproject_c4/calibrated_with.json'
+
 
 def moving_avg_with_linear_decay(prev_mean: np.ndarray, new_val: np.ndarray, idx: int, block_size: float) -> np.ndarray:
   return (idx*prev_mean + (block_size - idx) * new_val) / block_size
@@ -173,6 +181,40 @@ class Calibrator:
   def handle_v_ego(self, v_ego: float) -> None:
     self.v_ego = v_ego
 
+  def reproject_ready(self) -> bool:
+    """False while the reprojection stage runs on an unfitted rotation (the calibration is held at uncalibrated); a fitted
+    rotation different from the one the current calibration was built with restarts the calibration."""
+    now = time.monotonic()
+    if now - getattr(self, '_rp_t', 0.0) < 1.0:
+      return getattr(self, '_rp_ready', True)
+    self._rp_t = now
+    try:
+      d = json.load(open(REPROJECT_APPLIED))
+    except (OSError, ValueError):
+      d = {}
+    ready = not d.get('stage', False) or bool(d.get('fitted'))
+    if not ready:
+      if self.valid_blocks or self.idx or self.cal_status != log.ExtrinsicsCalibration.Status.uncalibrated:
+        cloudlog.warning("calibrationd: holding until the reprojection rotation is fitted")
+        self.reset(); self.cal_status = log.ExtrinsicsCalibration.Status.uncalibrated
+    else:
+      rot = d.get('rotvec') if d.get('stage') else None
+      try:
+        prev = json.load(open(REPROJECT_CALIBRATED_WITH)).get('rotvec')
+      except (OSError, ValueError):
+        prev = None
+      if rot is not None and prev is not None and not np.allclose(rot, prev, atol=1e-6) and (self.valid_blocks or self.idx):
+        cloudlog.warning(f"calibrationd: reprojection rotation changed {np.degrees(prev).round(3)} -> {np.degrees(rot).round(3)} deg: recalibrating")
+        self.reset(); self.cal_status = log.ExtrinsicsCalibration.Status.recalibrating
+      if rot != prev:
+        try:
+          os.makedirs(os.path.dirname(REPROJECT_CALIBRATED_WITH), exist_ok=True)
+          json.dump({'rotvec': rot}, open(REPROJECT_CALIBRATED_WITH, 'w'))
+        except OSError:
+          pass
+    self._rp_ready = ready
+    return ready
+
   def get_smooth_rpy(self) -> np.ndarray:
     if self.old_rpy_weight > 0:
       return self.old_rpy_weight * self.old_rpy + (1.0 - self.old_rpy_weight) * self.rpy
@@ -275,7 +317,7 @@ def main() -> NoReturn:
     timeout = 0 if sm.frame == -1 else 100
     sm.update(timeout)
 
-    if sm.updated['cameraOdometry']:
+    if sm.updated['cameraOdometry'] and calibrator.reproject_ready():
       calibrator.handle_v_ego(sm['carState'].vEgo)
       new_rpy = calibrator.handle_cam_odom(sm['cameraOdometry'].trans,
                                            sm['cameraOdometry'].rot,

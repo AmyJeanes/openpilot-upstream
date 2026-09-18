@@ -2,7 +2,6 @@
 from collections.abc import Callable
 import base64
 import json
-import subprocess
 import sys
 import ctypes
 from functools import cached_property
@@ -44,8 +43,7 @@ from openpilot.selfdrive.modeld import reproject_c4 as RC
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 REPROJECT_C4 = os.getenv('REPROJECT_C4', '1') != '0'  # 3X cameras -> comma 4 geometry on the QCOM, in front of the comma 4 big model
-REPROJECT_C4_REFINE = os.getenv('REPROJECT_C4_REFINE', '1') != '0'  # estimate the rotation from the model output while driving
-REPROJECT_C4_LIVE_SWAP = os.getenv('REPROJECT_C4_LIVE_SWAP', '0') != '0'  # ...and rebuild + swap the tables mid-drive (else applied at next start)
+REPROJECT_C4_REFINE = os.getenv('REPROJECT_C4_REFINE', '1') != '0'  # monitor the rotation with the model's own wide_from_device output
 C4_CAM = (1344, 760)
 
 LAT_SMOOTH_SECONDS = 0.0
@@ -157,8 +155,9 @@ class ModelState:
       self.rp = RC.Reprojector(self.src_wh, C4_CAM, device='QCOM', cache_dir=self.cache_dir, calib=self.calib)
       self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
       self.refiner = RC.RotationRefiner(self.rotation)
-      self.res_sum, self.res_n = np.zeros(3), 0  # window residuals against the applied rotation (no-swap mode)
-      self.rebuild: subprocess.Popen | None = None; self.pending_T = None; self.pending_calib = None
+      self.res_sum, self.res_n = np.zeros(3), 0  # window residuals against the applied rotation
+      self.pending = None; self.loader: threading.Thread | None = None; self.rot_mtime = 0.0
+      RC.save_applied(self.rotation, self.rot_file.get('fitted', False))
       self._src_tensors: dict[int, Tensor] = {}
       self.rp_time = 0.0; self.rp_enqueue = 0.0
       cam_w, cam_h = C4_CAM  # the warp pkl + model see a comma 4 camera
@@ -209,51 +208,49 @@ class ModelState:
     return {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
 
   def refine(self, model_output: dict[str, np.ndarray], v_ego: float) -> None:
-    """Continual rotation fit from the model's wide_from_device_euler: a step saves the rotation, builds its tables out of
-    process, loads them in a thread and swaps them in between runs (the tables are jit inputs, so a swap is one upload)."""
+    """The model's wide_from_device_euler is the residual of the applied rotation as the model sees it. Without a direct fit
+    (reprojectd) the window residuals are averaged and written as the estimate for the next start; with one it is a monitor."""
     if 'wide_from_device_euler' not in model_output:
       return
     new = self.refiner.push(model_output['wide_from_device_euler'][0], model_output['wide_from_device_euler_stds'][0], v_ego)
-    if new is None or self.rebuild is not None:
+    self.refiner.rotvec = np.array(self.rotation, np.float64)  # never compound: every window measures against what is applied
+    if new is None or self.rot_file.get('fitted'):
       return
-    if not REPROJECT_C4_LIVE_SWAP:
-      if self.rot_file.get('fitted'):  # reprojectd's direct fit owns the file; the model residual is a monitor only
-        self.refiner.rotvec = np.array(self.rotation, np.float64); return
-      # the tables stay as started, so every window measures against the same rotation: average them, write the
-      # estimate for the next start, and keep the refiner at the applied rotation so windows don't compound
-      self.res_sum += self.refiner.last_residual; self.res_n += 1
-      est = RC.matrix_to_rotvec(RC.rotvec_to_matrix(self.rotation) @ RC.rotvec_to_matrix(self.res_sum / self.res_n * self.refiner.k))
-      self.refiner.rotvec = np.array(self.rotation, np.float64)
-      RC.save_rotation(est, applied=list(self.rotation), windows=self.res_n)
-      cloudlog.warning(f"reproject_c4: rotation estimate {self.refiner.steps} ({self.res_n} windows): residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
-                       f"applied {np.degrees(self.rotation).round(3)} -> next start {np.degrees(est).round(3)} deg")
-      return
-    old = self.rotation; self.rotation = new
-    RC.save_rotation(new)
-    cloudlog.warning(f"reproject_c4: rotation step {self.refiner.steps}: residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
-                     f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; rebuilding tables")
-    self.pending_calib = RC.calib_from_rotvec(new)
-    # ~15 s of numpy: at modeld's realtime priority and core pinning it starves the other processes on that core (seen as
-    # a commIssue burst), so it runs as an ordinary low-priority process on any core
-    def unpin():
-      os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0)); os.nice(10); os.sched_setaffinity(0, range(os.cpu_count() or 1))
-    self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
-                                     'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
-                                     json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(self.pending_calib)], preexec_fn=unpin)
+    self.res_sum += self.refiner.last_residual; self.res_n += 1
+    est = RC.matrix_to_rotvec(RC.rotvec_to_matrix(self.rotation) @ RC.rotvec_to_matrix(self.res_sum / self.res_n * self.refiner.k))
+    RC.save_rotation(est, applied=list(self.rotation), windows=self.res_n)
+    cloudlog.warning(f"reproject_c4: rotation estimate {self.refiner.steps} ({self.res_n} windows): residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
+                     f"applied {np.degrees(self.rotation).round(3)} -> next start {np.degrees(est).round(3)} deg")
 
-  def poll_rebuild(self) -> None:
-    if self.rebuild is not None and self.rebuild.poll() is not None:
-      ok, self.rebuild = self.rebuild.returncode == 0, None
-      if not ok:
-        cloudlog.error("reproject_c4: table rebuild failed"); return
-      # the npz decompresses ~20 MB (~150 ms of CPU on the device): off the model loop
-      self.loader = threading.Thread(target=lambda: setattr(self, 'pending_T', RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, self.pending_calib)), daemon=True)
-      self.loader.start()
-    if getattr(self, 'pending_T', None) is not None:
-      T, self.pending_T = self.pending_T, None
+  def poll_fit(self) -> None:
+    """Once a second: a new direct fit in rotation.json (reprojectd, tables already built) is loaded in a thread and swapped in
+    between runs (one upload). This happens while calibrationd holds, so the car cannot be engaged."""
+    if self.pending is not None:
+      T, calib, meter, rot = self.pending; self.pending = None; self.loader = None
       t0 = time.perf_counter()
-      self.rp.reload(T); self.calib = self.pending_calib
-      cloudlog.warning(f"reproject_c4: tables swapped in {(time.perf_counter() - t0) * 1e3:.0f} ms")
+      self.rp.reload(T); self.calib, self.meter, self.rotation = calib, meter, rot
+      self.rot_file = RC.read_rotation_file(); self.refiner.rotvec = np.array(rot, np.float64); self.res_sum[:] = 0; self.res_n = 0
+      RC.save_applied(rot, True)
+      cloudlog.warning(f"reproject_c4: fitted rotation {np.degrees(rot).round(3)} deg swapped in ({(time.perf_counter() - t0) * 1e3:.0f} ms)")
+      return
+    if self.loader is not None:
+      return
+    try:
+      mtime = os.stat(RC.ROTATION_FILE).st_mtime
+    except OSError:
+      return
+    if mtime == self.rot_mtime:
+      return
+    self.rot_mtime = mtime; d = RC.read_rotation_file()
+    if not d.get('fitted') or np.allclose(d['rotvec'], self.rotation, atol=1e-6):
+      return
+    calib = RC.calib_from_rotvec(d['rotvec'])
+    if not os.path.exists(RC.table_path(self.src_wh, C4_CAM, self.cache_dir, calib)):
+      cloudlog.warning("reproject_c4: fitted rotation has no tables yet"); self.rot_mtime = 0.0; return
+    def load():  # ~150 ms of npz decompression + the meter's ring: off the model loop
+      T = RC.load_tables(self.src_wh, C4_CAM, self.cache_dir, calib)
+      self.pending = (T, calib, RC.SeamMeter(self.src_wh, C4_CAM, calib=calib), tuple(float(v) for v in d['rotvec']))
+    self.loader = threading.Thread(target=load, daemon=True); self.loader.start()
 
   def src_tensor(self, buf) -> Tensor:
     data = buf.data if hasattr(buf, 'data') else buf
@@ -533,7 +530,7 @@ def main(demo=False):
                   gain=round(m4['gain_y'], 3), model_gain=round(float(g), 3), u=round(m4['u_off'], 1), v=round(m4['v_off'], 1), gx=round(m4['gx'], 3), gy=round(m4['gy'], 3),
                   bands=[round(b, 3) for b in m4['bands']], rot_deg=[round(float(x), 3) for x in np.degrees(model.rotation)],
                   residual_deg=[round(float(x), 3) for x in np.degrees(rf.last_residual)] if rf.last_residual is not None else None,
-                  steps=rf.steps, acc=rf.n, rebuilding=model.rebuild is not None, live_swap=REPROJECT_C4_LIVE_SWAP, big=model is not small_model)
+                  steps=rf.steps, acc=rf.n, loading=model.loader is not None, fitted=bool(model.rot_file.get('fitted')), big=model is not small_model)
       try:
         tmp = '/data/reproject_c4/live.json.tmp'; json.dump(live, open(tmp, 'w')); os.replace(tmp, '/data/reproject_c4/live.json')
       except OSError:
@@ -545,9 +542,11 @@ def main(demo=False):
             f"gain {m4['gain_y']:.3f} U {m4['u_off']:+.1f} V {m4['v_off']:+.1f} grad {m4['gx']:+.3f},{m4['gy']:+.3f} bands {np.round(m4['bands'], 3)} (model {g:.3f})"
             if m4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
 
-    if model_output is not None and model.rp is not None and REPROJECT_C4_REFINE:
-      model.refine(model_output, v_ego)
-      model.poll_rebuild()
+    if model_output is not None and model.rp is not None:
+      if REPROJECT_C4_REFINE:
+        model.refine(model_output, v_ego)
+      if len(exec_times) % 20 == 0:
+        model.poll_fit()
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')

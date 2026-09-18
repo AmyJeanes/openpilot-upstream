@@ -72,6 +72,23 @@ def load_rotation():
   return POP_ROTATION
 
 
+APPLIED_FILE = os.path.join(os.path.dirname(ROTATION_FILE), 'applied.json')  # what modeld is running with; calibrationd waits on it
+
+
+def save_applied(rotvec, fitted, stage=True) -> None:
+  import time
+  os.makedirs(os.path.dirname(APPLIED_FILE), exist_ok=True)
+  tmp = APPLIED_FILE + '.tmp'
+  json.dump({'stage': stage, 'fitted': bool(fitted), 'rotvec': [float(v) for v in rotvec], 'at': time.time()}, open(tmp, 'w')); os.replace(tmp, APPLIED_FILE)
+
+
+def read_applied() -> dict:
+  try:
+    return json.load(open(APPLIED_FILE))
+  except (OSError, ValueError):
+    return {}
+
+
 def save_rotation(rotvec, **extra) -> None:
   import time
   os.makedirs(os.path.dirname(ROTATION_FILE), exist_ok=True)
@@ -350,12 +367,16 @@ def calib_tag(calib, feather=FEATHER_PX):
   return tag + ("" if feather == FEATHER_PX else f"_f{feather:g}")
 
 
+def table_path(src_wh, dst_wh, cache_dir, calib=None, feather=FEATHER_PX):
+  return os.path.join(cache_dir, f"reproject_c4_v{TABLE_VERSION}_{src_wh[0]}x{src_wh[1]}_{dst_wh[0]}x{dst_wh[1]}{calib_tag(calib, feather)}.npz")
+
+
 def load_tables(src_wh, dst_wh, cache_dir=None, calib=None, feather=FEATHER_PX):
   """build_tables takes ~25 s of numpy on the device CPU, so keep a copy on disk (a few MB, compressed)."""
   if cache_dir is None:
     return build_tables(src_wh, dst_wh, calib, feather)
   os.makedirs(cache_dir, exist_ok=True)
-  p = os.path.join(cache_dir, f"reproject_c4_v{TABLE_VERSION}_{src_wh[0]}x{src_wh[1]}_{dst_wh[0]}x{dst_wh[1]}{calib_tag(calib, feather)}.npz")
+  p = table_path(src_wh, dst_wh, cache_dir, calib, feather)
   if os.path.exists(p):
     z = np.load(p); T = {"wide": {}, "narrow": {}}
     for key in z.files:

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fits this unit's narrow->wide camera rotation for the 3X->comma 4 reprojection stage: a one-off, from frame pairs taken
 under calibrationd's own conditions (straight road, above 15 mph) while it is calibrating, or until a first fit exists.
-The result lands in rotation.json and modeld applies it at its next start; afterwards this process only watches for a
-recalibration (device remounted), which starts a new fit. Numpy only, low priority, one frame pair every few seconds."""
+The tables are built here and the result lands in rotation.json; modeld swaps it in (calibrationd holds until then, so the
+car cannot be engaged around the swap); afterwards this process only watches for a recalibration (device remounted),
+which starts a new fit. Numpy only, low priority, one frame pair every few seconds."""
 import os
 import time
 
@@ -21,6 +22,8 @@ PERIOD = 3.0          # s between frame pairs
 MIN_MATCHES = 15
 MAX_RMS_DEG = 0.25    # per-frame residual after trimming (good frames 0.10-0.17 on the 3X)
 PROGRESS_FILE = '/data/reproject_c4/fit.json'
+C4_CAM = (1344, 760)
+CACHE_DIR = os.environ.get('XDG_CACHE_HOME', '/data/tgcache')
 Status = log.ExtrinsicsCalibration.Status
 
 
@@ -42,7 +45,7 @@ def main():
   sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'])
   clients = {'narrow': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_ROAD, True),
              'wide': VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)}
-  applied = RC.load_rotation(); calib = RC.calib_from_rotvec(applied)
+  applied = tuple(RC.read_applied().get('rotvec') or RC.load_rotation()); calib = RC.calib_from_rotvec(applied)  # modeld's, once it has started
   state = RC.read_rotation_file()
   fits: list[tuple] = []
   last = 0.0
@@ -89,10 +92,14 @@ def main():
     dev = [np.linalg.norm(RC.matrix_to_rotvec(RC.rotvec_to_matrix(m).T @ RC.rotvec_to_matrix(v))) for v in rv]
     keep = np.argsort(dev)[:len(rv) - 2]
     final = RC.mean_rotvec([rv[i] for i in keep]); spread = float(np.degrees(max(dev[i] for i in keep)))
+    # build the tables here (~15 s of numpy at low priority) so modeld's swap is just a load; then publish the fit
+    t0 = time.monotonic(); write_progress(n=N_FITS, of=N_FITS, fitted=False, building=True, deg=[round(float(x), 3) for x in np.degrees(final)])
+    RC.load_tables((bn.width, bn.height), C4_CAM, CACHE_DIR, RC.calib_from_rotvec(final))
+    cloudlog.warning(f"reprojectd: tables built in {time.monotonic() - t0:.0f} s")
     RC.save_rotation(final, fitted=True, n=int(len(keep)), spread_deg=round(spread, 3), applied=[float(v) for v in applied])
     state = RC.read_rotation_file(); fits = []
     write_progress(n=N_FITS, of=N_FITS, fitted=True, deg=[round(float(x), 3) for x in np.degrees(final)], spread_deg=round(spread, 3))
-    cloudlog.warning(f"reprojectd: rotation fitted {np.degrees(final).round(3)} deg (was {np.degrees(applied).round(3)}, spread {spread:.3f} deg): applies at the next modeld start")
+    cloudlog.warning(f"reprojectd: rotation fitted {np.degrees(final).round(3)} deg (was {np.degrees(applied).round(3)}, spread {spread:.3f} deg)")
 
 
 if __name__ == "__main__":
