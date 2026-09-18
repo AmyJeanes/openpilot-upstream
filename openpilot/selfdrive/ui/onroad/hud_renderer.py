@@ -166,9 +166,9 @@ class HudRenderer(Widget):
     big, small, pad, gap, th = 72, 26, 16, 12, 6
     h = big + small + 2 * pad + th
     widths = [int(max(measure_text_cached(self._font_bold, value, big).x, measure_text_cached(self._font_medium, label, small).x) + 2 * pad) for label, value, _ in tiles]
-    # centred along the bottom: the bottom corners belong to the driver-monitoring icon (left or right), the top ones to
-    # the set-speed box and the experimental button
-    x = int(rect.x + (rect.width - (sum(widths) + gap * (len(tiles) - 1))) / 2); y = int(rect.y + rect.height - UI_CONFIG.border_size - h)
+    # centred along the top: alerts (the calibration bar) own the bottom, the corners the set-speed box, experimental
+    # button and driver-monitoring icon
+    x = int(rect.x + (rect.width - (sum(widths) + gap * (len(tiles) - 1))) / 2); y = int(rect.y + UI_CONFIG.border_size)
     for (label, value, col), w in zip(tiles, widths):
       rl.draw_rectangle(x, y, w, h, COLORS.BLACK_TRANSLUCENT)
       rl.draw_rectangle(x, y, w, th, col)
