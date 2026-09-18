@@ -6,6 +6,7 @@ import time
 import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
+from openpilot.selfdrive.ui.onroad.alert_renderer import ALERT_HEIGHTS, ALERT_MARGIN
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -169,9 +170,12 @@ class HudRenderer(Widget):
     big, small, pad, gap, th = 72, 26, 16, 12, 6
     h = big + small + 2 * pad + th
     widths = [int(max(measure_text_cached(self._font_bold, value, big).x, measure_text_cached(self._font_medium, label, small).x) + 2 * pad) for label, value, _ in tiles]
-    # centred along the top: alerts (the calibration bar) own the bottom, the corners the set-speed box, experimental
-    # button and driver-monitoring icon
-    x = int(rect.x + (rect.width - (sum(widths) + gap * (len(tiles) - 1))) / 2); y = int(rect.y + UI_CONFIG.border_size)
+    # centred along the bottom, stepping up above the alert bar (the calibration bar) when one is showing; the corners
+    # keep the set-speed box, experimental button and driver-monitoring icon
+    sm = ui_state.sm
+    alert_size = sm['selfdriveState'].alertSize.raw if sm.recv_frame['selfdriveState'] >= ui_state.started_frame else 0
+    above = ALERT_HEIGHTS[alert_size] - ALERT_MARGIN + gap if alert_size in ALERT_HEIGHTS else 0
+    x = int(rect.x + (rect.width - (sum(widths) + gap * (len(tiles) - 1))) / 2); y = int(rect.y + rect.height - UI_CONFIG.border_size - h - above)
     for (label, value, col), w in zip(tiles, widths):
       rl.draw_rectangle(x, y, w, h, COLORS.BLACK_TRANSLUCENT)
       if label == rot_tile[0] and rot_tile[3] is not None:  # aligning: pulsing stripe and a progress fill
