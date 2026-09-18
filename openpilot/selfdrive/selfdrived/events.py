@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import bisect
+import json
 import math
 import os
+import time
 from enum import IntEnum
 from collections.abc import Callable
 
@@ -254,10 +256,31 @@ def below_steer_speed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.S
     Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 0.4)
 
 
+_reproject_fit: dict = {}
+
+
+def reproject_fit_progress() -> str | None:
+  """While calibrationd holds for the 3X->comma 4 reprojection's camera alignment (reprojectd), what it is doing."""
+  now = time.monotonic()
+  if now - _reproject_fit.get('t', 0.0) > 0.5:
+    _reproject_fit['t'] = now
+    try:
+      applied = json.load(open('/data/reproject_c4/applied.json')); fit = json.load(open('/data/reproject_c4/fit.json'))
+    except (OSError, ValueError):
+      applied, fit = {}, {}
+    _reproject_fit['applied'], _reproject_fit['fit'] = applied, fit
+  applied, fit = _reproject_fit.get('applied', {}), _reproject_fit.get('fit', {})
+  if not applied.get('stage') or applied.get('fitted'):
+    return None
+  if fit.get('building'):
+    return "Aligning Cameras: Building"
+  return f"Aligning Cameras: {fit.get('n', 0)}/{fit.get('need', 6)}"
+
+
 def calibration_incomplete_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   first_word = 'Recalibrating' if sm['extrinsicsCalibration'].calStatus == log.ExtrinsicsCalibration.Status.recalibrating else 'Calibrating'
   return Alert(
-    f"{first_word}: {sm['extrinsicsCalibration'].calPerc:.0f}%",
+    reproject_fit_progress() or f"{first_word}: {sm['extrinsicsCalibration'].calPerc:.0f}%",
     f"Drive Above {get_display_speed(MIN_SPEED_FILTER, metric)}",
     AlertStatus.normal, AlertSize.mid,
     Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2)

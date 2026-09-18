@@ -35,7 +35,7 @@ def write_progress(**kw) -> None:
   try:
     import json
     os.makedirs(os.path.dirname(PROGRESS_FILE), exist_ok=True)
-    tmp = PROGRESS_FILE + '.tmp'; json.dump(kw, open(tmp, 'w')); os.replace(tmp, PROGRESS_FILE)
+    tmp = PROGRESS_FILE + '.tmp'; json.dump({'need': MIN_N, **kw}, open(tmp, 'w')); os.replace(tmp, PROGRESS_FILE)
   except OSError:
     pass
 
