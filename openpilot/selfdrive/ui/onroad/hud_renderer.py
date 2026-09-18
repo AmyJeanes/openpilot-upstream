@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 
@@ -147,21 +148,23 @@ class HudRenderer(Widget):
     def grade(v, ok, warn):
       return GREY if v is None else GREEN if v < ok else AMBER if v < warn else RED
     rot = d.get('rot_deg') or [0, 0, 0]
-    if f.get('fitted') or d.get('fitted'):
-      state, scol = "FITTED", GREEN
+    fitted = f.get('fitted') if f else d.get('fitted')  # a refit shows in fit.json while modeld still runs the old fit
+    pulse = 0.55 + 0.45 * math.sin(time.monotonic() * 2 * math.pi)  # 1 Hz while aligning: it must not be missed
+    if fitted:
+      rot_tile = ("ROTATION  FITTED", f"{rot[0]:+.2f} / {rot[1]:+.2f}", GREEN, None)
     elif f.get('building') or d.get('loading'):
-      state, scol = "BUILDING", BLUE
+      rot_tile = ("ALIGNING CAMERAS", "BUILDING", BLUE, 1.0)
     elif f.get('n'):
-      state, scol = f"FITTING {f.get('pct', 0):.0f}%", AMBER
+      rot_tile = ("ALIGNING CAMERAS", f"{f.get('pct', 0):.0f}%", AMBER, f.get('pct', 0) / 100)
     else:
-      state, scol = "SEED", GREY
+      rot_tile = ("ALIGNING CAMERAS", "WAITING", AMBER, 0.0)
     seam = d.get('gain'); seam_rel = (seam / d['model_gain']) if seam and d.get('model_gain') else None
     tiles = [  # label, big value, colour
       ("MODEL ms", f"{d.get('model_ms', 0):.0f}", grade(d.get('model_ms'), 46, 50)),
       ("STAGE ms", f"{d.get('stage_ms', 0):.1f}", grade(d.get('stage_ms'), 5.5, 7)),
       ("DROPS %", f"{d.get('drops', 0):.0f}", grade(d.get('drops'), 1, 5)),
       ("SEAM", f"{seam:.2f}" if seam else "-", GREY if seam_rel is None else GREEN if 0.9 < seam_rel < 1.15 else AMBER),
-      (f"ROTATION  {state}", f"{rot[0]:+.2f} / {rot[1]:+.2f}", scol),
+      rot_tile[:3],
     ]
     big, small, pad, gap, th = 72, 26, 16, 12, 6
     h = big + small + 2 * pad + th
@@ -171,6 +174,9 @@ class HudRenderer(Widget):
     x = int(rect.x + (rect.width - (sum(widths) + gap * (len(tiles) - 1))) / 2); y = int(rect.y + UI_CONFIG.border_size)
     for (label, value, col), w in zip(tiles, widths):
       rl.draw_rectangle(x, y, w, h, COLORS.BLACK_TRANSLUCENT)
+      if label == rot_tile[0] and rot_tile[3] is not None:  # aligning: pulsing stripe and a progress fill
+        rl.draw_rectangle(x, y, int(w * rot_tile[3]), h, rl.Color(col.r, col.g, col.b, 70))
+        col = rl.Color(col.r, col.g, col.b, int(255 * pulse))
       rl.draw_rectangle(x, y, w, th, col)
       rl.draw_text_ex(self._font_medium, label, rl.Vector2(x + pad, y + th + pad - 4), small, 0, GREY)
       rl.draw_text_ex(self._font_bold, value, rl.Vector2(x + pad, y + th + pad + small), big, 0, col)

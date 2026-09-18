@@ -64,6 +64,7 @@ def sanity_clip(rpy: np.ndarray) -> np.ndarray:
 # fitted one (reprojectd), and starts over when it changes: the model output this calibration is built on depends on it
 REPROJECT_APPLIED = '/data/reproject_c4/applied.json'
 REPROJECT_CALIBRATED_WITH = '/data/reproject_c4/calibrated_with.json'
+REPROJECT_FIT = '/data/reproject_c4/fit.json'
 
 
 def moving_avg_with_linear_decay(prev_mean: np.ndarray, new_val: np.ndarray, idx: int, block_size: float) -> np.ndarray:
@@ -192,7 +193,11 @@ class Calibrator:
       d = json.load(open(REPROJECT_APPLIED))
     except (OSError, ValueError):
       d = {}
-    ready = not d.get('stage', False) or bool(d.get('fitted'))
+    try:
+      refitting = not json.load(open(REPROJECT_FIT)).get('fitted', True)  # reprojectd is fitting again (calibration reset)
+    except (OSError, ValueError):
+      refitting = False
+    ready = not d.get('stage', False) or (bool(d.get('fitted')) and not refitting)
     if not ready:
       if self.valid_blocks or self.idx or self.cal_status != log.ExtrinsicsCalibration.Status.uncalibrated:
         cloudlog.warning("calibrationd: holding until the reprojection rotation is fitted")

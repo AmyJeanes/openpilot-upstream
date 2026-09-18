@@ -270,7 +270,7 @@ def reproject_fit_progress() -> str | None:
       applied, fit = {}, {}
     _reproject_fit['applied'], _reproject_fit['fit'] = applied, fit
   applied, fit = _reproject_fit.get('applied', {}), _reproject_fit.get('fit', {})
-  if not applied.get('stage') or applied.get('fitted'):
+  if not applied.get('stage') or (applied.get('fitted') and fit.get('fitted', True)):
     return None
   if fit.get('building'):
     return "Aligning Cameras: Building"

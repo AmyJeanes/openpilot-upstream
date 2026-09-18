@@ -74,6 +74,10 @@ def main():
     cal = sm['extrinsicsCalibration'].calStatus
     if prev_cal is None:
       prev_cal = cal
+      # a calibration reset from the settings (offroad) only shows as calibrationd starting from nothing
+      if state.get('fitted') and cal == Status.uncalibrated and sm['extrinsicsCalibration'].calPerc == 0:
+        cloudlog.warning("reprojectd: no calibration at start: refitting the rotation")
+        state = {}; fits = []; write_progress(n=0, of=MAX_N, fitted=False)
     if state.get('fitted'):
       # only a calibration that was complete and got reset (user, or calibrationd's own mount check) means a refit; the
       # reset calibrationd does for our own swap must not, or fit -> swap -> reset -> refit loops forever
