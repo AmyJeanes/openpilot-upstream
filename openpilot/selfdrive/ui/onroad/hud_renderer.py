@@ -142,33 +142,39 @@ class HudRenderer(Widget):
     d = self._live
     if not d:
       return
-    r = d.get('residual_deg'); rot = d.get('rot_deg') or [0, 0, 0]
-    lines = [
-      f"model {d.get('model_ms')} ms  stage {d.get('stage_ms')} (py {d.get('stage_enq_ms')})  meter {d.get('meter_ms')}  drops {d.get('drops')}  "
-      f"cpu {d.get('cpu_mhz')} MHz  gpu {d.get('gpu_busy')}%  {'big' if d.get('big') else 'SMALL'}",
-      f"seam gain {d.get('gain')} (model {d.get('model_gain')})  U {d.get('u'):+}  V {d.get('v'):+}  grad {d.get('gx'):+.2f} {d.get('gy'):+.2f}",
-      "bands " + " ".join(f"{b:.2f}" for b in d.get('bands', [])),
-      f"rot p {rot[0]:+.2f} y {rot[1]:+.2f} r {rot[2]:+.2f} deg  {'FITTED' if d.get('fitted') else 'seed'}"
-      + ("  LOADING" if d.get('loading') else "") + (f"   model resid p {r[0]:+.2f} y {r[1]:+.2f}  ({d.get('acc')}/600)" if r else f"   model resid: {d.get('acc')}/600 frames"),
+    f = getattr(self, '_fit', None) or {}
+    GREEN, AMBER, RED, BLUE, GREY = rl.Color(128, 216, 166, 255), rl.Color(255, 200, 80, 255), rl.Color(255, 90, 90, 255), rl.Color(110, 180, 255, 255), rl.Color(170, 170, 170, 255)
+    def grade(v, ok, warn):
+      return GREY if v is None else GREEN if v < ok else AMBER if v < warn else RED
+    rot = d.get('rot_deg') or [0, 0, 0]
+    if f.get('fitted') or d.get('fitted'):
+      state, scol = "FITTED", GREEN
+    elif f.get('building') or d.get('loading'):
+      state, scol = "BUILDING", BLUE
+    elif f.get('n'):
+      state, scol = f"FITTING {f.get('n')}", AMBER
+    else:
+      state, scol = "SEED", GREY
+    seam = d.get('gain'); seam_rel = (seam / d['model_gain']) if seam and d.get('model_gain') else None
+    tiles = [  # label, big value, colour
+      ("MODEL ms", f"{d.get('model_ms', 0):.0f}", grade(d.get('model_ms'), 46, 50)),
+      ("STAGE ms", f"{d.get('stage_ms', 0):.1f}", grade(d.get('stage_ms'), 5.5, 7)),
+      ("DROPS %", f"{d.get('drops', 0):.0f}", grade(d.get('drops'), 1, 5)),
+      ("SEAM", f"{seam:.2f}" if seam else "-", GREY if seam_rel is None else GREEN if 0.9 < seam_rel < 1.15 else AMBER),
+      (f"ROTATION  {state}", f"{rot[0]:+.2f} / {rot[1]:+.2f}", scol),
     ]
-    f = getattr(self, '_fit', None)
-    if f:
-      if f.get('fitted'):
-        fit_txt = f"pre-calib: FITTED from {f.get('n')} frames  {f.get('deg')}  spread {f.get('spread_deg')}  se {f.get('se_deg')}"
-      elif f.get('building'):
-        fit_txt = f"pre-calib: building tables for {f.get('deg')}"
-      elif f.get('mean_deg'):
-        fit_txt = f"pre-calib: {f.get('n')} frames  mean {f.get('mean_deg')}  se {f.get('se_deg')}  last rms {f.get('rms')}"
-      else:
-        fit_txt = "pre-calib: waiting for straight road above 15 mph"
-      lines.append(fit_txt)
-    size, pad = 30, 12
-    w = max(measure_text_cached(self._font_medium, ln, size).x for ln in lines) + 2 * pad
-    h = len(lines) * (size + 6) + 2 * pad
-    x = int(rect.x + UI_CONFIG.border_size); y = int(rect.y + rect.height - UI_CONFIG.border_size - h)
-    rl.draw_rectangle(x, y, int(w), int(h), COLORS.BLACK_TRANSLUCENT)
-    for i, ln in enumerate(lines):
-      rl.draw_text_ex(self._font_medium, ln, rl.Vector2(x + pad, y + pad + i * (size + 6)), size, 0, COLORS.WHITE)
+    big, small, pad, gap, th = 72, 26, 16, 12, 6
+    h = big + small + 2 * pad + th
+    widths = [int(max(measure_text_cached(self._font_bold, value, big).x, measure_text_cached(self._font_medium, label, small).x) + 2 * pad) for label, value, _ in tiles]
+    # centred along the bottom: the bottom corners belong to the driver-monitoring icon (left or right), the top ones to
+    # the set-speed box and the experimental button
+    x = int(rect.x + (rect.width - (sum(widths) + gap * (len(tiles) - 1))) / 2); y = int(rect.y + rect.height - UI_CONFIG.border_size - h)
+    for (label, value, col), w in zip(tiles, widths):
+      rl.draw_rectangle(x, y, w, h, COLORS.BLACK_TRANSLUCENT)
+      rl.draw_rectangle(x, y, w, th, col)
+      rl.draw_text_ex(self._font_medium, label, rl.Vector2(x + pad, y + th + pad - 4), small, 0, GREY)
+      rl.draw_text_ex(self._font_bold, value, rl.Vector2(x + pad, y + th + pad + small), big, 0, col)
+      x += w + gap
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed
