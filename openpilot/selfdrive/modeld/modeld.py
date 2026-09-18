@@ -245,9 +245,13 @@ class ModelState:
     cloudlog.warning(f"reproject_c4: rotation step {self.refiner.steps}: residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
                      f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; rebuilding tables")
     self.pending_calib = RC.calib_from_rotvec(new)
+    # ~15 s of numpy: at modeld's realtime priority and core pinning it starves the other processes on that core (seen as
+    # a commIssue burst), so it runs as an ordinary low-priority process on any core
+    def unpin():
+      os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0)); os.nice(10); os.sched_setaffinity(0, range(os.cpu_count() or 1))
     self.rebuild = subprocess.Popen([sys.executable, '-c', 'import sys, json; from openpilot.selfdrive.modeld import reproject_c4 as RC; '
                                      'RC.load_tables(tuple(json.loads(sys.argv[1])), tuple(json.loads(sys.argv[2])), sys.argv[3], json.loads(sys.argv[4]))',
-                                     json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(self.pending_calib)])
+                                     json.dumps(self.src_wh), json.dumps(C4_CAM), self.cache_dir, json.dumps(self.pending_calib)], preexec_fn=unpin)
 
   def poll_rebuild(self) -> None:
     if self.rebuild is not None and self.rebuild.poll() is not None:
