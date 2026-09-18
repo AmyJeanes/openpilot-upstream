@@ -18,7 +18,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER, MAX_YAW_RATE_FILTER
 from openpilot.selfdrive.modeld import reproject_c4 as RC
 
-MIN_N, MAX_N = 6, 40  # frames: stop when the mean has converged (SE below SE_STOP) or at MAX_N
+MIN_N, MAX_N = 12, 40  # frames: stop when the mean has converged (SE below SE_STOP) or at MAX_N; 6 left ~0.1 deg of yaw between fits
 SE_STOP = 0.02        # deg, standard error of the trimmed mean's pitch/yaw
 MIN_MATCHES = 15
 MAX_RMS_DEG = 0.25    # per-frame residual after trimming (good frames 0.10-0.17 on the 3X)
@@ -67,13 +67,23 @@ def main():
     cloudlog.warning("reprojectd: calibration was reset: refitting the rotation"); state = {}
   cloudlog.warning(f"reprojectd: applied rotation {np.degrees(applied).round(3)} deg, {'fitted' if state.get('fitted') else 'not fitted yet'}")
   write_progress(n=0, of=MAX_N, fitted=bool(state.get('fitted')))
+  why = None
+
+  def waiting(reason: str | None) -> None:
+    """Before the first frame: what the fit is waiting for, for the bar and the tile."""
+    nonlocal why
+    if reason != why and not fits and not state.get('fitted'):
+      why = reason; write_progress(n=0, of=MAX_N, fitted=False, why=reason)
+
   while True:
     sm.update(100)
     if not all(c.is_connected() for c in clients.values()):
       for c in clients.values():
         c.connect(False)
+      waiting('cameras')
       continue
     if not sm.all_checks(['extrinsicsCalibration']):
+      waiting('model')  # calibrationd is valid once modeld publishes cameraOdometry: the model is still loading
       continue
     cal = sm['extrinsicsCalibration'].calStatus
     if prev_cal is None:
@@ -90,10 +100,13 @@ def main():
         continue
     prev_cal = cal
     now = time.monotonic()
-    straight_and_fast = (sm.all_checks(['carState', 'cameraOdometry']) and sm['carState'].vEgo > MIN_SPEED_FILTER
-                         and abs(sm['cameraOdometry'].rot[2]) < MAX_YAW_RATE_FILTER)
-    if not straight_and_fast:
-      continue
+    if not sm.all_checks(['carState', 'cameraOdometry']):
+      waiting('model'); continue
+    if sm['carState'].vEgo <= MIN_SPEED_FILTER:
+      waiting('speed'); continue
+    if abs(sm['cameraOdometry'].rot[2]) >= MAX_YAW_RATE_FILTER:
+      waiting('straight'); continue
+    waiting(None)
     bn = clients['narrow'].recv(50); bw = clients['wide'].recv(50)
     if bn is None or bw is None or clients['narrow'].frame_id != clients['wide'].frame_id:
       continue

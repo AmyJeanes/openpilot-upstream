@@ -157,7 +157,7 @@ class HudRenderer(Widget):
     elif f.get('n'):
       rot_tile = ("ALIGNING CAMERAS", f"{f.get('pct', 0):.0f}%", AMBER, f.get('pct', 0) / 100)
     else:
-      rot_tile = ("ALIGNING CAMERAS", "WAITING", AMBER, 0.0)
+      rot_tile = ("ALIGNING CAMERAS", {'cameras': "CAMERAS", 'model': "LOADING", 'speed': "SPEED", 'straight': "STRAIGHT"}.get(f.get('why'), "WAITING"), AMBER, 0.0)
     seam = d.get('gain'); seam_rel = (seam / d['model_gain']) if seam and d.get('model_gain') else None
     tiles = [  # label, big value, colour
       ("MODEL ms", f"{d.get('model_ms', 0):.0f}", grade(d.get('model_ms'), 46, 50)),

@@ -274,6 +274,9 @@ def reproject_fit_progress() -> str | None:
     return None
   if fit.get('building'):
     return "Aligning Cameras: Building"
+  if not fit.get('n'):
+    return {'cameras': "Aligning Cameras: Waiting for Cameras", 'model': "Aligning Cameras: Loading Model",
+            'straight': "Aligning Cameras: Drive Straight"}.get(fit.get('why'), "Aligning Cameras: 0%")
   return f"Aligning Cameras: {fit.get('pct', 0):.0f}%"
 
 
