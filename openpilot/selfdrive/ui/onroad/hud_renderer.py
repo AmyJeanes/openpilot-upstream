@@ -1,3 +1,7 @@
+import json
+import os
+import time
+
 import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
@@ -71,6 +75,7 @@ class HudRenderer(Widget):
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
 
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
+    self._live: dict | None = None; self._live_t = 0.0  # reproject_c4 fit metrics, written by modeld once a second
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -120,6 +125,34 @@ class HudRenderer(Widget):
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     button_y = rect.y + UI_CONFIG.border_size
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+    self._draw_reproject_debug(rect)
+
+  def _draw_reproject_debug(self, rect: rl.Rectangle) -> None:
+    """Debug view of the 3X->comma 4 reprojection's live fits (seam match, rotation, timings) from modeld's live.json."""
+    if time.monotonic() - self._live_t > 0.5:
+      self._live_t = time.monotonic()
+      try:
+        self._live = json.load(open('/data/reproject_c4/live.json'))
+      except (OSError, ValueError):
+        self._live = None
+    d = self._live
+    if not d:
+      return
+    r = d.get('residual_deg'); rot = d.get('rot_deg') or [0, 0, 0]
+    lines = [
+      f"model {d.get('model_ms')} ms  stage {d.get('stage_ms')}  meter {d.get('meter_ms')}  drops {d.get('drops')}  {'big' if d.get('big') else 'SMALL'}",
+      f"seam gain {d.get('gain')} (model {d.get('model_gain')})  U {d.get('u'):+}  V {d.get('v'):+}  grad {d.get('gx'):+.2f} {d.get('gy'):+.2f}",
+      "bands " + " ".join(f"{b:.2f}" for b in d.get('bands', [])),
+      f"rot p {rot[0]:+.2f} y {rot[1]:+.2f} r {rot[2]:+.2f} deg  steps {d.get('steps')}  acc {d.get('acc')}/600"
+      + (f"  resid p {r[1]:+.2f} y {r[2]:+.2f}" if r else "") + ("  REBUILDING" if d.get('rebuilding') else ""),
+    ]
+    size, pad = 30, 12
+    w = max(measure_text_cached(self._font_medium, ln, size).x for ln in lines) + 2 * pad
+    h = len(lines) * (size + 6) + 2 * pad
+    x = int(rect.x + UI_CONFIG.border_size); y = int(rect.y + rect.height - UI_CONFIG.border_size - h)
+    rl.draw_rectangle(x, y, int(w), int(h), COLORS.BLACK_TRANSLUCENT)
+    for i, ln in enumerate(lines):
+      rl.draw_text_ex(self._font_medium, ln, rl.Vector2(x + pad, y + pad + i * (size + 6)), size, 0, COLORS.WHITE)
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed

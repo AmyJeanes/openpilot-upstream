@@ -519,6 +519,19 @@ def main(demo=False):
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
     exec_times.append(model_execution_time); stage_times.append(model.rp_time if model.rp is not None else 0.0)
+    if len(exec_times) % 20 == 0 and model.rp is not None and inputs.get('reproj_match'):
+      # live fit metrics for the on-screen debug view (ui reads this file); once a second
+      m4 = inputs['reproj_match']; rf = model.refiner
+      live = dict(model_ms=round(float(np.median(exec_times[-20:])) * 1e3, 1), stage_ms=round(float(np.median(stage_times[-20:])) * 1e3, 2),
+                  meter_ms=round(float(np.median(meter_times[-20:])) * 1e3, 2) if meter_times else None, drops=int(vipc_dropped_frames),
+                  gain=round(m4['gain_y'], 3), model_gain=round(float(g), 3), u=round(m4['u_off'], 1), v=round(m4['v_off'], 1), gx=round(m4['gx'], 3), gy=round(m4['gy'], 3),
+                  bands=[round(b, 3) for b in m4['bands']], rot_deg=[round(float(x), 3) for x in np.degrees(model.rotation)],
+                  residual_deg=[round(float(x), 3) for x in np.degrees(rf.last_residual)] if rf.last_residual is not None else None,
+                  steps=rf.steps, acc=rf.n, rebuilding=model.rebuild is not None, big=model is not small_model)
+      try:
+        tmp = '/data/reproject_c4/live.json.tmp'; json.dump(live, open(tmp, 'w')); os.replace(tmp, '/data/reproject_c4/live.json')
+      except OSError:
+        pass
     if len(exec_times) % 200 == 0:
       q = lambda t: f"{np.median(t[-200:]) * 1e3:.2f}/{np.percentile(t[-200:], 95) * 1e3:.2f}"
       m4 = inputs.get('reproj_match')
