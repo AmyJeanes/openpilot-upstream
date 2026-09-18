@@ -274,7 +274,7 @@ def reproject_fit_progress() -> str | None:
     return None
   if fit.get('building'):
     return "Aligning Cameras: Building"
-  return f"Aligning Cameras: {fit.get('n', 0)}/{fit.get('need', 6)}"
+  return f"Aligning Cameras: {fit.get('pct', 0):.0f}%"
 
 
 def calibration_incomplete_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:

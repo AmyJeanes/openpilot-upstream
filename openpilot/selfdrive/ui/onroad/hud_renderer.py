@@ -152,7 +152,7 @@ class HudRenderer(Widget):
     elif f.get('building') or d.get('loading'):
       state, scol = "BUILDING", BLUE
     elif f.get('n'):
-      state, scol = f"FITTING {f.get('n')}", AMBER
+      state, scol = f"FITTING {f.get('pct', 0):.0f}%", AMBER
     else:
       state, scol = "SEED", GREY
     seam = d.get('gain'); seam_rel = (seam / d['model_gain']) if seam and d.get('model_gain') else None

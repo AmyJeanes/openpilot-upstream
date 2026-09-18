@@ -31,11 +31,24 @@ def luma(buf) -> np.ndarray:
   return np.array(buf.data[:buf.uv_offset], dtype=np.uint8).reshape(-1, buf.stride)[:buf.height, :buf.width]
 
 
+def progress_pct(n: int, se: float) -> int:
+  """How far the fit is: n over the frames it will take, which is MIN_N or, when the mean's standard error is still above
+  SE_STOP, the n at which it would get there (SE falls as 1/sqrt(n)); MAX_N ends it regardless."""
+  need = max(MIN_N, n * (se / SE_STOP) ** 2 if n and np.isfinite(se) and se > SE_STOP else 0)
+  return int(min(99, 100 * max(n / need, n / MAX_N)))
+
+
+_pct = [0]
+
+
 def write_progress(**kw) -> None:
   try:
     import json
     os.makedirs(os.path.dirname(PROGRESS_FILE), exist_ok=True)
-    tmp = PROGRESS_FILE + '.tmp'; json.dump({'need': MIN_N, **kw}, open(tmp, 'w')); os.replace(tmp, PROGRESS_FILE)
+    # a noisy frame raises the SE; the bar pauses rather than backs up
+    _pct[0] = 100 if kw.get('fitted') else max(0 if kw.get('n', 0) == 0 else _pct[0], progress_pct(kw.get('n', 0), kw.get('se_deg', np.inf)))
+    kw.setdefault('pct', _pct[0])
+    tmp = PROGRESS_FILE + '.tmp'; json.dump(kw, open(tmp, 'w')); os.replace(tmp, PROGRESS_FILE)
   except OSError:
     pass
 
