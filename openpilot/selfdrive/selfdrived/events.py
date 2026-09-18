@@ -276,8 +276,8 @@ def reproject_fit_progress() -> str | None:
     return "Aligning Cameras: Building"
   if not fit.get('n'):
     return {'cameras': "Aligning Cameras: Waiting for Cameras", 'model': "Aligning Cameras: Loading Model",
-            'straight': "Aligning Cameras: Drive Straight"}.get(fit.get('why'), "Aligning Cameras: 0%")
-  return f"Aligning Cameras: {fit.get('pct', 0):.0f}%"
+            'straight': "Aligning Cameras: Drive Straight", 'features': "Aligning Cameras: Low Detail"}.get(fit.get('why'), "Aligning Cameras: 0%")
+  return f"Aligning Cameras: {fit.get('pct', 0):.0f}%" + (" (Low Detail)" if fit.get('why') == 'features' else "")
 
 
 def calibration_incomplete_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:

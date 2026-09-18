@@ -133,7 +133,7 @@ class HudRenderer(Widget):
     if time.monotonic() - self._live_t > 0.5:
       self._live_t = time.monotonic()
       try:
-        self._live = json.load(open('/data/reproject_c4/live.json'))
+        self._live = json.load(open('/dev/shm/reproject_c4/live.json'))
       except (OSError, ValueError):
         self._live = None
       try:
@@ -155,9 +155,9 @@ class HudRenderer(Widget):
     elif f.get('building') or d.get('loading'):
       rot_tile = ("ALIGNING CAMERAS", "BUILDING", BLUE, 1.0)
     elif f.get('n'):
-      rot_tile = ("ALIGNING CAMERAS", f"{f.get('pct', 0):.0f}%", AMBER, f.get('pct', 0) / 100)
+      rot_tile = ("ALIGNING: LOW DETAIL" if f.get('why') == 'features' else "ALIGNING CAMERAS", f"{f.get('pct', 0):.0f}%", AMBER, f.get('pct', 0) / 100)
     else:
-      rot_tile = ("ALIGNING CAMERAS", {'cameras': "CAMERAS", 'model': "LOADING", 'speed': "SPEED", 'straight': "STRAIGHT"}.get(f.get('why'), "WAITING"), AMBER, 0.0)
+      rot_tile = ("ALIGNING CAMERAS", {'cameras': "CAMERAS", 'model': "LOADING", 'speed': "SPEED", 'straight': "STRAIGHT", 'features': "LOW DETAIL"}.get(f.get('why'), "WAITING"), AMBER, 0.0)
     seam = d.get('gain'); seam_rel = (seam / d['model_gain']) if seam and d.get('model_gain') else None
     tiles = [  # label, big value, colour
       ("MODEL ms", f"{d.get('model_ms', 0):.0f}", grade(d.get('model_ms'), 46, 50)),

@@ -82,9 +82,10 @@ def main():
         c.connect(False)
       waiting('cameras')
       continue
-    if not sm.all_checks(['extrinsicsCalibration']):
-      waiting('model')  # calibrationd is valid once modeld publishes cameraOdometry: the model is still loading
-      continue
+    if not (sm.alive['extrinsicsCalibration'] and sm.valid['extrinsicsCalibration']):
+      # calibrationd is valid once modeld publishes cameraOdometry: the model is still loading. alive+valid, not
+      # all_checks: its frequency check fails for a second after a 3.5 s coarse fit, which showed as 'Loading Model'
+      waiting('model'); continue
     cal = sm['extrinsicsCalibration'].calStatus
     if prev_cal is None:
       prev_cal = cal
@@ -100,7 +101,7 @@ def main():
         continue
     prev_cal = cal
     now = time.monotonic()
-    if not sm.all_checks(['carState', 'cameraOdometry']):
+    if not all(sm.alive[k] and sm.valid[k] for k in ('carState', 'cameraOdometry')):
       waiting('model'); continue
     if sm['carState'].vEgo <= MIN_SPEED_FILTER:
       waiting('speed'); continue
@@ -117,6 +118,8 @@ def main():
     r = RC.fit_rotation(narrow_y, wide_y, calib) if not fits else RC.fit_rotation(narrow_y, wide_y, RC.calib_from_rotvec(mean), iters=1, coarse=False)
     if r is None or r[1] < MIN_MATCHES or r[2] > MAX_RMS_DEG:
       cloudlog.warning(f"reprojectd: frame {clients['narrow'].frame_id} rejected ({'no fit' if r is None else f'{r[1]} matches, rms {r[2]:.3f} deg'}), {time.monotonic() - t0:.1f} s")
+      # too few patches with texture (dusk, plain road): the bar says so instead of sitting at the same number
+      write_progress(n=len(fits), of=MAX_N, fitted=False, why='features', mean_deg=[round(float(x), 3) for x in np.degrees(mean)] if fits else None)
       continue
     fits.append(r)
     mean, keep, spread, se = RC.combine_fits([f[0] for f in fits])
@@ -132,9 +135,9 @@ def main():
     RC.load_tables((bn.width, bn.height), C4_CAM, CACHE_DIR, RC.calib_from_rotvec(final))
     cloudlog.warning(f"reprojectd: tables built in {time.monotonic() - t0:.0f} s")
     RC.save_rotation(final, fitted=True, n=int(len(keep)), spread_deg=round(spread, 3), se_deg=round(se, 3), applied=[float(v) for v in applied])
+    cloudlog.warning(f"reprojectd: rotation fitted {np.degrees(final).round(3)} deg (was {np.degrees(applied).round(3)}, spread {spread:.3f} deg)")
     state = RC.read_rotation_file(); fits = []; applied = tuple(float(v) for v in final); calib = RC.calib_from_rotvec(applied)
     write_progress(n=len(keep), of=len(keep), fitted=True, deg=[round(float(x), 3) for x in np.degrees(final)], spread_deg=round(spread, 3), se_deg=round(se, 3))
-    cloudlog.warning(f"reprojectd: rotation fitted {np.degrees(final).round(3)} deg (was {np.degrees(applied).round(3)}, spread {spread:.3f} deg)")
 
 
 if __name__ == "__main__":

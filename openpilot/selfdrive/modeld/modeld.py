@@ -7,6 +7,7 @@ import ctypes
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
+os.environ.setdefault('QCOM_PRIORITY', '1')  # KGSL context priority: the reprojection stage and the warp preempt the driver-monitoring model's 20 ms
 from tinygrad.device import Buffer, Device
 from tinygrad.dtype import DType, dtypes
 from tinygrad.tensor import Tensor
@@ -45,6 +46,7 @@ SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 REPROJECT_C4 = os.getenv('REPROJECT_C4', '1') != '0'  # 3X cameras -> comma 4 geometry on the QCOM, in front of the comma 4 big model
 REPROJECT_C4_REFINE = os.getenv('REPROJECT_C4_REFINE', '1') != '0'  # monitor the rotation with the model's own wide_from_device output
 C4_CAM = (1344, 760)
+LIVE_FILE = '/dev/shm/reproject_c4/live.json'
 
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
@@ -119,7 +121,7 @@ class ChestnutGpuState:
           cloudlog.exception("chestnut state read failed")
         self.valid = False
         self.metrics.clear()
-      # the read goes over the USB link the model shares; measured: it is the ~100 ms modelV2 gap every 100 frames
+      # over the USB link the model shares; 2-5 ms on the road
       self.smu_ms = (time.perf_counter() - t0) * 1e3; self.smu_max_ms = max(self.smu_ms, getattr(self, 'smu_max_ms', 0.0))
       if self.smu_ms > 50:
         cloudlog.warning(f"chestnut: SMU metrics read took {self.smu_ms:.0f} ms")
@@ -315,6 +317,7 @@ class ModelState:
 
 def main(demo=False):
   cloudlog.warning("modeld init")
+  os.makedirs(os.path.dirname(LIVE_FILE), exist_ok=True)
 
   CHESTNUT = chestnut_present() and chestnut_compiled()
   if CHESTNUT:
@@ -539,15 +542,17 @@ def main(demo=False):
                   steps=rf.steps, acc=rf.n, loading=model.loader is not None, fitted=bool(model.rot_file.get('fitted')), big=model is not small_model,
                   smu_ms=round(getattr(chestnut_state, 'smu_ms', 0.0), 1), smu_max_ms=round(getattr(chestnut_state, 'smu_max_ms', 0.0), 1))
       try:
-        tmp = '/data/reproject_c4/live.json.tmp'; json.dump(live, open(tmp, 'w')); os.replace(tmp, '/data/reproject_c4/live.json')
+        # tmpfs: on /data this write sat behind ext4's 5 s journal commit for ~100 ms, a dropped frame every 100
+        json.dump(live, open(LIVE_FILE + '.tmp', 'w')); os.replace(LIVE_FILE + '.tmp', LIVE_FILE)
       except OSError:
         pass
     if len(exec_times) % 200 == 0:
       q = lambda t: f"{np.median(t[-200:]) * 1e3:.2f}/{np.percentile(t[-200:], 95) * 1e3:.2f}"
       m4 = inputs.get('reproj_match')
-      print(f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms (enqueue {q(enq_times)}); {sys_stats()}; seam meter {q(meter_times) if meter_times else '-'} ms; "
-            f"gain {m4['gain_y']:.3f} U {m4['u_off']:+.1f} V {m4['v_off']:+.1f} grad {m4['gx']:+.3f},{m4['gy']:+.3f} bands {np.round(m4['bands'], 3)} (model {g:.3f})"
-            if m4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms", flush=True)
+      line = (f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms, of which reprojection {q(stage_times)} ms (enqueue {q(enq_times)}); {sys_stats()}; seam meter {q(meter_times) if meter_times else '-'} ms; "
+              f"gain {m4['gain_y']:.3f} U {m4['u_off']:+.1f} V {m4['v_off']:+.1f} grad {m4['gx']:+.3f},{m4['gy']:+.3f} bands {np.round(m4['bands'], 3)} (model {g:.3f})"
+              if m4 else f"run {len(exec_times)}: modelExecutionTime median/p95 {q(exec_times)} ms")
+      print(line, flush=True); cloudlog.info("reproject_c4: " + line)
 
     if model_output is not None and model.rp is not None:
       if REPROJECT_C4_REFINE:
