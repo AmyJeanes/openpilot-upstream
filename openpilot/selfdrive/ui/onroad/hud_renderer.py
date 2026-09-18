@@ -135,6 +135,10 @@ class HudRenderer(Widget):
         self._live = json.load(open('/data/reproject_c4/live.json'))
       except (OSError, ValueError):
         self._live = None
+      try:
+        self._fit = json.load(open('/data/reproject_c4/fit.json'))
+      except (OSError, ValueError):
+        self._fit = None
     d = self._live
     if not d:
       return
@@ -146,6 +150,9 @@ class HudRenderer(Widget):
       f"rot p {rot[0]:+.2f} y {rot[1]:+.2f} r {rot[2]:+.2f} deg  steps {d.get('steps')}  acc {d.get('acc')}/600"
       + (f"  resid p {r[0]:+.2f} y {r[1]:+.2f}" if r else "") + ("  REBUILDING" if d.get('rebuilding') else "") + ("" if d.get('live_swap') else "  next start"),
     ]
+    f = getattr(self, '_fit', None)
+    if f:
+      lines.append(f"direct fit {f.get('n')}/{f.get('of')}" + (f"  {f['deg']} spread {f.get('spread_deg')}  FITTED" if f.get('fitted') else (f"  last {f['last_deg']} rms {f.get('rms')}" if f.get('last_deg') else "")))
     size, pad = 30, 12
     w = max(measure_text_cached(self._font_medium, ln, size).x for ln in lines) + 2 * pad
     h = len(lines) * (size + 6) + 2 * pad

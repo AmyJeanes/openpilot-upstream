@@ -143,33 +143,6 @@ def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int
   return Tensor(UOp.from_buffer(view)).reshape(shape)
 
 
-ROTATION_FILE = os.environ.get('REPROJECT_C4_ROTATION', '/data/reproject_c4/rotation.json')
-
-
-def load_rotation() -> tuple[float, float, float]:
-  """The unit's narrow->wide rotation: the refined value on disk, else seeded from the stock calibration's persisted
-  wideFromDeviceEuler (calibrationd's block average of the model output), else the fleet median."""
-  try:
-    return tuple(json.load(open(ROTATION_FILE))['rotvec'])
-  except (OSError, ValueError, KeyError):
-    pass
-  try:
-    with log.Event.from_bytes(Params().get("CalibrationParams")) as msg:
-      e = list(msg.extrinsicsCalibration.wideFromDeviceEuler)
-    if len(e) == 3 and np.isfinite(e).all():
-      r = RC.rotvec_from_wide_from_device_euler(e); cloudlog.warning(f"reproject_c4: rotation seeded from CalibrationParams {np.degrees(r).round(3)} deg")
-      return r
-  except Exception:
-    cloudlog.exception("reproject_c4: no CalibrationParams seed")
-  return RC.POP_ROTATION
-
-
-def save_rotation(rotvec) -> None:
-  os.makedirs(os.path.dirname(ROTATION_FILE), exist_ok=True)
-  tmp = ROTATION_FILE + '.tmp'
-  json.dump({'rotvec': list(rotvec), 'at': time.time()}, open(tmp, 'w')); os.replace(tmp, ROTATION_FILE)
-
-
 class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
@@ -178,7 +151,8 @@ class ModelState:
     self.src_size = get_nv12_info(cam_w, cam_h)[3]
     if reproject:
       self.src_wh, self.cache_dir = (cam_w, cam_h), os.environ.get('XDG_CACHE_HOME', '/data/tgcache')
-      self.rotation = load_rotation()
+      self.rotation = RC.load_rotation(); self.rot_file = RC.read_rotation_file()
+      cloudlog.warning(f"reproject_c4: rotation {np.degrees(self.rotation).round(3)} deg from {'rotation.json' + (' (fitted)' if self.rot_file.get('fitted') else '') if self.rot_file else 'CalibrationParams seed / fleet median'}")
       self.calib = RC.calib_from_rotvec(self.rotation)
       self.rp = RC.Reprojector(self.src_wh, C4_CAM, device='QCOM', cache_dir=self.cache_dir, calib=self.calib)
       self.meter = RC.SeamMeter(self.src_wh, C4_CAM, calib=self.calib)
@@ -243,17 +217,19 @@ class ModelState:
     if new is None or self.rebuild is not None:
       return
     if not REPROJECT_C4_LIVE_SWAP:
+      if self.rot_file.get('fitted'):  # reprojectd's direct fit owns the file; the model residual is a monitor only
+        self.refiner.rotvec = np.array(self.rotation, np.float64); return
       # the tables stay as started, so every window measures against the same rotation: average them, write the
       # estimate for the next start, and keep the refiner at the applied rotation so windows don't compound
       self.res_sum += self.refiner.last_residual; self.res_n += 1
       est = RC.matrix_to_rotvec(RC.rotvec_to_matrix(self.rotation) @ RC.rotvec_to_matrix(self.res_sum / self.res_n * self.refiner.k))
       self.refiner.rotvec = np.array(self.rotation, np.float64)
-      save_rotation(tuple(float(v) for v in est))
+      RC.save_rotation(est, applied=list(self.rotation), windows=self.res_n)
       cloudlog.warning(f"reproject_c4: rotation estimate {self.refiner.steps} ({self.res_n} windows): residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
                        f"applied {np.degrees(self.rotation).round(3)} -> next start {np.degrees(est).round(3)} deg")
       return
     old = self.rotation; self.rotation = new
-    save_rotation(new)
+    RC.save_rotation(new)
     cloudlog.warning(f"reproject_c4: rotation step {self.refiner.steps}: residual {np.degrees(self.refiner.last_residual).round(3)} deg, "
                      f"rotation {np.degrees(old).round(3)} -> {np.degrees(new).round(3)} deg; rebuilding tables")
     self.pending_calib = RC.calib_from_rotvec(new)
