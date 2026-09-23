@@ -31,6 +31,10 @@ DESCRIPTIONS = {
   'RecordFront': tr_noop("Upload data from the cabin camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
+  "ReprojectionView": tr_noop(
+    "What the road view shows. Default is the camera. Reprojected is the comma 4 frames the 3X cameras are " +
+    "turned into, which the driving model sees, shown whole and letterboxed."
+  ),
 }
 
 
@@ -102,6 +106,16 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    self._reprojection_view_setting = multiple_button_item(
+      lambda: tr("Road View"),
+      lambda: tr(DESCRIPTIONS["ReprojectionView"]),
+      buttons=[lambda: tr("Default"), lambda: tr("Reprojected")],
+      button_width=255,
+      callback=lambda i: self._params.put("ReprojectionView", i, block=True),
+      selected_index=self._params.get("ReprojectionView", return_default=True),
+      icon="road.png"
+    )
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -134,6 +148,8 @@ class TogglesLayout(Widget):
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
         self._toggles["LongitudinalPersonality"] = self._long_personality_setting
+      if param == "IsMetric":
+        self._toggles["ReprojectionView"] = self._reprojection_view_setting
 
     self._update_experimental_mode_icon()
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)

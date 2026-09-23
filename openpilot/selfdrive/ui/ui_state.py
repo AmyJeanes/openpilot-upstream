@@ -60,6 +60,7 @@ class UIState:
         "driverStateV2",
         "narrowRoadCameraState",
         "wideRoadCameraState",
+        "reprojectCalibration",
         "managerState",
         "selfdriveState",
         "longitudinalPlan",
@@ -87,6 +88,8 @@ class UIState:
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed: bool = self.params.get_bool("ExperimentalModeConfirmed")
+    self.reproject_view: int = 0  # ReprojectionView: the road view's frames (0 camerad, 1 reprojected)
+    self.reproject_debug: int = 0  # ShowReprojectionDebug: 0 none, 1 visual, 2 stats, 3 all
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -251,6 +254,8 @@ class UIState:
       self.chestnut_compiled = chestnut_compiled()
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
+    self.reproject_view = self.params.get("ReprojectionView", return_default=True)
+    self.reproject_debug = self.params.get("ShowReprojectionDebug", return_default=True)
     now = time.monotonic()
     if cable_connected():
       self.usb_disconnected_ts = None
