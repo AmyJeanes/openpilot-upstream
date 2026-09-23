@@ -93,6 +93,7 @@ procs = [
   PythonProcess("navd", "openpilot.selfdrive.navigation.navd", navigation),
   PythonProcess("mapsd", "openpilot.selfdrive.navigation.mapsd", navigation),
   PythonProcess("reprojectd", "openpilot.selfdrive.modeld.reprojectd", reproject),
+  PythonProcess("reprojectcalibd", "openpilot.selfdrive.modeld.reprojectcalibd", reproject),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
