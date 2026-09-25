@@ -30,6 +30,10 @@ DESCRIPTIONS = {
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
   'RecordFront': tr_noop("Upload data from the cabin camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
+  "RoadCamera": tr_noop(
+    "Which road camera the road view shows. Default follows openpilot: the wide camera at low speed in " +
+    "Experimental Mode, the narrow camera otherwise. Narrow and Wide keep that camera at all speeds."
+  ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
 }
 
@@ -102,6 +106,16 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    self._road_camera_setting = multiple_button_item(
+      lambda: tr("Road Camera"),
+      lambda: tr(DESCRIPTIONS["RoadCamera"]),
+      buttons=[lambda: tr("Default"), lambda: tr("Narrow"), lambda: tr("Wide")],
+      button_width=255,
+      callback=lambda i: self._params.put("RoadCamera", i, block=True),
+      selected_index=self._params.get("RoadCamera", return_default=True),
+      icon="road.png"
+    )
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -134,6 +148,8 @@ class TogglesLayout(Widget):
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
         self._toggles["LongitudinalPersonality"] = self._long_personality_setting
+      if param == "IsMetric":
+        self._toggles["RoadCamera"] = self._road_camera_setting
 
     self._update_experimental_mode_icon()
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)
