@@ -273,6 +273,8 @@ def main(demo=False):
       try:
         wait_for_chestnut()
         m = ModelState(vipc_client_main.width, vipc_client_main.height, True)
+        # top clocks under the power limit, which tinygrad leaves to the SMU; AM_PERF_LEVEL=high once https://github.com/tinygrad/tinygrad/pull/18390 lands
+        Device["AMD"].iface.dev_impl.smu.set_clocks(level=-1)
         m.warmup()
         big_model = m
       except Exception:
