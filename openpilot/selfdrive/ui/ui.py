@@ -2,7 +2,9 @@
 import os
 import time
 
+from msgq.visionipc import VisionIpcClient
 from openpilot.cereal import messaging
+from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.common.hardware import COMMA_HARDWARE, HARDWARE
 from openpilot.common.realtime import Priority, config_realtime_process, set_core_affinity
 from openpilot.system.ui.lib.application import gui_app
@@ -13,6 +15,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 BIG_UI = gui_app.big_ui()
 
 FRAME_CLOCK_TIMEOUT_MS = 50  # one camera period
+STAGE_PRESENT_DELAY_S = 0.002  # let modeld copy the frames first; the swap's memory traffic slows that copy
 
 
 class DriverMonitoringClock:
@@ -33,6 +36,21 @@ class DriverMonitoringClock:
     return self._dm_running
 
 
+class ReprojectFrameClock(DriverMonitoringClock):
+  """With the driving model on the chestnut, the reprojection stage is the 3X GPU's last job in each camera period."""
+  def __init__(self):
+    super().__init__()
+    self._stage = VisionIpcClient("reproject", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)  # reprojectd sends wide last
+
+  def wait(self) -> bool:
+    if not (ui_state.started and ui_state.sm['modelV2'].big and (self._stage.is_connected() or self._stage.connect(False))):
+      return super().wait()
+    if self._stage.recv(0) is None and self._stage.recv(FRAME_CLOCK_TIMEOUT_MS) is None:
+      return False
+    time.sleep(STAGE_PRESENT_DELAY_S)
+    return True
+
+
 def main():
   cores = {5, }
   # above plannerd and radard
@@ -45,7 +63,7 @@ def main():
     MiciMainLayout()
 
   if HARDWARE.get_device_type() == 'tizi':
-    gui_app.set_frame_clock(DriverMonitoringClock().wait)
+    gui_app.set_frame_clock(ReprojectFrameClock().wait)
 
   pm = messaging.PubMaster(['uiDebug'])
   for should_render, frame_time, cpu_time in gui_app.render():
