@@ -9,6 +9,7 @@ import numpy as np
 
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from .geometry import C4_NARROW_K, FEATHER_PX, _nv12_index, sample_coords
+from .meter import SeamMeter
 
 
 IDX_BITS, ALPHA_SHIFT, INVALID_BIT = 0x3fffff, 22, 1 << 30  # one int32 per output byte: wide index | alpha << 22 | invalid
@@ -27,6 +28,7 @@ def build_tables(src_wh, dst_wh, calib):
   n_body = d_stride * (d_yh + d_uvh)
   sc = calib["narrow"]["f"] / C4_NARROW_K[0, 0]  # 3X narrow px per comma 4 narrow px
   out = {}
+  planes = {}
   for cam in ("wide", "narrow"):
     idx_w = np.zeros(n_body, np.int64)
     idx_n = np.zeros(n_body, np.int64)
@@ -40,6 +42,8 @@ def build_tables(src_wh, dst_wh, calib):
       inn, vn = _nv12_index(mn, sw, sh, s_stride, s_uv, chroma)
       # distance to the narrow frame edge, in destination px: the composite feathers over FEATHER_PX of it
       d = np.minimum(np.minimum(mn[..., 0], sw * s - mn[..., 0]), np.minimum(mn[..., 1], sh * s - mn[..., 1])) / (s * sc)
+      if cam == "narrow":
+        planes[chroma] = (iw, vw, inn, vn, d)
       if chroma:
         rows = np.arange(dh // 2)[:, None]
         cols = np.arange(dw // 2)[None, :]
@@ -60,9 +64,10 @@ def build_tables(src_wh, dst_wh, calib):
     alpha = np.round(np.clip(dist / FEATHER_PX, 0, 1) * val_n * 255).astype(np.int64)
     out[cam] = {"pw": (idx_w | (alpha << ALPHA_SHIFT) | (~val_w * INVALID_BIT)).astype(np.int32)}
   out["narrow"]["pn"] = idx_n.astype(np.int32)
+  out["meter"] = SeamMeter.geometry(dw, dh, planes[False], planes[True])  # ~1 s of numpy on the 3X: not for modeld's swap
   return out
 
-TABLE_VERSION = 1  # bump when the lens numbers, the feather or the table layout change
+TABLE_VERSION = 2  # bump when the lens numbers, the feather or the table layout change
 
 def table_path(src_wh, dst_wh, cache_dir, calib):
   tag = hashlib.sha1(json.dumps(calib, sort_keys=True, default=float).encode()).hexdigest()[:10]
@@ -74,7 +79,7 @@ def load_tables(src_wh, dst_wh, cache_dir, calib):
   p = table_path(src_wh, dst_wh, cache_dir, calib)
   if os.path.exists(p):
     z = np.load(p)
-    T = {"wide": {}, "narrow": {}}
+    T = {"wide": {}, "narrow": {}, "meter": {}}
     for key in z.files:
       cam, k = key.split("_", 1)
       T[cam][k] = z[key]
