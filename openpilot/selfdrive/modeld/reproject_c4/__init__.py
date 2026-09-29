@@ -8,5 +8,6 @@ gather per output byte (two plus a blend for the composite) - the same cost as t
 Outputs are NV12 buffers in the comma 4 camerad layout so the model pkl (keyed by its camera size) sees exactly what a
 comma 4 would have given it.
 
-geometry: lenses, rotations, sample coordinates."""
+geometry: lenses, rotations, sample coordinates. tables: the gather tables."""
 from .geometry import *  # noqa: F403
+from .tables import *  # noqa: F403
