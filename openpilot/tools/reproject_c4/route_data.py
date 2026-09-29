@@ -105,7 +105,8 @@ class CameradFrame:
 
 def read_segment(path: str) -> dict:
   """What the clip needs from one segment's log, as plain values (segments are parsed in worker processes)."""
-  out: dict = {k: [] for k in ('cams', 'wide_exposure', 'e2e', 'model', 'dm', 'ui', 'fit', 'calib', 'selfdrive', 'stage', 'v_ego', 'yaw_rate')}
+  out: dict = {k: [] for k in ('cams', 'wide_exposure', 'e2e', 'model', 'dm', 'ui', 'models', 'fit', 'calib', 'selfdrive', 'stage',
+                               'v_ego', 'throttle', 'lead', 'long_control', 'yaw_rate')}
   out['device'] = out['sensor'] = None
   for m in LogReader(path):
     try:
@@ -120,6 +121,11 @@ def read_segment(path: str) -> dict:
         mv = m.modelV2
         out['e2e'].append((t, (m.logMonoTime - mv.timestampEof) * 1e-6))
         out['model'].append((t, mv.modelExecutionTime * 1e3))
+        out['models'].append((t, mv.timestampEof, {
+          'path': np.array([mv.position.x, mv.position.y, mv.position.z], np.float32).T,
+          'lanes': [np.array([ll.x, ll.y, ll.z], np.float32).T for ll in mv.laneLines], 'lane_probs': list(mv.laneLineProbs),
+          'edges': [np.array([e.x, e.y, e.z], np.float32).T for e in mv.roadEdges], 'edge_stds': list(mv.roadEdgeStds),
+          'accel': np.array(mv.acceleration.x, np.float32)}))
       elif w == 'driverStateV2':
         out['dm'].append((t, m.driverStateV2.modelExecutionTime * 1e3))
       elif w == 'uiDebug' and m.uiDebug.frameTimeMillis > 0:  # some stock versions log zeros
@@ -138,6 +144,13 @@ def read_segment(path: str) -> dict:
         out['yaw_rate'].append((t, m.cameraOdometry.rot[2]))
       elif w == 'carState':
         out['v_ego'].append((t, m.carState.vEgo))
+      elif w == 'longitudinalPlan':
+        out['throttle'].append((t, m.longitudinalPlan.allowThrottle))
+      elif w == 'radarState':
+        lead = m.radarState.leadOne
+        out['lead'].append((t, lead.dRel if lead.status else None))
+      elif w == 'carParams':
+        out['long_control'].append((t, m.carParams.openpilotLongitudinalControl))
       elif w == 'deviceState' and out['device'] is None:
         out['device'] = str(m.deviceState.deviceType)
     except Exception:  # a message or field this route's schema doesn't have
@@ -192,8 +205,11 @@ class RouteLog:
     self.cams = {s: p['cams'] for s, p in parsed.items()}
     def rows(k):
       return [r for p in parsed.values() for r in p[k]]
-    for k in ('wide_exposure', 'e2e', 'model', 'dm', 'ui', 'fit', 'calib', 'selfdrive', 'stage', 'v_ego', 'yaw_rate'):
+    for k in ('wide_exposure', 'e2e', 'model', 'dm', 'ui', 'fit', 'calib', 'selfdrive', 'stage', 'v_ego', 'throttle', 'lead',
+              'long_control', 'yaw_rate'):
       setattr(self, k, Timeline(rows(k)))
+    self.models = {eof: m for _, eof, m in rows('models')}
+    self.model_at = Timeline([(t, m) for t, _, m in rows('models')])
     self.device = next((p['device'] for p in parsed.values() if p['device']), None)
     self.sensor = next((p['sensor'] for p in parsed.values() if p['sensor']), None)
 
