@@ -9,8 +9,10 @@ Outputs are NV12 buffers in the comma 4 camerad layout so the model pkl (keyed b
 comma 4 would have given it.
 
 geometry: lenses, rotations, sample coordinates. tables: the gather tables. meter: the seam exposure match. fit: the
-rotation fit from frame pairs. kernel (the GPU stage, tinygrad) is imported by the stage alone."""
+rotation fit from frame pairs. rotation: the fitted rotation across boots. kernel (the GPU stage, tinygrad) is imported
+by the stage alone."""
 from .geometry import *  # noqa: F403
 from .meter import *  # noqa: F403
 from .tables import *  # noqa: F403
+from .rotation import *  # noqa: F403
 from .fit import *  # noqa: F403
