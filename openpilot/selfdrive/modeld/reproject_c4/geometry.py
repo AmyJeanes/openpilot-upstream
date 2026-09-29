@@ -36,6 +36,8 @@ ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wi
 
 FEATHER_PX = 50  # composite seam width in comma 4 narrow px (50 over 24, by eye on drive clips)
 
+UV_FILL = 128
+
 def _dtheta_d(t, k):
   return 1 + 3 * k[0] * t**2 + 5 * k[1] * t**4 + 7 * k[2] * t**6
 
