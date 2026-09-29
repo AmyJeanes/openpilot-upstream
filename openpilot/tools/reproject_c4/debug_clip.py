@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """Render a route's 3X->comma 4 reprojection debug views to an mp4, off the device.
   openpilot/tools/reproject_c4/debug_clip.py <dongle/route> -s start -e end -o out.mp4 [-d data_dir] [-f MB]
+      [--path-opacity 1.0] [--overlay-opacity 0.5]
 Top row: the comma 4 narrow and wide frames the big model saw, rebuilt on this PC's GPU from the route's fcamera and ecamera
 at a narrow->wide rotation (rotations.py: the one the route logged, else one fitted here), and the seam check. Bottom row:
 the 3X frames, the model's two 512x256 inputs and the logged timings. Any 3X route with its full-resolution cameras
 (fcamera, ecamera) uploaded.
 
 route_data.py reads the route, stage.py runs the reprojection, clip.py puts each frame through them and hands it to the
-drawing processes (draw.py), which lay out the picture (view.py) with the stats (stats.py)."""
+drawing processes (draw.py), which lay out the picture (view.py) with the model's path (model_path.py), the outlines
+(outlines.py) and the stats (stats.py)."""
 import logging
 import os
 import subprocess
 import time
 from argparse import ArgumentParser
 
+import numpy as np
 import tqdm
 
 from openpilot.tools.clip.run import FRAMERATE
 from openpilot.tools.lib.route import Route
 from openpilot.tools.reproject_c4 import view as V
-from openpilot.tools.reproject_c4.clip import Clip
+from openpilot.tools.reproject_c4.clip import Clip, Settings
 
 logger = logging.getLogger(__name__)
 
 
-def render(clip: Clip, output: str, target_mb: float) -> None:
+def render(clip: Clip, output: str, target_mb: float, settings: Settings) -> None:
   ffmpeg = ['ffmpeg', '-v', 'warning', '-nostats', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{V.W}x{V.H}', '-r', str(FRAMERATE),
             '-i', 'pipe:0', '-vf', 'format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast']
   if target_mb > 0:
@@ -42,7 +45,7 @@ def render(clip: Clip, output: str, target_mb: float) -> None:
     try:
       while True:
         write(clip.depth - 1)
-        if not clip.submit():
+        if not clip.submit(settings):
           break
       write(0)
     finally:
@@ -59,6 +62,8 @@ def main():
   ap.add_argument('-o', '--output', required=True, help='The mp4 to render')
   ap.add_argument('-d', '--data-dir', help='Local directory with route data')
   ap.add_argument('-f', '--file-size', type=float, default=0, help="A target file size in MB (default: ffmpeg's quality)")
+  ap.add_argument('--path-opacity', type=float, default=1.0, help="The model path's opacity, 1 = as the ui draws it")
+  ap.add_argument('--overlay-opacity', type=float, default=0.5, help='The outlines, 0 hides them')
   a = ap.parse_args()
   if a.route.count('/') == 3:
     parts = a.route.split('/')
@@ -68,12 +73,13 @@ def main():
   if a.end <= a.start:
     ap.error(f'end ({a.end}) must be greater than start ({a.start})')
 
+  settings = Settings(float(np.clip(a.path_opacity, 0, 1)), float(np.clip(a.overlay_opacity, 0, 1)))
   t0 = time.monotonic()
   try:
     clip = Clip(Route(a.route, data_dir=a.data_dir), a.start, a.end)
     try:
       logger.info(f'rendering {a.end - a.start} s to {a.output}')
-      render(clip, a.output, a.file_size)
+      render(clip, a.output, a.file_size, settings)
       logger.info(f'{os.path.abspath(a.output)} in {time.monotonic() - t0:.0f} s')
     finally:
       clip.close()

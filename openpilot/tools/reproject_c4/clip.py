@@ -3,10 +3,12 @@ import logging
 import multiprocessing
 import os
 from collections import deque
+from dataclasses import dataclass
 from multiprocessing import shared_memory
 
 import numpy as np
 
+from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.modeld import reproject_c4 as RC
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.tools.clip.run import FRAMERATE, get_frame_dimensions
@@ -14,6 +16,7 @@ from openpilot.tools.lib.route import Route
 from openpilot.tools.reproject_c4 import draw, stats
 from openpilot.tools.reproject_c4 import rotations as R
 from openpilot.tools.reproject_c4 import view as V
+from openpilot.tools.reproject_c4.model_path import ModelPath
 from openpilot.tools.reproject_c4.route_data import SEG_FRAMES, CameradFrame, Frames, RouteLog, fetch
 from openpilot.tools.reproject_c4.stage import Stage
 
@@ -37,6 +40,12 @@ class Slots:
   def close(self) -> None:
     self.shm.close()
     self.shm.unlink()
+
+
+@dataclass(frozen=True)
+class Settings:
+  path_opacity: float = 1.0  # 1 = as the ui draws it
+  overlay_opacity: float = 0.5
 
 
 class Clip:
@@ -81,7 +90,8 @@ class Clip:
       v = getattr(self.log, k).window(t0 - stats.WINDOW, t1)[:, 1]
       self.ranges[k] = (float(np.percentile(v, 0.5)), float(np.percentile(v, 99.5))) if len(v) else None
     # forked before the stage opens the GPU and the decoders start their threads
-    self.pool = multiprocessing.get_context('fork').Pool(workers, draw.init_worker, ({'slots': self.slots, 'src_wh': self.src_wh},))
+    self.pool = multiprocessing.get_context('fork').Pool(workers, draw.init_worker, ({
+      'slots': self.slots, 'src_wh': self.src_wh, 'x3': DEVICE_CAMERAS.get((self.log.device, self.log.sensor), DEVICE_CAMERAS['tici', 'ar0231'])},))
     self.stage = Stage(self.src_wh, self.rotation.initial)
     self.narrow_src, self.wide_src = CameradFrame(*self.src_wh), CameradFrame(*self.src_wh)
     self.pending: deque = deque()  # (job, result)
@@ -101,16 +111,17 @@ class Clip:
     self.next = max(self.first, min(gidx, self.last - 1))
     self.decoders = (Frames(self.route.camera_paths(), self.next, self.last, self.src_wh),
                      Frames(self.route.ecamera_paths(), self.next, self.last, self.src_wh))
+    self.model_path = ModelPath()
     self.stage.meter = RC.SeamMeter(self.stage.meter_table)
 
-  def submit(self) -> bool:
+  def submit(self, settings: Settings) -> bool:
     """Run the stage on the next frame and start drawing it; False at the end of the clip."""
     if self.next >= self.last:
       return False
     assert self.decoders is not None and len(self.pending) < self.depth
     log, gidx = self.log, self.next
     seg, local = divmod(gidx, SEG_FRAMES)
-    t, _, narrow_exposure = log.frame(seg, local)
+    t, eof, narrow_exposure = log.frame(seg, local)
     narrow_bytes, wide_bytes = self.decoders[0].get(), self.decoders[1].get()
 
     applied, target, status = self.rotation.at(t)
@@ -123,10 +134,13 @@ class Clip:
     for k, buf in (*r.items(), ('device_narrow', np.frombuffer(narrow_bytes, np.uint8)), ('device_wide', np.frombuffer(wide_bytes, np.uint8))):
       self.slots.view(slot, k)[:] = buf
 
-    rpy = log.calib.at(t, ((0.0, 0.0, 0.0), 1.22, ()))[0]
-    alert = log.selfdrive.at(t, ('', False))[0]
+    rpy, height, wide_euler = log.calib.at(t, ((0.0, 0.0, 0.0), 1.22, ()))
+    alert, experimental = log.selfdrive.at(t, ('', False))
+    path = self.model_path.update(log.models.get(eof) or log.model_at.at(t), log.lead.at(t), height,
+                                  log.throttle.at(t, True) or not log.long_control.at(t, False), experimental)
     v_ego = log.v_ego.at(t)
-    job = {'gidx': gidx, 'slot': slot, 'rotation': self.stage.rotation, 'rpy': np.asarray(rpy if len(rpy) == 3 else (0, 0, 0), np.float32),
+    job = {'gidx': gidx, 'slot': slot, 'settings': settings, 'rotation': self.stage.rotation,
+           'rpy': np.asarray(rpy if len(rpy) == 3 else (0, 0, 0), np.float32), 'wide_euler': wide_euler, 'path': path,
            'speed': f'{v_ego * 2.23694:.0f} mph' if v_ego is not None else None, 'alert': alert,
            'stats': {'series': {k: getattr(log, k).window(t - stats.WINDOW - 1, t) for k in ('e2e', 'model', 'dm', 'ui')},
                      'rotation': tuple(np.degrees(applied)), 'rotation_from': self.rotation.name, 'status': status, 'stage': log.stage.at(t),

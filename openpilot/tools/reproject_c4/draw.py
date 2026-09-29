@@ -4,13 +4,15 @@ import signal
 
 import numpy as np
 
-from openpilot.common.transformations.camera import DEVICE_CAMERAS
+from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.model import get_warp_matrix
+from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.selfdrive.modeld import reproject_c4 as RC
 from openpilot.selfdrive.modeld.reproject_c4.tables import ALPHA_SHIFT
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.tools.reproject_c4 import stats
 from openpilot.tools.reproject_c4 import view as V
+from openpilot.tools.reproject_c4.outlines import debug_outlines
 
 DW, DH = RC.C4_CAM
 C4_CAMERA = DEVICE_CAMERAS['mici', 'os04c10']
@@ -20,6 +22,12 @@ def blend_weights(T: dict) -> np.ndarray:
   """The stage's narrow/wide blend weights (0 all wide - 255 all narrow) over the comma 4 narrow frame's px."""
   stride = get_nv12_info(DW, DH)[0]
   return ((T['narrow']['pw'][:stride * DH] >> ALPHA_SHIFT) & 0xff).reshape(DH, stride)[:, :DW].astype(np.uint8)
+
+
+def fit_transform(native_wh: tuple[int, int], size: tuple[int, int]) -> np.ndarray:
+  """Native px -> px of the panel `bare` scales that frame into."""
+  sc = min(size[0] / native_wh[0], size[1] / native_wh[1])
+  return np.array([[sc, 0, (size[0] - round(native_wh[0] * sc)) / 2], [0, sc, (size[1] - round(native_wh[1] * sc)) / 2], [0, 0, 1]])
 
 
 def input_coverage(alpha: np.ndarray, M: np.ndarray) -> tuple[float, float, float]:
@@ -40,19 +48,26 @@ def init_worker(cfg: dict) -> None:
 
 
 def _geometry(rotation: tuple, rpy: tuple) -> dict:
-  """The inset and the input coverage: they move only with the rotation and calibration."""
+  """The outlines as one layer over the whole picture (at full strength), the legends, the inset and the input coverage:
+  they move only with the rotation and calibration."""
   if _W['geometry'] is None or _W['geometry']['key'] != (rotation, rpy):
     if _W['alpha'] is None or _W['alpha'][0] != rotation:
       T = RC.load_tables(_W['src_wh'], RC.C4_CAM, RC.table_cache_dir(), RC.calib_from_rotvec(rotation))  # built by the stage
       _W['alpha'] = (rotation, blend_weights(T))
     alpha = _W['alpha'][1]
+    sets = debug_outlines(RC.calib_from_rotvec(rotation), np.asarray(rpy, np.float32))
+    sizes = {'c4_narrow': ((DW, DH), (V.PW, V.PH)), 'c4_wide': ((DW, DH), (V.PW, V.PH)),
+             'device_narrow': (_W['src_wh'], (V.XW, V.PH)), 'device_wide': (_W['src_wh'], (V.XW, V.PH))}
     _W['geometry'] = {'key': (rotation, rpy), 'masks': V.inset_masks(alpha, (V.PW, V.PH)),
+                      'outlines': V.canvas_layer({k: V.outline_layer(sets[k], *wh) for k, wh in sizes.items()}),
+                      'legends': {k: V.legend(sets[k]) for k in sizes},
                       'coverage': input_coverage(alpha, get_warp_matrix(np.asarray(rpy, np.float32), C4_CAMERA.narrow_road.intrinsics, False))}
   return _W['geometry']
 
 
-def _panels(r: dict, device: dict, rpy: np.ndarray) -> dict:
-  """The frame panels' pictures, from the stage's renders (r) and the 3X frames (packed NV12)."""
+def _panels(r: dict, device: dict, rpy: np.ndarray, wide_euler: tuple) -> tuple[dict, dict]:
+  """The frame panels' pictures, from the stage's renders (r) and the 3X frames (packed NV12), and car space -> each
+  panel's px, as the ui projects the path (the comma 4 frames are about the device axes)."""
   sw, sh = _W['src_wh']
   Kn, Kw = C4_CAMERA.narrow_road.intrinsics, C4_CAMERA.wide_road.intrinsics
   st, y_height, _, _ = get_nv12_info(DW, DH)
@@ -65,18 +80,33 @@ def _panels(r: dict, device: dict, rpy: np.ndarray) -> dict:
        for k, K in (('input_narrow', Kn), ('input_wide', Kw))}
   panels['input_narrow'] = V.perspective(c4['c4_narrow'], M['input_narrow'], (V.PH, V.IH))
   panels['input_wide'] = V.perspective(c4['c4_wide'], M['input_wide'], (V.PH, V.IH))
-  return panels
+
+  view_from_calib = view_frame_from_device_frame @ rot_from_euler(rpy)
+  view_from_wide = view_frame_from_device_frame @ rot_from_euler(wide_euler) @ rot_from_euler(rpy) if len(wide_euler) == 3 else view_from_calib
+  x3 = _W['x3']
+  T = {'c4_narrow': Kn @ view_from_calib, 'c4_wide': Kw @ view_from_calib,
+       'device_narrow': x3.narrow_road.intrinsics @ view_from_calib, 'device_wide': x3.wide_road.intrinsics @ view_from_wide}
+  S_c4, S_x3 = fit_transform((DW, DH), (V.PW, V.PH)), fit_transform((sw, sh), (V.XW, V.PH))
+  to_panel = {k: (S_c4 if k.startswith('c4') else S_x3) @ T[k] for k in T}
+  to_panel.update({k: np.linalg.inv(M[k]) @ T['c4_wide' if k == 'input_wide' else 'c4_narrow'] for k in M})
+  return panels, to_panel
 
 
 def frame(job: dict) -> None:
-  """One frame's picture, into its slot."""
-  slots, slot = _W['slots'], job['slot']
+  """One frame's picture, into its slot, with the path and outlines at the settings' opacity."""
+  slots, slot, s = _W['slots'], job['slot'], job['settings']
   r = {k: slots.view(slot, k) for k in ('narrow', 'wide', 'narrow_only', 'wide_only')}
   g = _geometry(job['rotation'], tuple(np.round(job['rpy'], 3)))
-  panels = _panels(r, {k: slots.view(slot, k) for k in ('device_narrow', 'device_wide')}, job['rpy'])
+  panels, to_panel = _panels(r, {k: slots.view(slot, k) for k in ('device_narrow', 'device_wide')}, job['rpy'], job['wide_euler'])
   st = get_nv12_info(DW, DH)[0]
   n, n_only, w_only = (V.luma(r[k], DW, DH, st, (V.PW, V.PH)) for k in ('narrow', 'narrow_only', 'wide_only'))
-  picture = V.compose(dict(panels, seam=V.seam_view(n, n_only, w_only, *g['masks']), speed=job['speed'],
+  picture = V.compose(dict(panels, seam=V.seam_view(n, n_only, w_only, *g['masks']), legends=g['legends'], speed=job['speed'],
                            alert=job['alert'], stats=stats.stats_panel(*V.PANELS['stats'][2:], dict(job['stats'], coverage=g['coverage']))))
+  picture = picture.convert('RGBA')
+  if s.path_opacity > 0:
+    picture.alpha_composite(V.fade(V.canvas_layer({k: job['path'].layer(img.size, to_panel[k]) for k, img in panels.items()}), s.path_opacity))
+  if s.overlay_opacity > 0:
+    picture.alpha_composite(V.fade(g['outlines'], s.overlay_opacity))
+  picture = picture.convert('RGB')
   slots.view(slot, 'picture')[:] = np.asarray(picture).ravel()
 
