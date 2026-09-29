@@ -34,6 +34,8 @@ def matrix_to_rotvec(M):
 
 ZMIN = np.cos(np.radians(88.0))  # rays further off-axis than this have no 3X wide pixel
 
+FEATHER_PX = 50  # composite seam width in comma 4 narrow px (50 over 24, by eye on drive clips)
+
 def _dtheta_d(t, k):
   return 1 + 3 * k[0] * t**2 + 5 * k[1] * t**4 + 7 * k[2] * t**6
 
@@ -95,3 +97,18 @@ def sample_coords(out_cam, dst_w, dst_h, scale, calib):
   mn = project_pinhole_k1(rays, calib["narrow"]) * scale
   mn[rays[..., 2] <= 0] = -1
   return mw, mn
+
+def _nv12_index(xy, src_w, src_h, stride, uv_offset, chroma):
+  """Nearest-neighbor byte index into a source NV12 buffer for float sample coords; chroma coords are in the half-res plane.
+  Returns (index, valid). For chroma the caller adds +1 for the V byte."""
+  xy = np.clip(np.nan_to_num(xy, nan=-1.0), -1e6, 1e6)  # grazing rays project to ±inf
+  x = np.round(xy[..., 0] - 0.5).astype(np.int64)
+  y = np.round(xy[..., 1] - 0.5).astype(np.int64)
+  w, h = (src_w // 2, src_h // 2) if chroma else (src_w, src_h)
+  valid = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+  x = np.clip(x, 0, w - 1)
+  y = np.clip(y, 0, h - 1)
+  idx = (uv_offset + y * stride + 2 * x) if chroma else (y * stride + x)
+  return idx, valid
+
+C4_CAM = (1344, 760)  # the comma 4 narrow/wide frame the stage produces, the size the big model's pkl is keyed by
