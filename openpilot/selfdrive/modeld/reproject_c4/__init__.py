@@ -8,7 +8,8 @@ gather per output byte (two plus a blend for the composite) - the same cost as t
 Outputs are NV12 buffers in the comma 4 camerad layout so the model pkl (keyed by its camera size) sees exactly what a
 comma 4 would have given it.
 
-geometry: lenses, rotations, sample coordinates. tables: the gather tables. kernel (the GPU stage, tinygrad) is imported
-by the stage alone."""
+geometry: lenses, rotations, sample coordinates. tables: the gather tables. meter: the seam exposure match. kernel (the
+GPU stage, tinygrad) is imported by the stage alone."""
 from .geometry import *  # noqa: F403
+from .meter import *  # noqa: F403
 from .tables import *  # noqa: F403
