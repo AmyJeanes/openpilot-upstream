@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Render a route's 3X->comma 4 reprojection debug views to an mp4, off the device.
-  openpilot/tools/reproject_c4/debug_clip.py <dongle/route> -s start -e end -o out.mp4 [-d data_dir] [-f MB]
+"""Play a route's 3X->comma 4 reprojection debug views in a window, off the device, or render them to an mp4 with -o.
+  openpilot/tools/reproject_c4/debug_clip.py <dongle/route> -s start -e end [-d data_dir] [-o out.mp4 [-f MB]]
       [--path-opacity 1.0] [--overlay-opacity 0.5]
+The window plays the clip in real time with play/pause, a scrub bar and sliders for the two opacities, and records nothing.
 Top row: the comma 4 narrow and wide frames the big model saw, rebuilt on this PC's GPU from the route's fcamera and ecamera
 at a narrow->wide rotation (rotations.py: the one the route logged, else one fitted here), and the seam check. Bottom row:
 the 3X frames, the model's two 512x256 inputs and the logged timings. Any 3X route with its full-resolution cameras
@@ -9,7 +10,7 @@ the 3X frames, the model's two 512x256 inputs and the logged timings. Any 3X rou
 
 route_data.py reads the route, stage.py runs the reprojection, clip.py puts each frame through them and hands it to the
 drawing processes (draw.py), which lay out the picture (view.py) with the model's path (model_path.py), the outlines
-(outlines.py) and the stats (stats.py)."""
+(outlines.py) and the stats (stats.py). window.py plays it."""
 import logging
 import os
 import subprocess
@@ -55,13 +56,13 @@ def render(clip: Clip, output: str, target_mb: float, settings: Settings) -> Non
 
 def main():
   logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
-  ap = ArgumentParser(description="Render a route's reprojection debug views to an mp4")
+  ap = ArgumentParser(description="Play a route's reprojection debug views in a window, or render them to an mp4 with -o")
   ap.add_argument('route', help='Route ID (dongle/route or dongle/route/start/end)')
   ap.add_argument('-s', '--start', type=int, help='Start time in seconds')
   ap.add_argument('-e', '--end', type=int, help='End time in seconds')
-  ap.add_argument('-o', '--output', required=True, help='The mp4 to render')
+  ap.add_argument('-o', '--output', help='Render to this mp4 instead of opening the window')
   ap.add_argument('-d', '--data-dir', help='Local directory with route data')
-  ap.add_argument('-f', '--file-size', type=float, default=0, help="A target file size in MB (default: ffmpeg's quality)")
+  ap.add_argument('-f', '--file-size', type=float, default=0, help="With -o, a target file size in MB (default: ffmpeg's quality)")
   ap.add_argument('--path-opacity', type=float, default=1.0, help="The model path's opacity, 1 = as the ui draws it")
   ap.add_argument('--overlay-opacity', type=float, default=0.5, help='The outlines, 0 hides them')
   a = ap.parse_args()
@@ -72,15 +73,22 @@ def main():
     ap.error('--start and --end are required')
   if a.end <= a.start:
     ap.error(f'end ({a.end}) must be greater than start ({a.start})')
+  if a.file_size and not a.output:
+    ap.error('-f sets the size of a rendered file: give -o too')
 
   settings = Settings(float(np.clip(a.path_opacity, 0, 1)), float(np.clip(a.overlay_opacity, 0, 1)))
   t0 = time.monotonic()
   try:
-    clip = Clip(Route(a.route, data_dir=a.data_dir), a.start, a.end)
+    clip = Clip(Route(a.route, data_dir=a.data_dir), a.start, a.end, window=not a.output)
     try:
-      logger.info(f'rendering {a.end - a.start} s to {a.output}')
-      render(clip, a.output, a.file_size, settings)
-      logger.info(f'{os.path.abspath(a.output)} in {time.monotonic() - t0:.0f} s')
+      if not a.output:
+        from openpilot.tools.reproject_c4.window import play
+        logger.info('window: space pause, left/right 5 s, R reset; close it or Ctrl-C to stop')
+        play(clip, settings)
+      else:
+        logger.info(f'rendering {a.end - a.start} s to {a.output}')
+        render(clip, a.output, a.file_size, settings)
+        logger.info(f'{os.path.abspath(a.output)} in {time.monotonic() - t0:.0f} s')
     finally:
       clip.close()
   except RuntimeError as e:
