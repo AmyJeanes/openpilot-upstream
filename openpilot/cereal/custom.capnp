@@ -10,7 +10,33 @@ $Cxx.namespace("cereal");
 # DO rename the structs
 # DON'T change the identifier (e.g. @0x81c2f05a394cf4af)
 
-struct CustomReserved0 @0x81c2f05a394cf4af {
+struct ReprojectCalibration @0x81c2f05a394cf4af {
+  # reprojectcalibd: the 3X->comma 4 reprojection's narrow->wide rotation, 2 Hz and on every change. Rotations are rotvecs
+  # in radians (x=pitch, y=yaw, z=roll)
+  enum Status {
+    waiting @0;   # no fit accepted yet; why says what it waits for
+    fitting @1;   # at least one fit accepted, more to come
+    building @2;  # converged, the lookup tables are being built
+    fitted @3;    # applied is this unit's fit (calibrationd holds until then)
+    ready @4;     # tables built: reprojectd swaps target in, then saves it
+  }
+  enum Why {
+    none @0;
+    cameras @1;
+    model @2;
+    speed @3;
+    straight @4;
+    pair @5;
+    features @6;  # the last frame had too little texture to fit
+  }
+  status @0 :Status;
+  why @1 :Why;
+  pct @2 :UInt8;             # progress of the fit, 0-100
+  mean @3 :List(Float32);    # component-wise median of the accepted fits
+  lastFrameId @4 :UInt32;    # the narrow camera frame the last fit ran on
+  lastAccepted @5 :Bool;
+  applied @6 :List(Float64); # the rotation reprojectd runs
+  target @7 :List(Float64);  # building / ready: the fitted rotation, exact (its tables are cached by it)
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {
