@@ -21,6 +21,7 @@ from openpilot.tools.reproject_c4.route_data import SEG_FRAMES, CameradFrame, Fr
 from openpilot.tools.reproject_c4.stage import Stage
 
 DW, DH = RC.C4_CAM
+WINDOW_DEPTH = 6  # frames in flight in the window: enough to keep up, few enough that a seek answers quickly
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,8 @@ class Settings:
 class Clip:
   """A route's frames between start and end, drawn in order from a position: the log, the stage on the GPU, the camera
   decoders and the drawing processes. submit() starts the next frame, take() hands back the oldest finished one."""
-  def __init__(self, route: Route, start: int, end: int):
+  def __init__(self, route: Route, start: int, end: int, window: bool = False):
+    self.window = window  # draw for the window (the path apart), and loop
     self.first, self.last = start * FRAMERATE, end * FRAMERATE
     self.route, self.name = route, route.name.canonical_name.replace('|', '/')
     seg_start, seg_end = start // 60, (end - 1) // 60 + 1
@@ -76,12 +78,14 @@ class Clip:
       self.rotation = R.Fitted(self.log, route, self.first, self.last, self.src_wh)
 
     workers = max(2, min(6, (os.cpu_count() or 4) // 2))  # past four the stage in this process sets the pace
-    self.depth = 2 * workers + 1  # frames in flight
-    self.n_slots = self.depth + 1  # and the one being taken
+    self.depth = WINDOW_DEPTH if window else 2 * workers + 1  # frames in flight
+    self.n_slots = self.depth + 1  # and the one on screen
     st, y_height, uv_height, _ = get_nv12_info(DW, DH)
     body, frame = st * (y_height + uv_height), self.src_wh[0] * self.src_wh[1] * 3 // 2
     sizes = {'narrow': body, 'wide': body, 'narrow_only': body, 'wide_only': body, 'device_narrow': frame, 'device_wide': frame,
              'picture': V.W * V.H * 3}
+    if window:
+      sizes['path'] = V.W * V.H * 4
     self.slots = Slots(self.n_slots, sizes)
     # the traces' y scales, fixed for the clip so they hold still while it plays
     t0, t1 = (self.log.frame(*divmod(i, SEG_FRAMES))[0] for i in (self.first, self.last - 1))
@@ -115,9 +119,11 @@ class Clip:
     self.stage.meter = RC.SeamMeter(self.stage.meter_table)
 
   def submit(self, settings: Settings) -> bool:
-    """Run the stage on the next frame and start drawing it; False at the end of the clip."""
+    """Run the stage on the next frame and start drawing it; False at the end of the clip (in the window: back to its start)."""
     if self.next >= self.last:
-      return False
+      if not self.window:
+        return False
+      self._restart(self.first)
     assert self.decoders is not None and len(self.pending) < self.depth
     log, gidx = self.log, self.next
     seg, local = divmod(gidx, SEG_FRAMES)
@@ -139,7 +145,7 @@ class Clip:
     path = self.model_path.update(log.models.get(eof) or log.model_at.at(t), log.lead.at(t), height,
                                   log.throttle.at(t, True) or not log.long_control.at(t, False), experimental)
     v_ego = log.v_ego.at(t)
-    job = {'gidx': gidx, 'slot': slot, 'settings': settings, 'rotation': self.stage.rotation,
+    job = {'gidx': gidx, 'slot': slot, 'settings': settings, 'window': self.window, 'rotation': self.stage.rotation,
            'rpy': np.asarray(rpy if len(rpy) == 3 else (0, 0, 0), np.float32), 'wide_euler': wide_euler, 'path': path,
            'speed': f'{v_ego * 2.23694:.0f} mph' if v_ego is not None else None, 'alert': alert,
            'stats': {'series': {k: getattr(log, k).window(t - stats.WINDOW - 1, t) for k in ('e2e', 'model', 'dm', 'ui')},
@@ -159,6 +165,10 @@ class Clip:
     job, result = self.pending.popleft()
     result.get()
     return job, self.slots.view(job['slot'], 'picture')
+
+  def outlines(self, key: tuple):
+    """Start drawing the window's outline layer for a (rotation, rounded calibration)."""
+    return self.pool.apply_async(draw.outline_canvas, key)
 
   def discard(self) -> None:
     while self.pending:

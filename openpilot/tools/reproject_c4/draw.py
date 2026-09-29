@@ -93,7 +93,8 @@ def _panels(r: dict, device: dict, rpy: np.ndarray, wide_euler: tuple) -> tuple[
 
 
 def frame(job: dict) -> None:
-  """One frame's picture, into its slot, with the path and outlines at the settings' opacity."""
+  """One frame's picture, into its slot. For the window, the path goes into a layer of its own, which it blends at its
+  slider's opacity."""
   slots, slot, s = _W['slots'], job['slot'], job['settings']
   r = {k: slots.view(slot, k) for k in ('narrow', 'wide', 'narrow_only', 'wide_only')}
   g = _geometry(job['rotation'], tuple(np.round(job['rpy'], 3)))
@@ -102,11 +103,20 @@ def frame(job: dict) -> None:
   n, n_only, w_only = (V.luma(r[k], DW, DH, st, (V.PW, V.PH)) for k in ('narrow', 'narrow_only', 'wide_only'))
   picture = V.compose(dict(panels, seam=V.seam_view(n, n_only, w_only, *g['masks']), legends=g['legends'], speed=job['speed'],
                            alert=job['alert'], stats=stats.stats_panel(*V.PANELS['stats'][2:], dict(job['stats'], coverage=g['coverage']))))
-  picture = picture.convert('RGBA')
-  if s.path_opacity > 0:
-    picture.alpha_composite(V.fade(V.canvas_layer({k: job['path'].layer(img.size, to_panel[k]) for k, img in panels.items()}), s.path_opacity))
-  if s.overlay_opacity > 0:
-    picture.alpha_composite(V.fade(g['outlines'], s.overlay_opacity))
-  picture = picture.convert('RGB')
+  def path_layer():
+    return V.canvas_layer({k: job['path'].layer(img.size, to_panel[k]) for k, img in panels.items()})
+  if job['window']:
+    slots.view(slot, 'path')[:] = np.asarray(path_layer()).ravel()
+  else:
+    picture = picture.convert('RGBA')
+    if s.path_opacity > 0:
+      picture.alpha_composite(V.fade(path_layer(), s.path_opacity))
+    if s.overlay_opacity > 0:
+      picture.alpha_composite(V.fade(g['outlines'], s.overlay_opacity))
+    picture = picture.convert('RGB')
   slots.view(slot, 'picture')[:] = np.asarray(picture).ravel()
 
+
+def outline_canvas(rotation: tuple, rpy: tuple) -> dict:
+  """The window's outline layer for a rotation and calibration."""
+  return {'key': (rotation, rpy), 'outlines': np.asarray(_geometry(rotation, rpy)['outlines'])}
