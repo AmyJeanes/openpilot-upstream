@@ -38,13 +38,14 @@ prints the commanded and measured motion each second.
 | F6 | Engage / disengage |
 | Brake (S, left trigger) | Disengage |
 | Gas, steering | Override, without disengaging |
+| `=` / `-` | Cruise speed up / down (hold to repeat) |
 | `,` / `.` | Left / right blinker: starts a lane change at 20 mph or more |
 
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
 ## How it works
 - The plugin attaches a scripted camera to the car at the comma mount (1.22 m above the ground, level), hides the HUD,
-  the car and the player, and captures the game window with Windows.Graphics.Capture.
+  and the player, and captures the game window with Windows.Graphics.Capture.
 - One game camera covers both openpilot cameras. The driving model only samples about 30 degrees either side of center,
   so a pinhole render with a 76 degree vertical field of view has enough coverage and resolution for both; the wide
   camera's outer field is black. A pixel shader resamples it through the comma 3X lenses into NV12, as the Slow Roads

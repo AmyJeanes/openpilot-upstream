@@ -43,6 +43,8 @@ struct Config {
   int keyEngage = VK_F6;
   int keyLeft = VK_OEM_COMMA;
   int keyRight = VK_OEM_PERIOD;
+  int keySpeedUp = VK_OEM_PLUS;  // the = key
+  int keySpeedDown = VK_OEM_MINUS;
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -58,6 +60,13 @@ std::mutex g_stateMutex;
 std::string g_state = "{}";  // latest vehicle state as JSON, sent with each frame
 
 std::atomic<int> g_engagePresses{0}, g_leftPresses{0}, g_rightPresses{0};
+
+// cruise speed buttons: a press, then repeats while held, as a car's stalk steps the set speed
+struct HeldKey {
+  int presses = 0;
+  bool down = false;
+  double nextRepeat = 0;
+} g_speedUp, g_speedDown;
 
 struct VehicleInfo {
   Vehicle handle = 0;
@@ -146,6 +155,8 @@ void ReadConfig() {
   c.keyEngage = key("key_engage", c.keyEngage);
   c.keyLeft = key("key_left", c.keyLeft);
   c.keyRight = key("key_right", c.keyRight);
+  c.keySpeedUp = key("key_speed_up", c.keySpeedUp);
+  c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
   g_cfg = c;
 }
 
@@ -264,9 +275,24 @@ bool GameFocused() {
 }
 
 // the driver's own inputs, read from the devices: the game's control values include what the plugin injects
-void ReadDriver() {
+void PollHeldKey(HeldKey &k, int vk, bool focused, double now) {
+  bool down = focused && (GetAsyncKeyState(vk) & 0x8000) != 0;
+  if (down && !k.down) {
+    k.presses++;
+    k.nextRepeat = now + 0.5;
+  } else if (down && now >= k.nextRepeat) {
+    k.presses++;
+    k.nextRepeat = now + 0.15;
+  }
+  k.down = down;
+}
+
+void ReadDriver(double now) {
   Driver d;
-  if (GameFocused()) {
+  bool focused = GameFocused();
+  PollHeldKey(g_speedUp, g_cfg.keySpeedUp, focused, now);
+  PollHeldKey(g_speedDown, g_cfg.keySpeedDown, focused, now);
+  if (focused) {
     auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
     d.gas = down('W');
     d.brake = down('S');
@@ -399,7 +425,8 @@ void UpdateIndicator() {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"resets\":" << g_m.resets;
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"speedUpPresses\":" << g_speedUp.presses
+    << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"resets\":" << g_m.resets;
   if (inVehicle) {
     s << ",\"vEgo\":" << Num(g_m.v) << ",\"aMeas\":" << Num(g_m.aMeas) << ",\"yawRate\":" << Num(g_m.yawRate)
       << ",\"heading\":" << Num(g_m.heading) << ",\"pitch\":" << Num(g_m.pitch) << ",\"roll\":" << Num(g_m.roll)
@@ -585,7 +612,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
     CLEAR_PLAYER_WANTED_LEVEL(PLAYER_ID());
   }
 
-  ReadDriver();
+  ReadDriver(now);
   if (g_engagePresses.load() && !connected) g_engagePresses = 0;
   if (v) {
     UpdateIndicator();

@@ -54,7 +54,7 @@ class GTA5World(World):
     self.indicator: str | None = None
     self.indicator_t = 0.0
     self.lane_changing = False
-    self.engage_presses: int | None = None
+    self.presses: dict[str, int] = {}
     self.curvature = 0.0  # measured, smoothed
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
@@ -181,16 +181,24 @@ class GTA5World(World):
     simulator_state.user_brake = 1.0 if user.get("brake") else 0.0
     simulator_state.user_torque = -math.copysign(10000, user["steer"]) if abs(user.get("steer", 0)) > 0.02 else 0
     self._update_indicator(simulator_state, state.get("indicator"))
-    self._update_engage(state.get("engagePresses"))
+    self._update_buttons(state)
     simulator_state.valid = True
 
-  def _update_engage(self, presses: int | None):
-    """The plugin's engage key toggles openpilot: set when disengaged, cancel when engaged."""
-    if presses is None:
-      return
-    if self.engage_presses is not None and presses > self.engage_presses:
-      self.q.put(control_cmd_gen("cruise_cancel" if self.simulator_state.is_engaged else "cruise_down"))
-    self.engage_presses = presses
+  def _update_buttons(self, state: dict):
+    """The plugin's keys stand in for the cruise buttons: engage sets when disengaged and cancels when engaged, and the
+    speed keys are resume/accel and set/decel, which step the set speed while engaged."""
+    for key in ("engagePresses", "speedUpPresses", "speedDownPresses"):
+      presses = state.get(key)
+      if presses is None:
+        continue
+      new = presses - self.presses.get(key, presses)
+      self.presses[key] = presses
+      for _ in range(max(0, min(new, 5))):
+        if key == "engagePresses":
+          cmd = "cruise_cancel" if self.simulator_state.is_engaged else "cruise_down"
+        else:
+          cmd = "cruise_up" if key == "speedUpPresses" else "cruise_down"
+        self.q.put(control_cmd_gen(cmd))
 
   def _update_indicator(self, simulator_state: SimulatorState, indicator: str | None):
     """The plugin's indicator is the blinker stalk: nudge the wheel to start the lane change, and cancel the indicator

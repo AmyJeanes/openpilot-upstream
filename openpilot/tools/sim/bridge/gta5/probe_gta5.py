@@ -22,7 +22,7 @@ SERVICES = ["selfdriveState", "onroadEvents", "modelV2", "cameraOdometry", "carS
 
 def main(duration: float) -> None:
   Params().put_bool("ExperimentalMode", os.getenv("EXPERIMENTAL", "0") == "1")
-  env = dict(os.environ, BLOCK="soundd", BIG="1", GALLIUM_DRIVER="d3d12")
+  env = dict(os.environ, BLOCK="soundd", GALLIUM_DRIVER="d3d12")  # BIG=1 for the comma 3X UI instead of the comma four one
   manager = subprocess.Popen("./launch_openpilot.sh", cwd=SIM_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   sm = messaging.SubMaster(SERVICES)
   time.sleep(8)  # let manager_init finish before the bridge writes params
