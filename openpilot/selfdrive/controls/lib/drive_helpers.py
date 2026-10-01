@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.realtime import DT_CTRL, DT_MDL
@@ -11,7 +13,8 @@ MIN_STABLE_DELAY = 0.3
 
 # EU guidelines
 MAX_LATERAL_JERK = 5.0  # m/s^3
-MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
+# MAX_LAT_ACCEL overrides it for simulators whose roads exceed what a real car may be steered through
+MAX_LATERAL_ACCEL_NO_ROLL = float(os.getenv("MAX_LAT_ACCEL", "3.0"))  # m/s^2
 
 
 def should_stop(v_ego: float, a_target: float) -> bool:
