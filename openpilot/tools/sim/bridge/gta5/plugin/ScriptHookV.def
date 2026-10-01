@@ -1,0 +1,11 @@
+; ScriptHookV.dll's exports that the plugin links against (MSVC-mangled), for an import library built without the SDK
+LIBRARY ScriptHookV.dll
+EXPORTS
+  ?scriptWait@@YAXK@Z
+  ?scriptRegister@@YAXPEAUHINSTANCE__@@P6AXXZ@Z
+  ?scriptUnregister@@YAXPEAUHINSTANCE__@@@Z
+  ?keyboardHandlerRegister@@YAXP6AXKGEHHHH@Z@Z
+  ?keyboardHandlerUnregister@@YAXP6AXKGEHHHH@Z@Z
+  ?nativeInit@@YAX_K@Z
+  ?nativePush64@@YAX_K@Z
+  ?nativeCall@@YAPEA_KXZ

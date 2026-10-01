@@ -11,6 +11,9 @@ def create_bridge(dual_camera, high_quality, simulator="metadrive"):
   if simulator == "slowroads":
     from openpilot.tools.sim.bridge.slowroads.slowroads_bridge import SlowRoadsBridge
     simulator_bridge = SlowRoadsBridge()
+  elif simulator == "gta5":
+    from openpilot.tools.sim.bridge.gta5.gta5_bridge import GTA5Bridge
+    simulator_bridge = GTA5Bridge()
   else:
     from openpilot.tools.sim.bridge.metadrive.metadrive_bridge import MetaDriveBridge
     simulator_bridge = MetaDriveBridge(dual_camera, high_quality)
@@ -27,7 +30,7 @@ def parse_args(add_args=None):
   parser.add_argument('--joystick', action='store_true')
   parser.add_argument('--high_quality', action='store_true')
   parser.add_argument('--dual_camera', action='store_true')
-  parser.add_argument('--simulator', choices=['metadrive', 'slowroads'], default='metadrive')
+  parser.add_argument('--simulator', choices=['metadrive', 'slowroads', 'gta5'], default='metadrive')
 
   return parser.parse_args(add_args)
 
