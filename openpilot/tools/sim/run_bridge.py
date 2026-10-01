@@ -4,12 +4,16 @@ import argparse
 from typing import Any
 from multiprocessing import Queue
 
-from openpilot.tools.sim.bridge.metadrive.metadrive_bridge import MetaDriveBridge
 
-def create_bridge(dual_camera, high_quality):
+def create_bridge(dual_camera, high_quality, simulator="metadrive"):
   queue: Any = Queue()
 
-  simulator_bridge = MetaDriveBridge(dual_camera, high_quality)
+  if simulator == "slowroads":
+    from openpilot.tools.sim.bridge.slowroads.slowroads_bridge import SlowRoadsBridge
+    simulator_bridge = SlowRoadsBridge()
+  else:
+    from openpilot.tools.sim.bridge.metadrive.metadrive_bridge import MetaDriveBridge
+    simulator_bridge = MetaDriveBridge(dual_camera, high_quality)
   simulator_process = simulator_bridge.run(queue)
 
   return queue, simulator_process, simulator_bridge
@@ -23,13 +27,14 @@ def parse_args(add_args=None):
   parser.add_argument('--joystick', action='store_true')
   parser.add_argument('--high_quality', action='store_true')
   parser.add_argument('--dual_camera', action='store_true')
+  parser.add_argument('--simulator', choices=['metadrive', 'slowroads'], default='metadrive')
 
   return parser.parse_args(add_args)
 
 if __name__ == "__main__":
   args = parse_args()
 
-  queue, simulator_process, simulator_bridge = create_bridge(args.dual_camera, args.high_quality)
+  queue, simulator_process, simulator_bridge = create_bridge(args.dual_camera, args.high_quality, args.simulator)
 
   if args.joystick:
     # start input poll for joystick

@@ -48,3 +48,6 @@ Start bridge processes located in openpilot/tools/sim:
 ``` bash
 ./run_bridge.py
 ```
+
+## Slow Roads
+`--simulator slowroads` drives the Slow Roads game on Windows from openpilot in WSL; see [its README](bridge/slowroads/README.md).
