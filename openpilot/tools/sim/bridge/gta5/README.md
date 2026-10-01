@@ -28,7 +28,8 @@ switches back when the bridge stops. The bridge writes its address to `C:\Users\
 set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL.
 
 `gta5_cmd.py` sends debug commands through the running bridge: `snap` saves the next frames as PNGs, `setup` spawns a car
-and puts it on the road nearest a point, and `camera` rotates the camera on its mount. `GTA5_DEBUG=1` on terminal 2
+and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and logs the motion, and `engage` presses the
+engage key. `../slowroads/view_cameras.py` shows the full camera frames openpilot gets. `GTA5_DEBUG=1` on terminal 2
 prints the commanded and measured motion each second.
 
 ## Controls
@@ -50,8 +51,10 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
   bridge does (`lens=0` for openpilot's plain pinhole cameras).
 - Frames go uncompressed over TCP (about 140 MB/s at 20 Hz), which the WSL network carries easily; `gta5_rx.py` copies them
   into shared memory in its own process, so the bridge's 100 Hz threads keep the GIL.
-- Control uses carControl's `curvature` and `accel`. The plugin steers with a feed-forward road wheel angle plus an
-  integral on the curvature the yaw rate shows, and drives the throttle and brake from the requested acceleration plus an
-  integral on the measured one. It holds a stop with the handbrake, as the game's brake reverses a stopped car.
-- The steering angle openpilot sees is the yaw rate's curvature through openpilot's learned vehicle model.
+- Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which turns the car at
+  a yaw rate roughly proportional to it (`yaw_gain`; `gta5_cmd.py steertest` measures it): it feeds forward the yaw rate
+  the curvature needs and integrates the error. Throttle and brake follow the requested acceleration plus an integral on
+  the measured one, and a stop is held with the handbrake, as the game's brake reverses a stopped car.
+- The steering angle openpilot sees is the yaw rate's curvature through openpilot's learned vehicle model, and the IMU
+  uses the physics' yaw rate.
 - The plugin sets the maximum wanted level to zero while connected.
