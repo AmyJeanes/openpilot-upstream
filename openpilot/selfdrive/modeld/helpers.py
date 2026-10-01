@@ -6,15 +6,17 @@ from openpilot.common.hardware import AGNOS
 from openpilot.common.hardware.usb import CHESTNUT_USB_PRODUCT, USB_DEVICES_PATH, is_chestnut_usb_id
 
 MODELS_DIR = Path(__file__).resolve().parent / 'models'
+# big model built for MODELD_DEV from MODELD_BIG_ONNX; the shipped big model is compiled for the comma eGPU only
+LOCAL_BIG_PKL = MODELS_DIR / 'local_big_driving_tinygrad.pkl'
 
 
 def modeld_pkl_path(chestnut: bool):
   prefix = 'big_' if chestnut else ''
   return MODELS_DIR / f'{prefix}driving_tinygrad.pkl'
 
-def load_oob(path, chestnut=False):
+def load_oob(path, chestnut=False, device=None):
   from tinygrad import Context
-  device = 'USB+AMD:LLVM' if chestnut else 'QCOM' if AGNOS else 'METAL' if sys.platform == 'darwin' else 'CPU:LLVM'
+  device = device or ('USB+AMD:LLVM' if chestnut else 'QCOM' if AGNOS else 'METAL' if sys.platform == 'darwin' else 'CPU:LLVM')
   with Context(DEV=device):
     from tinygrad_repo.examples.openpilot.helpers import load_pickle
     return load_pickle(path, out_of_band=True)

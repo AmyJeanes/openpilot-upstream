@@ -14,6 +14,7 @@ from tinygrad.tensor import Tensor
 from tinygrad.helpers import round_up
 from tinygrad.uop.ops import UOp
 import math
+from pathlib import Path
 import pickle
 import threading
 import time
@@ -39,7 +40,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, 
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
-from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob, wait_for_chestnut
+from openpilot.selfdrive.modeld.helpers import MODELS_DIR, LOCAL_BIG_PKL, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob, wait_for_chestnut
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
@@ -141,8 +142,8 @@ def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int
 class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
-  def __init__(self, cam_w: int, cam_h: int, chestnut: bool):
-    jits = load_oob(modeld_pkl_path(chestnut), chestnut)
+  def __init__(self, cam_w: int, cam_h: int, chestnut: bool, pkl_path: Path | None = None):
+    jits = load_oob(pkl_path or modeld_pkl_path(chestnut), chestnut, None if chestnut else os.getenv('MODELD_DEV'))
     self.model_device = jits['input_specs']['new_img'][2]
     self.input_shapes = {name: (shape, np.dtype(dtype)) for name, (shape, dtype, _) in jits['input_specs'].items()}
     self.state_pairs = {name: f'next_{name}' for name in self.input_shapes if f'next_{name}' in jits['metadata']['output_shapes']}
@@ -151,6 +152,7 @@ class ModelState:
 
     self.prev_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     self.chestnut = chestnut
+    self.big = chestnut or pkl_path == LOCAL_BIG_PKL
 
     stride, y_height, uv_height, _ = get_nv12_info(cam_w, cam_h)
     self.frame_copy_size = stride * (y_height + uv_height)
@@ -281,6 +283,8 @@ def main(demo=False):
     loader.join(BIG_MODEL_TIMEOUT)
     model = big_model
     params.put_bool("ChestnutActive", model is not None)
+  elif os.getenv('MODELD_BIG'):
+    model = ModelState(vipc_client_main.width, vipc_client_main.height, False, LOCAL_BIG_PKL)
 
   small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False) if model is None or CHESTNUT else None
   if model is None:
@@ -432,7 +436,7 @@ def main(demo=False):
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, extrinsics_calibration_seen)
-      modelv2_send.modelV2.big = model.chestnut
+      modelv2_send.modelV2.big = model.big
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
