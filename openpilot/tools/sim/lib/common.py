@@ -91,6 +91,10 @@ class World(ABC):
   def read_cameras(self):
     pass
 
+  def camera_yuv(self, wide: bool) -> bytes | None:
+    """Optional: a ready NV12 frame, for worlds that produce one more cheaply than converting road_image."""
+    return None
+
   @abstractmethod
   def close(self, reason: str):
     pass
