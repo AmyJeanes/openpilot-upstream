@@ -547,7 +547,10 @@ void ApplyControls(float dt, double now) {
     if (stopped) g_ctl.lonI = std::max(0.0f, g_ctl.lonI);
   }
   if (g_user.gas) g_ctl.lonI = 0;
-  float u = std::clamp(accel + g_ctl.lonI, -4.0f, 2.5f);
+  // a real Model 3 delivers the requested acceleration on any grade (openpilot sends it open loop), so add what gravity
+  // takes away; the coasting model and throttle table are flat-road ones
+  float grade = 9.81f * std::sin(g_m.pitch * DEG);
+  float u = std::clamp(accel + g_ctl.lonI, -4.0f, 2.5f) + grade;
   // the game's brake reverses a stopped car, so hold a stop with the handbrake like a car's brake hold
   bool hold = std::fabs(speed) < 0.5f && accel < 0 && !g_user.gas;
   if (hold != g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, hold);
