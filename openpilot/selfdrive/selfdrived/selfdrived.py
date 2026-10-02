@@ -17,6 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
+from openpilot.selfdrive.controls.lib.desire_helper import lane_turn_desire
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
@@ -65,7 +66,8 @@ class SelfdriveD:
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
     self.excessive_actuation_check = ExcessiveActuationCheck()
-    self.excessive_actuation = self.params.get("Offroad_ExcessiveActuation") is not None
+    # a simulator's physics (collisions, kerbs) jolts the car far beyond what a real car's actuators could
+    self.excessive_actuation = self.params.get("Offroad_ExcessiveActuation") is not None and not SIMULATION
     self.big_model_loading = False
     self.big_model_active = False
     self.big_model_failed = False
@@ -299,7 +301,7 @@ class SelfdriveD:
       device_motion = Pose.from_device_motion(self.sm['deviceMotion'])
       self.calibrated_pose = self.pose_calibrator.build_calibrated_pose(device_motion)
 
-    if self.calibrated_pose is not None and not self.CP.notCar:
+    if self.calibrated_pose is not None and not self.CP.notCar and not SIMULATION:
       excessive_actuation = self.excessive_actuation_check.update(self.sm, CS, self.calibrated_pose)
       if not self.excessive_actuation and excessive_actuation is not None:
         set_offroad_alert("Offroad_ExcessiveActuation", True, extra_text=str(excessive_actuation))
@@ -308,6 +310,13 @@ class SelfdriveD:
     if self.excessive_actuation:
       self.events.add(EventName.excessiveActuation)
     # ******************************************************************************************
+
+    # Handle lane turn, which modeld's DesireHelper gives the model ahead of any lane change
+    lane_turn = lane_turn_desire(CS)
+    if lane_turn == log.Desire.turnLeft:
+      self.events.add(EventName.turnLeft)
+    elif lane_turn == log.Desire.turnRight:
+      self.events.add(EventName.turnRight)
 
     # Handle lane change
     if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:

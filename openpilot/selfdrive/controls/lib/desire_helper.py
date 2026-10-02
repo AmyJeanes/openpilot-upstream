@@ -8,6 +8,19 @@ LaneChangeDirection = log.LaneChangeDirection
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 LANE_CHANGE_START_TIME = 0.5
+# below this a blinker asks the model to take the next turn instead, as sunnypilot's lane turn desire does
+LANE_TURN_SPEED = 19 * CV.MPH_TO_MS
+
+
+def lane_turn_desire(CS) -> int:
+  """The turn a blinker asks for at low speed, unless the blind spot that way is occupied; overrides any lane change."""
+  if CS.vEgo < LANE_TURN_SPEED:
+    if CS.leftBlinker and not CS.rightBlinker and not CS.leftBlindspot:
+      return log.Desire.turnLeft
+    if CS.rightBlinker and not CS.leftBlinker and not CS.rightBlindspot:
+      return log.Desire.turnRight
+  return log.Desire.none
+
 
 class DesireHelper:
   def __init__(self):
@@ -70,8 +83,8 @@ class DesireHelper:
 
     self.prev_one_blinker = one_blinker and lateral_active
 
-    self.desire = log.Desire.none
-    if self.lane_change_state == LaneChangeState.laneChangeStarting:
+    self.desire = lane_turn_desire(carstate)
+    if self.desire == log.Desire.none and self.lane_change_state == LaneChangeState.laneChangeStarting:
       if self.lane_change_direction == LaneChangeDirection.left:
         self.desire = log.Desire.laneChangeLeft
       elif self.lane_change_direction == LaneChangeDirection.right:
