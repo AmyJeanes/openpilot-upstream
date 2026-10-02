@@ -340,11 +340,19 @@ void OnVehicleChanged(Vehicle v) {
   GET_MODEL_DIMENSIONS(GET_ENTITY_MODEL(v), &mn, &mx);
   g_veh.mountX = 0;
   g_veh.mountY = std::isnan(g_cfg.mountForward) ? 0.25f * mx.y : g_cfg.mountForward;
-  // a mount set with the camera command for this model, which puts the camera ahead of its interior
+  g_veh.mountZ = mn.z + g_cfg.mountHeight;
+  // behind the windscreen, as a comma device is mounted, whatever the cabin's height; the bone sits low on the glass
+  int ws = GET_ENTITY_BONE_INDEX_BY_NAME(v, "windscreen");
+  if (ws >= 0 && std::isnan(g_cfg.mountForward)) {
+    Vector3 w = GET_WORLD_POSITION_OF_ENTITY_BONE(v, ws);
+    Vector3 l = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, w.x, w.y, w.z);
+    g_veh.mountY = l.y;
+    g_veh.mountZ = l.z + 0.08f;
+  }
+  // a mount set with the camera command for this model
   char saved[32];
   GetPrivateProfileStringA("mount_forward", ModelKey(v).c_str(), "", saved, sizeof(saved), IniPath().c_str());
   if (saved[0]) g_veh.mountY = static_cast<float>(atof(saved));
-  g_veh.mountZ = mn.z + g_cfg.mountHeight;
   int lf = GET_ENTITY_BONE_INDEX_BY_NAME(v, "wheel_lf"), lr = GET_ENTITY_BONE_INDEX_BY_NAME(v, "wheel_lr");
   g_veh.wheelLf = lf;
   if (lf >= 0 && lr >= 0) {

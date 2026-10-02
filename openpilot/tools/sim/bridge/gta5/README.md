@@ -48,7 +48,8 @@ openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
 ## How it works
-- The plugin attaches a scripted camera to the car at the comma mount (1.22 m above the ground, level), hides the HUD,
+- The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
+  car's windscreen bone; else 1.22 m above the ground), level, hides the HUD,
   and captures the game window with Windows.Graphics.Capture.
 - With `interleave=1`, the game renders the openpilot camera only on one frame per 20 Hz capture, and the player's own
   camera on the rest. Those frames carry a small coloured marker at the top-left, so timing between the script and the
