@@ -55,7 +55,7 @@ class GTA5World(World):
     self.indicator_t = 0.0
     self.lane_changing = False
     self.presses: dict[str, int] = {}
-    self.curvature = 0.0  # measured, smoothed
+    self.curvature = 0.0  # what the steering is set for
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
@@ -154,9 +154,8 @@ class GTA5World(World):
     simulator_state.bearing = bearing
     simulator_state.imu.bearing = bearing
 
-    # the path curvature the yaw rate shows stands in for a steering angle sensor
-    measured = yaw_rate / v if v > 2.0 else 0.0
-    self.curvature += 0.3 * (measured - self.curvature)
+    # the plugin reports the curvature its steering is set for, standing in for a steering angle sensor
+    self.curvature = state.get("steerCurvature", yaw_rate / v if v > 2.0 else 0.0)
     if self.VM is not None:
       # invert controlsd's measured curvature using the same learned params, so the reported angle matches its target
       lp = self.sm['vehicleParameters']

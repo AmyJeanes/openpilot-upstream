@@ -410,6 +410,14 @@ void ApplyControls(float dt, double now) {
   g_ctl.brakeOut = brake;
 }
 
+// what a steering angle sensor would show, as the curvature it steers for: the applied steer bias while the plugin
+// drives (openpilot's torque controller winds up against the lag and offset of the path the car actually follows), else
+// the yaw rate's curvature
+float SteerCurvature() {
+  if (g_ctl.wasLive) return g_ctl.steerOut * g_cfg.yawGain / std::max(g_m.v, 3.0f);
+  return g_m.v > 2.0f ? g_m.yawRate / g_m.v : 0.0f;
+}
+
 void UpdateIndicator() {
   int left = g_leftPresses.exchange(0), right = g_rightPresses.exchange(0);
   int prev = g_indicator;
@@ -430,7 +438,7 @@ void Publish(double now, bool inVehicle) {
   if (inVehicle) {
     s << ",\"vEgo\":" << Num(g_m.v) << ",\"aMeas\":" << Num(g_m.aMeas) << ",\"yawRate\":" << Num(g_m.yawRate)
       << ",\"heading\":" << Num(g_m.heading) << ",\"pitch\":" << Num(g_m.pitch) << ",\"roll\":" << Num(g_m.roll)
-      << ",\"wheelBase\":" << Num(g_veh.wheelBase) << ",\"pos\":" << Vec(g_m.pos) << ",\"rotVel\":" << Vec(g_m.rotVel)
+      << ",\"wheelBase\":" << Num(g_veh.wheelBase) << ",\"steerCurvature\":" << Num(SteerCurvature()) << ",\"pos\":" << Vec(g_m.pos) << ",\"rotVel\":" << Vec(g_m.rotVel)
       << ",\"steerBone\":" << Vec(g_m.steerBone)
       << ",\"indicator\":" << (g_indicator == 1 ? "\"left\"" : g_indicator == 2 ? "\"right\"" : "null")
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
