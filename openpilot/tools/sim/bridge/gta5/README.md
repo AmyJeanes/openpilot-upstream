@@ -34,7 +34,7 @@ and puts it on the road nearest a point, `camera` rotates the camera on its moun
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
 recolour the car (where its model allows), and `engage` and `indicator` press those keys. For testing,
-`traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car that far ahead of the camera (`remove=1`
+`traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car about that far ahead in the lane (`leadspeed v=` changes its speed, `remove=1`
 deletes it, `clear=<model>` any left behind) and the state then reports its true range, and `GTA5_LOG=<file>` on
 terminal 2 records the game state and the controls sent, a JSON line each. `watch_views.py` shows the road and wide camera streams
 side by side, as openpilot gets them, outlining the part the driving model takes in. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps

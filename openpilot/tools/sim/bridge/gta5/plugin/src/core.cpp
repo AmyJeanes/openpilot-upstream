@@ -772,9 +772,25 @@ void StepLead(double now) {
   Vector3 mn{}, mx{};
   GET_MODEL_DIMENSIONS(l.model, &mn, &mx);
   l.rearY = mn.y;
-  // its rear the given distance ahead of the camera
+  // its rear about the given distance ahead of the camera, moved onto the road there at the player's offset from the
+  // road's nodes, so it's in the same lane where the road curves (the state reports its true range)
+  float heading = GET_ENTITY_HEADING(g_veh.handle);
   Vector3 p = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(g_veh.handle, 0.0f, g_veh.mountY + l.dist - mn.y, 0.0f);
-  l.veh = CREATE_VEHICLE(l.model, p.x, p.y, p.z + 0.5f, GET_ENTITY_HEADING(g_veh.handle), FALSE, FALSE, FALSE);
+  Vector3 egoPos = GET_ENTITY_COORDS(g_veh.handle, TRUE), egoNode{}, node{};
+  float egoNodeHeading = 0, nodeHeading = 0;
+  if (GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(egoPos.x, egoPos.y, egoPos.z, &egoNode, &egoNodeHeading, 1, 3.0f, 0.0f) &&
+      GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(p.x, p.y, p.z, &node, &nodeHeading, 1, 3.0f, 0.0f)) {
+    auto aligned = [heading](float h) { return std::fabs(std::remainder(h - heading, 360.0f)) > 90.0f ? h + 180.0f : h; };
+    egoNodeHeading = aligned(egoNodeHeading) * DEG;
+    nodeHeading = aligned(nodeHeading) * DEG;
+    // headings are counterclockwise from north: right is (cos h, sin h)
+    float offset = (egoPos.x - egoNode.x) * std::cos(egoNodeHeading) + (egoPos.y - egoNode.y) * std::sin(egoNodeHeading);
+    p = node;
+    p.x += offset * std::cos(nodeHeading);
+    p.y += offset * std::sin(nodeHeading);
+    heading = nodeHeading / DEG;
+  }
+  l.veh = CREATE_VEHICLE(l.model, p.x, p.y, p.z + 0.5f, heading, FALSE, FALSE, FALSE);
   SET_MODEL_AS_NO_LONGER_NEEDED(l.model);
   if (!l.veh) {
     Log("lead: vehicle creation failed");
@@ -914,6 +930,12 @@ void HandleMessage(const Message &m, double now) {
       g_lead.loading = true;
       g_lead.t = now;
     }
+  } else if (type == "leadspeed" && g_lead.driver && DOES_ENTITY_EXIST(g_lead.veh)) {
+    // a new speed for the moving lead; near 0 it pulls up and waits, as in a queue
+    float v = static_cast<float>(MsgNum(m, "v", g_lead.speed));
+    SET_VEHICLE_MAX_SPEED(g_lead.veh, std::max(v, 0.01f));
+    SET_DRIVE_TASK_CRUISE_SPEED(g_lead.driver, std::max(v, 0.01f));
+    SET_VEHICLE_HANDBRAKE(g_lead.veh, v < 0.5f);
   } else if (type == "traffic") {
     g_noTraffic = !MsgBool(m, "on", true);
     if (g_noTraffic) ClearModel(0, 300.0f);  // any model
