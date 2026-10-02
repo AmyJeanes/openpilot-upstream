@@ -283,7 +283,7 @@ def main(demo=False):
     loader.join(BIG_MODEL_TIMEOUT)
     model = big_model
     params.put_bool("ChestnutActive", model is not None)
-  elif os.getenv('MODELD_BIG'):
+  elif os.getenv("MODELD_BIG", "0") == "1":
     model = ModelState(vipc_client_main.width, vipc_client_main.height, False, LOCAL_BIG_PKL)
 
   small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False) if model is None or CHESTNUT else None
