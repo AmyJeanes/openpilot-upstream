@@ -20,6 +20,7 @@
 #include "natives.h"
 #include "net.h"
 #include "present_hook.h"
+#include "script_hook.h"
 
 #pragma comment(lib, "xinput.lib")
 
@@ -295,6 +296,7 @@ void ActivateCamera() {
   Log(std::string("camera on") + (g_cfg.interleave ? ", interleaved" : ""));
 }
 
+bool g_radarHidden = false;  // by the openpilot camera's last frame
 void RenderCamera(bool on) {
   if (on != g_rendering) RENDER_SCRIPT_CAMS(on, FALSE, 0, TRUE, FALSE, 0);
   g_rendering = on;
@@ -1020,6 +1022,10 @@ extern "C" __declspec(dllexport) void CoreTick() {
   float dt = GET_FRAME_TIME();
   for (auto &m : g_link.TakeMessages()) HandleMessage(m, now);
 
+  static bool scriptHook = false;
+  if (!scriptHook) scriptHook = (script_hook::Install(Log), true);
+  script_hook::Update();
+
   Ped ped = PLAYER_PED_ID();
   if (g_setup.step) StepSetup(ped, now);
   StepLead(now);
@@ -1056,18 +1062,30 @@ extern "C" __declspec(dllexport) void CoreTick() {
   g_capture.SetMarker(g_cfg.interleave && !hooked);
   present_hook::SetEnabled(want && hooked);
 
+  script_hook::SetOverride(g_cam != 0);
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view >= 0) {
-    // help text would cover the marker, and the wide lens reaches the radar in the corner. Hiding the feed for a frame
-    // restarts its animation, which flickers, so it's hidden only where the frames reach the screen.
+    // help text would cover the marker, and the wide lens reaches the radar in the corner. Hiding the rest of the HUD
+    // or the feed for a frame restarts their animations (the radio station's name never shows), so the feed is hidden
+    // only where the frames reach the screen.
     HIDE_HELP_TEXT_THIS_FRAME();
-    HIDE_HUD_AND_RADAR_THIS_FRAME();
+    if (!IS_RADAR_HIDDEN()) {
+      DISPLAY_RADAR(FALSE);
+      g_radarHidden = true;
+    }
     if (!hooked) THEFEED_HIDE_THIS_FRAME();
     // tells the capture this frame is the openpilot camera's, and which view by its colour (magenta both, cyan road,
     // yellow wide); the lens resampling blacks it out
     if (g_cfg.interleave)
       DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, view == HOOK_ROAD ? 0 : 255, view == HOOK_BOTH ? 0 : 255, view == HOOK_WIDE ? 0 : 255, 255, FALSE);
+  } else if (g_radarHidden) {
+    DISPLAY_RADAR(TRUE);
+    g_radarHidden = false;
   }
+  // sounds are heard from the rendering camera, as the game sees it a frame late
+  static bool lastOp = false;
+  if (view >= 0 || lastOp) FREEZE_MICROPHONE();
+  lastOp = view >= 0;
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0) DrawSpeed(now);
   if (connected) {
@@ -1092,6 +1110,8 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   ReleaseControls();
   ReleaseCamera();
   RemoveLead();
+  script_hook::Uninstall();
+  if (g_radarHidden) DISPLAY_RADAR(TRUE);
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();

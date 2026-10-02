@@ -67,7 +67,11 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
   views: turn off TAA, DLAA, DLSS and FSR upscaling, ray tracing's temporal denoising, and motion blur. DLSS frame
   generation on its own looked clean. Supersampling (2x) anti-aliases the magnified road view; it doesn't add pixels,
   as the frames are taken after the game scales them down. A 90 FPS cap leaves the player 70 and the GPU room for the
-  model.
+  model. The openpilot frames hide only the radar, and hold sounds where the player's camera hears them. The game's
+  scripts see a script camera rendering on the frame after each, and the interaction menu (M) closes itself then, so
+  the plugin swaps `IS_GAMEPLAY_CAM_RENDERING` in that script's native table for one that answers yes while connected
+  (`script_hook.cpp`, with YimMenuV2's patterns for the Enhanced build; if they stop matching, the log says so and the
+  menu just closes).
 - One 76 degree render covers both openpilot cameras, magnified about 2.8x for the road camera and with the wide
   camera's outer field black. A pixel shader resamples it through the comma 3X lenses into NV12, as the Slow Roads
   bridge does (`lens=0` for openpilot's plain pinhole cameras). `split_views=1` renders each camera separately (30

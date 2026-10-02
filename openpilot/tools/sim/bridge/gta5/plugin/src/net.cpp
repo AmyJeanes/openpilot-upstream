@@ -3,6 +3,7 @@
 
 #include "net.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -72,7 +73,7 @@ double MsgNum(const Message &m, const char *key, double fallback) {
 bool MsgBool(const Message &m, const char *key, bool fallback) {
   auto it = m.find(key);
   if (it == m.end()) return fallback;
-  return it->second == "true" || it->second == "1";
+  return it->second == "true" || std::atof(it->second.c_str()) != 0;  // gta5_cmd.py sends on=1 as 1.0
 }
 
 std::string MsgStr(const Message &m, const char *key, const std::string &fallback) {
