@@ -30,18 +30,20 @@ switches back when the bridge stops. The bridge writes its address to `C:\Users\
 set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL.
 
 `gta5_cmd.py` sends debug commands through the running bridge: `snap` saves the next frames as PNGs, `setup` spawns a car
-and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and logs the motion, and `engage` presses the
-engage key. `../slowroads/view_cameras.py` shows the full camera frames openpilot gets. `GTA5_DEBUG=1` on terminal 2
-prints the commanded and measured motion each second.
+and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and
+throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
+present hook, and `engage` and `indicator` press those keys. `../slowroads/view_cameras.py` shows the full camera frames
+openpilot gets. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps
+openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that off).
 
 ## Controls
 | Key | openpilot |
 |---|---|
 | F6 | Engage / disengage |
-| Brake (S, left trigger) | Disengage |
-| Gas, steering | Override, without disengaging |
-| `=` / `-` | Cruise speed up / down (hold to repeat) |
-| `,` / `.` | Left / right blinker: starts a lane change at 20 mph or more |
+| Brake (S, left trigger), steering | Disengage |
+| Gas | Override, without disengaging |
+| Up / down arrow | Cruise speed up / down (hold to repeat); the phone is blocked while connected |
+| Left / right arrow | Left / right blinker: starts a lane change at 20 mph or more |
 
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
@@ -60,10 +62,12 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
   bridge does (`lens=0` for openpilot's plain pinhole cameras).
 - Frames go uncompressed over TCP (about 140 MB/s at 20 Hz), which the WSL network carries easily; `gta5_rx.py` copies them
   into shared memory in its own process, so the bridge's 100 Hz threads keep the GIL.
-- Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which turns the car at
-  a yaw rate roughly proportional to it (`yaw_gain`; `gta5_cmd.py steertest` measures it): it feeds forward the yaw rate
-  the curvature needs and integrates the error. Throttle and brake follow the requested acceleration plus an integral on
-  the measured one, and a stop is held with the handbrake, as the game's brake reverses a stopped car.
+- Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which sets a wheel
+  angle and so a path curvature roughly proportional to it, by an amount that depends on the car: it learns that gain
+  while driving (`curv_gain` is where it starts), feeds forward the bias for the curvature, and integrates the yaw rate
+  error. Throttle comes from a measured table of the acceleration it adds over coasting, which in the game is a hard
+  -3 m/s^2 or so, and the brake covers anything beyond that; a stop is held with the handbrake, as the game's brake
+  reverses a stopped car.
 - The steering angle openpilot sees is the yaw rate's curvature through openpilot's learned vehicle model, and the IMU
   uses the physics' yaw rate.
 - The plugin sets the maximum wanted level to zero while connected.

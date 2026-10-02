@@ -24,7 +24,21 @@ NUDGE_TORQUE = 2000
 NUDGE_TIMEOUT = 3.0  # s after the indicator comes on
 # the plugin reads the bridge's address from here when its gta5op.ini doesn't set one
 BRIDGE_FILE = Path(os.getenv("GTA5_BRIDGE_FILE", "/mnt/c/Users/Public/gta5op-bridge.txt"))
+PIN_UI = Path(__file__).parent / "pin_ui.ps1"
 LaneChangeState = log.LaneChangeState
+
+
+def pin_ui() -> subprocess.Popen | None:
+  """Keeps openpilot's UI window above the game's, from Windows (GTA5_PIN_UI=0 turns it off)."""
+  if os.getenv("GTA5_PIN_UI", "1") == "0":
+    return None
+  try:
+    script = subprocess.check_output(["wslpath", "-w", str(PIN_UI)], text=True).strip()
+    return subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Loop"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  except (OSError, subprocess.CalledProcessError) as e:
+    print(f"gta5: couldn't keep the UI on top: {e}")
+    return None
 
 
 def own_ip() -> str:
@@ -56,6 +70,8 @@ class GTA5World(World):
     self.lane_changing = False
     self.presses: dict[str, int] = {}
     self.curvature = 0.0  # what the steering is set for
+    self.steering = False  # whether the driver was steering
+    self.pinner: subprocess.Popen | None = None
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
@@ -70,6 +86,7 @@ class GTA5World(World):
       raise RuntimeError(f"could not listen for the game on port {port}: {error}")
     self.frames = frames_recv
     threading.Thread(target=self._frame_reader, daemon=True).start()
+    self.pinner = pin_ui()
 
     addr = f"{own_ip()}:{port}"
     try:
@@ -157,14 +174,14 @@ class GTA5World(World):
     # the plugin reports the curvature its steering is set for, standing in for a steering angle sensor
     self.curvature = state.get("steerCurvature", yaw_rate / v if v > 2.0 else 0.0)
     if self.VM is not None:
-      # invert controlsd's measured curvature using the same learned params, so the reported angle matches its target
+      # invert controlsd's measured curvature using the same learned params, so the reported angle matches its target.
+      # Not the learned angle offset: paramsd learns it from this angle, so adding it back feeds any mismatch into it again.
       lp = self.sm['vehicleParameters']
       roll = 0.0
-      offset = 0.0
       if self.sm.seen['vehicleParameters']:
         self.VM.update_params(max(lp.stiffnessFactor, 0.1), max(lp.steerRatio, 0.1))
-        roll, offset = lp.roll, lp.angleOffsetDeg
-      simulator_state.steering_angle = math.degrees(self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), roll)) + offset
+        roll = lp.roll
+      simulator_state.steering_angle = math.degrees(self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), roll))
     else:
       simulator_state.steering_angle = math.degrees(self.curvature * OP_WHEELBASE * OP_STEER_RATIO)
 
@@ -175,10 +192,15 @@ class GTA5World(World):
     simulator_state.imu.gyroscope = vec3(yaw_rate, 0, 0)
 
     user = state.get("user") or {}
-    # driver input while engaged: the brake disengages, gas and steering override, as in a real car
+    # driver input while engaged: gas overrides; the brake and steering disengage, since the game's steering has no torque
+    # for openpilot to blend with, and fighting it soon trips the excessive actuation lockout
     simulator_state.user_gas = 1.0 if user.get("gas") else 0.0
     simulator_state.user_brake = 1.0 if user.get("brake") else 0.0
-    simulator_state.user_torque = -math.copysign(10000, user["steer"]) if abs(user.get("steer", 0)) > 0.02 else 0
+    steering = abs(user.get("steer", 0)) > 0.02
+    if steering and not self.steering and self.simulator_state.is_engaged:
+      self.q.put(control_cmd_gen("cruise_cancel"))
+    self.steering = steering
+    simulator_state.user_torque = 0  # but for the lane change nudge
     self._update_indicator(simulator_state, state.get("indicator"))
     self._update_buttons(state)
     simulator_state.valid = True
@@ -239,6 +261,8 @@ class GTA5World(World):
 
   def close(self, reason: str):
     self._send({"type": "control", "active": False})
+    if self.pinner is not None:
+      self.pinner.terminate()
     self.exit_event.set()
     # the camera thread waits for each game frame, and none come once the game connection is gone; wake it so the bridge
     # process can exit, handing it a blank frame rather than the shared memory freed below

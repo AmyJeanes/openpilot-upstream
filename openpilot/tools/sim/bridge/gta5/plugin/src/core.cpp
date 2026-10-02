@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -37,17 +38,17 @@ struct Config {
   bool lens = true;
   float mountHeight = 1.22f;   // above the ground, as the sim's calibration assumes
   float mountForward = NAN;    // from the vehicle origin; NAN = a quarter of the way to the front
-  float yawGain = 15.5f;  // yaw rate (rad/s) per unit of steer bias, measured with steertest at 7-14 m/s
+  float curvGain = 1.55f;  // initial path curvature (1/m) per unit of steer bias, learned per car while driving
   float latKi = 1.0f;     // 1/s, integral on the yaw rate error, in units of the feed-forward
   // with no throttle the game slows a car hard, about -(coastAccel + coastPerSpeed * v); steertest with throttle=0 measures it
   float coastAccel = 3.1f;     // m/s^2
   float coastPerSpeed = 0.04f;  // m/s^2 per m/s
   float brakeGain = 8.0f;      // m/s^2 at full brake beyond coasting, roughly
   int keyEngage = VK_F6;
-  int keyLeft = VK_OEM_COMMA;
-  int keyRight = VK_OEM_PERIOD;
-  int keySpeedUp = VK_OEM_PLUS;  // the = key
-  int keySpeedDown = VK_OEM_MINUS;
+  int keyLeft = VK_LEFT;
+  int keyRight = VK_RIGHT;
+  int keySpeedUp = VK_UP;
+  int keySpeedDown = VK_DOWN;
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
   bool presentHook = true;  // when interleaving, take frames from the game's presents and keep them off screen
@@ -102,6 +103,17 @@ struct Control {
   bool braking = false, wasLive = false, holding = false;
   float steerOut = 0, throttleOut = 0, brakeOut = 0;
 } g_ctl;
+
+// The path curvature per unit of steer bias: the bias sets a wheel angle, which sets the curvature whatever the speed, by
+// an amount that differs between cars with their steering lock and wheelbase. A least-squares fit of the measured
+// curvature against the bias applied a moment before, forgetting over several seconds.
+struct CurvGain {
+  float gain = 1.55f;
+  double num = 0, den = 0, nextLog = 0;
+  std::deque<std::pair<double, float>> applied;  // time, bias
+} g_curvGain;
+
+double g_latLogUntil = 0;  // logs the steering loop each frame until then
 
 // open-loop steering check: holds a steer bias and logs the motion it produces
 struct SteerTest {
@@ -160,7 +172,7 @@ void ReadConfig() {
   c.lens = num("lens", 1) != 0;
   c.mountHeight = num("mount_height", c.mountHeight);
   c.mountForward = num("mount_forward", NAN);
-  c.yawGain = num("yaw_gain", c.yawGain);
+  c.curvGain = num("curv_gain", c.curvGain);
   c.latKi = num("lat_ki", c.latKi);
   c.coastAccel = num("coast_accel", c.coastAccel);
   c.coastPerSpeed = num("coast_per_speed", c.coastPerSpeed);
@@ -289,6 +301,8 @@ void OnVehicleChanged(Vehicle v) {
   ReleaseCamera();
   g_veh = VehicleInfo{};
   g_veh.handle = v;
+  g_curvGain = CurvGain{};
+  g_curvGain.gain = g_cfg.curvGain;
   int resets = g_m.resets;
   g_m = Motion{};
   g_m.resets = resets + 1;
@@ -398,6 +412,22 @@ float ThrottleFor(float drive) {
   return 1.0f;
 }
 
+void UpdateCurvGain(float dt, double now) {
+  CurvGain &g = g_curvGain;
+  constexpr double LAG = 0.15, TAU = 8.0;  // the game's steering response lag, s; forgetting time, s
+  while (g.applied.size() > 1 && g.applied[1].first <= now - LAG) g.applied.pop_front();
+  if (g.applied.empty() || g.applied.front().first > now - LAG || g_m.v < 5.0f || g_user.steer != 0) return;
+  double bias = g.applied.front().second, a = std::min(1.0, dt / TAU);
+  g.num += a * (g_m.yawRate / g_m.v * bias - g.num);
+  g.den += a * (bias * bias - g.den);
+  // highway steering is a bias of a few thousandths
+  if (g.den > 0.001 * 0.001) g.gain = static_cast<float>(std::clamp(g.num / g.den, 0.3, 6.0));
+  if (now >= g.nextLog) {
+    g.nextLog = now + 10;
+    Log("curvature gain " + Num(g.gain));
+  }
+}
+
 void ApplyControls(float dt, double now) {
   Vehicle veh = g_veh.handle;
   if (now < g_test.until) {
@@ -415,6 +445,7 @@ void ApplyControls(float dt, double now) {
   if (!live) {
     if (g_ctl.wasLive) ReleaseControls();
     g_ctl.wasLive = false;
+    g_curvGain.applied.clear();
     g_ctl.latI = g_ctl.lonI = 0;
     g_ctl.braking = false;
     g_ctl.steerOut = g_ctl.throttleOut = g_ctl.brakeOut = 0;
@@ -423,13 +454,19 @@ void ApplyControls(float dt, double now) {
   g_ctl.wasLive = true;
   float speed = g_m.v;
 
-  // lateral: the game's steer bias turns the car at a yaw rate roughly proportional to it, whatever the speed, so
-  // feed forward the yaw rate the curvature needs, and integrate the yaw rate error
+  // lateral: the game's steer bias sets a path curvature roughly proportional to it, so feed forward the bias for the
+  // curvature, and integrate the yaw rate error
   float v = std::max(speed, 3.0f);
   float yawTarget = g_ctl.curvature * v;
-  g_ctl.latI = std::clamp(g_ctl.latI + g_cfg.latKi * (yawTarget - g_m.yawRate) / g_cfg.yawGain * dt, -0.05f, 0.05f);
+  UpdateCurvGain(dt, now);
+  float gain = g_curvGain.gain;
+  g_ctl.latI = std::clamp(g_ctl.latI + g_cfg.latKi * (yawTarget - g_m.yawRate) / (gain * v) * dt, -0.05f, 0.05f);
   if (speed < 3.0f) g_ctl.latI *= std::max(0.0f, 1.0f - dt);
-  float steer = std::clamp(yawTarget / g_cfg.yawGain + g_ctl.latI + 0.15f * g_user.steer, -0.3f, 0.3f);
+  float steer = std::clamp(g_ctl.curvature / gain + g_ctl.latI + 0.15f * g_user.steer, -0.3f, 0.3f);
+  g_curvGain.applied.emplace_back(now, steer);
+  if (now < g_latLogUntil)
+    Log("lat v " + Num(speed) + " curv " + Num(g_ctl.curvature) + " yawTarget " + Num(yawTarget) + " yawRate " + Num(g_m.yawRate) +
+        " steer " + Num(steer) + " latI " + Num(g_ctl.latI) + " gain " + Num(gain) + " dt " + Num(dt) + " cmdAge " + Num(now - g_ctl.t));
   // sets the wheel angle directly; the steering control input goes through the game's smoothing and speed scaling
   SET_VEHICLE_STEER_BIAS(g_veh.handle, steer);
 
@@ -472,7 +509,7 @@ void ApplyControls(float dt, double now) {
 // including the integral) shows openpilot's torque controller a lag and offset it can't act on, so it winds up to full
 // torque and raises the steer-saturated alert. Otherwise, the yaw rate's curvature.
 float SteerCurvature() {
-  if (g_ctl.wasLive) return (g_ctl.steerOut - g_ctl.latI) * g_cfg.yawGain / std::max(g_m.v, 3.0f);
+  if (g_ctl.wasLive) return (g_ctl.steerOut - g_ctl.latI) * g_curvGain.gain;
   return g_m.v > 2.0f ? g_m.yawRate / g_m.v : 0.0f;
 }
 
@@ -501,7 +538,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"indicator\":" << (g_indicator == 1 ? "\"left\"" : g_indicator == 2 ? "\"right\"" : "null")
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
-      << ",\"latI\":" << Num(g_ctl.latI) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}";
+      << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}";
   }
   s << "}";
   std::lock_guard lk(g_stateMutex);
@@ -595,6 +632,10 @@ void HandleMessage(const Message &m, double now) {
     Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag));
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
+  } else if (type == "latlog") {
+    g_latLogUntil = now + MsgNum(m, "secs", 10);
+  } else if (type == "indicator") {
+    (MsgStr(m, "side") == "right" ? g_rightPresses : g_leftPresses)++;  // as if the indicator key were pressed
   } else if (type == "steertest") {
     g_test.bias = static_cast<float>(MsgNum(m, "bias", 0.1));
     g_test.throttle = static_cast<float>(MsgNum(m, "throttle", 0.3));
@@ -689,6 +730,8 @@ extern "C" __declspec(dllexport) void CoreTick() {
     SET_MAX_WANTED_LEVEL(0);
     CLEAR_PLAYER_WANTED_LEVEL(PLAYER_ID());
   }
+  // up arrow, the default speed key, otherwise takes out the phone
+  if (connected && v) DISABLE_CONTROL_ACTION(0, INPUT_PHONE, TRUE);
 
   ReadDriver(now);
   if (g_engagePresses.load() && !connected) g_engagePresses = 0;

@@ -91,6 +91,7 @@ inline float GET_DISABLED_CONTROL_NORMAL(int control, int action) { return Invok
 inline float GET_CONTROL_NORMAL(int control, int action) { return Invoke<float>(0xEC3C9B8D5327B563, control, action); }
 
 enum Input {
+  INPUT_PHONE = 27,
   INPUT_VEH_MOVE_LR = 59,
   INPUT_VEH_ACCELERATE = 71,
   INPUT_VEH_BRAKE = 72,
