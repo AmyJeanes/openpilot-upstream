@@ -1,6 +1,7 @@
 import signal
 import threading
 import functools
+import os
 import numpy as np
 
 from collections import namedtuple
@@ -13,6 +14,7 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.selfdrive.test.helpers import set_params_enabled
 from openpilot.tools.sim.lib.common import SimulatorState, World
 from openpilot.tools.sim.lib.simulated_car import SimulatedCar
+from openpilot.tools.sim.lib.simulated_tesla import SimulatedTesla, is_tesla
 from openpilot.tools.sim.lib.simulated_sensors import SimulatedSensors
 
 QueueMessage = namedtuple("QueueMessage", ["type", "info"], defaults=[None])
@@ -37,7 +39,10 @@ class SimulatorBridge(ABC):
   TICKS_PER_FRAME = 5
 
   def __init__(self, dual_camera, high_quality):
+    fingerprint = os.environ.get("FINGERPRINT")
     set_params_enabled()
+    if fingerprint is not None:
+      os.environ["FINGERPRINT"] = fingerprint  # set_params_enabled sets its own, but the simulated car follows this one
     self.params = Params()
     self.params.put_bool("AlphaLongitudinalEnabled", True, block=True)
 
@@ -100,7 +105,7 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
   def _run(self, q: Queue):
     self.world = self.spawn_world(q)
 
-    self.simulated_car = SimulatedCar()
+    self.simulated_car = SimulatedTesla() if is_tesla() else SimulatedCar()
     self.simulated_sensors = SimulatedSensors(self.dual_camera)
 
     self._exit_event = threading.Event()
@@ -147,6 +152,7 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
               self.simulator_state.cruise_button = CruiseButtons.CANCEL
             elif m[1] == "main":
               self.simulator_state.cruise_button = CruiseButtons.MAIN
+            self.simulated_car.press(self.simulator_state.cruise_button)
           elif m[0] == "blinker":
             if m[1] == "left":
               self.simulator_state.left_blinker = True
@@ -179,6 +185,7 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
         self.past_startup_engaged = True
       elif not self.past_startup_engaged and self.simulated_car.sm['selfdriveState'].engageable:
         self.simulator_state.cruise_button = CruiseButtons.DECEL_SET if self.startup_button_prev else CruiseButtons.MAIN # force engagement on startup
+        self.simulated_car.press(self.simulator_state.cruise_button)
         self.startup_button_prev = not self.startup_button_prev
 
       throttle_out = throttle_op if self.simulator_state.is_engaged else throttle_manual
