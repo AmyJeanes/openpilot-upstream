@@ -87,7 +87,8 @@ float3 sampleRay(float2 p) {
     [unroll] for (int i = 0; i < 6; i++) rho -= (rho * (1.0 + k1 * rho * rho) - rd) / (1.0 + 3.0 * k1 * rho * rho);
   }
   float2 s = (r > 0.0 ? d * (rho / r) : float2(0, 0)) * srcF + srcSize * 0.5;
-  if (any(s < 0.0) || any(s > srcSize)) return float3(0, 0, 0);
+  // outside the render, or the interleave marker at its corner, which the wide lens reaches
+  if (any(s < 0.0) || any(s > srcSize) || all(s < srcSize * float2(0.006, 0.01))) return float3(0, 0, 0);
   return src.SampleLevel(samp, (srcOrigin + s) / texSize, 0).rgb * 255.0;
 }
 float psY(float4 pos : SV_Position) : SV_Target {
@@ -138,6 +139,9 @@ struct Capture::Impl {
   wgc::Direct3D11CaptureFramePool::FrameArrived_revoker revoker;
   int64_t lastFrame = 0;  // 100 ns units, in the frames' own clock
   bool loggedSize = false;
+  com_ptr<ID3D11Texture2D> markerStage;
+  int seen = 0, marked = 0, taken = 0;
+  int64_t lastStats = 0;
 
   bool InitD3D() {
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
@@ -194,6 +198,14 @@ struct Capture::Impl {
       make(CAM_W, CAM_H, DXGI_FORMAT_R8_UNORM, v.y, v.yStage, v.yRtv);
       make(CAM_W / 2, CAM_H / 2, DXGI_FORMAT_R8G8_UNORM, v.uv, v.uvStage, v.uvRtv);
     }
+    D3D11_TEXTURE2D_DESC md{};
+    md.Width = md.Height = MARKER_PX;
+    md.MipLevels = md.ArraySize = 1;
+    md.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    md.SampleDesc.Count = 1;
+    md.Usage = D3D11_USAGE_STAGING;
+    md.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    device->CreateTexture2D(&md, nullptr, markerStage.put());
     return true;
   }
 
@@ -209,6 +221,26 @@ struct Capture::Impl {
     w = std::min(float(client.right - client.left), texW - x);
     h = std::min(float(client.bottom - client.top), texH - y);
     return w > 16 && h > 16;
+  }
+
+  // whether the plugin's marker (magenta, at the client area's top-left) is in this frame
+  bool Marked(ID3D11Texture2D *tex) {
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc(&desc);
+    float cx, cy, cw, ch;
+    if (!ClientRect(desc.Width, desc.Height, cx, cy, cw, ch)) return false;
+    UINT x = UINT(cx) + MARKER_AT, y = UINT(cy) + MARKER_AT;
+    D3D11_BOX box{x, y, 0, x + MARKER_PX, y + MARKER_PX, 1};
+    ctx->CopySubresourceRegion(markerStage.get(), 0, 0, 0, 0, tex, 0, &box);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(markerStage.get(), 0, D3D11_MAP_READ, 0, &m))) return false;
+    bool all = true;
+    for (int r = 0; r < MARKER_PX; r++) {
+      const uint8_t *px = static_cast<const uint8_t *>(m.pData) + size_t(r) * m.RowPitch;
+      for (int c = 0; c < MARKER_PX; c++, px += 4) all &= px[2] > 200 && px[1] < 60 && px[0] > 200;  // BGRA
+    }
+    ctx->Unmap(markerStage.get(), 0);
+    return all;
   }
 
   void Process(ID3D11Texture2D *tex, double t) {
@@ -297,7 +329,7 @@ struct Capture::Impl {
     onFrame(std::move(out), t);
   }
 
-  void OnFrameArrived(wgc::Direct3D11CaptureFramePool const &sender, bool enabled) {
+  void OnFrameArrived(wgc::Direct3D11CaptureFramePool const &sender, bool enabled, bool marker) {
     auto frame = sender.TryGetNextFrame();
     if (!frame) return;
     std::lock_guard lk(mutex);
@@ -310,14 +342,25 @@ struct Capture::Impl {
       return;
     }
     if (!enabled) return;
-    // keep a steady cadence from the ~60 Hz presents: take a frame once a period has passed, allowing for jitter
     int64_t now = frame.SystemRelativeTime().count();
-    int64_t period = int64_t(1e7 / cfg.fps);
-    if (now - lastFrame < period - period / 5) return;
-    lastFrame = (now - lastFrame < 2 * period) ? lastFrame + period : now;
     auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     com_ptr<ID3D11Texture2D> tex;
     if (FAILED(access->GetInterface(__uuidof(ID3D11Texture2D), tex.put_void()))) return;
+    if (marker) {
+      seen++;
+      if (now - lastStats > 100000000) {
+        if (lastStats) log("interleave: " + std::to_string(seen) + " frames, " + std::to_string(marked) + " marked, " + std::to_string(taken) + " taken in 10 s");
+        seen = marked = taken = 0;
+        lastStats = now;
+      }
+      if (!Marked(tex.get())) return;
+      marked++;
+    }
+    // keep a steady cadence from the ~60 Hz presents: take a frame once a period has passed, allowing for jitter
+    int64_t period = int64_t(1e7 / cfg.fps);
+    if (now - lastFrame < period - period / 5) return;
+    lastFrame = (now - lastFrame < 2 * period) ? lastFrame + period : now;
+    if (marker) taken++;
     // SystemRelativeTime is the QPC clock in 100 ns units, the same clock as QpcSeconds()
     Process(tex.get(), double(now) / 1e7);
   }
@@ -329,7 +372,7 @@ struct Capture::Impl {
     return insp.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
   }
 
-  void Run(std::atomic<bool> *enabled, std::promise<bool> *started) {
+  void Run(std::atomic<bool> *enabled, std::atomic<bool> *marker, std::promise<bool> *started) {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     bool ok = false;
     try {
@@ -340,12 +383,18 @@ struct Capture::Impl {
         winrt::check_hresult(interop->CreateForWindow(hwnd, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(item)));
         poolSize = item.Size();
         pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(Direct3DDevice(), wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, poolSize);
-        revoker = pool.FrameArrived(winrt::auto_revoke, [this, enabled](auto const &sender, auto const &) { OnFrameArrived(sender, *enabled); });
+        revoker = pool.FrameArrived(winrt::auto_revoke, [this, enabled, marker](auto const &sender, auto const &) { OnFrameArrived(sender, *enabled, *marker); });
         session = pool.CreateCaptureSession(item);
         session.IsCursorCaptureEnabled(false);
         try {
           session.IsBorderRequired(false);
         } catch (...) {
+        }
+        try {
+          // by default capture is limited to about 60 Hz, which misses openpilot frames interleaved into faster rendering
+          session.MinUpdateInterval(std::chrono::milliseconds(1));
+        } catch (...) {
+          log("capture: MinUpdateInterval unsupported");
         }
         session.StartCapture();
         log("capture started");
@@ -382,7 +431,7 @@ bool Capture::Start(HWND hwnd, const CaptureConfig &cfg, FrameCallback onFrame, 
   impl_->log = std::move(log);
   std::promise<bool> started;
   auto fut = started.get_future();
-  impl_->thread = std::thread([this, &started] { impl_->Run(&enabled_, &started); });
+  impl_->thread = std::thread([this, &started] { impl_->Run(&enabled_, &marker_, &started); });
   bool ok = fut.get();
   if (!ok) Stop();
   return ok;

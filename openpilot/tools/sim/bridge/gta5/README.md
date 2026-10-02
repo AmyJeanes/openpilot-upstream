@@ -20,7 +20,9 @@ It's developed with the Steam version on Windows and openpilot in WSL.
 ## Running
 ```bash
 export OPENPILOT_PREFIX=gta5 MODELD_DEV=CUDA
-BLOCK=soundd BIG=1 ./openpilot/tools/sim/launch_openpilot.sh   # terminal 1
+# once after each WSL restart, which clears /dev/shm
+python3 -c "from openpilot.common.prefix import OpenpilotPrefix; OpenpilotPrefix('gta5').create_dirs()"
+GALLIUM_DRIVER=d3d12 BLOCK=soundd ./openpilot/tools/sim/launch_openpilot.sh   # terminal 1
 ./openpilot/tools/sim/run_bridge.py --simulator gta5            # terminal 2
 ```
 Get into a car in the game. Once the bridge is running, the plugin connects to it and switches to the openpilot camera; it
@@ -45,7 +47,11 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 
 ## How it works
 - The plugin attaches a scripted camera to the car at the comma mount (1.22 m above the ground, level), hides the HUD,
-  and the player, and captures the game window with Windows.Graphics.Capture.
+  and captures the game window with Windows.Graphics.Capture.
+- With `interleave=1`, the game renders the openpilot camera only on one frame per 20 Hz capture, and the player's own
+  camera on the rest. Those frames carry a small magenta marker at the top-left that the capture picks them out by, so
+  timing between the game and the capture doesn't matter. They still show on screen, as flicker. Anything that blends
+  frames together mixes the two views: turn off TAA, DLSS and FSR (including frame generation), and motion blur.
 - One game camera covers both openpilot cameras. The driving model only samples about 30 degrees either side of center,
   so a pinhole render with a 76 degree vertical field of view has enough coverage and resolution for both; the wide
   camera's outer field is black. A pixel shader resamples it through the comma 3X lenses into NV12, as the Slow Roads

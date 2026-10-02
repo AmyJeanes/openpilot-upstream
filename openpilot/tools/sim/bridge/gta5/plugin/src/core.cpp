@@ -45,6 +45,8 @@ struct Config {
   int keyRight = VK_OEM_PERIOD;
   int keySpeedUp = VK_OEM_PLUS;  // the = key
   int keySpeedDown = VK_OEM_MINUS;
+  bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
+  int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -103,6 +105,11 @@ struct SteerTest {
 } g_test;
 
 Cam g_cam = 0;
+bool g_rendering = false;  // whether the game renders the script camera rather than its own
+double g_nextOp = 0;       // when interleaving, the time of the next openpilot camera frame
+uint32_t g_opTicks = 0;    // recent frames' camera, newest in bit 0
+int g_ticks = 0, g_opCount = 0;
+double g_statsT = 0;
 float g_camPitch = 0, g_camYaw = 0;  // degrees, for checks against known rotations
 int g_indicator = 0;  // 0 off, 1 left, 2 right
 bool g_engaged = false;
@@ -157,6 +164,8 @@ void ReadConfig() {
   c.keyRight = key("key_right", c.keyRight);
   c.keySpeedUp = key("key_speed_up", c.keySpeedUp);
   c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
+  c.interleave = num("interleave", 0) != 0;
+  c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
   g_cfg = c;
 }
 
@@ -218,13 +227,40 @@ void ActivateCamera() {
   SET_CAM_FOV(g_cam, g_cfg.vfov);
   SET_CAM_NEAR_CLIP(g_cam, 0.05f);
   SET_CAM_ACTIVE(g_cam, TRUE);
-  RENDER_SCRIPT_CAMS(TRUE, FALSE, 0, TRUE, FALSE, 0);
-  Log("camera on");
+  g_rendering = false;
+  g_opTicks = 0;
+  Log(std::string("camera on") + (g_cfg.interleave ? ", interleaved" : ""));
+}
+
+void RenderCamera(bool on) {
+  if (on != g_rendering) RENDER_SCRIPT_CAMS(on, FALSE, 0, TRUE, FALSE, 0);
+  g_rendering = on;
+}
+
+// Picks the frames to render the openpilot camera in, and returns whether the frame being drawn shows it. Interleaved,
+// that's one at each 20 Hz capture time, and the rest are the player's camera.
+bool UpdateCameraFrame(double now, float dt) {
+  bool op = true;
+  if (g_cfg.interleave) {
+    op = now + 0.5 * dt >= g_nextOp;
+    if (op) g_nextOp = std::max(g_nextOp + 0.05, now + 0.5 * dt);
+    g_ticks++;
+    g_opCount += op;
+    if (now - g_statsT > 10) {
+      if (g_statsT) Log("interleave: " + std::to_string(g_ticks) + " ticks, " + std::to_string(g_opCount) + " openpilot frames in 10 s");
+      g_ticks = g_opCount = 0;
+      g_statsT = now;
+    }
+  }
+  RenderCamera(op);
+  g_opTicks = (g_opTicks << 1) | (op ? 1u : 0u);
+  return (g_opTicks >> g_cfg.interleaveLag) & 1u;
 }
 
 void ReleaseCamera() {
   if (!g_cam) return;
   RENDER_SCRIPT_CAMS(FALSE, FALSE, 0, TRUE, FALSE, 0);
+  g_rendering = false;
   if (DOES_CAM_EXIST(g_cam)) DESTROY_CAM(g_cam, FALSE);
   g_cam = 0;
   Log("camera off");
@@ -532,6 +568,10 @@ void HandleMessage(const Message &m, double now) {
     g_camPitch = static_cast<float>(MsgNum(m, "pitch", g_camPitch));
     g_camYaw = static_cast<float>(MsgNum(m, "yaw", g_camYaw));
     if (g_cam) AttachCamera();
+  } else if (type == "interleave") {
+    g_cfg.interleave = MsgBool(m, "on", g_cfg.interleave);
+    g_cfg.interleaveLag = std::clamp(static_cast<int>(MsgNum(m, "lag", g_cfg.interleaveLag)), 0, 8);
+    Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag));
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
   } else if (type == "steertest") {
@@ -608,13 +648,14 @@ extern "C" __declspec(dllexport) void CoreTick() {
     if (hwnd) g_captureFailed = !g_capture.Start(hwnd, cc, SendFrame, Log);
   }
   g_capture.SetEnabled(want);
+  g_capture.SetMarker(g_cfg.interleave);
 
-  if (g_cam) {
+  if (g_cam && UpdateCameraFrame(now, dt)) {
     HIDE_HUD_AND_RADAR_THIS_FRAME();
     HIDE_HELP_TEXT_THIS_FRAME();
     THEFEED_HIDE_THIS_FRAME();
-    SET_ENTITY_LOCALLY_INVISIBLE(v);
-    SET_ENTITY_LOCALLY_INVISIBLE(ped);
+    // tells the capture this frame is the openpilot camera's; the lens resampling blacks it out
+    if (g_cfg.interleave) DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, 255, 0, 255, 255, FALSE);
   }
   if (connected) {
     // police chases after a scrape with traffic would end any drive

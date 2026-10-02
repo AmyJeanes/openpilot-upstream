@@ -29,7 +29,6 @@ inline int GET_ENTITY_BONE_INDEX_BY_NAME(Entity e, const char *bone) { return In
 inline Vector3 GET_WORLD_POSITION_OF_ENTITY_BONE(Entity e, int bone) { return Invoke<Vector3>(0x44A8FCB8ED227738, e, bone); }
 inline Vector3 GET_ENTITY_BONE_OBJECT_ROTATION(Entity e, int bone) { return Invoke<Vector3>(0xBD8D32550E5CEBFE, e, bone); }
 inline Vector3 GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(Entity e, float x, float y, float z) { return Invoke<Vector3>(0x2274BC1C4885E333, e, x, y, z); }
-inline void SET_ENTITY_LOCALLY_INVISIBLE(Entity e) { Invoke(0xE135A9FF3F5D05D8, e); }
 inline void SET_ENTITY_COORDS(Entity e, float x, float y, float z, BOOL xa, BOOL ya, BOOL za, BOOL clear) { Invoke(0x06843DA7060A026B, e, x, y, z, xa, ya, za, clear); }
 inline void SET_ENTITY_HEADING(Entity e, float h) { Invoke(0x8E2530AA8ADA980E, e, h); }
 inline void SET_ENTITY_AS_MISSION_ENTITY(Entity e, BOOL a, BOOL b) { Invoke(0xAD738C3085FE7E11, e, a, b); }
@@ -82,6 +81,8 @@ inline void HIDE_HUD_AND_RADAR_THIS_FRAME() { Invoke(0x719FF505F097FD20); }
 inline void HIDE_HELP_TEXT_THIS_FRAME() { Invoke(0xD46923FC481CA285); }
 inline void THEFEED_HIDE_THIS_FRAME() { Invoke(0x25F87B30C382FCA7); }
 inline void CLEAR_PRINTS() { Invoke(0xCC33FA791322B9D9); }
+// screen coordinates 0-1, the rectangle's center and size
+inline void DRAW_RECT(float x, float y, float w, float h, int r, int g, int b, int a, BOOL p8) { Invoke(0x3A618A217E5154F0, x, y, w, h, r, g, b, a, p8); }
 
 // controls
 inline BOOL SET_CONTROL_VALUE_NEXT_FRAME(int control, int action, float v) { return Invoke<BOOL>(0xE8A25867FBA3B05E, control, action, v); }
