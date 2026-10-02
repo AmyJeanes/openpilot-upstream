@@ -23,6 +23,10 @@ class Link {
   // address() returns "host:port" or "" when unknown; it is asked again before each connection attempt
   void Start(std::function<std::string()> address, std::function<void(const std::string &)> log);
   void Stop();
+  // the game exits without Stop, and destroying a joinable std::thread aborts the process; by then its thread is gone
+  ~Link() {
+    if (thread_.joinable()) thread_.detach();
+  }
   bool Connected() const { return connected_; }
 
   // Queues a frame message: [u32 total][u32 header length][header JSON][payload]. Only the newest frame is kept while

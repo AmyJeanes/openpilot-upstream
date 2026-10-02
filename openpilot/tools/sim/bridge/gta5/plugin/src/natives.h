@@ -48,6 +48,15 @@ inline void SET_VEHICLE_INDICATOR_LIGHTS(Vehicle v, int turnSignal, BOOL on) { I
 // holds the steering at a fraction of full lock (left positive) for this frame
 inline void SET_VEHICLE_STEER_BIAS(Vehicle v, float bias) { Invoke(0x42A8EC77D5150CBE, v, bias); }
 inline void SET_VEHICLE_FIXED(Vehicle v) { Invoke(0x115722B1B9C14C1C, v); }
+inline void SET_VEHICLE_MOD_KIT(Vehicle v, int kit) { Invoke(0x1F2AA07F00B3217A, v, kit); }
+// paintType: 0 normal, 1 metallic, 2 pearl, 3 matte, 4 metal, 5 chrome
+inline void SET_VEHICLE_MOD_COLOR_1(Vehicle v, int paintType, int color, int pearl) { Invoke(0x43FEB945EE7F85B8, v, paintType, color, pearl); }
+inline void SET_VEHICLE_MOD_COLOR_2(Vehicle v, int paintType, int color) { Invoke(0x816562BADFDEC83E, v, paintType, color); }
+inline void SET_VEHICLE_CUSTOM_PRIMARY_COLOUR(Vehicle v, int r, int g, int b) { Invoke(0x7141766F91D15BEA, v, r, g, b); }
+// interior trim and dashboard, as palette indices (0 metallic black, 12 matte black, 111 white)
+inline void SET_VEHICLE_EXTRA_COLOUR_5(Vehicle v, int color) { Invoke(0xF40DD601A65F7F19, v, color); }
+inline void SET_VEHICLE_EXTRA_COLOUR_6(Vehicle v, int color) { Invoke(0x6089CDF6A57F326C, v, color); }
+inline void SET_VEHICLE_CUSTOM_SECONDARY_COLOUR(Vehicle v, int r, int g, int b) { Invoke(0x36CED73BFED89754, v, r, g, b); }
 inline void SET_VEHICLE_FORWARD_SPEED(Vehicle v, float s) { Invoke(0xAB54A438726D25D5, v, s); }
 
 // world and paths

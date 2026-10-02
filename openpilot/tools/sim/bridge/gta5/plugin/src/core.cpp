@@ -151,8 +151,10 @@ void Log(const std::string &msg) {
   }
 }
 
+std::string IniPath() { return std::filesystem::path(g_dir + L"\\gta5op.ini").string(); }
+
 void ReadConfig() {
-  std::string ini = std::filesystem::path(g_dir + L"\\gta5op.ini").string();
+  std::string ini = IniPath();
   auto str = [&](const char *key, const std::string &def) {
     char buf[256];
     GetPrivateProfileStringA("gta5op", key, def.c_str(), buf, sizeof(buf), ini.c_str());
@@ -287,6 +289,12 @@ void ReleaseCamera() {
 
 // *** vehicle ***
 
+std::string ModelKey(Vehicle v) {
+  char key[16];
+  snprintf(key, sizeof(key), "0x%08X", GET_ENTITY_MODEL(v));
+  return key;
+}
+
 void ReleaseControls() {
   if (g_veh.handle && DOES_ENTITY_EXIST(g_veh.handle)) {
     if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(g_veh.handle, FALSE);
@@ -312,6 +320,10 @@ void OnVehicleChanged(Vehicle v) {
   GET_MODEL_DIMENSIONS(GET_ENTITY_MODEL(v), &mn, &mx);
   g_veh.mountX = 0;
   g_veh.mountY = std::isnan(g_cfg.mountForward) ? 0.25f * mx.y : g_cfg.mountForward;
+  // a mount set with the camera command for this model, which puts the camera ahead of its interior
+  char saved[32];
+  GetPrivateProfileStringA("mount_forward", ModelKey(v).c_str(), "", saved, sizeof(saved), IniPath().c_str());
+  if (saved[0]) g_veh.mountY = static_cast<float>(atof(saved));
   g_veh.mountZ = mn.z + g_cfg.mountHeight;
   int lf = GET_ENTITY_BONE_INDEX_BY_NAME(v, "wheel_lf"), lr = GET_ENTITY_BONE_INDEX_BY_NAME(v, "wheel_lr");
   g_veh.wheelLf = lf;
@@ -503,14 +515,11 @@ void ApplyControls(float dt, double now) {
   g_ctl.brakeOut = brake;
 }
 
-// what a steering angle sensor would show, as the curvature it steers for. While the plugin drives, that's the steering
-// openpilot asked for plus the driver's, without the integral that corrects for the game's handling: like a real
-// steering rack, it reaches the angle it's given. Reporting the path the car follows instead (yaw rate, or the bias
-// including the integral) shows openpilot's torque controller a lag and offset it can't act on, so it winds up to full
-// torque and raises the steer-saturated alert. Otherwise, the yaw rate's curvature.
+// what a steering angle sensor would show, as the curvature the car follows: the yaw rate's, which the bridge turns into
+// an angle through openpilot's own learned vehicle model. Below walking pace that's undefined, so the commanded steering.
 float SteerCurvature() {
-  if (g_ctl.wasLive) return (g_ctl.steerOut - g_ctl.latI) * g_curvGain.gain;
-  return g_m.v > 2.0f ? g_m.yawRate / g_m.v : 0.0f;
+  if (g_m.v > 2.0f) return g_m.yawRate / g_m.v;
+  return g_ctl.wasLive ? g_ctl.steerOut * g_curvGain.gain : 0.0f;
 }
 
 void UpdateIndicator() {
@@ -624,6 +633,17 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "camera") {
     g_camPitch = static_cast<float>(MsgNum(m, "pitch", g_camPitch));
     g_camYaw = static_cast<float>(MsgNum(m, "yaw", g_camYaw));
+    // mount position for this car, meters: forward of the vehicle origin, and up from the ground
+    if (m.count("forward") && g_veh.handle) {
+      g_veh.mountY = static_cast<float>(MsgNum(m, "forward"));
+      WritePrivateProfileStringA("mount_forward", ModelKey(g_veh.handle).c_str(), Num(g_veh.mountY).c_str(), IniPath().c_str());
+    }
+    if (m.count("height")) {
+      float height = static_cast<float>(MsgNum(m, "height"));
+      g_veh.mountZ += height - g_cfg.mountHeight;
+      g_cfg.mountHeight = height;
+    }
+    Log("camera: forward " + Num(g_veh.mountY) + ", up " + Num(g_veh.mountZ) + ", pitch " + Num(g_camPitch) + ", yaw " + Num(g_camYaw));
     if (g_cam) AttachCamera();
   } else if (type == "interleave") {
     g_cfg.interleave = MsgBool(m, "on", g_cfg.interleave);
@@ -632,6 +652,22 @@ void HandleMessage(const Message &m, double now) {
     Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag));
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
+  } else if (type == "trim" && g_veh.handle) {
+    if (m.count("interior")) SET_VEHICLE_EXTRA_COLOUR_5(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
+    if (m.count("dashboard")) SET_VEHICLE_EXTRA_COLOUR_6(g_veh.handle, static_cast<int>(MsgNum(m, "dashboard")));
+    Log("trim interior " + Num(MsgNum(m, "interior", -1)) + " dashboard " + Num(MsgNum(m, "dashboard", -1)));
+  } else if (type == "paint" && g_veh.handle) {
+    int r = static_cast<int>(MsgNum(m, "r")), g = static_cast<int>(MsgNum(m, "g")), b = static_cast<int>(MsgNum(m, "b"));
+    int paintType = static_cast<int>(MsgNum(m, "finish", 1));  // metallic
+    SET_VEHICLE_MOD_KIT(g_veh.handle, 0);
+    SET_VEHICLE_MOD_COLOR_1(g_veh.handle, paintType, 0, 0);
+    SET_VEHICLE_MOD_COLOR_2(g_veh.handle, paintType, 0);
+    SET_VEHICLE_CUSTOM_PRIMARY_COLOUR(g_veh.handle, r, g, b);
+    // the secondary colour, which many cars use for trim; the same as the primary unless given
+    int sr = static_cast<int>(MsgNum(m, "sr", r)), sg = static_cast<int>(MsgNum(m, "sg", g)), sb = static_cast<int>(MsgNum(m, "sb", b));
+    SET_VEHICLE_CUSTOM_SECONDARY_COLOUR(g_veh.handle, sr, sg, sb);
+    Log("paint " + std::to_string(r) + "," + std::to_string(g) + "," + std::to_string(b) + " secondary " + std::to_string(sr) + "," +
+        std::to_string(sg) + "," + std::to_string(sb) + " finish " + std::to_string(paintType));
   } else if (type == "latlog") {
     g_latLogUntil = now + MsgNum(m, "secs", 10);
   } else if (type == "indicator") {
@@ -719,9 +755,13 @@ extern "C" __declspec(dllexport) void CoreTick() {
   present_hook::SetEnabled(want && hooked);
 
   if (g_cam && UpdateCameraFrame(now, dt)) {
-    HIDE_HUD_AND_RADAR_THIS_FRAME();
+    // help text would cover the marker; the rest only shows if the frames reach the screen, and hiding the feed for a
+    // frame restarts its animation, which flickers. The model's view doesn't reach the HUD in the corners.
     HIDE_HELP_TEXT_THIS_FRAME();
-    THEFEED_HIDE_THIS_FRAME();
+    if (!hooked) {
+      HIDE_HUD_AND_RADAR_THIS_FRAME();
+      THEFEED_HIDE_THIS_FRAME();
+    }
     // tells the capture this frame is the openpilot camera's; the lens resampling blacks it out
     if (g_cfg.interleave) DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, 255, 0, 255, 255, FALSE);
   }

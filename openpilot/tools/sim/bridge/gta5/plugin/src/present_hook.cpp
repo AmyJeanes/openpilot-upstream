@@ -383,6 +383,13 @@ std::condition_variable g_queueCv;
 std::deque<Pending> g_pending;
 bool g_stopWorker = false;
 std::thread g_worker;
+// The game exits without the core's shutdown, and destroying a joinable std::thread aborts the process; by then its
+// thread is gone anyway.
+struct WorkerExit {
+  ~WorkerExit() {
+    if (g_worker.joinable()) g_worker.detach();
+  }
+} g_workerExit;
 int g_statPresents = 0, g_statOp = 0;
 double g_statT = 0;
 

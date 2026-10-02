@@ -19,9 +19,8 @@ It's developed with the Steam version on Windows and openpilot in WSL.
 
 ## Running
 ```bash
-export OPENPILOT_PREFIX=gta5 MODELD_DEV=CUDA
-# once after each WSL restart, which clears /dev/shm
-python3 -c "from openpilot.common.prefix import OpenpilotPrefix; OpenpilotPrefix('gta5').create_dirs()"
+# in both terminals: a simulated Tesla Model 3 (angle steering suits the game's steering; the sim's default is a Honda)
+export OPENPILOT_PREFIX=gta5 MODELD_DEV=CUDA FINGERPRINT=TESLA_MODEL_3
 GALLIUM_DRIVER=d3d12 BLOCK=soundd ./openpilot/tools/sim/launch_openpilot.sh   # terminal 1
 ./openpilot/tools/sim/run_bridge.py --simulator gta5            # terminal 2
 ```
@@ -32,7 +31,8 @@ set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL.
 `gta5_cmd.py` sends debug commands through the running bridge: `snap` saves the next frames as PNGs, `setup` spawns a car
 and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
-present hook, and `engage` and `indicator` press those keys. `../slowroads/view_cameras.py` shows the full camera frames
+present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
+recolour the car (where its model allows), and `engage` and `indicator` press those keys. `../slowroads/view_cameras.py` shows the full camera frames
 openpilot gets. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps
 openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that off).
 
