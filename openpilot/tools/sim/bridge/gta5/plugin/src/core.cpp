@@ -54,8 +54,9 @@ struct Config {
   bool presentHook = true;  // when interleaving, take frames from the game's presents and keep them off screen
   // with the present hook, a render for each openpilot camera, at these vertical fields of view: about the road lens's
   // own pixel scale, and enough to fill the wide lens
-  bool splitViews = true;
+  bool splitViews = false;
   float roadVfov = 30.0f, wideVfov = 116.0f;
+  float wideDelay = 0.025f;  // s from the road view to the wide view; 0 is the next frame
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -75,7 +76,7 @@ std::atomic<int> g_engagePresses{0}, g_leftPresses{0}, g_rightPresses{0};
 
 // cruise speed buttons: a press, then repeats while held, as a car's stalk steps the set speed
 struct HeldKey {
-  int presses = 0;
+  int presses = 0, presses5 = 0;
   bool down = false;
   double nextRepeat = 0;
 } g_speedUp, g_speedDown;
@@ -125,17 +126,25 @@ struct SteerTest {
   float bias = 0, throttle = 0;
 } g_test;
 
-Cam g_cam = 0;
+Cam g_cam = 0;  // the openpilot camera for both views, also standing for the set while it exists
+Cam g_cams[3] = {};  // by view: both, road, wide, each at its own field of view
+int g_activeView = 0;
 bool g_rendering = false;  // whether the game renders the script camera rather than its own
 double g_nextOp = 0;       // when interleaving, the time of the next openpilot camera frame
 uint64_t g_frameViews = 0;  // recent frames' camera, 4 bits each, newest lowest: 0 the player's, else the view plus one
-bool g_wideNext = false;    // the frame after a road view renders the wide view
-float g_camFov = 0;
+double g_wideAt = -1;       // when to render the wide view that completes a road view, or -1
 int g_ticks = 0, g_opCount = 0;
 double g_statsT = 0;
 float g_camPitch = 0, g_camYaw = 0;  // degrees, for checks against known rotations
 int g_indicator = 0;  // 0 off, 1 left, 2 right
 bool g_engaged = false;
+
+// openpilot's set speed, from the bridge, for the speed readout
+struct Hud {
+  float setKph = 0;
+  bool metric = false, engaged = false;
+  double t = -1e9;
+} g_hud;
 
 struct Setup {
   int step = 0;  // 0 idle, 1 model loading, 2 waiting for the world to load, 3 placing on the road
@@ -193,7 +202,7 @@ void ReadConfig() {
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
   c.presentHook = num("present_hook", 1) != 0;
-  c.splitViews = num("split_views", 1) != 0;
+  c.splitViews = num("split_views", 0) != 0;
   c.roadVfov = num("road_vfov", c.roadVfov);
   c.wideVfov = num("wide_vfov", c.wideVfov);
   g_cfg = c;
@@ -248,19 +257,25 @@ float WrapDeg(float d) {
 // *** camera ***
 
 void AttachCamera() {
-  HARD_ATTACH_CAM_TO_ENTITY(g_cam, g_veh.handle, g_camPitch, 0.0f, g_camYaw, g_veh.mountX, g_veh.mountY, g_veh.mountZ, TRUE);
+  for (Cam c : g_cams) HARD_ATTACH_CAM_TO_ENTITY(c, g_veh.handle, g_camPitch, 0.0f, g_camYaw, g_veh.mountX, g_veh.mountY, g_veh.mountZ, TRUE);
 }
 
+// A camera per view rather than one whose field of view changes: the game can apply a new field of view a frame late,
+// even one set frames ahead, while switching the active camera takes effect on the frame.
 void ActivateCamera() {
-  g_cam = CREATE_CAM("DEFAULT_SCRIPTED_CAMERA", TRUE);
+  const float fovs[3] = {g_cfg.vfov, g_cfg.roadVfov, g_cfg.wideVfov};
+  for (int i = 0; i < 3; i++) {
+    g_cams[i] = CREATE_CAM("DEFAULT_SCRIPTED_CAMERA", FALSE);
+    SET_CAM_FOV(g_cams[i], fovs[i]);
+    SET_CAM_NEAR_CLIP(g_cams[i], 0.05f);
+  }
+  g_cam = g_cams[HOOK_BOTH];
   AttachCamera();
-  g_camFov = g_cfg.vfov;
-  SET_CAM_FOV(g_cam, g_camFov);
-  SET_CAM_NEAR_CLIP(g_cam, 0.05f);
   SET_CAM_ACTIVE(g_cam, TRUE);
+  g_activeView = HOOK_BOTH;
   g_rendering = false;
   g_frameViews = 0;
-  g_wideNext = false;
+  g_wideAt = -1;
   Log(std::string("camera on") + (g_cfg.interleave ? ", interleaved" : ""));
 }
 
@@ -271,15 +286,22 @@ void RenderCamera(bool on) {
 
 // Picks the frames to render the openpilot camera in, and returns the view the frame being drawn shows (a HOOK_ view), or
 // -1 for the player's camera. Interleaved, that's one frame at each 20 Hz capture time, or with split views a road view
-// then a wide view on the next frame, and the rest are the player's camera.
+// then a wide view half a period later, so the player's frames are evenly spaced; the rest are the player's camera.
 int UpdateCameraFrame(double now, float dt, bool split) {
   int view = HOOK_BOTH;
   if (g_cfg.interleave) {
-    bool op = now + 0.5 * dt >= g_nextOp;
-    if (op) g_nextOp = std::max(g_nextOp + 0.05, now + 0.5 * dt);
-    if (g_wideNext) view = HOOK_WIDE;
-    else view = !op ? -1 : split ? HOOK_ROAD : HOOK_BOTH;
-    g_wideNext = view == HOOK_ROAD;
+    double t = now + 0.5 * dt;
+    bool op = t >= g_nextOp;
+    if (op) {
+      view = split ? HOOK_ROAD : HOOK_BOTH;
+      if (split) g_wideAt = t + g_cfg.wideDelay;
+      g_nextOp = std::max(g_nextOp + 0.05, t);
+    } else if (g_wideAt > 0 && t >= g_wideAt) {
+      view = HOOK_WIDE;
+      g_wideAt = -1;
+    } else {
+      view = -1;
+    }
     g_ticks++;
     g_opCount += view >= 0;
     if (now - g_statsT > 10) {
@@ -288,10 +310,10 @@ int UpdateCameraFrame(double now, float dt, bool split) {
       g_statsT = now;
     }
   }
-  float fov = view == HOOK_ROAD ? g_cfg.roadVfov : view == HOOK_WIDE ? g_cfg.wideVfov : g_cfg.vfov;
-  if (view >= 0 && fov != g_camFov) {
-    SET_CAM_FOV(g_cam, fov);
-    g_camFov = fov;
+  if (view >= 0 && view != g_activeView) {
+    SET_CAM_ACTIVE(g_cams[g_activeView], FALSE);
+    SET_CAM_ACTIVE(g_cams[view], TRUE);
+    g_activeView = view;
   }
   RenderCamera(view >= 0);
   g_frameViews = (g_frameViews << 4) | uint64_t(view + 1);
@@ -302,7 +324,10 @@ void ReleaseCamera() {
   if (!g_cam) return;
   RENDER_SCRIPT_CAMS(FALSE, FALSE, 0, TRUE, FALSE, 0);
   g_rendering = false;
-  if (DOES_CAM_EXIST(g_cam)) DESTROY_CAM(g_cam, FALSE);
+  for (Cam &c : g_cams) {
+    if (c && DOES_CAM_EXIST(c)) DESTROY_CAM(c, FALSE);
+    c = 0;
+  }
   g_cam = 0;
   Log("camera off");
 }
@@ -374,11 +399,13 @@ bool GameFocused() {
 // the driver's own inputs, read from the devices: the game's control values include what the plugin injects
 void PollHeldKey(HeldKey &k, int vk, bool focused, double now) {
   bool down = focused && (GetAsyncKeyState(vk) & 0x8000) != 0;
+  // with shift, a step to the next multiple of 5, as a car's stalk pushed past its detent
+  int &presses = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? k.presses5 : k.presses;
   if (down && !k.down) {
-    k.presses++;
+    presses++;
     k.nextRepeat = now + 0.5;
   } else if (down && now >= k.nextRepeat) {
-    k.presses++;
+    presses++;
     k.nextRepeat = now + 0.15;
   }
   k.down = down;
@@ -562,16 +589,55 @@ void UpdateIndicator() {
   }
 }
 
+void DrawText(const std::string &text, float x, float y, float scale, int r, int g, int b) {
+  SET_TEXT_FONT(4);
+  SET_TEXT_SCALE(scale, scale);
+  SET_TEXT_COLOUR(r, g, b, 255);
+  SET_TEXT_OUTLINE();
+  SET_TEXT_WRAP(0.0f, x);
+  SET_TEXT_JUSTIFICATION(2);
+  BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING");
+  ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(text.c_str());
+  END_TEXT_COMMAND_DISPLAY_TEXT(0.0f, y, 0);
+}
+
+// the car's speed and openpilot's set speed at the right of the screen, green while engaged
+void DrawSpeed(double now) {
+  bool fresh = now - g_hud.t < 1.0;
+  float toUnit = g_hud.metric ? 3.6f : 2.23694f;
+  int r = 255, g = 255, b = 255;
+  if (fresh && g_hud.engaged) r = 80, g = 220, b = 100;
+  DrawText(std::to_string(static_cast<int>(std::lround(g_m.v * toUnit))) + (g_hud.metric ? " km/h" : " mph"), 0.985f, 0.74f, 0.9f, r, g, b);
+  std::string set = fresh && g_hud.setKph > 0 ? std::to_string(static_cast<int>(std::lround(g_hud.setKph * (g_hud.metric ? 1.0f : 0.621371f)))) : "-";
+  DrawText("SET " + set, 0.985f, 0.795f, 0.55f, 200, 200, 200);
+}
+
+// the street the car is on, which the bridge guesses a speed limit from
+std::string Street(double now) {
+  static std::string street;
+  static double next = 0;
+  if (now < next) return street;
+  next = now + 0.5;
+  uint64_t hash = 0, crossing = 0;
+  GET_STREET_NAME_AT_COORD(g_m.pos.x, g_m.pos.y, g_m.pos.z, &hash, &crossing);
+  const char *name = hash ? GET_STREET_NAME_FROM_HASH_KEY(static_cast<Hash>(hash)) : nullptr;
+  street.clear();
+  for (const char *c = name; c && *c; c++)
+    if (*c != '"' && *c != '\\' && static_cast<unsigned char>(*c) >= 0x20) street += *c;
+  return street;
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
     << ",\"engagePresses\":" << g_engagePresses.load() << ",\"speedUpPresses\":" << g_speedUp.presses
-    << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"resets\":" << g_m.resets;
+    << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
+    << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
   if (inVehicle) {
     s << ",\"vEgo\":" << Num(g_m.v) << ",\"aMeas\":" << Num(g_m.aMeas) << ",\"yawRate\":" << Num(g_m.yawRate)
       << ",\"heading\":" << Num(g_m.heading) << ",\"pitch\":" << Num(g_m.pitch) << ",\"roll\":" << Num(g_m.roll)
       << ",\"wheelBase\":" << Num(g_veh.wheelBase) << ",\"steerCurvature\":" << Num(SteerCurvature()) << ",\"pos\":" << Vec(g_m.pos) << ",\"rotVel\":" << Vec(g_m.rotVel)
-      << ",\"steerBone\":" << Vec(g_m.steerBone)
+      << ",\"steerBone\":" << Vec(g_m.steerBone) << ",\"street\":\"" << Street(now) << "\""
       << ",\"indicator\":" << (g_indicator == 1 ? "\"left\"" : g_indicator == 2 ? "\"right\"" : "null")
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
@@ -650,6 +716,11 @@ void HandleMessage(const Message &m, double now) {
     g_ctl.curvature = static_cast<float>(MsgNum(m, "curvature"));
     g_ctl.accel = static_cast<float>(MsgNum(m, "accel"));
     g_ctl.t = now;
+  } else if (type == "hud") {
+    g_hud.setKph = static_cast<float>(MsgNum(m, "setSpeed"));
+    g_hud.metric = MsgBool(m, "metric");
+    g_hud.engaged = MsgBool(m, "engaged");
+    g_hud.t = now;
   } else if (type == "engaged") {
     g_engaged = MsgBool(m, "on");
   } else if (type == "indicatorOff") {
@@ -678,8 +749,22 @@ void HandleMessage(const Message &m, double now) {
     g_cfg.interleaveLag = std::clamp(static_cast<int>(MsgNum(m, "lag", g_cfg.interleaveLag)), 0, 8);
     g_cfg.presentHook = MsgBool(m, "hook", g_cfg.presentHook);
     g_cfg.splitViews = MsgBool(m, "split", g_cfg.splitViews);
+    g_cfg.wideDelay = static_cast<float>(MsgNum(m, "wide_delay", g_cfg.wideDelay));
     Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag) +
         (g_cfg.splitViews ? ", split views" : ""));
+  } else if (type == "reset") {
+    // restarts one part of the openpilot camera pipeline (hook, capture or camera), each recreated next tick
+    std::string part = MsgStr(m, "part");
+    if (part == "hook" && g_hook == Hook::On) {
+      present_hook::Uninstall();
+      g_hook = Hook::Off;
+      g_capture.Stop();
+    } else if (part == "capture") {
+      g_capture.Stop();
+    } else if (part == "camera") {
+      ReleaseCamera();
+    }
+    Log("reset " + part);
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
   } else if (type == "trim" && g_veh.handle) {
@@ -788,16 +873,18 @@ extern "C" __declspec(dllexport) void CoreTick() {
 
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view >= 0) {
-    // help text would cover the marker, and the road view's narrow render reaches the radar in its corner. Hiding the
-    // feed for a frame restarts its animation, which flickers, so it's hidden only where the frames reach the screen.
+    // help text would cover the marker, and the wide lens reaches the radar in the corner. Hiding the feed for a frame
+    // restarts its animation, which flickers, so it's hidden only where the frames reach the screen.
     HIDE_HELP_TEXT_THIS_FRAME();
-    if (!hooked || view == HOOK_ROAD) HIDE_HUD_AND_RADAR_THIS_FRAME();
+    HIDE_HUD_AND_RADAR_THIS_FRAME();
     if (!hooked) THEFEED_HIDE_THIS_FRAME();
     // tells the capture this frame is the openpilot camera's, and which view by its colour (magenta both, cyan road,
     // yellow wide); the lens resampling blacks it out
     if (g_cfg.interleave)
       DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, view == HOOK_ROAD ? 0 : 255, view == HOOK_BOTH ? 0 : 255, view == HOOK_WIDE ? 0 : 255, 255, FALSE);
   }
+  // on the player's frames only, which keeps it out of the openpilot camera's
+  if (connected && v && view < 0) DrawSpeed(now);
   if (connected) {
     // police chases after a scrape with traffic would end any drive
     SET_MAX_WANTED_LEVEL(0);

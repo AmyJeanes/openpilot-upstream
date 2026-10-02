@@ -20,6 +20,12 @@ SLOTS = 3  # the bridge may still be copying the previous frame while the next o
 NV12_SIZE = get_nv12_info(W, H)[3]
 FRAME_BYTES = W * H * 3 // 2  # one view as the plugin sends it: Y rows, then interleaved UV rows, unpadded
 DEBUG_PORT = 8792
+# The game sometimes renders an openpilot frame with the previous openpilot frame's camera, so a road frame can hold the
+# wide render or the other way round. A pair matches when the wide frame's center is the road frame shrunk by the
+# lenses' focal length ratio; mismatched pairs (correlation under the threshold) are dropped.
+WIDE_FROM_ROAD_SCALE = 597.732 / 2600.85
+MATCH_THRESHOLD = 0.4
+MATCH_SHIFT = 4  # px at quarter size, searched each way
 
 
 def nv12_planes(buf) -> tuple[np.ndarray, np.ndarray]:
@@ -27,6 +33,28 @@ def nv12_planes(buf) -> tuple[np.ndarray, np.ndarray]:
   stride, y_height, uv_height, size = get_nv12_info(W, H)
   planes = np.frombuffer(buf, dtype=np.uint8, count=size)[:stride * (y_height + uv_height)].reshape(-1, stride)
   return planes[:H, :W], planes[y_height:y_height + H // 2, :W]
+
+
+def views_match(road_y: np.ndarray, wide_y: np.ndarray) -> float:
+  """Normalized correlation of the road frame's center, shrunk to the wide lens's scale, with the wide frame's center."""
+  from PIL import Image
+  r, w = road_y[::4, ::4].astype(np.float32), wide_y[::4, ::4].astype(np.float32)
+  h, wd = r.shape
+  ch, cw = int(h * 0.6), int(wd * 0.6)
+  crop = r[(h - ch) // 2:(h + ch) // 2, (wd - cw) // 2:(wd + cw) // 2]
+  sh, sw = round(ch * WIDE_FROM_ROAD_SCALE), round(cw * WIDE_FROM_ROAD_SCALE)
+  small = np.asarray(Image.fromarray(crop).resize((sw, sh), Image.BILINEAR), dtype=np.float32)
+  a = small - small.mean()
+  best = -1.0
+  # the wide frame comes a little after the road one, so in a turn the view has moved on a few pixels
+  for dy in range(-MATCH_SHIFT, MATCH_SHIFT + 1):
+    for dx in range(-MATCH_SHIFT, MATCH_SHIFT + 1):
+      y0, x0 = (h - sh) // 2 + dy, (wd - sw) // 2 + dx
+      center = w[y0:y0 + sh, x0:x0 + sw]
+      b = center - center.mean()
+      denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
+      best = max(best, float((a * b).sum()) / denom if denom > 1e-3 else 1.0)
+  return best
 
 
 def nv12_to_rgb(frame: np.ndarray) -> np.ndarray:
@@ -57,6 +85,9 @@ class Receiver:
     self.conn: socket.socket | None = None
     self.seq = 0
     self.snap_path: str | None = None
+    self.mismatched = 0
+    self.burst_path = ""
+    self.burst_left = 0
 
   def send_plugin(self, obj: dict) -> None:
     data = (json.dumps(obj) + "\n").encode()
@@ -86,6 +117,8 @@ class Receiver:
             continue
           if cmd.get("type") == "snap":
             self.snap_path = cmd.get("path", "/tmp/gta5")
+          elif cmd.get("type") == "burst":
+            self.burst_path, self.burst_left = cmd.get("path", "/tmp/gta5burst"), int(cmd.get("count", 40))
           else:
             self.send_plugin(cmd)
 
@@ -96,6 +129,14 @@ class Receiver:
       raise ValueError(f"unsupported frame size {head['width']}x{head['height']}")
     slot = self.seq % SLOTS
     off = 4 + head_len
+    if tuple(head["views"]) == VIEWS:
+      road_y = np.frombuffer(msg[off:off + W * H], dtype=np.uint8).reshape(H, W)
+      wide_y = np.frombuffer(msg[off + FRAME_BYTES:off + FRAME_BYTES + W * H], dtype=np.uint8).reshape(H, W)
+      if views_match(road_y, wide_y) < MATCH_THRESHOLD:
+        self.mismatched += 1
+        if self.mismatched % 20 == 1:
+          print(f"gta5: dropped a mismatched road/wide pair ({self.mismatched} so far)", flush=True)
+        return
     for name in head["views"]:
       frame = np.frombuffer(msg[off:off + FRAME_BYTES], dtype=np.uint8)
       off += FRAME_BYTES
@@ -107,11 +148,17 @@ class Receiver:
       if self.snap_path:
         from PIL import Image
         Image.fromarray(nv12_to_rgb(frame)).save(f"{self.snap_path}_{name}.png")
+      if self.burst_left:
+        from PIL import Image
+        # quarter-size luma, cheap enough to keep up with consecutive frames
+        Image.fromarray(np.ascontiguousarray(y[::4, ::4])).save(f"{self.burst_path}_{self.seq:06d}_{name}.jpg", quality=80)
     if self.snap_path:
       with open(f"{self.snap_path}_state.json", "w") as f:
         json.dump(head, f, indent=1)
       print(f"gta5: saved {self.snap_path}_*.png", flush=True)
       self.snap_path = None
+    if self.burst_left:
+      self.burst_left -= 1
     self.seq += 1
     self.frames.send((slot, list(head["views"]), head["state"]))
 

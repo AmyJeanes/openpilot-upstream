@@ -10,6 +10,7 @@ from pathlib import Path
 
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
+from openpilot.common.params import Params
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
@@ -22,6 +23,11 @@ DEBUG = bool(os.getenv("GTA5_DEBUG"))  # print commanded vs measured motion each
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
 NUDGE_TORQUE = 2000
 NUDGE_TIMEOUT = 3.0  # s after the indicator comes on
+TURN_CANCEL_DEG = 60.0  # heading change since the indicator came on that counts as a turn taken
+TURN_CANCEL_YAW_RATE = 0.1  # rad/s, straightened out
+# GTA has no speed limits; a guess from the street's name, mph: freeways, highways and routes, then anything else
+SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
+CITY_SPEED_LIMIT = 35
 # the plugin reads the bridge's address from here when its gta5op.ini doesn't set one
 BRIDGE_FILE = Path(os.getenv("GTA5_BRIDGE_FILE", "/mnt/c/Users/Public/gta5op-bridge.txt"))
 PIN_UI = Path(__file__).parent / "pin_ui.ps1"
@@ -52,6 +58,13 @@ def own_ip() -> str:
     return "127.0.0.1"
 
 
+def speed_limit(street: str) -> float:
+  if not street:
+    return 0.0
+  mph = next((limit for words, limit in SPEED_LIMITS if any(w in street for w in words)), CITY_SPEED_LIMIT)
+  return mph * 0.44704
+
+
 class GTA5World(World):
   def __init__(self, simulator_state: SimulatorState, q: Queue, port: int):
     super().__init__(dual_camera=True)
@@ -62,11 +75,14 @@ class GTA5World(World):
     self.state: dict | None = None
     self.slots: dict[str, int] = {}
     self.last_frame_time = 0.0
-    self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState'])
+    self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState', 'controlsState'])
+    self.metric = Params().get_bool("IsMetric")
+    self.next_hud = 0.0
     self.VM: VehicleModel | None = None
     self.last_status = 0.0
     self.indicator: str | None = None
     self.indicator_t = 0.0
+    self.indicator_heading = 0.0
     self.lane_changing = False
     self.presses: dict[str, int] = {}
     self.curvature = 0.0  # what the steering is set for
@@ -125,6 +141,17 @@ class GTA5World(World):
 
   # *** World interface ***
 
+  def _send_hud(self):
+    """The set speed for the game's HUD, as openpilot's UI shows it (km/h; 0 when not set)."""
+    now = time.monotonic()
+    if now < self.next_hud:
+      return
+    self.next_hud = now + 0.2
+    cluster = self.sm['carState'].vCruiseCluster
+    set_kph = self.sm['controlsState'].deprecated.vCruise if cluster == 0.0 else cluster
+    self._send({"type": "hud", "setSpeed": set_kph if 0 < set_kph < 255 else 0, "metric": self.metric,
+                "engaged": self.simulator_state.is_engaged})
+
   def apply_controls(self, steer_angle, throttle_out, brake_out):
     """Sends carControl's desired curvature and acceleration rather than the bridge's steer_angle/throttle/brake:
     those are shaped for the simulated Honda, not for the game car."""
@@ -135,6 +162,7 @@ class GTA5World(World):
       state = self.state
     if state is None or not state.get("inVehicle"):
       return
+    self._send_hud()
     if not self.simulator_state.is_engaged:
       self._send({"type": "control", "active": False})
       return
@@ -203,14 +231,18 @@ class GTA5World(World):
       self.q.put(control_cmd_gen("cruise_cancel"))
     self.steering = steering
     simulator_state.user_torque = 0  # but for the lane change nudge
-    self._update_indicator(simulator_state, state.get("indicator"))
+    simulator_state.speed_limit = speed_limit(state.get("street", ""))
+    self._update_indicator(simulator_state, state.get("indicator"), state["heading"], state["yawRate"])
     self._update_buttons(state)
     simulator_state.valid = True
 
   def _update_buttons(self, state: dict):
     """The plugin's keys stand in for the cruise buttons: engage sets when disengaged and cancels when engaged, and the
-    speed keys are resume/accel and set/decel, which step the set speed while engaged."""
-    for key in ("engagePresses", "speedUpPresses", "speedDownPresses"):
+    speed keys are resume/accel and set/decel, which step the set speed while engaged (to the next multiple of 5 with
+    shift)."""
+    commands = {"speedUpPresses": "cruise_up", "speedDownPresses": "cruise_down", "speedUp5Presses": "cruise_up5",
+                "speedDown5Presses": "cruise_down5"}
+    for key in ("engagePresses", *commands):
       presses = state.get(key)
       if presses is None:
         continue
@@ -220,18 +252,25 @@ class GTA5World(World):
         if key == "engagePresses":
           cmd = "cruise_cancel" if self.simulator_state.is_engaged else "cruise_down"
         else:
-          cmd = "cruise_up" if key == "speedUpPresses" else "cruise_down"
+          cmd = commands[key]
         self.q.put(control_cmd_gen(cmd))
 
-  def _update_indicator(self, simulator_state: SimulatorState, indicator: str | None):
+  def _update_indicator(self, simulator_state: SimulatorState, indicator: str | None, heading: float, yaw_rate: float):
     """The plugin's indicator is the blinker stalk: nudge the wheel to start the lane change, and cancel the indicator
     once it is done, as a car's stalk would."""
     now = time.monotonic()
     if indicator != self.indicator:
       self.indicator, self.indicator_t, self.lane_changing = indicator, now, False
+      self.indicator_heading = heading
     simulator_state.left_blinker = indicator == "left"
     simulator_state.right_blinker = indicator == "right"
     if indicator is None:
+      return
+    # a turn: cancel once the car has come round and straightened out
+    turned = abs((heading - self.indicator_heading + 180) % 360 - 180)
+    if turned > TURN_CANCEL_DEG and abs(yaw_rate) < TURN_CANCEL_YAW_RATE:
+      self._send({"type": "indicatorOff"})
+      self.indicator_heading = heading  # once, until the plugin's indicator goes off
       return
     lane_change = self.sm['modelV2'].meta.laneChangeState
     if lane_change == LaneChangeState.laneChangeStarting:

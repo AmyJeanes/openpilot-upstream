@@ -5,12 +5,14 @@
 #include <dxgi1_4.h>
 #include <winrt/base.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
+#include <vector>
 
 #include "capture.h"
 
@@ -29,7 +31,7 @@ constexpr int EXECUTE_INDEX = 10;                      // in ID3D12CommandQueue'
 
 // Presents we keep per-frame resources for. An openpilot frame's texture is reused this many presents later at the
 // earliest, which leaves the consumer time to read it.
-constexpr int FRAMES = 8;
+constexpr int FRAMES = 16;
 constexpr UINT PRED_STRIDE = 16;  // per frame: is-openpilot and is-player predicates, 64 bits each
 
 // Sets the frame's predicates from the marker the plugin draws over openpilot camera frames, its colour giving the view:
@@ -62,8 +64,12 @@ VtableEntry g_present, g_present1, g_execute;
 // the direct queue each thread last submitted to: the game renders a frame on the queue it then presents it on
 thread_local ID3D12CommandQueue *t_lastQueue = nullptr;
 std::atomic<ID3D12CommandQueue *> g_lastQueue{nullptr};
+// submissions per direct queue since the last stats, to check which the game renders on
+std::mutex g_queueStatsMutex;
+std::vector<std::pair<ID3D12CommandQueue *, int>> g_queueStats;
 std::atomic<int> g_inflight{0};
 std::atomic<bool> g_enabled{false};
+std::atomic<uint64_t> g_recorded{0};  // presents recorded, which a frame's texture is reused FRAMES of after
 thread_local bool t_inPresent = false;
 std::function<void(const std::string &)> g_log;
 std::function<void(const HookFrame &)> g_onFrame;
@@ -377,6 +383,7 @@ struct Renderer {
     queue->Signal(fence.get(), n);
     allocFence[f] = n;
     presents = n;
+    g_recorded = n;
     return n;
   }
 } g_r;
@@ -416,17 +423,31 @@ void Worker() {
       if (WaitForSingleObject(event, 500) != WAIT_OBJECT_0) continue;
     }
     int f = int(p.n % FRAMES);
+    // the worker fell so far behind that the texture may already hold a later frame
+    if (g_recorded - p.n >= FRAMES - 1) continue;
     int view = int(g_r.readbackData[f * 2]) - 1;
     bool op = view >= 0;
     g_statPresents++;
     g_statOp += op;
     if (p.t - g_statT > 10) {
-      if (g_statT) Log(std::to_string(g_statPresents) + " presents, " + std::to_string(g_statOp) + " openpilot frames in 10 s");
+      if (g_statT) {
+        std::string queues;
+        {
+          std::lock_guard qlk(g_queueStatsMutex);
+          for (auto &[q, count] : g_queueStats) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), " %p:%d%s", static_cast<void *>(q), count, q == g_r.queue.get() ? " (ours)" : "");
+            queues += buf;
+          }
+          g_queueStats.clear();
+        }
+        Log(std::to_string(g_statPresents) + " presents, " + std::to_string(g_statOp) + " openpilot frames in 10 s; direct queue submissions" + queues);
+      }
       g_statPresents = g_statOp = 0;
       g_statT = p.t;
     }
     if (op && g_onFrame && g_r.handles[f]) {
-      HookFrame hf{g_r.handles[f], g_r.ids[f], g_r.adapter, int(g_r.frameDesc.Width), int(g_r.frameDesc.Height), p.t, view};
+      HookFrame hf{g_r.handles[f], g_r.ids[f], g_r.adapter, int(g_r.frameDesc.Width), int(g_r.frameDesc.Height), p.t, view, p.n};
       g_onFrame(hf);
     }
   }
@@ -448,7 +469,8 @@ void OnPresent(IDXGISwapChain *sc, UINT flags) {
   if (!n) return;
   std::lock_guard qlk(g_queueMutex);
   g_pending.push_back({n, t});
-  while (g_pending.size() > 2 * FRAMES) g_pending.pop_front();
+  // a worker that falls behind takes the newest frames, well before their textures come round again
+  while (g_pending.size() > FRAMES / 2) g_pending.pop_front();
   g_queueCv.notify_one();
 }
 
@@ -457,6 +479,10 @@ void STDMETHODCALLTYPE HookExecute(ID3D12CommandQueue *q, UINT n, ID3D12CommandL
   if (q->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
     t_lastQueue = q;
     g_lastQueue = q;
+    std::lock_guard lk(g_queueStatsMutex);
+    auto it = std::find_if(g_queueStats.begin(), g_queueStats.end(), [q](auto &e) { return e.first == q; });
+    if (it == g_queueStats.end()) g_queueStats.push_back({q, 1});
+    else it->second++;
   }
   reinterpret_cast<ExecuteFn>(g_execute.original)(q, n, lists);
   g_inflight--;
@@ -569,5 +595,7 @@ void Uninstall() {
 }
 
 void SetEnabled(bool on) { g_enabled = on; }
+
+bool Reused(uint64_t n) { return g_recorded - n >= FRAMES - 1; }
 
 }  // namespace present_hook

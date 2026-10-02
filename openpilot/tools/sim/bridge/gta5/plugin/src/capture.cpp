@@ -145,6 +145,8 @@ struct Capture::Impl {
   com_ptr<ID3D11Texture2D> shared[16];  // opened hook textures, by id
   int64_t lastFrame = 0;  // 100 ns units, in the frames' own clock
   double roadT = -1;      // a road view drawn and waiting for its wide view, at this time
+  uint64_t roadN = 0;     // and its present
+  int dropped = 0;
   bool loggedSize = false;
   com_ptr<ID3D11Texture2D> markerStage;
   int seen = 0, marked = 0, taken = 0;
@@ -296,13 +298,17 @@ struct Capture::Impl {
     float cw = float(f.width), ch = float(f.height);
     if (f.view == HOOK_BOTH) {
       roadT = -1;
-      Process(shared[slot].get(), f.t, 0, 0, cw, ch);
+      Draw(shared[slot].get(), views[0], cfg.vfovDeg, 0, 0, cw, ch);
+      Draw(shared[slot].get(), views[1], cfg.vfovDeg, 0, 0, cw, ch);
+      SendShared(f.t, f.n, f.n);
     } else if (f.view == HOOK_ROAD) {
       Draw(shared[slot].get(), views[0], cfg.roadVfovDeg, 0, 0, cw, ch);
+      ctx->Flush();  // read now, while the texture still holds this frame
       roadT = f.t;
+      roadN = f.n;
     } else {
       Draw(shared[slot].get(), views[1], cfg.wideVfovDeg, 0, 0, cw, ch);
-      Send(roadT);  // the road view's time, as it's the one the model relies on
+      SendShared(roadT, roadN, f.n);  // the road view's time, as it's the one the model relies on
       roadT = -1;
       return;
     }
@@ -402,22 +408,39 @@ struct Capture::Impl {
     ctx->PSSetShaderResources(0, 1, noSrv);
   }
 
+  // sends the views drawn from the hook's frames, unless their textures may have been reused before they were read
+  void SendShared(double t, uint64_t roadN, uint64_t wideN) {
+    std::vector<uint8_t> out = Read();
+    if (out.empty()) return;
+    if (present_hook::Reused(roadN) || present_hook::Reused(wideN)) {
+      if (dropped++ % 20 == 0) log("capture: dropped frames read too late (" + std::to_string(dropped) + " so far)");
+      return;
+    }
+    onFrame(std::move(out), t);
+  }
+
   // reads both views back and sends them
   void Send(double t) {
+    std::vector<uint8_t> out = Read();
+    if (!out.empty()) onFrame(std::move(out), t);
+  }
+
+  // both views' staging textures, which waits for their drawing to finish
+  std::vector<uint8_t> Read() {
     std::vector<uint8_t> out(NV12_BYTES * 2);
     uint8_t *dst = out.data();
     for (auto &v : views) {
       D3D11_MAPPED_SUBRESOURCE m;
-      if (FAILED(ctx->Map(v.yStage.get(), 0, D3D11_MAP_READ, 0, &m))) return;
+      if (FAILED(ctx->Map(v.yStage.get(), 0, D3D11_MAP_READ, 0, &m))) return {};
       for (int r = 0; r < CAM_H; r++) memcpy(dst + size_t(r) * CAM_W, static_cast<uint8_t *>(m.pData) + size_t(r) * m.RowPitch, CAM_W);
       ctx->Unmap(v.yStage.get(), 0);
       dst += size_t(CAM_W) * CAM_H;
-      if (FAILED(ctx->Map(v.uvStage.get(), 0, D3D11_MAP_READ, 0, &m))) return;
+      if (FAILED(ctx->Map(v.uvStage.get(), 0, D3D11_MAP_READ, 0, &m))) return {};
       for (int r = 0; r < CAM_H / 2; r++) memcpy(dst + size_t(r) * CAM_W, static_cast<uint8_t *>(m.pData) + size_t(r) * m.RowPitch, CAM_W);
       ctx->Unmap(v.uvStage.get(), 0);
       dst += size_t(CAM_W) * CAM_H / 2;
     }
-    onFrame(std::move(out), t);
+    return out;
   }
 
   void OnFrameArrived(wgc::Direct3D11CaptureFramePool const &sender, bool enabled, bool marker) {

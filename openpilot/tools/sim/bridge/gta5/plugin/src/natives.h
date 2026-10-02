@@ -36,6 +36,9 @@ inline void FREEZE_ENTITY_POSITION(Entity e, BOOL t) { Invoke(0x428CA6DBD1094446
 
 // vehicles
 inline Hash GET_HASH_KEY(const char *s) { return Invoke<Hash>(0xD24D37CC275948CC, s); }
+// street hashes are written to 8-byte slots
+inline void GET_STREET_NAME_AT_COORD(float x, float y, float z, uint64_t *street, uint64_t *crossing) { Invoke(0x2EB41072B4C1E4C0, x, y, z, street, crossing); }
+inline const char *GET_STREET_NAME_FROM_HASH_KEY(Hash h) { return Invoke<const char *>(0xD0EF8A959B8A4CB9, h); }
 inline void REQUEST_MODEL(Hash m) { Invoke(0x963D27A58DF860AC, m); }
 inline BOOL HAS_MODEL_LOADED(Hash m) { return Invoke<BOOL>(0x98A4EB5D89A0C952, m); }
 inline void SET_MODEL_AS_NO_LONGER_NEEDED(Hash m) { Invoke(0xE532F5D78798DAAB, m); }
@@ -92,6 +95,15 @@ inline void THEFEED_HIDE_THIS_FRAME() { Invoke(0x25F87B30C382FCA7); }
 inline void CLEAR_PRINTS() { Invoke(0xCC33FA791322B9D9); }
 // screen coordinates 0-1, the rectangle's center and size
 inline void DRAW_RECT(float x, float y, float w, float h, int r, int g, int b, int a, BOOL p8) { Invoke(0x3A618A217E5154F0, x, y, w, h, r, g, b, a, p8); }
+inline void SET_TEXT_FONT(int font) { Invoke(0x66E0276CC5F6B9DA, font); }
+inline void SET_TEXT_SCALE(float scale, float size) { Invoke(0x07C837F9A01C34C9, scale, size); }
+inline void SET_TEXT_COLOUR(int r, int g, int b, int a) { Invoke(0xBE6B23FFA53FB442, r, g, b, a); }
+inline void SET_TEXT_OUTLINE() { Invoke(0x2513DFB0FB8400FE); }
+inline void SET_TEXT_JUSTIFICATION(int justify) { Invoke(0x4E096588B13FFECA, justify); }  // 0 centre, 1 left, 2 right
+inline void SET_TEXT_WRAP(float start, float end) { Invoke(0x63145D9C883A1A70, start, end); }
+inline void BEGIN_TEXT_COMMAND_DISPLAY_TEXT(const char *fmt) { Invoke(0x25FBB336DF1804CB, fmt); }
+inline void ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(const char *s) { Invoke(0x6C188BE134E074AA, s); }
+inline void END_TEXT_COMMAND_DISPLAY_TEXT(float x, float y, int p2) { Invoke(0xCD015E5BB0D96A57, x, y, p2); }
 
 // controls
 inline BOOL SET_CONTROL_VALUE_NEXT_FRAME(int control, int action, float v) { return Invoke<BOOL>(0xE8A25867FBA3B05E, control, action, v); }

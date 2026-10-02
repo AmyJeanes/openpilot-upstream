@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Sends a debug command to the GTA V plugin through the running bridge, e.g.
   gta5_cmd.py snap /tmp/gta5                    save the next road/wide frames as PNGs, and their state
+  gta5_cmd.py burst /tmp/burst 40               save the next 40 frames' luma, quarter size, as JPEGs
   gta5_cmd.py setup x=2420 y=3000 z=46 model=sultan speed=20 hour=12 weather=EXTRASUNNY
                                                 spawn a car and/or put it on the road nearest a point
   gta5_cmd.py camera yaw=5 pitch=0              rotate the camera on its mount (degrees)"""
@@ -25,6 +26,9 @@ def main(argv: list[str]) -> None:
   cmd: dict = {"type": argv[0]}
   if argv[0] == "snap":
     cmd["path"] = argv[1] if len(argv) > 1 else "/tmp/gta5"
+  elif argv[0] == "burst":
+    cmd["path"] = argv[1] if len(argv) > 1 else "/tmp/gta5burst"
+    cmd["count"] = int(argv[2]) if len(argv) > 2 else 40
   else:
     for arg in argv[1:]:
       key, _, value = arg.partition("=")

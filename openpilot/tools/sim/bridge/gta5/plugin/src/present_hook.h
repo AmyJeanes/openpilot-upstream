@@ -13,6 +13,7 @@ struct HookFrame {
   int width, height;
   double t;  // QPC seconds at the present
   int view;  // HOOK_BOTH: one render for both openpilot cameras; HOOK_ROAD, HOOK_WIDE: one each, road then wide
+  uint64_t n;  // the present's number
 };
 
 enum { HOOK_BOTH = 0, HOOK_ROAD = 1, HOOK_WIDE = 2 };
@@ -23,4 +24,6 @@ bool Install(std::function<void(const std::string &)> log, std::function<void(co
 void Uninstall();
 // while on, frames with the interleave marker go to onFrame and are replaced on screen
 void SetEnabled(bool on);
+// whether frame n's texture may have been overwritten by a later frame: a consumer that read it since should drop it
+bool Reused(uint64_t n);
 }  // namespace present_hook
