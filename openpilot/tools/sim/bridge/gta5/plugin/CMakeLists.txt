@@ -19,4 +19,4 @@ add_dependencies(gta5op shv_lib)
 target_link_libraries(gta5op PRIVATE ${SHV_LIB})
 set_target_properties(gta5op PROPERTIES SUFFIX ".asi")
 
-add_library(gta5op_core SHARED src/core.cpp src/capture.cpp src/net.cpp)
+add_library(gta5op_core SHARED src/core.cpp src/capture.cpp src/net.cpp src/present_hook.cpp)

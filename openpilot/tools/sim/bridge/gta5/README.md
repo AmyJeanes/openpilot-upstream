@@ -49,9 +49,11 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 - The plugin attaches a scripted camera to the car at the comma mount (1.22 m above the ground, level), hides the HUD,
   and captures the game window with Windows.Graphics.Capture.
 - With `interleave=1`, the game renders the openpilot camera only on one frame per 20 Hz capture, and the player's own
-  camera on the rest. Those frames carry a small magenta marker at the top-left that the capture picks them out by, so
-  timing between the game and the capture doesn't matter. They still show on screen, as flicker. Anything that blends
-  frames together mixes the two views: turn off TAA, DLSS and FSR (including frame generation), and motion blur.
+  camera on the rest. Those frames carry a small magenta marker at the top-left, so timing between the script and the
+  renderer doesn't matter. A hook on the game's D3D12 present checks for it on the GPU: it copies a marked frame out
+  for openpilot and presents the player's previous frame in its place, so the openpilot view never shows
+  (`present_hook=0` captures the window instead, where it flickers). Anything that blends frames together mixes the two
+  views: turn off TAA, DLSS and FSR (including frame generation), ray tracing's temporal denoising, and motion blur.
 - One game camera covers both openpilot cameras. The driving model only samples about 30 degrees either side of center,
   so a pinhole render with a 76 degree vertical field of view has enough coverage and resolution for both; the wide
   camera's outer field is black. A pixel shader resamples it through the comma 3X lenses into NV12, as the Slow Roads

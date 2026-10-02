@@ -6,7 +6,10 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <mutex>
 #include <vector>
+
+struct HookFrame;
 
 constexpr int CAM_W = 1928, CAM_H = 1208;
 constexpr size_t NV12_BYTES = size_t(CAM_W) * CAM_H * 3 / 2;  // unpadded: Y rows, then interleaved UV rows
@@ -28,7 +31,11 @@ class Capture {
   Capture();
   ~Capture();
   bool Start(HWND hwnd, const CaptureConfig &cfg, FrameCallback onFrame, std::function<void(const std::string &)> log);
+  // frames come from the present hook instead of the window, through ProcessShared
+  void StartHook(const CaptureConfig &cfg, FrameCallback onFrame, std::function<void(const std::string &)> log);
+  void ProcessShared(const HookFrame &frame);
   void Stop();
+  bool HookMode() const;
   void SetEnabled(bool on) { enabled_ = on; }
   // take only frames with the marker the plugin draws over openpilot camera frames, when they're interleaved with the
   // player's own
@@ -38,6 +45,7 @@ class Capture {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  std::mutex hookMutex_;  // ProcessShared runs on the hook's thread
   std::atomic<bool> enabled_{false}, marker_{false};
 };
 

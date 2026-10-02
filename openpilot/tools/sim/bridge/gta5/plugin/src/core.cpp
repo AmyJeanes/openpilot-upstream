@@ -18,6 +18,7 @@
 #include "core_api.h"
 #include "natives.h"
 #include "net.h"
+#include "present_hook.h"
 
 #pragma comment(lib, "xinput.lib")
 
@@ -47,6 +48,7 @@ struct Config {
   int keySpeedDown = VK_OEM_MINUS;
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
+  bool presentHook = true;  // when interleaving, take frames from the game's presents and keep them off screen
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -56,6 +58,7 @@ Config g_cfg;
 Link g_link;
 Capture g_capture;
 bool g_captureFailed = false;
+enum class Hook { Off, On, Failed } g_hook = Hook::Off;
 std::mutex g_logMutex;
 
 std::mutex g_stateMutex;
@@ -166,6 +169,7 @@ void ReadConfig() {
   c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
+  c.presentHook = num("present_hook", 1) != 0;
   g_cfg = c;
 }
 
@@ -571,6 +575,7 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "interleave") {
     g_cfg.interleave = MsgBool(m, "on", g_cfg.interleave);
     g_cfg.interleaveLag = std::clamp(static_cast<int>(MsgNum(m, "lag", g_cfg.interleaveLag)), 0, 8);
+    g_cfg.presentHook = MsgBool(m, "hook", g_cfg.presentHook);
     Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag));
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
@@ -640,15 +645,21 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (want && !g_cam) ActivateCamera();
   else if (!want && g_cam) ReleaseCamera();
 
-  if (want && !g_capture.Running() && !g_captureFailed) {
+  if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off && want)
+    g_hook = present_hook::Install(Log, [](const HookFrame &f) { g_capture.ProcessShared(f); }) ? Hook::On : Hook::Failed;
+  bool hooked = g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::On;
+  CaptureConfig cc;
+  cc.vfovDeg = g_cfg.vfov;
+  cc.lens = g_cfg.lens;
+  if (want && hooked && !g_capture.HookMode()) {
+    g_capture.StartHook(cc, SendFrame, Log);
+  } else if (want && !hooked && (!g_capture.Running() || g_capture.HookMode()) && !g_captureFailed) {
     HWND hwnd = FindGameWindow();
-    CaptureConfig cc;
-    cc.vfovDeg = g_cfg.vfov;
-    cc.lens = g_cfg.lens;
     if (hwnd) g_captureFailed = !g_capture.Start(hwnd, cc, SendFrame, Log);
   }
   g_capture.SetEnabled(want);
-  g_capture.SetMarker(g_cfg.interleave);
+  g_capture.SetMarker(g_cfg.interleave && !hooked);
+  present_hook::SetEnabled(want && hooked);
 
   if (g_cam && UpdateCameraFrame(now, dt)) {
     HIDE_HUD_AND_RADAR_THIS_FRAME();
@@ -676,6 +687,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
 extern "C" __declspec(dllexport) void CoreShutdown() {
   ReleaseControls();
   ReleaseCamera();
+  if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();
   Log("shutdown");

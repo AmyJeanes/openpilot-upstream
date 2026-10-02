@@ -1,6 +1,8 @@
 #include "capture.h"
 
-#include <d3d11.h>
+#include "present_hook.h"
+
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
@@ -137,16 +139,36 @@ struct Capture::Impl {
   wgc::Direct3D11CaptureFramePool pool{nullptr};
   wgc::GraphicsCaptureSession session{nullptr};
   wgc::Direct3D11CaptureFramePool::FrameArrived_revoker revoker;
+  bool hookMode = false, openFailed = false;
+  LUID adapter{};
+  uint64_t sharedIds[16]{};
+  com_ptr<ID3D11Texture2D> shared[16];  // opened hook textures, by id
   int64_t lastFrame = 0;  // 100 ns units, in the frames' own clock
   bool loggedSize = false;
   com_ptr<ID3D11Texture2D> markerStage;
   int seen = 0, marked = 0, taken = 0;
   int64_t lastStats = 0;
 
-  bool InitD3D() {
+  bool InitD3D(const LUID *luid = nullptr) {
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, &fl, 1, D3D11_SDK_VERSION, device.put(), nullptr, ctx.put()))) {
+    com_ptr<IDXGIAdapter1> chosen;
+    if (luid) {
+      com_ptr<IDXGIFactory1> factory;
+      CreateDXGIFactory1(IID_PPV_ARGS(factory.put()));
+      for (UINT i = 0; factory; i++) {
+        com_ptr<IDXGIAdapter1> a;
+        if (factory->EnumAdapters1(i, a.put()) != S_OK) break;
+        DXGI_ADAPTER_DESC1 d;
+        a->GetDesc1(&d);
+        if (d.AdapterLuid.LowPart == luid->LowPart && d.AdapterLuid.HighPart == luid->HighPart) {
+          chosen = a;
+          break;
+        }
+      }
+    }
+    D3D_DRIVER_TYPE type = chosen ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+    if (FAILED(D3D11CreateDevice(chosen.get(), type, nullptr, flags, &fl, 1, D3D11_SDK_VERSION, device.put(), nullptr, ctx.put()))) {
       log("D3D11 device creation failed");
       return false;
     }
@@ -243,18 +265,59 @@ struct Capture::Impl {
     return all;
   }
 
+  // takes the hook's frame if it's time for one
+  void ProcessShared(const HookFrame &f) {
+    std::lock_guard lk(mutex);
+    if (!device) {
+      adapter = f.adapter;
+      if (!InitD3D(&adapter)) return;
+    }
+    int64_t now = int64_t(f.t * 1e7);
+    int64_t period = int64_t(1e7 / cfg.fps);
+    if (now - lastFrame < period - period / 5) return;
+    int slot = int(f.id % 16);
+    if (sharedIds[slot] != f.id) {
+      shared[slot] = nullptr;
+      sharedIds[slot] = 0;
+      com_ptr<ID3D11Device1> d1 = device.as<ID3D11Device1>();
+      HRESULT hr = d1->OpenSharedResource1(f.handle, IID_PPV_ARGS(shared[slot].put()));
+      if (FAILED(hr)) {
+        if (!openFailed) log("couldn't open the hook's texture: " + std::to_string(uint32_t(hr)));
+        openFailed = true;
+        return;
+      }
+      sharedIds[slot] = f.id;
+    }
+    lastFrame = (now - lastFrame < 2 * period) ? lastFrame + period : now;
+    Process(shared[slot].get(), f.t, 0, 0, float(f.width), float(f.height));
+  }
+
   void Process(ID3D11Texture2D *tex, double t) {
     D3D11_TEXTURE2D_DESC desc;
     tex->GetDesc(&desc);
     float cx, cy, cw, ch;
     if (!ClientRect(desc.Width, desc.Height, cx, cy, cw, ch)) return;
+    Process(tex, t, cx, cy, cw, ch);
+  }
+
+  void Process(ID3D11Texture2D *tex, double t, float cx, float cy, float cw, float ch) {
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc(&desc);
     if (!loggedSize) {
       log("capturing " + std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", client area " +
           std::to_string(int(cw)) + "x" + std::to_string(int(ch)) + " at " + std::to_string(int(cx)) + "," + std::to_string(int(cy)));
       loggedSize = true;
     }
+    // the frame's stored values, as the display shows them: an sRGB view would linearize them
+    D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM
+              : desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ? DXGI_FORMAT_B8G8R8A8_UNORM
+              : desc.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS ? DXGI_FORMAT_R10G10B10A2_UNORM
+              : desc.Format;
+    sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sv.Texture2D.MipLevels = 1;
     com_ptr<ID3D11ShaderResourceView> srv;
-    if (FAILED(device->CreateShaderResourceView(tex, nullptr, srv.put()))) return;
+    if (FAILED(device->CreateShaderResourceView(tex, &sv, srv.put()))) return;
 
     // square pixels with the principal point at the center: the focal length follows from the vertical FOV
     float srcF = ch * 0.5f / std::tan(cfg.vfovDeg * 3.14159265f / 360.0f);
@@ -438,6 +501,7 @@ bool Capture::Start(HWND hwnd, const CaptureConfig &cfg, FrameCallback onFrame, 
 }
 
 void Capture::Stop() {
+  std::lock_guard hlk(hookMutex_);
   if (!impl_) return;
   {
     std::lock_guard lk(impl_->mutex);
@@ -447,5 +511,24 @@ void Capture::Stop() {
   if (impl_->thread.joinable()) impl_->thread.join();
   impl_.reset();
 }
+
+void Capture::StartHook(const CaptureConfig &cfg, FrameCallback onFrame, std::function<void(const std::string &)> log) {
+  Stop();
+  std::lock_guard lk(hookMutex_);
+  impl_ = std::make_unique<Impl>();
+  impl_->cfg = cfg;
+  impl_->onFrame = std::move(onFrame);
+  impl_->log = std::move(log);
+  impl_->hookMode = true;
+  impl_->running = true;
+  impl_->log("capture from the present hook");
+}
+
+void Capture::ProcessShared(const HookFrame &frame) {
+  std::lock_guard lk(hookMutex_);
+  if (impl_ && impl_->hookMode && enabled_) impl_->ProcessShared(frame);
+}
+
+bool Capture::HookMode() const { return impl_ && impl_->hookMode; }
 
 bool Capture::Running() const { return impl_ && impl_->running; }
