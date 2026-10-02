@@ -681,6 +681,71 @@ std::string Route(double now) {
   return route;
 }
 
+// the car's lane, counted from the left, of the lanes its way, as "lane":[i,n]; negative in the oncoming lanes, and empty
+// off GTA's roads or across them. Lanes are 5.4 m wide, outward from the median's edge on a two-way road and centred on
+// its path nodes on a one-way one.
+std::string Lane(double now) {
+  static std::string lane;
+  static double next = 0;
+  if (now < next) return lane;
+  next = now + 0.2;
+  lane.clear();
+  Vector3 a{}, b{};
+  int toA = 0, toB = 0;
+  float median = 0;
+  const Vector3 &p = g_m.pos;
+  if (!GET_CLOSEST_ROAD(p.x, p.y, p.z, 1.0f, 1, &a, &b, &toA, &toB, &median, FALSE)) return lane;
+  float dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
+  if (len < 1.0f) return lane;
+  float roadHeading = std::atan2(dy, dx) / DEG - 90;
+  float off = std::remainder(g_m.heading - roadHeading, 360.0f);
+  bool towardsB = std::fabs(off) < 30;
+  if (!towardsB && std::fabs(off) < 150) return lane;  // turning, or on a crossing road
+  float right = ((p.x - a.x) * dy - (p.y - a.y) * dx) / len * (towardsB ? 1 : -1);
+  int n = towardsB ? toB : toA, back = towardsB ? toA : toB;
+  if (n < 1) return lane;
+  constexpr float LANE_WIDTH = 5.4f;
+  float leftEdge = back > 0 ? median / 2 : -n * LANE_WIDTH / 2;
+  float across = right - leftEdge;
+  // the median counts as the inside lane, until the car is a quarter of a lane past it
+  int i = across < -median - LANE_WIDTH / 4 ? std::max(static_cast<int>(std::floor((across + median) / LANE_WIDTH)), -back)
+                                            : std::clamp(static_cast<int>(std::floor(across / LANE_WIDTH)), 0, n - 1);
+  lane = "\"lane\":[" + std::to_string(i) + "," + std::to_string(n) + "]";
+  return lane;
+}
+
+// what the traffic around shows of the light ahead, as "traffic":{red, crossing, peds}: AI cars going our way that wait at
+// a red light (or queue behind one; they all clear when it turns green, before moving), cars crossing ahead, and
+// pedestrians just in front
+std::string Traffic(double now) {
+  static std::string traffic;
+  static double next = 0;
+  if (now < next || !g_veh.handle) return traffic;
+  next = now + 0.2;
+  int red = 0, crossing = 0, peds = 0;
+  int slots[2 + 2 * 32] = {32};
+  int count = GET_PED_NEARBY_VEHICLES(PLAYER_PED_ID(), slots);
+  for (int i = 0; i < std::min(count, 32); i++) {
+    Vehicle v = slots[2 + 2 * i];
+    if (v == g_veh.handle || !DOES_ENTITY_EXIST(v)) continue;
+    Vector3 q = GET_ENTITY_COORDS(v, TRUE);
+    Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
+    float dh = std::fabs(std::remainder(GET_ENTITY_HEADING(v) - g_m.heading, 360.0f));
+    if (dh < 30 && std::fabs(rel.x) < 15 && rel.y > -40 && rel.y < 25 && IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS(v)) red++;
+    else if (dh > 60 && dh < 120 && std::fabs(rel.x) < 30 && rel.y > 3 && rel.y < 40 && GET_ENTITY_SPEED(v) > 3) crossing++;
+  }
+  count = GET_PED_NEARBY_PEDS(PLAYER_PED_ID(), slots, -1);
+  for (int i = 0; i < std::min(count, 32); i++) {
+    Ped ped = slots[2 + 2 * i];
+    if (!DOES_ENTITY_EXIST(ped) || IS_PED_DEAD_OR_DYING(ped, TRUE)) continue;
+    Vector3 q = GET_ENTITY_COORDS(ped, TRUE);
+    Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
+    if (std::fabs(rel.x) < 2.5f && rel.y > 1 && rel.y < 12) peds++;
+  }
+  traffic = "\"traffic\":{\"red\":" + std::to_string(red) + ",\"crossing\":" + std::to_string(crossing) + ",\"peds\":" + std::to_string(peds) + "}";
+  return traffic;
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -698,8 +763,8 @@ void Publish(double now, bool inVehicle) {
       << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    std::string route = Route(now);
-    if (!route.empty()) s << "," << route;
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now)})
+      if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
   s << "}";
@@ -948,6 +1013,10 @@ void HandleMessage(const Message &m, double now) {
     Log("reset " + part);
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
+  } else if (type == "cruise") {
+    // as if the cruise speed keys were pressed: up or down, by 5 with five=1
+    auto &k = MsgStr(m, "dir") == "up" ? g_speedUp : g_speedDown;
+    (MsgBool(m, "five") ? k.presses5 : k.presses) += static_cast<int>(MsgNum(m, "times", 1));
   } else if (type == "trim" && g_veh.handle) {
     if (m.count("interior")) SET_VEHICLE_EXTRA_COLOUR_5(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
     if (m.count("dashboard")) SET_VEHICLE_EXTRA_COLOUR_6(g_veh.handle, static_cast<int>(MsgNum(m, "dashboard")));

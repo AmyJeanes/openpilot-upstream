@@ -1,5 +1,8 @@
+import time
+
 from openpilot.cereal import log
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 
 LaneChangeState = log.LaneChangeState
@@ -10,11 +13,27 @@ LANE_CHANGE_TIME_MAX = 10.
 LANE_CHANGE_START_TIME = 0.5
 # below this a blinker asks the model to take the next turn instead, as sunnypilot's lane turn desire does
 LANE_TURN_SPEED = 19 * CV.MPH_TO_MS
+# a navigation source's request (the NavDesire param): "laneChange" makes the blinker ask for a lane change at any speed
+NAV_LANE_CHANGE = "laneChange"
+NAV_READ_EVERY = 0.2  # s
 
 
-def lane_turn_desire(CS) -> int:
+class NavDesire:
+  def __init__(self):
+    self.params = Params()
+    self.value = ""
+    self.t = 0.0
+
+  def get(self) -> str:
+    now = time.monotonic()
+    if now - self.t > NAV_READ_EVERY:
+      self.value, self.t = self.params.get("NavDesire") or "", now
+    return self.value
+
+
+def lane_turn_desire(CS, nav: str = "") -> int:
   """The turn a blinker asks for at low speed, unless the blind spot that way is occupied; overrides any lane change."""
-  if CS.vEgo < LANE_TURN_SPEED:
+  if CS.vEgo < LANE_TURN_SPEED and nav != NAV_LANE_CHANGE:
     if CS.leftBlinker and not CS.rightBlinker and not CS.leftBlindspot:
       return log.Desire.turnLeft
     if CS.rightBlinker and not CS.leftBlinker and not CS.rightBlindspot:
@@ -29,6 +48,7 @@ class DesireHelper:
     self.lane_change_timer = 0.0
     self.prev_one_blinker = False
     self.desire = log.Desire.none
+    self.nav = NavDesire()
 
   @staticmethod
   def get_lane_change_direction(CS):
@@ -37,7 +57,8 @@ class DesireHelper:
   def update(self, carstate, lateral_active, lane_change_prob):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
-    below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
+    nav = self.nav.get()
+    below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN and nav != NAV_LANE_CHANGE
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
@@ -83,7 +104,7 @@ class DesireHelper:
 
     self.prev_one_blinker = one_blinker and lateral_active
 
-    self.desire = lane_turn_desire(carstate)
+    self.desire = lane_turn_desire(carstate, nav)
     if self.desire == log.Desire.none and self.lane_change_state == LaneChangeState.laneChangeStarting:
       if self.lane_change_direction == LaneChangeDirection.left:
         self.desire = log.Desire.laneChangeLeft

@@ -1,5 +1,6 @@
 """Navigation: drives the GPS route to the game map's waypoint, as a driver would with openpilot's lane turn desire. It
-slows for each turn on the route, signals it, and stops at the waypoint."""
+moves into the lane for each turn on the route, slows for it, signals it, and stops at the waypoint. PullAway pulls away
+from a light once it turns green."""
 import math
 import os
 import time
@@ -12,6 +13,7 @@ DEBUG = bool(os.getenv("GTA5_DEBUG"))
 TURN_ANGLE = 50.0  # deg of heading change along TURN_WINDOW m of route that makes a turn, not a bend
 TURN_WINDOW = 30.0  # m
 TURN_HOLDS = 20.0  # m past the turn where the route still heads the new way: a jog between lanes comes back
+U_TURN_ANGLE = 135.0  # deg: the model can't make a U-turn, so drive on until GTA routes round instead
 TURN_SPEED = 12 * CV.MPH_TO_MS  # the lane turn desire works below 19 mph
 TURN_SLOW_BY = 15.0  # m before the turn
 SLOW_DECEL = 0.8  # m/s^2, the approach the cruise cap allows
@@ -28,7 +30,7 @@ REPEAT_EVERY = 2.0  # s at most
 REPEAT_BELOW = 0.1  # the model's probability of the turn
 MIN_AHEAD = 20.0  # m: the route starts with a jog from the car's lane to GTA's road nodes, which isn't a turn
 CONFIRM = 0.5  # s a turn must stay in the route before it counts, past the route's jitter at junctions
-BEHIND = 100.0  # deg between the car's heading and the route's start: it leads back the way the car came
+BEHIND_BY = 2.0  # m
 COOLDOWN = 3.0  # s after a turn, while the rest of it may still look like a turn ahead
 ARRIVE_DECEL = 0.7  # m/s^2
 ARRIVE_LAG = 1.0  # s: openpilot eases into a lower set speed
@@ -36,6 +38,18 @@ ARRIVE_KEEP = 100.0  # m: GTA clears the waypoint as the car nears it, so stop o
 STOP_BEFORE = 8.0  # m before the waypoint
 ARRIVED_DIST = 15.0  # m: disengage once nearly stopped
 ROUTE_POINTS = 101  # the plugin's route covers 500 m; fewer points means it ends there
+LANE_CHANGE_DIST = 40.0  # m before a turn, the last a lane change for it starts
+LANE_CHANGE_SPEED = 2.0  # m/s
+LANE_CHANGE_TIMEOUT = 10.0  # s
+LANE_CHANGE_GAP = 2.0  # s between lane changes
+WRONG_SIDE_FOR = 1.0  # s in the oncoming lanes before moving back over
+# the driver's gas press that gets the car moving again, which the model won't do itself once stopped
+GO_AFTER = 1.0  # s stopped
+GO_GREEN = 0.4  # s since traffic last showed red
+GO_GAS = 0.5  # s
+GO_EVERY = 3.0  # s
+GO_TRIES = 3
+GO_CLEAR = 15.0  # m: a vehicle nearer ahead leads the car away
 
 
 def wrap(deg: float) -> float:
@@ -73,15 +87,19 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
     steps = [abs(wrap(headings[k + 1] - headings[k])) for k in range(i, j)]
     k = i + int(np.argmax(steps)) + 1
     held = int(np.searchsorted(starts, starts[k] + TURN_HOLDS, side='right')) - 1
-    if abs(wrap(headings[max(held, j)] - headings[i])) < TURN_ANGLE:
+    exit_change = abs(wrap(headings[max(held, j)] - headings[i]))
+    if exit_change < TURN_ANGLE:
       continue
+    if exit_change > U_TURN_ANGLE:
+      return None
     return Turn(starts[k], "left" if change > 0 else "right", headings[max(held, j)])
   return None
 
 
 class Nav:
-  def __init__(self, send):
+  def __init__(self, send, set_desire):
     self.send = send  # to the plugin
+    self.set_desire = set_desire  # openpilot's NavDesire
     self.turn: Turn | None = None  # the one being signaled
     self.cooldown_until = 0.0
     self.signaled: str | None = None
@@ -93,6 +111,10 @@ class Nav:
     self.repeat_t = 0.0  # when the blinker last dropped to repeat the turn
     self.stopped = False
     self.seen: tuple[str, float] | None = None  # the turn ahead's side, and since when
+    self.changing: str | None = None  # the side of nav's lane change under way
+    self.change_shown = False
+    self.change_t = 0.0  # when it started, or the last ended
+    self.wrong_side_t: float | None = None  # since when the car has been in the oncoming lanes
 
   def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict[str, float]) -> tuple[float, bool]:
     """Returns the cruise cap (m/s, 0 for none) and whether to disengage, having arrived. `desire` is the model's
@@ -105,8 +127,11 @@ class Nav:
     route = state.get("route")
     if not engaged:
       self._cancel(indicator)
+      self._end_change(indicator)
       self.route_end, self.dest = None, None
       return 0.0, False
+    self._watch_change(indicator, now)
+    self._keep_right(state.get("lane"), v, now)
     if not route:
       self._cancel(indicator)
       left = None if self.dest is None else float(np.hypot(*(self.dest - np.array(state["pos"][:2]))))
@@ -151,10 +176,13 @@ class Nav:
       self.seen = (turn.side, now)
     if turn is not None and now - self.seen[1] < CONFIRM:
       turn = None
+    self._change_lane(turn, state.get("lane"), indicator, v, now)
     cap = 0.0
     if turn is not None and turn.dist < LOOKAHEAD:
       cap = math.sqrt(TURN_SPEED ** 2 + 2 * SLOW_DECEL * max(0.0, turn.dist - TURN_SLOW_BY))
-      if now >= self.cooldown_until and (turn.dist < SIGNAL_ALWAYS_DIST or (turn.dist < SIGNAL_DIST and v < 19 * CV.MPH_TO_MS)):
+      signal = turn.dist < SIGNAL_ALWAYS_DIST or (turn.dist < SIGNAL_DIST and v < 19 * CV.MPH_TO_MS and self.changing is None)
+      if now >= self.cooldown_until and signal:
+        self._end_change(indicator)
         self.turn, self.signaled, self.driven, self.shown = turn, turn.side, 0.0, False
         if DEBUG:
           print(f"nav: signal {turn.side} in {turn.dist:.0f} m, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s)")
@@ -171,6 +199,49 @@ class Nav:
       return min(cap, stop) if cap else stop, arrived
     return max(cap, 0.5) if cap else 0.0, False
 
+  def _keep_right(self, lane: list[int] | None, v: float, now: float):
+    """Back over from the oncoming lanes, which the model sometimes drifts into on wide roads."""
+    if not lane or lane[0] >= 0:
+      self.wrong_side_t = None
+      return
+    self.wrong_side_t = self.wrong_side_t or now
+    if (self.changing is None and self.turn is None and now - self.wrong_side_t > WRONG_SIDE_FOR and v > LANE_CHANGE_SPEED
+        and now - self.change_t > LANE_CHANGE_GAP):
+      self._start_change("right", f"out of oncoming lane {-lane[0]}")
+
+  def _start_change(self, side: str, why: str):
+    self.changing, self.change_shown, self.change_t = side, False, time.monotonic()
+    if DEBUG:
+      print(f"nav: lane change {side}, {why}")
+    self.set_desire("laneChange")
+    self.send({"type": "setIndicator", "side": side})
+
+  def _change_lane(self, turn: Turn | None, lane: list[int] | None, indicator: str | None, v: float, now: float):
+    """Into the turn's lane: the leftmost for a left turn, the rightmost for a right."""
+    if self.changing is not None or turn is None or self.turn is not None or not lane or not LANE_CHANGE_DIST < turn.dist < LOOKAHEAD:
+      return
+    i, n = lane
+    want = 0 if turn.side == "left" else n - 1
+    if i == want or v < LANE_CHANGE_SPEED or now - self.change_t < LANE_CHANGE_GAP:
+      return
+    self._start_change("left" if want < i else "right", f"from lane {i + 1} of {n} for the {turn.side} turn in {turn.dist:.0f} m")
+
+  def _watch_change(self, indicator: str | None, now: float):
+    if self.changing is None:
+      return
+    self.change_shown |= indicator == self.changing
+    # the bridge cancels the indicator once the lane change is done, as does the driver to stop it
+    if (self.change_shown and indicator != self.changing) or now - self.change_t > LANE_CHANGE_TIMEOUT:
+      self._end_change(indicator)
+
+  def _end_change(self, indicator: str | None):
+    if self.changing is None:
+      return
+    if indicator == self.changing:
+      self.send({"type": "indicatorOff"})
+    self.set_desire("")
+    self.changing, self.change_t = None, time.monotonic()
+
   def _arrive(self, v: float) -> tuple[float, bool]:
     stop = max(math.sqrt(2 * ARRIVE_DECEL * max(0.0, self.route_end - STOP_BEFORE - v * ARRIVE_LAG)), 0.5)
     # or stopped near it, short of the cap's aim (not at lights further back)
@@ -182,11 +253,11 @@ class Nav:
 
   @staticmethod
   def _behind(route: np.ndarray, heading: float) -> bool:
-    ahead = route[min(6, len(route) - 1)] - route[min(4, len(route) - 1)]
-    if np.hypot(*ahead) < 1.0:
-      return False
-    start = math.degrees(math.atan2(ahead[1], ahead[0])) - 90
-    return abs(wrap(start - heading)) > BEHIND
+    """Whether the route leads back the way the car came: its points 10 and 15 m on are behind the car."""
+    h = math.radians(heading)
+    forward = np.array([-math.sin(h), math.cos(h)])
+    ahead = (route[2:4] - route[0]) @ forward
+    return len(ahead) == 2 and bool(np.all(ahead < -BEHIND_BY))
 
   def _cancel(self, indicator: str | None):
     if self.signaled is not None and (indicator == self.signaled or not self.shown):
@@ -201,3 +272,34 @@ class Nav:
   @property
   def signaling(self) -> bool:
     return self.signaled is not None
+
+
+class PullAway:
+  """Presses the gas, as a driver would, when AI traffic waiting with the car at a red light shows it has turned green."""
+  def __init__(self, send):
+    self.send = send
+    self.stopped_t: float | None = None
+    self.red_t: float | None = None  # when traffic last showed a red light during this stop
+    self.go_t = 0.0
+    self.tries = 0
+
+  def update(self, state: dict, engaged: bool):
+    now = time.monotonic()
+    if not engaged or state.get("vEgo", 0.0) > 0.3:
+      self.stopped_t, self.red_t, self.tries = None, None, 0
+      return
+    if self.stopped_t is None:
+      self.stopped_t = now
+    traffic = state.get("traffic", {})
+    if traffic.get("red", 0):
+      self.red_t = now
+      return
+    user = state.get("user") or {}
+    ahead = state.get("vehicleAhead", 0.0)
+    blocked = traffic.get("crossing", 0) or traffic.get("peds", 0) or 0 < ahead < GO_CLEAR or user.get("gas") or user.get("brake")
+    if (self.red_t is not None and now - self.red_t > GO_GREEN and not blocked and now - self.stopped_t > GO_AFTER and now - self.go_t > GO_EVERY
+        and self.tries < GO_TRIES):
+      self.go_t, self.tries = now, self.tries + 1
+      if DEBUG:
+        print(f"nav: green, pulling away ({self.tries})")
+      self.send({"type": "gas", "secs": GO_GAS})

@@ -33,7 +33,7 @@ frames' luma, `reset part=hook|capture|camera` restarts that part of the camera 
 and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
-recolour the car (where its model allows), and `engage` and `indicator` press those keys. For testing,
+recolour the car (where its model allows), and `engage`, `indicator` and `cruise dir=down five=1` press those keys. For testing,
 `traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car about that far ahead in the lane
 (`leadspeed v=` changes its speed, `remove=1` deletes it, `clear=<model>` any left behind) and the state then reports
 its true range, `gas secs=1` presses the gas as the driver would, the state's `vehicleAhead` is the range to the first
@@ -62,10 +62,21 @@ the driving model for the turn. The model takes that request as a pulse when the
 long stop, so the bridge drops the blinker briefly for openpilot (not the car's lights) when the car pulls away again or
 the model stops expecting the turn. Near the waypoint it slows to a stop there and disengages.
 
+Before a turn, from 150 m to 40 m out, the car changes into the leftmost lane for a left turn or the rightmost for a
+right, and it moves back over if it drifts into the oncoming lanes. The plugin finds the car's lane from GTA's road
+nodes (lanes are 5.4 m wide, out from the median), and the bridge asks for the lane change through openpilot's
+`NavDesire` param, which makes the blinker mean a lane change at any speed rather than the turn it means below 19 mph.
+GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
+U-turn, so nav drives on until GTA routes round instead.
+
+Stopped at a red light, the car pulls away by itself once it turns green, with a short press of the gas as a driver
+would give. The game's AI drivers know the lights: those waiting with the car at a red light (or queued behind one) all
+clear at once when it turns green, about 2 s before they move. With no AI traffic around, as with `traffic on=0`, the car
+can't tell, and waits for the gas, as on the real car; nor does it go while traffic crosses ahead or someone is in front.
+
 The model chooses where to turn and doesn't always: after a stop it can carry straight on, and with a turn asked for
-and no turning to take it stops, so a turn is signalled only within 50 m of one. As on the real car, it won't pull
-away from a stop by itself; press the gas. `GTA5_DEBUG=1` prints nav's decisions. `gta5_cmd.py waypoint x= y=` sets a
-waypoint (`off=1` clears it).
+and no turning to take it stops, so a turn is signalled only within 50 m of one. `GTA5_DEBUG=1` prints nav's decisions.
+`gta5_cmd.py waypoint x= y=` sets a waypoint (`off=1` clears it).
 
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
@@ -104,3 +115,4 @@ waypoint (`off=1` clears it).
   on a real one. The IMU has the physics' yaw rate, and gravity from the car's grade and bank, which gives locationd its
   pitch and roll. The throttle adds what gravity takes on a grade, as a real car's drive unit delivers its acceleration.
 - The plugin sets the maximum wanted level to zero while connected.
+- openpilot and the bridge each restart on their own: modeld takes the restarted bridge's camera streams.

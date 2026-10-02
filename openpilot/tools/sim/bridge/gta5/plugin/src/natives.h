@@ -44,6 +44,13 @@ inline int GET_SHAPE_TEST_RESULT(int handle, BOOL *hit, Vector3 *end, Vector3 *n
   return Invoke<int>(0x3D87450E15D98694, handle, hit, end, normal, entity);
 }
 inline void SET_VEHICLE_MAX_SPEED(Vehicle v, float speed) { Invoke(0xBAA045B4E42F3C06, v, speed); }
+inline float GET_ENTITY_SPEED(Entity e) { return Invoke<float>(0xD5037BA82E12416F, e); }
+// arrays of 8-byte slots: the capacity first, then a handle every other slot from index 2
+inline int GET_PED_NEARBY_VEHICLES(Ped p, int *slots) { return Invoke<int>(0xCFF869CBFA210D82, p, slots); }
+inline int GET_PED_NEARBY_PEDS(Ped p, int *slots, int ignoreType) { return Invoke<int>(0x23F8F5FC7E8C4A6B, p, slots, ignoreType); }
+inline BOOL IS_PED_DEAD_OR_DYING(Ped p, BOOL melee) { return Invoke<BOOL>(0x3317DEDB88C95038, p, melee); }
+// for AI drivers: waiting at a red light, or queued behind one
+inline BOOL IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS(Vehicle v) { return Invoke<BOOL>(0x2959F696AE390A99, v); }
 inline void SET_DRIVE_TASK_CRUISE_SPEED(Ped p, float speed) { Invoke(0x5C9B84BD7D31D908, p, speed); }
 inline void SET_ENTITY_COORDS(Entity e, float x, float y, float z, BOOL xa, BOOL ya, BOOL za, BOOL clear) { Invoke(0x06843DA7060A026B, e, x, y, z, xa, ya, za, clear); }
 inline void SET_ENTITY_HEADING(Entity e, float h) { Invoke(0x8E2530AA8ADA980E, e, h); }
@@ -86,6 +93,10 @@ inline BOOL GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(float x, float y, float z, Vec
 }
 inline BOOL GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING(float x, float y, float z, int n, Vector3 *pos, float *heading, int *lanes, int flags, float p8, float p9) {
   return Invoke<BOOL>(0x80CA6A8B6C094CC4, x, y, z, n, pos, heading, lanes, flags, p8, p9);
+}
+// the road nearest a point, between path nodes a and b, with its lanes towards each and the median's width
+inline BOOL GET_CLOSEST_ROAD(float x, float y, float z, float p3, int p4, Vector3 *a, Vector3 *b, int *lanesToA, int *lanesToB, float *median, BOOL major) {
+  return Invoke<BOOL>(0x132F52BBA570FE92, x, y, z, p3, p4, a, b, lanesToA, lanesToB, median, major);
 }
 inline BOOL GET_GROUND_Z_FOR_3D_COORD(float x, float y, float z, float *groundZ, BOOL ignoreWater, BOOL p5) {
   return Invoke<BOOL>(0xC906A7DAB05C8D2B, x, y, z, groundZ, ignoreWater, p5);

@@ -17,7 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
-from openpilot.selfdrive.controls.lib.desire_helper import lane_turn_desire
+from openpilot.selfdrive.controls.lib.desire_helper import NavDesire, lane_turn_desire
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
@@ -50,6 +50,7 @@ IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 class SelfdriveD:
   def __init__(self, CP=None):
     self.params = Params()
+    self.nav_desire = NavDesire()
 
     # Ensure the current branch is cached, otherwise the first cycle lags
     build_metadata = get_build_metadata()
@@ -312,7 +313,7 @@ class SelfdriveD:
     # ******************************************************************************************
 
     # Handle lane turn, which modeld's DesireHelper gives the model ahead of any lane change
-    lane_turn = lane_turn_desire(CS)
+    lane_turn = lane_turn_desire(CS, self.nav_desire.get())
     if lane_turn == log.Desire.turnLeft:
       self.events.add(EventName.turnLeft)
     elif lane_turn == log.Desire.turnRight:
