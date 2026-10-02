@@ -32,8 +32,8 @@ set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL.
 and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
-recolour the car (where its model allows), and `engage` and `indicator` press those keys. `../slowroads/view_cameras.py` shows the full camera frames
-openpilot gets. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps
+recolour the car (where its model allows), and `engage` and `indicator` press those keys. `watch_views.py` shows the road and wide camera streams
+side by side, as openpilot gets them. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps
 openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that off).
 
 ## Controls
@@ -51,15 +51,18 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 - The plugin attaches a scripted camera to the car at the comma mount (1.22 m above the ground, level), hides the HUD,
   and captures the game window with Windows.Graphics.Capture.
 - With `interleave=1`, the game renders the openpilot camera only on one frame per 20 Hz capture, and the player's own
-  camera on the rest. Those frames carry a small magenta marker at the top-left, so timing between the script and the
+  camera on the rest. Those frames carry a small coloured marker at the top-left, so timing between the script and the
   renderer doesn't matter. A hook on the game's D3D12 present checks for it on the GPU: it copies a marked frame out
   for openpilot and presents the player's previous frame in its place, so the openpilot view never shows
   (`present_hook=0` captures the window instead, where it flickers). Anything that blends frames together mixes the two
   views: turn off TAA, DLSS and FSR (including frame generation), ray tracing's temporal denoising, and motion blur.
-- One game camera covers both openpilot cameras. The driving model only samples about 30 degrees either side of center,
-  so a pinhole render with a 76 degree vertical field of view has enough coverage and resolution for both; the wide
-  camera's outer field is black. A pixel shader resamples it through the comma 3X lenses into NV12, as the Slow Roads
-  bridge does (`lens=0` for openpilot's plain pinhole cameras).
+- With the present hook, each openpilot camera gets its own render: at each capture time a 30 degree (vertical) road
+  view, about the road lens's own pixel scale, then a 116 degree wide view on the next frame, enough to fill the
+  fisheye. The marker's colour says which (cyan road, yellow wide), and the capture pairs them. That's 40 hidden frames
+  a second, so the player sees the render rate less 40. `split_views=0`, and the window capture, use one 76 degree
+  render for both, magnified about 2.8x for the road camera and with the wide camera's outer field black. A pixel
+  shader resamples the renders through the comma 3X lenses into NV12, as the Slow Roads bridge does (`lens=0` for
+  openpilot's plain pinhole cameras).
 - Frames go uncompressed over TCP (about 140 MB/s at 20 Hz), which the WSL network carries easily; `gta5_rx.py` copies them
   into shared memory in its own process, so the bridge's 100 Hz threads keep the GIL.
 - Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which sets a wheel

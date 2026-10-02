@@ -12,7 +12,10 @@ struct HookFrame {
   LUID adapter;
   int width, height;
   double t;  // QPC seconds at the present
+  int view;  // HOOK_BOTH: one render for both openpilot cameras; HOOK_ROAD, HOOK_WIDE: one each, road then wide
 };
+
+enum { HOOK_BOTH = 0, HOOK_ROAD = 1, HOOK_WIDE = 2 };
 
 namespace present_hook {
 // onFrame runs on the hook's own thread

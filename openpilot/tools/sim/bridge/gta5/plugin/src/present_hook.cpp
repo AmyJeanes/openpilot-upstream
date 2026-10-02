@@ -32,19 +32,24 @@ constexpr int EXECUTE_INDEX = 10;                      // in ID3D12CommandQueue'
 constexpr int FRAMES = 8;
 constexpr UINT PRED_STRIDE = 16;  // per frame: is-openpilot and is-player predicates, 64 bits each
 
-// Sets the frame's predicates from the marker the plugin draws over openpilot camera frames.
+// Sets the frame's predicates from the marker the plugin draws over openpilot camera frames, its colour giving the view:
+// the is-openpilot predicate holds the HookFrame view plus one.
 const char *SHADER = R"(
 Texture2D<float4> frame : register(t0);
 RWByteAddressBuffer pred : register(u0);
 cbuffer C : register(b0) { uint mx; uint my; uint off; };
 [numthreads(1, 1, 1)] void main() {
-  bool marked = true;
+  bool both = true, road = true, wide = true;
   [unroll] for (uint y = 0; y < 4; y++)
     [unroll] for (uint x = 0; x < 4; x++) {
-      float4 c = frame.Load(int3(mx + x, my + y, 0));
-      marked = marked && c.r > 0.8 && c.g < 0.25 && c.b > 0.8;
+      float3 c = frame.Load(int3(mx + x, my + y, 0)).rgb;
+      bool3 hi = c > 0.8, lo = c < 0.25;
+      both = both && hi.r && lo.g && hi.b;  // magenta
+      road = road && lo.r && hi.g && hi.b;  // cyan
+      wide = wide && hi.r && hi.g && lo.b;  // yellow
     }
-  pred.Store4(off, uint4(marked ? 1 : 0, 0, marked ? 0 : 1, 0));
+  uint view = both ? 1 : road ? 2 : wide ? 3 : 0;
+  pred.Store4(off, uint4(view, 0, view ? 0 : 1, 0));
 }
 )";
 
@@ -411,7 +416,8 @@ void Worker() {
       if (WaitForSingleObject(event, 500) != WAIT_OBJECT_0) continue;
     }
     int f = int(p.n % FRAMES);
-    bool op = g_r.readbackData[f * 2] != 0;
+    int view = int(g_r.readbackData[f * 2]) - 1;
+    bool op = view >= 0;
     g_statPresents++;
     g_statOp += op;
     if (p.t - g_statT > 10) {
@@ -420,7 +426,7 @@ void Worker() {
       g_statT = p.t;
     }
     if (op && g_onFrame && g_r.handles[f]) {
-      HookFrame hf{g_r.handles[f], g_r.ids[f], g_r.adapter, int(g_r.frameDesc.Width), int(g_r.frameDesc.Height), p.t};
+      HookFrame hf{g_r.handles[f], g_r.ids[f], g_r.adapter, int(g_r.frameDesc.Width), int(g_r.frameDesc.Height), p.t, view};
       g_onFrame(hf);
     }
   }

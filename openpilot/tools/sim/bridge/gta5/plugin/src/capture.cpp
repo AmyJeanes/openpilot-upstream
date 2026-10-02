@@ -144,6 +144,7 @@ struct Capture::Impl {
   uint64_t sharedIds[16]{};
   com_ptr<ID3D11Texture2D> shared[16];  // opened hook textures, by id
   int64_t lastFrame = 0;  // 100 ns units, in the frames' own clock
+  double roadT = -1;      // a road view drawn and waiting for its wide view, at this time
   bool loggedSize = false;
   com_ptr<ID3D11Texture2D> markerStage;
   int seen = 0, marked = 0, taken = 0;
@@ -265,7 +266,7 @@ struct Capture::Impl {
     return all;
   }
 
-  // takes the hook's frame if it's time for one
+  // takes the hook's frame if it's time for one; a wide view completes the road view rendered just before it
   void ProcessShared(const HookFrame &f) {
     std::lock_guard lk(mutex);
     if (!device) {
@@ -274,7 +275,11 @@ struct Capture::Impl {
     }
     int64_t now = int64_t(f.t * 1e7);
     int64_t period = int64_t(1e7 / cfg.fps);
-    if (now - lastFrame < period - period / 5) return;
+    if (f.view == HOOK_WIDE) {
+      if (roadT < 0 || f.t - roadT > 0.1) return;
+    } else if (now - lastFrame < period - period / 5) {
+      return;
+    }
     int slot = int(f.id % 16);
     if (sharedIds[slot] != f.id) {
       shared[slot] = nullptr;
@@ -288,8 +293,20 @@ struct Capture::Impl {
       }
       sharedIds[slot] = f.id;
     }
+    float cw = float(f.width), ch = float(f.height);
+    if (f.view == HOOK_BOTH) {
+      roadT = -1;
+      Process(shared[slot].get(), f.t, 0, 0, cw, ch);
+    } else if (f.view == HOOK_ROAD) {
+      Draw(shared[slot].get(), views[0], cfg.roadVfovDeg, 0, 0, cw, ch);
+      roadT = f.t;
+    } else {
+      Draw(shared[slot].get(), views[1], cfg.wideVfovDeg, 0, 0, cw, ch);
+      Send(roadT);  // the road view's time, as it's the one the model relies on
+      roadT = -1;
+      return;
+    }
     lastFrame = (now - lastFrame < 2 * period) ? lastFrame + period : now;
-    Process(shared[slot].get(), f.t, 0, 0, float(f.width), float(f.height));
   }
 
   void Process(ID3D11Texture2D *tex, double t) {
@@ -308,6 +325,14 @@ struct Capture::Impl {
           std::to_string(int(cw)) + "x" + std::to_string(int(ch)) + " at " + std::to_string(int(cx)) + "," + std::to_string(int(cy)));
       loggedSize = true;
     }
+    for (auto &v : views) Draw(tex, v, cfg.vfovDeg, cx, cy, cw, ch);
+    Send(t);
+  }
+
+  // resamples the frame through one view's lens into its staging textures
+  void Draw(ID3D11Texture2D *tex, View &v, float vfovDeg, float cx, float cy, float cw, float ch) {
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc(&desc);
     // the frame's stored values, as the display shows them: an sRGB view would linearize them
     D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM
@@ -320,7 +345,7 @@ struct Capture::Impl {
     if (FAILED(device->CreateShaderResourceView(tex, &sv, srv.put()))) return;
 
     // square pixels with the principal point at the center: the focal length follows from the vertical FOV
-    float srcF = ch * 0.5f / std::tan(cfg.vfovDeg * 3.14159265f / 360.0f);
+    float srcF = ch * 0.5f / std::tan(vfovDeg * 3.14159265f / 360.0f);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->IASetInputLayout(nullptr);
     ctx->VSSetShader(vs.get(), nullptr, 0);
@@ -331,7 +356,7 @@ struct Capture::Impl {
     ID3D11Buffer *cbs[] = {cb.get()};
     ctx->PSSetConstantBuffers(0, 1, cbs);
 
-    for (auto &v : views) {
+    {
       Params p{};
       p.outSize[0] = CAM_W;
       p.outSize[1] = CAM_H;
@@ -375,7 +400,10 @@ struct Capture::Impl {
     ctx->OMSetRenderTargets(1, none, nullptr);
     ID3D11ShaderResourceView *noSrv[] = {nullptr};
     ctx->PSSetShaderResources(0, 1, noSrv);
+  }
 
+  // reads both views back and sends them
+  void Send(double t) {
     std::vector<uint8_t> out(NV12_BYTES * 2);
     uint8_t *dst = out.data();
     for (auto &v : views) {

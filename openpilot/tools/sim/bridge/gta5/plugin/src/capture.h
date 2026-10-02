@@ -17,7 +17,8 @@ constexpr size_t NV12_BYTES = size_t(CAM_W) * CAM_H * 3 / 2;  // unpadded: Y row
 constexpr int MARKER_AT = 2, MARKER_PX = 4;
 
 struct CaptureConfig {
-  float vfovDeg = 76.0f;     // vertical field of view the game camera renders with
+  float vfovDeg = 76.0f;     // vertical field of view the game camera renders with, for one render covering both cameras
+  float roadVfovDeg = 30.0f, wideVfovDeg = 116.0f;  // and for a render each
   bool lens = true;          // the comma 3X lenses, else openpilot's plain pinhole cameras
   float lensMaxAngleDeg = 65.0f;
   float fps = 20.0f;

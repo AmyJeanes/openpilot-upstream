@@ -52,6 +52,10 @@ struct Config {
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
   bool presentHook = true;  // when interleaving, take frames from the game's presents and keep them off screen
+  // with the present hook, a render for each openpilot camera, at these vertical fields of view: about the road lens's
+  // own pixel scale, and enough to fill the wide lens
+  bool splitViews = true;
+  float roadVfov = 30.0f, wideVfov = 116.0f;
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -124,7 +128,9 @@ struct SteerTest {
 Cam g_cam = 0;
 bool g_rendering = false;  // whether the game renders the script camera rather than its own
 double g_nextOp = 0;       // when interleaving, the time of the next openpilot camera frame
-uint32_t g_opTicks = 0;    // recent frames' camera, newest in bit 0
+uint64_t g_frameViews = 0;  // recent frames' camera, 4 bits each, newest lowest: 0 the player's, else the view plus one
+bool g_wideNext = false;    // the frame after a road view renders the wide view
+float g_camFov = 0;
 int g_ticks = 0, g_opCount = 0;
 double g_statsT = 0;
 float g_camPitch = 0, g_camYaw = 0;  // degrees, for checks against known rotations
@@ -187,6 +193,9 @@ void ReadConfig() {
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
   c.presentHook = num("present_hook", 1) != 0;
+  c.splitViews = num("split_views", 1) != 0;
+  c.roadVfov = num("road_vfov", c.roadVfov);
+  c.wideVfov = num("wide_vfov", c.wideVfov);
   g_cfg = c;
 }
 
@@ -245,11 +254,13 @@ void AttachCamera() {
 void ActivateCamera() {
   g_cam = CREATE_CAM("DEFAULT_SCRIPTED_CAMERA", TRUE);
   AttachCamera();
-  SET_CAM_FOV(g_cam, g_cfg.vfov);
+  g_camFov = g_cfg.vfov;
+  SET_CAM_FOV(g_cam, g_camFov);
   SET_CAM_NEAR_CLIP(g_cam, 0.05f);
   SET_CAM_ACTIVE(g_cam, TRUE);
   g_rendering = false;
-  g_opTicks = 0;
+  g_frameViews = 0;
+  g_wideNext = false;
   Log(std::string("camera on") + (g_cfg.interleave ? ", interleaved" : ""));
 }
 
@@ -258,24 +269,33 @@ void RenderCamera(bool on) {
   g_rendering = on;
 }
 
-// Picks the frames to render the openpilot camera in, and returns whether the frame being drawn shows it. Interleaved,
-// that's one at each 20 Hz capture time, and the rest are the player's camera.
-bool UpdateCameraFrame(double now, float dt) {
-  bool op = true;
+// Picks the frames to render the openpilot camera in, and returns the view the frame being drawn shows (a HOOK_ view), or
+// -1 for the player's camera. Interleaved, that's one frame at each 20 Hz capture time, or with split views a road view
+// then a wide view on the next frame, and the rest are the player's camera.
+int UpdateCameraFrame(double now, float dt, bool split) {
+  int view = HOOK_BOTH;
   if (g_cfg.interleave) {
-    op = now + 0.5 * dt >= g_nextOp;
+    bool op = now + 0.5 * dt >= g_nextOp;
     if (op) g_nextOp = std::max(g_nextOp + 0.05, now + 0.5 * dt);
+    if (g_wideNext) view = HOOK_WIDE;
+    else view = !op ? -1 : split ? HOOK_ROAD : HOOK_BOTH;
+    g_wideNext = view == HOOK_ROAD;
     g_ticks++;
-    g_opCount += op;
+    g_opCount += view >= 0;
     if (now - g_statsT > 10) {
       if (g_statsT) Log("interleave: " + std::to_string(g_ticks) + " ticks, " + std::to_string(g_opCount) + " openpilot frames in 10 s");
       g_ticks = g_opCount = 0;
       g_statsT = now;
     }
   }
-  RenderCamera(op);
-  g_opTicks = (g_opTicks << 1) | (op ? 1u : 0u);
-  return (g_opTicks >> g_cfg.interleaveLag) & 1u;
+  float fov = view == HOOK_ROAD ? g_cfg.roadVfov : view == HOOK_WIDE ? g_cfg.wideVfov : g_cfg.vfov;
+  if (view >= 0 && fov != g_camFov) {
+    SET_CAM_FOV(g_cam, fov);
+    g_camFov = fov;
+  }
+  RenderCamera(view >= 0);
+  g_frameViews = (g_frameViews << 4) | uint64_t(view + 1);
+  return int((g_frameViews >> (4 * g_cfg.interleaveLag)) & 0xF) - 1;
 }
 
 void ReleaseCamera() {
@@ -649,7 +669,9 @@ void HandleMessage(const Message &m, double now) {
     g_cfg.interleave = MsgBool(m, "on", g_cfg.interleave);
     g_cfg.interleaveLag = std::clamp(static_cast<int>(MsgNum(m, "lag", g_cfg.interleaveLag)), 0, 8);
     g_cfg.presentHook = MsgBool(m, "hook", g_cfg.presentHook);
-    Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag));
+    g_cfg.splitViews = MsgBool(m, "split", g_cfg.splitViews);
+    Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag) +
+        (g_cfg.splitViews ? ", split views" : ""));
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
   } else if (type == "trim" && g_veh.handle) {
@@ -743,6 +765,8 @@ extern "C" __declspec(dllexport) void CoreTick() {
   bool hooked = g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::On;
   CaptureConfig cc;
   cc.vfovDeg = g_cfg.vfov;
+  cc.roadVfovDeg = g_cfg.roadVfov;
+  cc.wideVfovDeg = g_cfg.wideVfov;
   cc.lens = g_cfg.lens;
   if (want && hooked && !g_capture.HookMode()) {
     g_capture.StartHook(cc, SendFrame, Log);
@@ -754,16 +778,17 @@ extern "C" __declspec(dllexport) void CoreTick() {
   g_capture.SetMarker(g_cfg.interleave && !hooked);
   present_hook::SetEnabled(want && hooked);
 
-  if (g_cam && UpdateCameraFrame(now, dt)) {
-    // help text would cover the marker; the rest only shows if the frames reach the screen, and hiding the feed for a
-    // frame restarts its animation, which flickers. The model's view doesn't reach the HUD in the corners.
+  int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
+  if (view >= 0) {
+    // help text would cover the marker, and the road view's narrow render reaches the radar in its corner. Hiding the
+    // feed for a frame restarts its animation, which flickers, so it's hidden only where the frames reach the screen.
     HIDE_HELP_TEXT_THIS_FRAME();
-    if (!hooked) {
-      HIDE_HUD_AND_RADAR_THIS_FRAME();
-      THEFEED_HIDE_THIS_FRAME();
-    }
-    // tells the capture this frame is the openpilot camera's; the lens resampling blacks it out
-    if (g_cfg.interleave) DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, 255, 0, 255, 255, FALSE);
+    if (!hooked || view == HOOK_ROAD) HIDE_HUD_AND_RADAR_THIS_FRAME();
+    if (!hooked) THEFEED_HIDE_THIS_FRAME();
+    // tells the capture this frame is the openpilot camera's, and which view by its colour (magenta both, cyan road,
+    // yellow wide); the lens resampling blacks it out
+    if (g_cfg.interleave)
+      DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, view == HOOK_ROAD ? 0 : 255, view == HOOK_BOTH ? 0 : 255, view == HOOK_WIDE ? 0 : 255, 255, FALSE);
   }
   if (connected) {
     // police chases after a scrape with traffic would end any drive
