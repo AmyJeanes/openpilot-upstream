@@ -43,6 +43,13 @@ LANE_CHANGE_SPEED = 2.0  # m/s
 LANE_CHANGE_TIMEOUT = 10.0  # s
 LANE_CHANGE_GAP = 2.0  # s between lane changes
 WRONG_SIDE_FOR = 1.0  # s in the oncoming lanes before moving back over
+# The model has no desire for straight on, and sometimes turns where the route doesn't, as from a lane that becomes a
+# turn lane; a keep desire away from that side (meant for forks) holds it on the road.
+KEEP_ABOVE = 0.25  # the model's probability of a turn the route doesn't take
+KEEP_CLEAR = 80.0  # m: no turn on the route nearer than this
+KEEP_UNTIL = 0.05  # probability of the turn, once past where it was
+KEEP_FOR = 30.0  # m driven at least
+KEEP_GAP = 0.5  # s off to repeat it: openpilot reads the desire every 0.2 s
 # the driver's gas press that gets the car moving again, which the model won't do itself once stopped
 GO_AFTER = 1.0  # s stopped
 GO_GREEN = 0.4  # s since traffic last showed red
@@ -115,6 +122,10 @@ class Nav:
     self.change_shown = False
     self.change_t = 0.0  # when it started, or the last ended
     self.wrong_side_t: float | None = None  # since when the car has been in the oncoming lanes
+    self.keeping: str | None = None  # the keep desire held against a turn the route doesn't take
+    self.keep_from = 0.0  # self.driven when it started
+    self.keep_gap_until = 0.0  # repeating it after a stop: off until then
+    self.keep_stopped = False
 
   def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict[str, float]) -> tuple[float, bool]:
     """Returns the cruise cap (m/s, 0 for none) and whether to disengage, having arrived. `desire` is the model's
@@ -128,12 +139,14 @@ class Nav:
     if not engaged:
       self._cancel(indicator)
       self._end_change(indicator)
+      self._end_keep()
       self.route_end, self.dest = None, None
       return 0.0, False
     self._watch_change(indicator, now)
     self._keep_right(state.get("lane"), v, now)
     if not route:
       self._cancel(indicator)
+      self._end_keep()
       left = None if self.dest is None else float(np.hypot(*(self.dest - np.array(state["pos"][:2]))))
       if left is not None and left < ARRIVE_KEEP:
         # counted down by the distance driven, which doesn't grow again if the car runs past it
@@ -193,11 +206,42 @@ class Nav:
         self.stopped = True
       elif v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY and (self.stopped or desire.get(self.turn.side, 1.0) < REPEAT_BELOW):
         self.repeat_t, self.stopped = now, False
+    self._keep_straight(turn, desire, v, now)
 
     if self.route_end is not None:
       stop, arrived = self._arrive(v)
       return min(cap, stop) if cap else stop, arrived
     return max(cap, 0.5) if cap else 0.0, False
+
+  def _keep_straight(self, turn: Turn | None, desire: dict[str, float], v: float, now: float):
+    if self.turn is not None or self.changing is not None:
+      self._end_keep()
+      return
+    if self.keeping is None:
+      side = max(("left", "right"), key=lambda k: desire.get(k, 0.0))
+      if desire.get(side, 0.0) > KEEP_ABOVE and (turn is None or turn.dist > KEEP_CLEAR):
+        self.keeping, self.keep_from, self.keep_stopped = "keepRight" if side == "left" else "keepLeft", self.driven, False
+        if DEBUG:
+          print(f"nav: {self.keeping}, the model expecting a {side} turn ({desire[side]:.2f}) the route doesn't take")
+        self.set_desire(self.keeping)
+      return
+    if self.driven - self.keep_from > KEEP_FOR and max(desire.get("left", 0.0), desire.get("right", 0.0)) < KEEP_UNTIL:
+      self._end_keep()
+      return
+    # the model forgets it at a stop, as a turn: off briefly as the car pulls away, so it sees it again
+    if v < 0.3:
+      self.keep_stopped = True
+    elif v > 1.0 and self.keep_stopped:
+      self.keep_stopped, self.keep_gap_until = False, now + KEEP_GAP
+      self.set_desire("")
+    elif self.keep_gap_until and now > self.keep_gap_until:
+      self.keep_gap_until = 0.0
+      self.set_desire(self.keeping)
+
+  def _end_keep(self):
+    if self.keeping is not None and self.changing is None:  # a lane change's desire replaces it
+      self.set_desire("")
+    self.keeping, self.keep_gap_until = None, 0.0
 
   def _keep_right(self, lane: list[int] | None, v: float, now: float):
     """Back over from the oncoming lanes, which the model sometimes drifts into on wide roads."""

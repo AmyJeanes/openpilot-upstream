@@ -30,7 +30,7 @@ set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL.
 
 `gta5_cmd.py` sends debug commands through the running bridge: `snap` saves the next frames as PNGs, `burst` the next N
 frames' luma, `reset part=hook|capture|camera` restarts that part of the camera pipeline, `setup` spawns a car
-and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and
+and puts it on the road nearest a point (`heading=` the way nearer that, `lane=` in that lane from the left), `camera` rotates the camera on its mount, `steertest` holds a steer bias and
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
 recolour the car (where its model allows), and `engage`, `indicator` and `cruise dir=down five=1` press those keys. For testing,
@@ -67,7 +67,10 @@ right, and it moves back over if it drifts into the oncoming lanes. The plugin f
 nodes (lanes are 5.4 m wide, out from the median), and the bridge asks for the lane change through openpilot's
 `NavDesire` param, which makes the blinker mean a lane change at any speed rather than the turn it means below 19 mph.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
-U-turn, so nav drives on until GTA routes round instead.
+U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
+where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take
+rises, nav asks for the keep desire away from it (keepRight against a left turn), meant for forks, which holds it on
+the road. Like a turn, the model forgets it at a stop, so it's asked again as the car pulls away.
 
 Stopped at a red light, the car pulls away by itself once it turns green, with a short press of the gas as a driver
 would give. The game's AI drivers know the lights: those waiting with the car at a red light (or queued behind one) all

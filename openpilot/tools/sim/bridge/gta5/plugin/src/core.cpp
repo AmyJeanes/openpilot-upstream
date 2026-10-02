@@ -152,6 +152,8 @@ struct Setup {
   int step = 0;  // 0 idle, 1 model loading, 2 waiting for the world to load, 3 placing on the road
   float x = 0, y = 0, z = 0, speed = 0;
   int minLanes = 0;  // lanes in the direction of travel, e.g. 3 for a freeway
+  float heading = NAN;  // the direction wanted, deg
+  int lane = -1;  // the lane wanted, from the left
   Hash model = 0;
   double t = 0;
 } g_setup;
@@ -681,6 +683,45 @@ std::string Route(double now) {
   return route;
 }
 
+constexpr float LANE_WIDTH = 5.4f;
+
+// GTA's road at a point, for a car heading that way: its lanes that way and back, and the offsets right of the road's
+// line of the point and of the lanes' left edge; false off the roads or across one
+struct RoadLanes {
+  float dirX = 0, dirY = 0;  // the road's direction the car's way, a unit vector
+  int n = 0, back = 0;
+  float median = 0, right = 0, leftEdge = 0;
+};
+bool RoadLanesAtPoint(const Vector3 &p, float heading, RoadLanes &r) {
+  Vector3 a{}, b{};
+  int toA = 0, toB = 0;
+  if (!GET_CLOSEST_ROAD(p.x, p.y, p.z, 1.0f, 1, &a, &b, &toA, &toB, &r.median, FALSE)) return false;
+  float dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
+  if (len < 1.0f) return false;
+  float off = std::remainder(heading - (std::atan2(dy, dx) / DEG - 90), 360.0f);
+  bool towardsB = std::fabs(off) < 30;
+  if (!towardsB && std::fabs(off) < 150) return false;  // turning, or on a crossing road
+  float sign = towardsB ? 1.0f : -1.0f;
+  r.dirX = dx / len * sign;
+  r.dirY = dy / len * sign;
+  r.right = ((p.x - a.x) * dy - (p.y - a.y) * dx) / len * sign;
+  r.n = towardsB ? toB : toA;
+  r.back = towardsB ? toA : toB;
+  // lanes run out from the median's edge on a two-way road, and are centred on the road's line on a one-way one
+  r.leftEdge = r.back > 0 ? r.median / 2 : -r.n * LANE_WIDTH / 2;
+  return r.n > 0;
+}
+bool RoadLanesAt(Vector3 p, float heading, RoadLanes &r) {
+  // GTA links some nodes to roads across, so look a little ahead or behind for the road this way too
+  for (float d : {0.0f, 5.0f, 10.0f, -5.0f}) {
+    Vector3 q = p;
+    q.x -= std::sin(heading * DEG) * d;
+    q.y += std::cos(heading * DEG) * d;
+    if (RoadLanesAtPoint(q, heading, r)) return true;
+  }
+  return false;
+}
+
 // the car's lane, counted from the left, of the lanes its way, as "lane":[i,n]; negative in the oncoming lanes, and empty
 // off GTA's roads or across them. Lanes are 5.4 m wide, outward from the median's edge on a two-way road and centred on
 // its path nodes on a one-way one.
@@ -690,27 +731,13 @@ std::string Lane(double now) {
   if (now < next) return lane;
   next = now + 0.2;
   lane.clear();
-  Vector3 a{}, b{};
-  int toA = 0, toB = 0;
-  float median = 0;
-  const Vector3 &p = g_m.pos;
-  if (!GET_CLOSEST_ROAD(p.x, p.y, p.z, 1.0f, 1, &a, &b, &toA, &toB, &median, FALSE)) return lane;
-  float dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
-  if (len < 1.0f) return lane;
-  float roadHeading = std::atan2(dy, dx) / DEG - 90;
-  float off = std::remainder(g_m.heading - roadHeading, 360.0f);
-  bool towardsB = std::fabs(off) < 30;
-  if (!towardsB && std::fabs(off) < 150) return lane;  // turning, or on a crossing road
-  float right = ((p.x - a.x) * dy - (p.y - a.y) * dx) / len * (towardsB ? 1 : -1);
-  int n = towardsB ? toB : toA, back = towardsB ? toA : toB;
-  if (n < 1) return lane;
-  constexpr float LANE_WIDTH = 5.4f;
-  float leftEdge = back > 0 ? median / 2 : -n * LANE_WIDTH / 2;
-  float across = right - leftEdge;
+  RoadLanes r;
+  if (!RoadLanesAt(g_m.pos, g_m.heading, r)) return lane;
+  float across = r.right - r.leftEdge;
   // the median counts as the inside lane, until the car is a quarter of a lane past it
-  int i = across < -median - LANE_WIDTH / 4 ? std::max(static_cast<int>(std::floor((across + median) / LANE_WIDTH)), -back)
-                                            : std::clamp(static_cast<int>(std::floor(across / LANE_WIDTH)), 0, n - 1);
-  lane = "\"lane\":[" + std::to_string(i) + "," + std::to_string(n) + "]";
+  int i = across < -r.median - LANE_WIDTH / 4 ? std::max(static_cast<int>(std::floor((across + r.median) / LANE_WIDTH)), -r.back)
+                                              : std::clamp(static_cast<int>(std::floor(across / LANE_WIDTH)), 0, r.n - 1);
+  lane = "\"lane\":[" + std::to_string(i) + "," + std::to_string(r.n) + "]";
   return lane;
 }
 
@@ -819,6 +846,14 @@ void StepSetup(Ped ped, double now) {
       if (found && s.minLanes) Log("setup: node " + std::to_string(n) + " has " + std::to_string(lanes) + " lanes");
     }
     if (found) {
+      // the road's direction nearer the one asked for, and the middle of lane= (from the left) that way
+      if (!std::isnan(s.heading) && std::fabs(std::remainder(heading - s.heading, 360.0f)) > 90) heading += 180;
+      RoadLanes r;
+      if (s.lane >= 0 && RoadLanesAt(node, heading, r)) {
+        float shift = r.leftEdge + (std::min(s.lane, r.n - 1) + 0.5f) * LANE_WIDTH - r.right;
+        node.x += r.dirY * shift;  // the right of the road's direction (x, y) is (y, -x)
+        node.y -= r.dirX * shift;
+      }
       SET_ENTITY_COORDS(e, node.x, node.y, node.z + 0.5f, FALSE, FALSE, FALSE, FALSE);
       SET_ENTITY_HEADING(e, heading);
       if (e != ped) {
@@ -1076,6 +1111,8 @@ void HandleMessage(const Message &m, double now) {
     s.z = static_cast<float>(MsgNum(m, "z", NAN));
     s.speed = static_cast<float>(MsgNum(m, "speed", 0));
     s.minLanes = static_cast<int>(MsgNum(m, "lanes", 0));
+    s.heading = static_cast<float>(MsgNum(m, "heading", NAN));
+    s.lane = static_cast<int>(MsgNum(m, "lane", -1));
     s.t = now;
     std::string model = MsgStr(m, "model");
     if (!model.empty()) {

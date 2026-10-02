@@ -15,6 +15,8 @@ LANE_CHANGE_START_TIME = 0.5
 LANE_TURN_SPEED = 19 * CV.MPH_TO_MS
 # a navigation source's request (the NavDesire param): "laneChange" makes the blinker ask for a lane change at any speed
 NAV_LANE_CHANGE = "laneChange"
+# or one of the model's keep desires, for a fork, which openpilot itself never asks for
+NAV_KEEP = {"keepLeft": log.Desire.keepLeft, "keepRight": log.Desire.keepRight}
 NAV_READ_EVERY = 0.2  # s
 
 
@@ -110,3 +112,5 @@ class DesireHelper:
         self.desire = log.Desire.laneChangeLeft
       elif self.lane_change_direction == LaneChangeDirection.right:
         self.desire = log.Desire.laneChangeRight
+    if self.desire == log.Desire.none:
+      self.desire = NAV_KEEP.get(nav, log.Desire.none)
