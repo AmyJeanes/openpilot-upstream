@@ -29,6 +29,15 @@ inline int GET_ENTITY_BONE_INDEX_BY_NAME(Entity e, const char *bone) { return In
 inline Vector3 GET_WORLD_POSITION_OF_ENTITY_BONE(Entity e, int bone) { return Invoke<Vector3>(0x44A8FCB8ED227738, e, bone); }
 inline Vector3 GET_ENTITY_BONE_OBJECT_ROTATION(Entity e, int bone) { return Invoke<Vector3>(0xBD8D32550E5CEBFE, e, bone); }
 inline Vector3 GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(Entity e, float x, float y, float z) { return Invoke<Vector3>(0x2274BC1C4885E333, e, x, y, z); }
+inline Vector3 GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(Entity e, float x, float y, float z) { return Invoke<Vector3>(0x1899F328B0E12848, e, x, y, z); }
+inline void DELETE_VEHICLE(Vehicle *v) { Invoke(0xEA386986E786A54F, v); }
+inline Vehicle GET_CLOSEST_VEHICLE(float x, float y, float z, float radius, Hash model, int flags) { return Invoke<Vehicle>(0xF73EB622C4F1689B, x, y, z, radius, model, flags); }
+inline void DELETE_PED(Ped *p) { Invoke(0x9614299DCB53E54B, p); }
+inline Ped CREATE_RANDOM_PED_AS_DRIVER(Vehicle v, BOOL returnHandle) { return Invoke<Ped>(0x9B62392B474F44A0, v, returnHandle); }
+inline void SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(Ped p, BOOL on) { Invoke(0x9F8AA94D6D97DBF4, p, on); }
+inline void TASK_VEHICLE_DRIVE_WANDER(Ped p, Vehicle v, float speed, int style) { Invoke(0x480142959D337D00, p, v, speed, style); }
+inline void SET_VEHICLE_MAX_SPEED(Vehicle v, float speed) { Invoke(0xBAA045B4E42F3C06, v, speed); }
+inline void SET_DRIVE_TASK_CRUISE_SPEED(Ped p, float speed) { Invoke(0x5C9B84BD7D31D908, p, speed); }
 inline void SET_ENTITY_COORDS(Entity e, float x, float y, float z, BOOL xa, BOOL ya, BOOL za, BOOL clear) { Invoke(0x06843DA7060A026B, e, x, y, z, xa, ya, za, clear); }
 inline void SET_ENTITY_HEADING(Entity e, float h) { Invoke(0x8E2530AA8ADA980E, e, h); }
 inline void SET_ENTITY_AS_MISSION_ENTITY(Entity e, BOOL a, BOOL b) { Invoke(0xAD738C3085FE7E11, e, a, b); }
@@ -71,6 +80,14 @@ inline BOOL GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(float x, float y, float z, Vec
 inline BOOL GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING(float x, float y, float z, int n, Vector3 *pos, float *heading, int *lanes, int flags, float p8, float p9) {
   return Invoke<BOOL>(0x80CA6A8B6C094CC4, x, y, z, n, pos, heading, lanes, flags, p8, p9);
 }
+inline BOOL GET_GROUND_Z_FOR_3D_COORD(float x, float y, float z, float *groundZ, BOOL ignoreWater, BOOL p5) {
+  return Invoke<BOOL>(0xC906A7DAB05C8D2B, x, y, z, groundZ, ignoreWater, p5);
+}
+inline void SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0x245A6883D966D537, m); }
+inline void SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0xB3B3359379FE77D3, m); }
+inline void SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0xEAE6DCC7EEE3DB1D, m); }
+inline void SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0x95E3D6257B166CF2, m); }
+inline void SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(float a, float b) { Invoke(0x7A556143A1C03898, a, b); }
 inline void SET_CLOCK_TIME(int h, int m, int s) { Invoke(0x47C3B5848C3E45D8, h, m, s); }
 inline void SET_WEATHER_TYPE_NOW_PERSIST(const char *w) { Invoke(0xED712CA327900C8A, w); }
 inline void SET_MAX_WANTED_LEVEL(int lvl) { Invoke(0xAA5F02DB48D704B9, lvl); }

@@ -33,7 +33,10 @@ frames' luma, `reset part=hook|capture|camera` restarts that part of the camera 
 and puts it on the road nearest a point, `camera` rotates the camera on its mount, `steertest` holds a steer bias and
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
-recolour the car (where its model allows), and `engage` and `indicator` press those keys. `watch_views.py` shows the road and wide camera streams
+recolour the car (where its model allows), and `engage` and `indicator` press those keys. For testing,
+`traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car that far ahead of the camera (`remove=1`
+deletes it, `clear=<model>` any left behind) and the state then reports its true range, and `GTA5_LOG=<file>` on
+terminal 2 records the game state and the controls sent, a JSON line each. `watch_views.py` shows the road and wide camera streams
 side by side, as openpilot gets them, outlining the part the driving model takes in. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps
 openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that off).
 
@@ -76,6 +79,8 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
   error. Throttle comes from a measured table of the acceleration it adds over coasting, which in the game is a hard
   -3 m/s^2 or so, and the brake covers anything beyond that; a stop is held with the handbrake, as the game's brake
   reverses a stopped car.
-- The steering angle openpilot sees is the yaw rate's curvature through openpilot's learned vehicle model, and the IMU
-  uses the physics' yaw rate.
+- The steering angle openpilot sees is the yaw rate's curvature through the car's own fixed vehicle model (carParams',
+  no offset), and the Model 3's commanded angle goes back through the same model, so paramsd learns the car's values as
+  on a real one. The IMU has the physics' yaw rate, and gravity from the car's grade and bank, which gives locationd its
+  pitch and roll. The throttle adds what gravity takes on a grade, as a real car's drive unit delivers its acceleration.
 - The plugin sets the maximum wanted level to zero while connected.

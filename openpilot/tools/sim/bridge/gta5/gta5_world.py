@@ -1,3 +1,4 @@
+import json
 import math
 import multiprocessing
 import os
@@ -22,6 +23,7 @@ OP_WHEELBASE = 2.7
 OP_STEER_RATIO = 15.38
 MIN_FRAME_SPACING = 0.040  # s
 DEBUG = bool(os.getenv("GTA5_DEBUG"))  # print commanded vs measured motion each second
+LOG = os.getenv("GTA5_LOG")  # a file to record the game state and the controls sent, a JSON line each, for analysis
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
 NUDGE_TORQUE = 2000
@@ -81,7 +83,6 @@ class GTA5World(World):
     self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState', 'controlsState',
                                    'carOutput'])
     self.tesla = is_tesla()
-    self.roll, self.angle_offset = 0.0, 0.0  # paramsd's, through which the steering angle is reported
     self.metric = Params().get_bool("IsMetric")
     self.next_hud = 0.0
     self.VM: VehicleModel | None = None
@@ -94,6 +95,7 @@ class GTA5World(World):
     self.curvature = 0.0  # what the steering is set for
     self.steering = False  # whether the driver was steering
     self.pinner: subprocess.Popen | None = None
+    self.log = open(LOG, "a", buffering=1) if LOG else None
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
@@ -129,6 +131,8 @@ class GTA5World(World):
           self.slots[name] = slot
         self.state = state
         self.last_frame_time = time.monotonic()
+      if self.log:
+        self.log.write(json.dumps({"mono": self.last_frame_time, "state": state}) + "\n")
       # modeld discards a road frame arriving within 25 ms of the last, and counts it as a drop that invalidates camera odometry;
       # after a late frame the 20 Hz camera thread would otherwise catch up by sending the next one immediately
       wait = MIN_FRAME_SPACING - (time.monotonic() - last_release)
@@ -140,6 +144,8 @@ class GTA5World(World):
         last_release = time.monotonic()
 
   def _send(self, obj: dict):
+    if self.log and obj.get("type") == "control":
+      self.log.write(json.dumps({"mono": time.monotonic(), "control": obj}) + "\n")
     try:
       self.controls.send(obj)
     except (BrokenPipeError, OSError):
@@ -177,10 +183,10 @@ class GTA5World(World):
     curvature = -actuators.curvature
     accel = float(actuators.accel)
     if self.tesla and self.VM is not None and self.sm.seen['carOutput']:
-      # What a Model 3 executes: the angle after the car controller's rate and lateral jerk limits, back through the
-      # same vehicle model the steering angle is reported with, and the acceleration within its limits
+      # What a Model 3 executes: the angle after the car controller's rate and lateral jerk limits, through the car's
+      # vehicle model, and the acceleration within its limits
       angle = self.sm['carOutput'].actuatorsOutput.steeringAngleDeg
-      curvature = self.VM.calc_curvature(math.radians(angle - self.angle_offset), max(abs(state['vEgo']), 1.0), self.roll)
+      curvature = self.VM.calc_curvature(math.radians(angle), max(abs(state['vEgo']), 1.0), state.get("bank", 0.0))
       accel = float(np.clip(accel, TeslaParams.ACCEL_MIN, TeslaParams.ACCEL_MAX))
     self._send({"type": "control", "active": True, "curvature": curvature, "accel": accel})
 
@@ -214,24 +220,23 @@ class GTA5World(World):
 
     # the plugin reports the curvature the car follows, standing in for a steering angle sensor
     self.curvature = state.get("steerCurvature", yaw_rate / v if v > 2.0 else 0.0)
+    grade, bank = state.get("grade", 0.0), state.get("bank", 0.0)  # radians: nose up, right side down (NED roll)
     if self.VM is not None:
-      # The angle for the curvature the car follows, through paramsd's learned vehicle model: controlsd's angle controller
-      # then sees only the real tracking error, and paramsd sees an angle consistent with the car's motion, so its
-      # estimates hold. An angle for the commanded curvature instead leaves any tracking bias for paramsd to integrate,
-      # without limit while the angle uses what it learned, or as a constant error for controlsd while it doesn't.
-      lp = self.sm['vehicleParameters']
-      if self.sm.seen['vehicleParameters']:
-        self.VM.update_params(max(lp.stiffnessFactor, 0.1), max(lp.steerRatio, 0.1))
-        self.roll, self.angle_offset = lp.roll, lp.angleOffsetDeg
-      steer = self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), self.roll)
-      simulator_state.steering_angle = math.degrees(steer) + self.angle_offset
+      # The angle for the curvature the car follows, through the car's own fixed vehicle model (carParams', with no
+      # offset), as a real sensor measures a physical angle: paramsd then learns the car's values, as on a real Model 3.
+      # An angle through paramsd's learned model would confirm whatever it learned, letting its estimates wander.
+      steer = self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), bank)
+      simulator_state.steering_angle = math.degrees(steer)
     else:
       simulator_state.steering_angle = math.degrees(self.curvature * OP_WHEELBASE * OP_STEER_RATIO)
 
     # IMU in the raw sensor frame locationd expects (it reads device = [-v2, -v1, -v0]; device is x fwd, y right, z down).
     # locationd rejects a gyro that disagrees with camera odometry's yaw rate, so a zero IMU fails on winding roads.
-    lat_accel = -v * yaw_rate  # device y (right) points away from a left turn's center
-    simulator_state.imu.accelerometer = vec3(9.81, -lat_accel, -state["aMeas"])
+    # The accelerometer measures gravity too, from which locationd gets the pitch and roll that paramsd and the planner use.
+    g = 9.81
+    lat_accel = -v * yaw_rate - g * math.sin(bank) * math.cos(grade)  # device y (right) points away from a left turn's center
+    fwd_accel = state["aMeas"] + g * math.sin(grade)
+    simulator_state.imu.accelerometer = vec3(g * math.cos(grade) * math.cos(bank), -lat_accel, -fwd_accel)
     simulator_state.imu.gyroscope = vec3(yaw_rate, 0, 0)
 
     user = state.get("user") or {}

@@ -91,6 +91,7 @@ struct VehicleInfo {
 struct Motion {
   bool valid = false;
   float v = 0, aMeas = 0, yawRate = 0, heading = 0, pitch = 0, roll = 0;
+  float grade = 0, bank = 0;  // radians: nose up, right side down
   Vector3 pos{}, rotVel{}, steerBone{};
   int resets = 0;
 } g_m;
@@ -153,6 +154,19 @@ struct Setup {
   Hash model = 0;
   double t = 0;
 } g_setup;
+
+// a test car placed ahead in the lane, whose true range the state reports for checking openpilot's lead estimate
+struct Lead {
+  Vehicle veh = 0;
+  Ped driver = 0;
+  Hash model = 0;
+  float dist = 30, speed = 0, rearY = 0;  // rearY: the model's rear, from its origin
+  bool loading = false;
+  double t = 0;
+} g_lead;
+bool g_noTraffic = false;
+bool LeadTruth(float &ahead, float &left, float &speed);
+float CameraHeight(double now);
 
 void Log(const std::string &msg) {
   std::lock_guard lk(g_logMutex);
@@ -463,6 +477,10 @@ void Measure(float dt) {
   g_m.pos = pos;
   g_m.pitch = rot.x;
   g_m.roll = rot.y;
+  // from the car's own axes, which leaves no doubt about the rotation's sign conventions
+  Vector3 front = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(v, 0.0f, 1.0f, 0.0f), right = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(v, 1.0f, 0.0f, 0.0f);
+  g_m.grade = std::asin(std::clamp(front.z - pos.z, -1.0f, 1.0f));
+  g_m.bank = std::asin(std::clamp(pos.z - right.z, -1.0f, 1.0f));
   g_m.rotVel = GET_ENTITY_ROTATION_VELOCITY(v);
   if (g_veh.wheelLf >= 0) g_m.steerBone = GET_ENTITY_BONE_OBJECT_ROTATION(v, g_veh.wheelLf);
   g_m.valid = true;
@@ -549,7 +567,7 @@ void ApplyControls(float dt, double now) {
   if (g_user.gas) g_ctl.lonI = 0;
   // a real Model 3 delivers the requested acceleration on any grade (openpilot sends it open loop), so add what gravity
   // takes away; the coasting model and throttle table are flat-road ones
-  float grade = 9.81f * std::sin(g_m.pitch * DEG);
+  float grade = 9.81f * std::sin(g_m.grade);
   float u = std::clamp(accel + g_ctl.lonI, -4.0f, 2.5f) + grade;
   // the game's brake reverses a stopped car, so hold a stop with the handbrake like a car's brake hold
   bool hold = std::fabs(speed) < 0.5f && accel < 0 && !g_user.gas;
@@ -638,13 +656,16 @@ void Publish(double now, bool inVehicle) {
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
   if (inVehicle) {
     s << ",\"vEgo\":" << Num(g_m.v) << ",\"aMeas\":" << Num(g_m.aMeas) << ",\"yawRate\":" << Num(g_m.yawRate)
-      << ",\"heading\":" << Num(g_m.heading) << ",\"pitch\":" << Num(g_m.pitch) << ",\"roll\":" << Num(g_m.roll)
+      << ",\"heading\":" << Num(g_m.heading) << ",\"pitch\":" << Num(g_m.pitch) << ",\"roll\":" << Num(g_m.roll) << ",\"grade\":" << Num(g_m.grade) << ",\"bank\":" << Num(g_m.bank)
       << ",\"wheelBase\":" << Num(g_veh.wheelBase) << ",\"steerCurvature\":" << Num(SteerCurvature()) << ",\"pos\":" << Vec(g_m.pos) << ",\"rotVel\":" << Vec(g_m.rotVel)
       << ",\"steerBone\":" << Vec(g_m.steerBone) << ",\"street\":\"" << Street(now) << "\""
       << ",\"indicator\":" << (g_indicator == 1 ? "\"left\"" : g_indicator == 2 ? "\"right\"" : "null")
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
-      << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}";
+      << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
+      << ",\"camHeight\":" << Num(CameraHeight(now));
+    float ahead = 0, left = 0, speed = 0;
+    if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
   s << "}";
   std::lock_guard lk(g_stateMutex);
@@ -710,6 +731,92 @@ void StepSetup(Ped ped, double now) {
     }
     s.step = 0;
   }
+}
+
+void RemoveLead() {
+  // the game deletes only entities a script owns
+  if (g_lead.driver && DOES_ENTITY_EXIST(g_lead.driver)) {
+    SET_ENTITY_AS_MISSION_ENTITY(g_lead.driver, TRUE, TRUE);
+    DELETE_PED(&g_lead.driver);
+  }
+  if (g_lead.veh && DOES_ENTITY_EXIST(g_lead.veh)) {
+    SET_ENTITY_AS_MISSION_ENTITY(g_lead.veh, TRUE, TRUE);
+    DELETE_VEHICLE(&g_lead.veh);
+  }
+  g_lead.veh = g_lead.driver = 0;
+}
+
+// deletes cars of a model near the player's, other than the player's own: test leads left behind
+void ClearModel(Hash model, float radius) {
+  if (!g_veh.handle) return;
+  Vector3 p = GET_ENTITY_COORDS(g_veh.handle, TRUE);
+  for (int i = 0; i < 100; i++) {
+    Vehicle v = GET_CLOSEST_VEHICLE(p.x, p.y, p.z, radius, model, 70);
+    if (!v || v == g_veh.handle) break;
+    SET_ENTITY_AS_MISSION_ENTITY(v, TRUE, TRUE);
+    DELETE_VEHICLE(&v);
+  }
+}
+
+void StepLead(double now) {
+  Lead &l = g_lead;
+  if (!l.loading || !g_veh.handle) return;
+  if (!HAS_MODEL_LOADED(l.model)) {
+    if (now - l.t > 10) {
+      Log("lead: model didn't load");
+      l.loading = false;
+    }
+    return;
+  }
+  l.loading = false;
+  Vector3 mn{}, mx{};
+  GET_MODEL_DIMENSIONS(l.model, &mn, &mx);
+  l.rearY = mn.y;
+  // its rear the given distance ahead of the camera
+  Vector3 p = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(g_veh.handle, 0.0f, g_veh.mountY + l.dist - mn.y, 0.0f);
+  l.veh = CREATE_VEHICLE(l.model, p.x, p.y, p.z + 0.5f, GET_ENTITY_HEADING(g_veh.handle), FALSE, FALSE, FALSE);
+  SET_MODEL_AS_NO_LONGER_NEEDED(l.model);
+  if (!l.veh) {
+    Log("lead: vehicle creation failed");
+    return;
+  }
+  SET_ENTITY_AS_MISSION_ENTITY(l.veh, TRUE, TRUE);
+  SET_VEHICLE_ON_GROUND_PROPERLY(l.veh, 5.0f);
+  if (l.speed > 0) {
+    l.driver = CREATE_RANDOM_PED_AS_DRIVER(l.veh, TRUE);
+    SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(l.driver, TRUE);
+    SET_VEHICLE_ENGINE_ON(l.veh, TRUE, TRUE, FALSE);
+    SET_VEHICLE_FORWARD_SPEED(l.veh, l.speed);
+    TASK_VEHICLE_DRIVE_WANDER(l.driver, l.veh, l.speed, 786603);  // normal driving: keeps to lanes, stops at lights
+    SET_VEHICLE_MAX_SPEED(l.veh, l.speed);  // the task alone drives well over its speed
+  } else {
+    SET_VEHICLE_HANDBRAKE(l.veh, TRUE);
+  }
+  Log("lead: placed " + Num(l.dist) + " m ahead, speed " + Num(l.speed));
+}
+
+// the test lead's rear relative to the camera: ahead, left, and its speed along the ego car's heading
+bool LeadTruth(float &ahead, float &left, float &speed) {
+  if (!g_lead.veh || !DOES_ENTITY_EXIST(g_lead.veh) || !g_veh.handle) return false;
+  Vector3 rear = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(g_lead.veh, 0.0f, g_lead.rearY, 0.0f);
+  Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, rear.x, rear.y, rear.z);
+  ahead = rel.y - g_veh.mountY;
+  left = -(rel.x - g_veh.mountX);
+  float dh = (GET_ENTITY_HEADING(g_lead.veh) - GET_ENTITY_HEADING(g_veh.handle)) * DEG;
+  speed = GET_ENTITY_SPEED_VECTOR(g_lead.veh, TRUE).y * std::cos(dh);
+  return true;
+}
+
+// the camera's height above the ground under it
+float CameraHeight(double now) {
+  static float height = 0;
+  static double next = 0;
+  if (now < next || !g_veh.handle) return height;
+  next = now + 0.5;
+  Vector3 c = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(g_veh.handle, g_veh.mountX, g_veh.mountY, g_veh.mountZ);
+  float ground = 0;
+  if (GET_GROUND_Z_FOR_3D_COORD(c.x, c.y, c.z, &ground, FALSE, FALSE)) height = c.z - ground;
+  return height;
 }
 
 void HandleMessage(const Message &m, double now) {
@@ -795,6 +902,22 @@ void HandleMessage(const Message &m, double now) {
     g_test.throttle = static_cast<float>(MsgNum(m, "throttle", 0.3));
     g_test.until = now + MsgNum(m, "secs", 2.0);
     g_test.nextLog = now;
+  } else if (type == "lead") {
+    RemoveLead();
+    if (m.count("clear")) ClearModel(GET_HASH_KEY(MsgStr(m, "clear").c_str()), 200.0f);
+    if (!MsgBool(m, "remove")) {
+      g_lead.dist = static_cast<float>(MsgNum(m, "dist", 30));
+      g_lead.speed = static_cast<float>(MsgNum(m, "speed", 0));
+      std::string model = MsgStr(m, "model");
+      g_lead.model = GET_HASH_KEY(model.empty() ? "sultan" : model.c_str());
+      REQUEST_MODEL(g_lead.model);
+      g_lead.loading = true;
+      g_lead.t = now;
+    }
+  } else if (type == "traffic") {
+    g_noTraffic = !MsgBool(m, "on", true);
+    if (g_noTraffic) ClearModel(0, 300.0f);  // any model
+    Log(std::string("traffic ") + (g_noTraffic ? "off" : "on"));
   } else if (type == "setup") {
     Setup s;
     s.x = static_cast<float>(MsgNum(m, "x", NAN));
@@ -848,6 +971,14 @@ extern "C" __declspec(dllexport) void CoreTick() {
 
   Ped ped = PLAYER_PED_ID();
   if (g_setup.step) StepSetup(ped, now);
+  StepLead(now);
+  if (g_noTraffic) {
+    SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
+    SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
+    SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
+    SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
+    SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(0.0f, 0.0f);
+  }
   Vehicle v = IS_PED_IN_ANY_VEHICLE(ped, FALSE) ? GET_VEHICLE_PED_IS_IN(ped, FALSE) : 0;
   if (v != g_veh.handle) OnVehicleChanged(v);
 
@@ -909,6 +1040,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
 extern "C" __declspec(dllexport) void CoreShutdown() {
   ReleaseControls();
   ReleaseCamera();
+  RemoveLead();
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();
