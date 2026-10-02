@@ -8,9 +8,12 @@ from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
+import numpy as np
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
+from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
+from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
@@ -75,7 +78,10 @@ class GTA5World(World):
     self.state: dict | None = None
     self.slots: dict[str, int] = {}
     self.last_frame_time = 0.0
-    self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState', 'controlsState'])
+    self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState', 'controlsState',
+                                   'carOutput'])
+    self.tesla = is_tesla()
+    self.roll, self.angle_offset = 0.0, 0.0  # paramsd's, through which the steering angle is reported
     self.metric = Params().get_bool("IsMetric")
     self.next_hud = 0.0
     self.VM: VehicleModel | None = None
@@ -169,7 +175,14 @@ class GTA5World(World):
     actuators = self.sm['carControl'].actuators
     # openpilot's curvature is right-positive (controlsd negates the vehicle model's); the plugin takes left-positive
     curvature = -actuators.curvature
-    self._send({"type": "control", "active": True, "curvature": curvature, "accel": float(actuators.accel)})
+    accel = float(actuators.accel)
+    if self.tesla and self.VM is not None and self.sm.seen['carOutput']:
+      # What a Model 3 executes: the angle after the car controller's rate and lateral jerk limits, back through the
+      # same vehicle model the steering angle is reported with, and the acceleration within its limits
+      angle = self.sm['carOutput'].actuatorsOutput.steeringAngleDeg
+      curvature = self.VM.calc_curvature(math.radians(angle - self.angle_offset), max(abs(state['vEgo']), 1.0), self.roll)
+      accel = float(np.clip(accel, TeslaParams.ACCEL_MIN, TeslaParams.ACCEL_MAX))
+    self._send({"type": "control", "active": True, "curvature": curvature, "accel": accel})
 
     now = time.monotonic()
     if DEBUG and now - self.last_status > 1.0:
@@ -207,11 +220,11 @@ class GTA5World(World):
       # estimates hold. An angle for the commanded curvature instead leaves any tracking bias for paramsd to integrate,
       # without limit while the angle uses what it learned, or as a constant error for controlsd while it doesn't.
       lp = self.sm['vehicleParameters']
-      roll, offset = 0.0, 0.0
       if self.sm.seen['vehicleParameters']:
         self.VM.update_params(max(lp.stiffnessFactor, 0.1), max(lp.steerRatio, 0.1))
-        roll, offset = lp.roll, lp.angleOffsetDeg
-      simulator_state.steering_angle = math.degrees(self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), roll)) + offset
+        self.roll, self.angle_offset = lp.roll, lp.angleOffsetDeg
+      steer = self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), self.roll)
+      simulator_state.steering_angle = math.degrees(steer) + self.angle_offset
     else:
       simulator_state.steering_angle = math.degrees(self.curvature * OP_WHEELBASE * OP_STEER_RATIO)
 
