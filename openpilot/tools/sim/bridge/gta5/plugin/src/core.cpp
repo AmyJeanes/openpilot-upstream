@@ -39,8 +39,10 @@ struct Config {
   float mountForward = NAN;    // from the vehicle origin; NAN = a quarter of the way to the front
   float yawGain = 15.5f;  // yaw rate (rad/s) per unit of steer bias, measured with steertest at 7-14 m/s
   float latKi = 1.0f;     // 1/s, integral on the yaw rate error, in units of the feed-forward
-  float accelGain = 4.0f;      // m/s^2 at full throttle, roughly
-  float brakeGain = 8.0f;      // m/s^2 at full brake, roughly
+  // with no throttle the game slows a car hard, about -(coastAccel + coastPerSpeed * v); steertest with throttle=0 measures it
+  float coastAccel = 3.1f;     // m/s^2
+  float coastPerSpeed = 0.04f;  // m/s^2 per m/s
+  float brakeGain = 8.0f;      // m/s^2 at full brake beyond coasting, roughly
   int keyEngage = VK_F6;
   int keyLeft = VK_OEM_COMMA;
   int keyRight = VK_OEM_PERIOD;
@@ -160,7 +162,8 @@ void ReadConfig() {
   c.mountForward = num("mount_forward", NAN);
   c.yawGain = num("yaw_gain", c.yawGain);
   c.latKi = num("lat_ki", c.latKi);
-  c.accelGain = num("accel_gain", c.accelGain);
+  c.coastAccel = num("coast_accel", c.coastAccel);
+  c.coastPerSpeed = num("coast_per_speed", c.coastPerSpeed);
   c.brakeGain = num("brake_gain", c.brakeGain);
   c.keyEngage = key("key_engage", c.keyEngage);
   c.keyLeft = key("key_left", c.keyLeft);
@@ -384,6 +387,17 @@ void Measure(float dt) {
   g_m.valid = true;
 }
 
+// The throttle that adds this much acceleration over coasting. The game ignores throttle below about 0.15 and gives most
+// of its drive by 0.5 (measured with steertest on a sedan: 0.3 adds about 3.5 m/s^2, full throttle about 8).
+float ThrottleFor(float drive) {
+  static const float THROTTLE[] = {0.15f, 0.3f, 0.5f, 0.75f, 1.0f};
+  static const float DRIVE[] = {0.0f, 3.5f, 6.3f, 7.5f, 8.1f};
+  if (drive <= 0) return 0;
+  for (int i = 1; i < 5; i++)
+    if (drive < DRIVE[i]) return THROTTLE[i - 1] + (THROTTLE[i] - THROTTLE[i - 1]) * (drive - DRIVE[i - 1]) / (DRIVE[i] - DRIVE[i - 1]);
+  return 1.0f;
+}
+
 void ApplyControls(float dt, double now) {
   Vehicle veh = g_veh.handle;
   if (now < g_test.until) {
@@ -434,13 +448,15 @@ void ApplyControls(float dt, double now) {
   bool hold = std::fabs(speed) < 0.5f && accel < 0 && !g_user.gas;
   if (hold != g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, hold);
   g_ctl.holding = hold;
-  g_ctl.braking = !hold && u < (g_ctl.braking ? -0.1f : -0.3f) && !g_user.gas;
+  // throttle gives anything above coasting, including most slowing down; the brake only what's beyond it
+  float coast = -(g_cfg.coastAccel + g_cfg.coastPerSpeed * std::fabs(speed));
+  g_ctl.braking = !hold && u < coast + (g_ctl.braking ? 0.2f : 0.0f) && !g_user.gas;
   float throttle = 0, brake = 0;
   if (hold) {
   } else if (g_ctl.braking) {
-    brake = std::clamp(-u / g_cfg.brakeGain, 0.0f, 1.0f);
+    brake = std::clamp((coast - u) / g_cfg.brakeGain, 0.0f, 1.0f);
   } else {
-    throttle = std::clamp(u / g_cfg.accelGain, 0.0f, 1.0f);
+    throttle = ThrottleFor(u - coast);
   }
   if (g_user.gas) throttle = 1.0f;
   SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
