@@ -330,6 +330,15 @@ def main(demo=False):
   DH = DesireHelper()
 
   while True:
+    # the camera server restarted (as the simulator bridge does): take its new buffers, and its frame times from the start
+    reconnect = [c for c in ([vipc_client_main, vipc_client_extra] if use_extra_client else [vipc_client_main]) if not c.is_connected()]
+    for client in reconnect:
+      cloudlog.warning("camera server restarted, reconnecting")
+      while not client.connect(False):
+        time.sleep(0.1)
+    if reconnect:
+      meta_main, meta_extra = FrameMeta(), FrameMeta()
+
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
     while meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
       buf_main = vipc_client_main.recv()
