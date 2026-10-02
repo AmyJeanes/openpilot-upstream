@@ -410,11 +410,13 @@ void ApplyControls(float dt, double now) {
   g_ctl.brakeOut = brake;
 }
 
-// what a steering angle sensor would show, as the curvature it steers for: the applied steer bias while the plugin
-// drives (openpilot's torque controller winds up against the lag and offset of the path the car actually follows), else
-// the yaw rate's curvature
+// what a steering angle sensor would show, as the curvature it steers for. While the plugin drives, that's the steering
+// openpilot asked for plus the driver's, without the integral that corrects for the game's handling: like a real
+// steering rack, it reaches the angle it's given. Reporting the path the car follows instead (yaw rate, or the bias
+// including the integral) shows openpilot's torque controller a lag and offset it can't act on, so it winds up to full
+// torque and raises the steer-saturated alert. Otherwise, the yaw rate's curvature.
 float SteerCurvature() {
-  if (g_ctl.wasLive) return g_ctl.steerOut * g_cfg.yawGain / std::max(g_m.v, 3.0f);
+  if (g_ctl.wasLive) return (g_ctl.steerOut - g_ctl.latI) * g_cfg.yawGain / std::max(g_m.v, 3.0f);
   return g_m.v > 2.0f ? g_m.yawRate / g_m.v : 0.0f;
 }
 
