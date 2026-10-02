@@ -978,7 +978,8 @@ void HandleMessage(const Message &m, double now) {
     s.t = now;
     std::string model = MsgStr(m, "model");
     if (!model.empty()) {
-      s.model = GET_HASH_KEY(model.c_str());
+      // a name, or a hash as the ini's per-model keys write it (0x...), for add-on cars
+      s.model = model.rfind("0x", 0) == 0 ? static_cast<Hash>(std::strtoul(model.c_str(), nullptr, 16)) : GET_HASH_KEY(model.c_str());
       REQUEST_MODEL(s.model);
       s.step = 1;
     } else if (!std::isnan(s.x)) {
