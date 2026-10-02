@@ -174,13 +174,9 @@ class GTA5World(World):
     # the plugin reports the curvature its steering is set for, standing in for a steering angle sensor
     self.curvature = state.get("steerCurvature", yaw_rate / v if v > 2.0 else 0.0)
     if self.VM is not None:
-      # invert controlsd's measured curvature using the same learned params, so the reported angle matches its target.
-      # Not the learned angle offset: paramsd learns it from this angle, so adding it back feeds any mismatch into it again.
-      lp = self.sm['vehicleParameters']
-      roll = 0.0
-      if self.sm.seen['vehicleParameters']:
-        self.VM.update_params(max(lp.stiffnessFactor, 0.1), max(lp.steerRatio, 0.1))
-        roll = lp.roll
+      # the angle for the curvature through the car's own steer ratio and stiffness, not paramsd's learned ones or angle
+      # offset: paramsd learns those from this angle, so using them feeds any mismatch back into them until they run away
+      roll = self.sm['vehicleParameters'].roll if self.sm.seen['vehicleParameters'] else 0.0
       simulator_state.steering_angle = math.degrees(self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), roll))
     else:
       simulator_state.steering_angle = math.degrees(self.curvature * OP_WHEELBASE * OP_STEER_RATIO)
