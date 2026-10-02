@@ -24,9 +24,9 @@ def is_tesla() -> bool:
 class SimulatedTesla:
   """Simulates a Tesla Model 3 (panda state + CAN messages) to openpilot: an angle-steering car with openpilot
   longitudinal control (an alpha feature, so AlphaLongitudinalEnabled must be set). openpilot engages with the car's
-  cruise control, which this simulates from the bridge's cruise buttons: set/decel enables it at the current speed and
-  steps the set speed down, resume/accel resumes or steps it up, and cancel, the brake or openpilot's cancel request
-  disables it."""
+  cruise control, which this simulates from the bridge's cruise buttons: set/decel enables it at the speed limit, where
+  the simulator knows one, or else the current speed, and steps the set speed down, resume/accel resumes or steps it up,
+  and cancel, the brake or openpilot's cancel request disables it."""
   packer = CANPacker("tesla_model3_party")
 
   def __init__(self):
@@ -38,33 +38,41 @@ class SimulatedTesla:
     self.metric = self.params.get_bool("IsMetric")
     self.cruise_enabled = False
     self.set_speed = 0.0  # m/s, 0 until first set
-    self.presses: deque[int] = deque()
+    self.presses: deque[tuple[int, int]] = deque()
 
-  def press(self, button: int):
-    """A cruise button press, from the bridge's thread."""
-    self.presses.append(button)
+  def press(self, button: int, step: int = 1):
+    """A cruise button press, from the bridge's thread; step 5 changes the set speed to the next multiple of 5."""
+    self.presses.append((button, step))
 
   def update_cruise(self, simulator_state: SimulatorState):
     unit = CV.KPH_TO_MS if self.metric else CV.MPH_TO_MS
     while self.presses:
-      self.handle_press(self.presses.popleft(), simulator_state, unit)
+      self.handle_press(*self.presses.popleft(), simulator_state, unit)
     if simulator_state.user_brake > 0 or self.sm['carControl'].cruiseControl.cancel:
       self.cruise_enabled = False
 
-  def handle_press(self, pressed: int, simulator_state: SimulatorState, unit: float):
+  def handle_press(self, pressed: int, step: int, simulator_state: SimulatorState, unit: float):
     if pressed == CruiseButtons.DECEL_SET:
       if self.cruise_enabled:
-        self.set_speed = max(self.set_speed - unit, MIN_SET_SPEED)
+        self.set_speed = max(self.stepped(-step, unit), MIN_SET_SPEED)
       else:
-        self.set_speed = max(round(simulator_state.speed / unit) * unit, MIN_SET_SPEED)
+        # the speed limit where the car knows it, else the current speed
+        speed = simulator_state.speed_limit or simulator_state.speed
+        self.set_speed = max(round(speed / unit) * unit, MIN_SET_SPEED)
         self.cruise_enabled = True
     elif pressed == CruiseButtons.RES_ACCEL:
       if self.cruise_enabled:
-        self.set_speed += unit
+        self.set_speed = self.stepped(step, unit)
       elif self.set_speed > 0:
         self.cruise_enabled = True
     elif pressed == CruiseButtons.CANCEL:
       self.cruise_enabled = False
+
+  def stepped(self, step: int, unit: float) -> float:
+    """The set speed a step on, to the next multiple of the step in the display unit."""
+    current = round(self.set_speed / unit)
+    target = (current // abs(step) + 1) * abs(step) if step > 0 else -((-current) // abs(step) + 1) * abs(step)
+    return target * unit
 
   def send_can_messages(self, simulator_state: SimulatorState):
     if not simulator_state.valid:

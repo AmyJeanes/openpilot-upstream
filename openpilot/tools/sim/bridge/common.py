@@ -144,15 +144,15 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
           elif m[0] == "brake":
             brake_manual = float(m[1])
           elif m[0] == "cruise":
-            if m[1] == "down":
+            if m[1] in ("down", "down5"):
               self.simulator_state.cruise_button = CruiseButtons.DECEL_SET
-            elif m[1] == "up":
+            elif m[1] in ("up", "up5"):
               self.simulator_state.cruise_button = CruiseButtons.RES_ACCEL
             elif m[1] == "cancel":
               self.simulator_state.cruise_button = CruiseButtons.CANCEL
             elif m[1] == "main":
               self.simulator_state.cruise_button = CruiseButtons.MAIN
-            self.simulated_car.press(self.simulator_state.cruise_button)
+            self.simulated_car.press(self.simulator_state.cruise_button, 5 if m[1].endswith("5") else 1)
           elif m[0] == "blinker":
             if m[1] == "left":
               self.simulator_state.left_blinker = True

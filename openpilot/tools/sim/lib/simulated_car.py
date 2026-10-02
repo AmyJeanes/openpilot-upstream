@@ -27,7 +27,7 @@ class SimulatedCar:
     checks = []
     return CANParser(dbc_f, checks, 0)
 
-  def press(self, button: int):
+  def press(self, button: int, step: int = 1):
     """The cruise buttons go out in SCM_BUTTONS from simulator_state.cruise_button."""
 
   def send_can_messages(self, simulator_state: SimulatorState):

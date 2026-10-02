@@ -56,6 +56,8 @@ class SimulatorState:
     self.left_blinker = False
     self.right_blinker = False
 
+    self.speed_limit: float = 0  # m/s, 0 if unknown
+
   @property
   def speed(self):
     return math.sqrt(self.velocity.x ** 2 + self.velocity.y ** 2 + self.velocity.z ** 2)
