@@ -36,6 +36,13 @@ inline void DELETE_PED(Ped *p) { Invoke(0x9614299DCB53E54B, p); }
 inline Ped CREATE_RANDOM_PED_AS_DRIVER(Vehicle v, BOOL returnHandle) { return Invoke<Ped>(0x9B62392B474F44A0, v, returnHandle); }
 inline void SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(Ped p, BOOL on) { Invoke(0x9F8AA94D6D97DBF4, p, on); }
 inline void TASK_VEHICLE_DRIVE_WANDER(Ped p, Vehicle v, float speed, int style) { Invoke(0x480142959D337D00, p, v, speed, style); }
+// flags: 2 vehicles; result 2 when ready
+inline int START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(float x1, float y1, float z1, float x2, float y2, float z2, int flags, Entity ignore, int p8) {
+  return Invoke<int>(0x377906D8A31E5586, x1, y1, z1, x2, y2, z2, flags, ignore, p8);
+}
+inline int GET_SHAPE_TEST_RESULT(int handle, BOOL *hit, Vector3 *end, Vector3 *normal, Entity *entity) {
+  return Invoke<int>(0x3D87450E15D98694, handle, hit, end, normal, entity);
+}
 inline void SET_VEHICLE_MAX_SPEED(Vehicle v, float speed) { Invoke(0xBAA045B4E42F3C06, v, speed); }
 inline void SET_DRIVE_TASK_CRUISE_SPEED(Ped p, float speed) { Invoke(0x5C9B84BD7D31D908, p, speed); }
 inline void SET_ENTITY_COORDS(Entity e, float x, float y, float z, BOOL xa, BOOL ya, BOOL za, BOOL clear) { Invoke(0x06843DA7060A026B, e, x, y, z, xa, ya, za, clear); }

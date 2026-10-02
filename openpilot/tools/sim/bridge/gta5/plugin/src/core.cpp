@@ -165,8 +165,10 @@ struct Lead {
   double t = 0;
 } g_lead;
 bool g_noTraffic = false;
+double g_testGasUntil = 0;  // the gas command presses the pedal until then
 bool LeadTruth(float &ahead, float &left, float &speed);
 float CameraHeight(double now);
+float VehicleAhead(double now);
 
 void Log(const std::string &msg) {
   std::lock_guard lk(g_logMutex);
@@ -386,7 +388,9 @@ void OnVehicleChanged(Vehicle v) {
     Vector3 w = GET_WORLD_POSITION_OF_ENTITY_BONE(v, ws);
     Vector3 l = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, w.x, w.y, w.z);
     g_veh.mountY = l.y;
-    g_veh.mountZ = l.z + 0.08f;
+    // and at least as high as a comma device sits below the roof (a Model 3 calibrates to 1.20-1.23 m, 0.29 m below
+    // its roof): the driving model judges scale from the camera's height, reading speeds 20% fast from 9 cm too low
+    g_veh.mountZ = std::max(l.z + 0.08f, mx.z - 0.29f);
   }
   // a mount set with the camera command for this model
   char saved[32];
@@ -444,6 +448,7 @@ void ReadDriver(double now) {
     float lx = xs.Gamepad.sThumbLX / 32767.0f;
     if (std::fabs(lx) > 0.25f && std::fabs(d.steer) < std::fabs(lx)) d.steer = -lx;
   }
+  if (now < g_testGasUntil) d.gas = true;
   g_user = d;
 }
 
@@ -663,7 +668,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
       << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
-      << ",\"camHeight\":" << Num(CameraHeight(now));
+      << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
@@ -823,6 +828,27 @@ bool LeadTruth(float &ahead, float &left, float &speed) {
   return true;
 }
 
+// the range from the camera to the first vehicle straight ahead, within 100 m (0 for none): a check on openpilot's
+// lead in ordinary traffic, where the road is straight
+float VehicleAhead(double now) {
+  static float range = 0;
+  static double next = 0;
+  if (now < next || !g_veh.handle) return range;
+  next = now + 0.1;
+  Vector3 a = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(g_veh.handle, g_veh.mountX, g_veh.mountY + 0.5f, g_veh.mountZ - 0.5f);
+  Vector3 b = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(g_veh.handle, g_veh.mountX, g_veh.mountY + 100.0f, g_veh.mountZ - 0.5f);
+  int test = START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(a.x, a.y, a.z, b.x, b.y, b.z, 2, g_veh.handle, 7);
+  BOOL hit = FALSE;
+  Vector3 end{}, normal{};
+  Entity e = 0;
+  range = 0;
+  if (GET_SHAPE_TEST_RESULT(test, &hit, &end, &normal, &e) == 2 && hit) {
+    Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, end.x, end.y, end.z);
+    range = rel.y - g_veh.mountY;
+  }
+  return range;
+}
+
 // the camera's height above the ground under it
 float CameraHeight(double now) {
   static float height = 0;
@@ -936,6 +962,8 @@ void HandleMessage(const Message &m, double now) {
     SET_VEHICLE_MAX_SPEED(g_lead.veh, std::max(v, 0.01f));
     SET_DRIVE_TASK_CRUISE_SPEED(g_lead.driver, std::max(v, 0.01f));
     SET_VEHICLE_HANDBRAKE(g_lead.veh, v < 0.5f);
+  } else if (type == "gas") {
+    g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {
     g_noTraffic = !MsgBool(m, "on", true);
     if (g_noTraffic) ClearModel(0, 300.0f);  // any model

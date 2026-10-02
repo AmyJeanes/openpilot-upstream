@@ -34,9 +34,11 @@ and puts it on the road nearest a point, `camera` rotates the camera on its moun
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
 recolour the car (where its model allows), and `engage` and `indicator` press those keys. For testing,
-`traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car about that far ahead in the lane (`leadspeed v=` changes its speed, `remove=1`
-deletes it, `clear=<model>` any left behind) and the state then reports its true range, and `GTA5_LOG=<file>` on
-terminal 2 records the game state and the controls sent, a JSON line each. `watch_views.py` shows the road and wide camera streams
+`traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car about that far ahead in the lane
+(`leadspeed v=` changes its speed, `remove=1` deletes it, `clear=<model>` any left behind) and the state then reports
+its true range, `gas secs=1` presses the gas as the driver would, the state's `vehicleAhead` is the range to the first
+vehicle straight ahead, and `GTA5_LOG=<file>` on terminal 2 records the game state and the controls sent, a JSON line
+each. `watch_views.py` shows the road and wide camera streams
 side by side, as openpilot gets them, outlining the part the driving model takes in. `GTA5_DEBUG=1` on terminal 2 prints the commanded and measured motion each second. The bridge keeps
 openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that off).
 
@@ -54,7 +56,8 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
-  car's windscreen bone; else 1.22 m above the ground), level, hides the HUD,
+  car's windscreen bone, and at least 0.29 m below the roof, a Model 3's device height; else 1.22 m above the ground),
+  level, hides the HUD,
   and captures the game window with Windows.Graphics.Capture.
 - With `interleave=1`, the game renders the openpilot camera only on one frame per 20 Hz capture, and the player's own
   camera on the rest. Those frames carry a small coloured marker at the top-left, so timing between the script and the
