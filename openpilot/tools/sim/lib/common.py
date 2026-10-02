@@ -57,6 +57,7 @@ class SimulatorState:
     self.right_blinker = False
 
     self.speed_limit: float = 0  # m/s, 0 if unknown
+    self.cruise_cap: float = 0  # m/s, a lower cruise speed the car asks for, as for a turn on its route; 0 for none
 
   @property
   def speed(self):

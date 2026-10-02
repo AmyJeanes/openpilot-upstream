@@ -605,16 +605,21 @@ float SteerCurvature() {
   return g_ctl.wasLive ? g_ctl.steerOut * g_curvGain.gain : 0.0f;
 }
 
-void UpdateIndicator() {
-  int left = g_leftPresses.exchange(0), right = g_rightPresses.exchange(0);
-  int prev = g_indicator;
-  if (left) g_indicator = g_indicator == 1 ? 0 : 1;
-  if (right) g_indicator = g_indicator == 2 ? 0 : 2;
-  if (g_indicator != prev && g_veh.handle) {
+void SetIndicator(int indicator) {
+  g_indicator = indicator;
+  if (g_veh.handle) {
     // turnSignal 1 is the left light, 0 the right
     SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 1, g_indicator == 1);
     SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 0, g_indicator == 2);
   }
+}
+
+void UpdateIndicator() {
+  int left = g_leftPresses.exchange(0), right = g_rightPresses.exchange(0);
+  int indicator = g_indicator;
+  if (left) indicator = indicator == 1 ? 0 : 1;
+  if (right) indicator = indicator == 2 ? 0 : 2;
+  if (indicator != g_indicator) SetIndicator(indicator);
 }
 
 void DrawText(const std::string &text, float x, float y, float scale, int r, int g, int b) {
@@ -655,6 +660,27 @@ std::string Street(double now) {
   return street;
 }
 
+// the map's waypoint and the GPS route to it: a point every 5 m from the car for up to 500 m, fewer where it ends
+std::string Route(double now) {
+  static std::string route;
+  static double next = 0;
+  if (now < next) return route;
+  next = now + 0.2;
+  route.clear();
+  if (!IS_WAYPOINT_ACTIVE()) return route;
+  Vector3 w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()));
+  Vector3 last{};
+  for (float d = 0; d <= 500.0f; d += 5.0f) {
+    Vector3 p{};
+    if (!GET_POS_ALONG_GPS_TYPE_ROUTE(&p, TRUE, d, 0)) break;
+    if (d > 0 && p.x == last.x && p.y == last.y) break;  // past the end, it gives the end again
+    route += std::string(route.empty() ? "[" : ",") + "[" + Num(std::round(p.x * 10) / 10) + "," + Num(std::round(p.y * 10) / 10) + "]";
+    last = p;
+  }
+  if (!route.empty()) route = "\"waypoint\":[" + Num(w.x) + "," + Num(w.y) + "],\"route\":" + route + "]";
+  return route;
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -672,6 +698,8 @@ void Publish(double now, bool inVehicle) {
       << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
+    std::string route = Route(now);
+    if (!route.empty()) s << "," << route;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
   s << "}";
@@ -878,11 +906,10 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "engaged") {
     g_engaged = MsgBool(m, "on");
   } else if (type == "indicatorOff") {
-    g_indicator = 0;
-    if (g_veh.handle) {
-      SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 0, FALSE);
-      SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 1, FALSE);
-    }
+    SetIndicator(0);
+  } else if (type == "setIndicator") {
+    std::string side = MsgStr(m, "side");
+    SetIndicator(side == "left" ? 1 : side == "right" ? 2 : 0);
   } else if (type == "camera") {
     g_camPitch = static_cast<float>(MsgNum(m, "pitch", g_camPitch));
     g_camYaw = static_cast<float>(MsgNum(m, "yaw", g_camYaw));
@@ -964,6 +991,9 @@ void HandleMessage(const Message &m, double now) {
     SET_VEHICLE_MAX_SPEED(g_lead.veh, std::max(v, 0.01f));
     SET_DRIVE_TASK_CRUISE_SPEED(g_lead.driver, std::max(v, 0.01f));
     SET_VEHICLE_HANDBRAKE(g_lead.veh, v < 0.5f);
+  } else if (type == "waypoint") {
+    if (MsgBool(m, "off")) SET_WAYPOINT_OFF();
+    else SET_NEW_WAYPOINT(static_cast<float>(MsgNum(m, "x")), static_cast<float>(MsgNum(m, "y")));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {

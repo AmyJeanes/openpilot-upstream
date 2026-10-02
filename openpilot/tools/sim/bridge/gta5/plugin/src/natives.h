@@ -102,6 +102,15 @@ inline void CLEAR_PLAYER_WANTED_LEVEL(int player) { Invoke(0xB302540597885499, p
 inline BOOL IS_PAUSE_MENU_ACTIVE() { return Invoke<BOOL>(0xB0034A223497FFCB); }
 inline float GET_FRAME_TIME() { return Invoke<float>(0x15C40837039FFAF7); }
 
+// GPS
+inline BOOL IS_WAYPOINT_ACTIVE() { return Invoke<BOOL>(0x1DD1F58F493F1DA5); }
+inline int GET_WAYPOINT_BLIP_ENUM_ID() { return Invoke<int>(0x186E5D252FA50E7D); }
+inline int GET_FIRST_BLIP_INFO_ID(int sprite) { return Invoke<int>(0x1BEDE233E6CD2A1F, sprite); }
+inline Vector3 GET_BLIP_INFO_ID_COORD(int blip) { return Invoke<Vector3>(0xFA7C7F0AADF25D09, blip); }
+inline void SET_WAYPOINT_OFF() { Invoke(0xA7E4E2D361C2627F); }
+inline void SET_NEW_WAYPOINT(float x, float y) { Invoke(0xFE43368D2AA4F2FC, x, y); }
+inline BOOL GET_POS_ALONG_GPS_TYPE_ROUTE(Vector3 *result, BOOL p1, float dist, int type) { return Invoke<BOOL>(0xF3162836C28F9DA5, result, p1, dist, type); }
+
 // camera and HUD
 inline Cam CREATE_CAM(const char *name, BOOL p1) { return Invoke<Cam>(0xC3981DCE61D9E13F, name, p1); }
 inline void DESTROY_CAM(Cam c, BOOL p1) { Invoke(0x865908C81A2C22E9, c, p1); }

@@ -54,6 +54,19 @@ openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that
 
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
+## Navigation
+Set a waypoint on the game's map while engaged and the car follows GTA's GPS route to it: the plugin sends the route (a
+point every 5 m for 500 m) and the bridge (`gta5_nav.py`) finds the turns in it, lowers the set speed to 12 mph for
+each (the car reports a lower cruise speed, as a car's own navigation would), and signals it, which below 19 mph asks
+the driving model for the turn. The model takes that request as a pulse when the blinker comes on, and forgets it at a
+long stop, so the bridge drops the blinker briefly for openpilot (not the car's lights) when the car pulls away again or
+the model stops expecting the turn. Near the waypoint it slows to a stop there and disengages.
+
+The model chooses where to turn and doesn't always: after a stop it can carry straight on, and with a turn asked for
+and no turning to take it stops, so a turn is signalled only within 50 m of one. As on the real car, it won't pull
+away from a stop by itself; press the gas. `GTA5_DEBUG=1` prints nav's decisions. `gta5_cmd.py waypoint x= y=` sets a
+waypoint (`off=1` clears it).
+
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
   car's windscreen bone, and at least 0.29 m below the roof, a Model 3's device height; else 1.22 m above the ground),

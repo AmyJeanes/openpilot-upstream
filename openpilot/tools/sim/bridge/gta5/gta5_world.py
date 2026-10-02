@@ -16,6 +16,7 @@ from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
+from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
@@ -96,6 +97,7 @@ class GTA5World(World):
     self.steering = False  # whether the driver was steering
     self.pinner: subprocess.Popen | None = None
     self.log = open(LOG, "a", buffering=1) if LOG else None
+    self.nav = Nav(self._send)
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
@@ -251,6 +253,13 @@ class GTA5World(World):
     simulator_state.user_torque = 0  # but for the lane change nudge
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
     self._update_indicator(simulator_state, state.get("indicator"), state["heading"], state["yawRate"])
+    desire = self.sm['modelV2'].meta.desireState
+    turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight]} if len(desire) > log.Desire.turnRight else {}
+    simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
+    if self.nav.blinker_gap:
+      simulator_state.left_blinker = simulator_state.right_blinker = False
+    if arrived:
+      self.q.put(control_cmd_gen("cruise_cancel"))
     self._update_buttons(state)
     simulator_state.valid = True
 
@@ -296,7 +305,8 @@ class GTA5World(World):
     elif self.lane_changing:
       self.lane_changing = False
       self._send({"type": "indicatorOff"})
-    elif lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT and simulator_state.user_torque == 0:
+    elif (lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT and simulator_state.user_torque == 0
+          and not self.nav.signaling):  # a turn on the route, not a lane change
       simulator_state.user_torque = NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE
 
   def read_cameras(self):
