@@ -77,7 +77,10 @@ it goes off, as openpilot reads it every 0.2 s (and afresh as a blinker comes on
 is still turning. On our routes nav also knows the forks: where a road splits, as at a freeway exit or where GTA splits
 a road's lanes before a junction, it moves into the lanes of the route's branch (planned the same way, and never out of
 the lanes for a fork or turn before it), and for a fork in the road, holds the model's keep desire towards that branch
-from 4 s before it to 40 m past, unless a turn the other way follows. Where a centre turn bay or slip lane opens for
+from 4 s before it to 40 m past, unless a turn the other way follows, or the route stays on the larger branch. There
+is no keepLeft on a two-way road, as it takes the car into the oncoming lanes. A turn ends at its way out (the blinker
+off, no more pulses once begun), with keepRight for a moment if the car is still swinging round a left turn
+(`GTA5_EXIT_CUE=0` turns that off); a turn is left to the route only when the car is surely out of its lane. Where a centre turn bay or slip lane opens for
 a turn (GTA's bays are short slip-lane links into the median), the car slows for the turn from there, changes into it
 from the lane beside it, and then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
 lane from the route counts only while the car heads along the route's link and agrees with the plugin's, if it has
