@@ -77,7 +77,11 @@ it goes off, as openpilot reads it every 0.2 s (and afresh as a blinker comes on
 is still turning. On our routes nav also knows the forks: where a road splits, as at a freeway exit or where GTA splits
 a road's lanes before a junction, it moves into the lanes of the route's branch (planned the same way, and never out of
 the lanes for a fork or turn before it), and for a fork in the road, holds the model's keep desire towards that branch
-from 4 s before it to 40 m past. With the map's speed limits, engaging sets the limit where the car is, the set speed
+from 4 s before it to 40 m past, unless a turn the other way follows. Where a centre turn bay or slip lane opens for
+a turn (GTA's bays are short slip-lane links into the median), the car slows for the turn from there, changes into it
+from the lane beside it, and then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
+lane from the route counts only while the car heads along the route's link and agrees with the plugin's, if it has
+one. With the map's speed limits, engaging sets the limit where the car is, the set speed
 follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set speed alone), and a lower limit ahead
 slows the car before it. Routes avoid service roads (car parks, alleys, drives), which the model doesn't see as roads.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
