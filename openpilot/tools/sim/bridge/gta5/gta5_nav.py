@@ -36,7 +36,14 @@ REPEAT_GAP = 0.3  # s without the blinker
 REPEAT_EVERY = 2.0  # s at most
 REPEAT_BELOW = 0.1  # the model's probability of the turn
 PULSE_EVERY = 2.5  # s, until the turn starts, and for keep desires while held
-TURN_STARTED = 15.0  # deg turned since signaling
+TURN_STARTED = 15.0  # deg turned since signaling: no more pulses, as one late in the turn swings the car round past it
+STOP_REPEAT_TURNED = 30.0  # deg: after a stop, asked again unless turned this far already
+EXIT_DONE = 25.0  # deg from the turn's way out: done, the blinker off, whatever the yaw rate
+# Coming round past a left turn's way out, the model is held back by keepRight for a moment (not keepLeft after a right
+# turn, which takes the car into the oncoming lanes)
+EXIT_CUE = os.getenv("GTA5_EXIT_CUE", "1") != "0"
+EXIT_CUE_FOR = 2.0  # s at most
+EXIT_CUE_YAW = 0.15  # rad/s still turning
 MIN_AHEAD = 20.0  # m: GTA's route starts with a jog from the car's lane to its road nodes, which isn't a turn
 MIN_AHEAD_MAP = 5.0  # m: our map's routes start at the car
 TURN_PAST = 8.0  # m past a turn, heading within TURN_PAST_HEADING of its way out: done, as for a turn straight after
@@ -56,6 +63,7 @@ ROUTE_POINTS = 101  # the plugin's route covers 500 m; fewer points means it end
 LANE_CHANGE_DIST = 30.0  # m before a turn, the last a lane change for it starts
 LANE_CHANGE_TIME = 8.0  # s each, with the gap before the next
 LANE_CHANGE_EARLY = 4.0  # s more
+FAST, FAST_EARLY = 18.0, 8.0  # m/s, and s more at that speed, as on a freeway, where the exits come up fast
 LANE_CHANGE_SPEED = 2.0  # m/s
 LANE_CHANGE_MIN_SPEED = 5.0  # m/s, slowing down for room to change lanes for a turn
 FORK_MIN_SPEED = 10.0  # m/s, for a fork, as on a freeway
@@ -64,6 +72,7 @@ LANE_CHANGE_GAP = 2.0  # s between lane changes
 LANE_CHANGE_TRIES = 3  # for one turn or fork, without getting nearer its lane
 LANE_STEADY = 0.5  # s a lane reading must hold
 LANE_STALE = 3.0  # s without a steady reading
+SKIP_SURE = 0.6  # lanes from the turn's lanes, by the car's position on the route, to leave the turn to the route
 WRONG_SIDE_FOR = 1.0  # s in the oncoming lanes before moving back over
 TURNING = 0.1  # rad/s: no lane change while turning
 # The blinker means a lane change below 19 mph only once openpilot has read NavDesire (every 0.2 s), and a turn
@@ -143,7 +152,10 @@ class Fork:
     self.side = side  # the branch the route takes
     self.ours, self.lanes_in = lanes, lanes_in  # lanes on the route's branch, and on the road before
     self.other = other  # lanes on the other branches, which GTA sometimes counts on top of the road's
-    self.keep = keep  # whether to hold the keep desire through it
+    # whether to hold the keep desire through it: a fork in the road, where the route leaves the road for the other
+    # branch, not where it stays on it past a smaller one (L2: keepLeft there took the car into the oncoming lanes)
+    main = other > 0 and lanes > other and lanes >= lanes_in - other
+    self.keep = keep and not main
     self.slip = slip  # the other branch opens a slip lane or turn bay
 
   def lanes(self, n: int) -> tuple[int, int]:
@@ -253,6 +265,10 @@ class Nav:
     self.min_ahead = MIN_AHEAD
     self.bay_to = 0.0  # self.driven to which the car is changing into, or is in, a turn bay
     self.yaw = 0.0
+    self.lane_frac: float | None = None  # the car's lane from its position on the route's link, between lanes as it changes
+    self.one_way = False  # whether the road is one-way, as a keepLeft on a two-way road drifts into the oncoming lanes
+    self.cue: str | None = None  # the keep desire held against swinging round past a turn's way out
+    self.cue_until = 0.0
     self.lane: tuple[int, int] | None = None  # the car's lane [i from the left, of n], once it has held LANE_STEADY
     self.lane_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
     self.lane_t = 0.0  # when the lane reading last held
@@ -295,6 +311,7 @@ class Nav:
       self.change_send_at = 0.0
       self.send({"type": "setIndicator", "side": self.changing})
     self.yaw = state.get("yawRate", 0.0)
+    self.lane_frac, self.one_way = state.get("laneFrac"), state.get("twoWay") is False
     self._keep_right(v, now)
     if not route:
       self._cancel(indicator)
@@ -333,8 +350,13 @@ class Nav:
 
     if self.turn is not None:
       along, off = self.driven - self.turn_from, abs(wrap(heading - self.turn.exit_heading))
-      done = (along > self.turn.dist - TURN_WINDOW / 2 and off < DONE_HEADING and abs(yaw_rate) < DONE_YAW_RATE
-              or along > self.turn.dist + TURN_PAST and off < TURN_PAST_HEADING)
+      out = along > self.turn.dist - TURN_WINDOW / 2 and off < EXIT_DONE
+      done = out or along > self.turn.dist + TURN_PAST and off < TURN_PAST_HEADING and abs(yaw_rate) < DONE_YAW_RATE
+      turning = yaw_rate if self.turn.side == "left" else -yaw_rate
+      if out and EXIT_CUE and self.turn.side == "left" and turning > EXIT_CUE_YAW:
+        self.cue, self.cue_until = "keepRight", now + EXIT_CUE_FOR
+        if DEBUG:
+          print(f"nav: keepRight as the car comes round past the left turn ({turning:.2f} rad/s)")
       if done or along > self.turn.dist + MISSED_BY:
         if DEBUG:
           print(f"nav: turn {'done' if done else 'missed'} after {along:.0f} m (car {heading:.0f})")
@@ -364,9 +386,11 @@ class Nav:
       if v < 0.3:
         self.stopped = True
       elif v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY:
-        started = abs(wrap(heading - self.signal_heading)) > TURN_STARTED
-        if self.stopped or desire.get(self.turn.side, 1.0) < REPEAT_BELOW or (not started and now - self.repeat_t > PULSE_EVERY):
-          self.repeat_t, self.stopped = now, False
+        turned = abs(wrap(heading - self.signal_heading))
+        fading = desire.get(self.turn.side, 1.0) < REPEAT_BELOW or now - self.repeat_t > PULSE_EVERY
+        if turned < TURN_STARTED and fading or self.stopped and turned < STOP_REPEAT_TURNED:
+          self.repeat_t = now
+        self.stopped = False
     caps.append(curve_cap(route, v))
     caps.append(limit_cap(state.get("limits") or [], v))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
@@ -454,9 +478,10 @@ class Nav:
       if not lo <= self.lane[0] <= hi:
         if turn.dist > LANE_CHANGE_DIST or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
           return  # a lane change towards it may still come or finish
-        self._end_change(indicator)
-        self._skip(route, turn.dist, f"{turn.side} turn")
-        return
+        if self._sure_wrong(lo, hi):
+          self._end_change(indicator)
+          self._skip(route, turn.dist, f"{turn.side} turn")
+          return
     if self.changing is not None:
       if self.driven < self.bay_to and turn.dist > BAY_LAST:
         return  # into the turn bay first
@@ -467,7 +492,8 @@ class Nav:
     self.turn_point = self._point(route, turn.dist)
     self.signal_heading, self.repeat_t = heading, now
     if DEBUG:
-      print(f"nav: signal {turn.side} in {turn.dist:.0f} m, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, lane {self.lane})")
+      lane = f"lane {self.lane} at {self.lane_frac}"
+      print(f"nav: signal {turn.side} in {turn.dist:.0f} m, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
     self.send({"type": "setIndicator", "side": turn.side})
 
   def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):
@@ -478,6 +504,11 @@ class Nav:
       return
     self.bay_to = self.driven + turn.dist + TURN_HOLDS
     self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m")
+
+  def _sure_wrong(self, lo: int, hi: int) -> bool:
+    """Whether the car is surely out of lanes lo-hi, by its position on the route's link (not just between lanes, as
+    the model ends lane changes early on GTA's wide lanes), the plugin not disagreeing."""
+    return self.lane_frac is not None and (lo - self.lane_frac > SKIP_SURE or self.lane_frac - hi > SKIP_SURE)
 
   def _bay_beside(self, turn: Turn, bay: float) -> bool:
     """Whether the car is in the lane beside the turn ahead's bay, to change into it."""
@@ -515,11 +546,14 @@ class Nav:
     room = m.dist - last
     need = changes * LANE_CHANGE_TIME
     if fork and room < 0 and self.changing is None:
+      if not self._sure_wrong(lo, hi):
+        return 0.0
       self._skip(route, m.dist, f"{m.side} fork")
       self.skip_turns_to = self.driven + m.dist + FORK_TURN
       return 0.0
     cap = max(FORK_MIN_SPEED if fork else LANE_CHANGE_MIN_SPEED, room / need) if room < need * v else 0.0
-    if (self.changing is None and room > 0 and room < (need + LANE_CHANGE_EARLY) * max(v, LANE_CHANGE_MIN_SPEED)
+    early = LANE_CHANGE_EARLY + (FAST_EARLY if v > FAST else 0.0)
+    if (self.changing is None and room > 0 and room < (need + early) * max(v, LANE_CHANGE_MIN_SPEED)
         and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING):
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
@@ -536,7 +570,7 @@ class Nav:
     if fork is not None and fork.keep and not against and self.turn is None and fork.dist < max(FORK_KEEP_DIST, FORK_KEEP * v):
       lo, hi = fork.lanes(self.lane[1]) if self.lane is not None else (0, 0)
       if self.lane is None or lo <= self.lane[0] <= hi:
-        want = "keepLeft" if fork.side == "left" else "keepRight"
+        want = "keepLeft" if fork.side == "left" and self.one_way else "keepRight" if fork.side == "right" else None
         self.fork_keep_to = self.driven + fork.dist + FORK_KEEP_PAST
     if want != self.fork_keep:
       if DEBUG and want:
@@ -554,7 +588,7 @@ class Nav:
           or (self.lane is not None and self.lane[1] < 2)):
         return  # the turn just taken, or one lane: nothing to keep from
       side = max(("left", "right"), key=lambda k: desire.get(k, 0.0))
-      if desire.get(side, 0.0) > KEEP_ABOVE and (turn is None or turn.dist > KEEP_CLEAR):
+      if desire.get(side, 0.0) > KEEP_ABOVE and (turn is None or turn.dist > KEEP_CLEAR) and (side == "left" or self.one_way):
         self.keeping, self.keep_from, self.keep_t = "keepRight" if side == "left" else "keepLeft", self.driven, now
         if DEBUG:
           print(f"nav: {self.keeping}, the model expecting a {side} turn ({desire[side]:.2f}) the route doesn't take")
@@ -567,7 +601,11 @@ class Nav:
   def _set_desire(self, now: float):
     """NavDesire: a lane change under way, else a keep desire; the model forgets a keep desire at a stop, as a turn, so
     it goes off briefly as the car pulls away to be seen again."""
-    want = "laneChange" if self.changing is not None or now < self.change_hold_until else self.fork_keep or self.keeping or ""
+    if self.cue and (now > self.cue_until or abs(self.yaw) < TURNING):
+      self.cue = None
+    want = "laneChange" if self.changing is not None or now < self.change_hold_until else self.cue or self.fork_keep or self.keeping or ""
+    if want == "keepLeft" and not self.one_way:
+      want = ""  # on a two-way road, towards the oncoming lanes
     if want.startswith("keep"):
       if self.v < 0.3:
         self.keep_stopped = True

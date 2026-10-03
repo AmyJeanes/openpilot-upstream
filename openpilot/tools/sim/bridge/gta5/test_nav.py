@@ -79,7 +79,7 @@ def test_wrong_lane_turn_left_to_route():
   d = Drive((0, 2), v=3.0)  # too near to change lanes for it
   y, turned = 0.0, False
   while y < 38.0:
-    d.step(route, y)
+    d.step(route, y, {"laneFrac": 0.0})  # surely in the left lane
     turned |= d.nav.turn is not None
     y += d.v * 0.05
   assert not turned and len(d.nav.skipped) == 1
@@ -91,6 +91,8 @@ def test_fork_lanes():
   assert Fork(100.0, "left", 1, 1, False).lanes(2) == (0, 1)  # one lane in: any lane
   assert Fork(100.0, "left", 4, 4, True, other=1).lanes(4) == (0, 1)  # GTA counts the exit's lane on top
   assert Fork(100.0, "right", 2, 2, False, slip=True).lanes(2) == (0, 1)  # a bay opening: any lane
+  assert not Fork(100.0, "left", 2, 2, True, other=1).keep  # staying on the road past a smaller branch: no keep desire
+  assert Fork(100.0, "right", 1, 3, True, other=2).keep  # leaving it
 
 
 def test_link_lanes():
@@ -172,3 +174,46 @@ def test_left_turn_into_its_bay():
       order.append("turn")
     y += d.v * 0.05
   assert order == ["bay", "turn"]
+
+
+def test_no_keep_left_on_a_two_way_road():
+  # a left fork on a two-way road (L2): keepLeft would take the car over into the oncoming lanes
+  route = route_to_turn(300.0)
+  for two_way, expect in ((True, False), (False, True)):
+    d = Drive((0, 2), v=8.0)
+    asked = False
+    for k in range(60):
+      d.step(route, k * 0.4, {"forks": [[50.0 - k * 0.4, "left", 1, 2, True, 1, False]], "twoWay": two_way, "routeEnd": 400.0})
+      asked |= d.nav.desire == "keepLeft"
+    assert asked == expect
+
+
+def test_doubtful_lane_still_signals():
+  # nav's lane says the car is beside the right turn's lane, but its position is between the two (the model ended the
+  # lane change early, R1): signal the turn rather than leave it
+  route = route_to_turn(60.0)
+  for frac, signalled in ((0.75, True), (0.0, False)):
+    d = Drive((0, 2), v=5.0)
+    y = 0.0
+    while y < 45.0:
+      d.step(route, y, {"laneFrac": frac, "routeEnd": 200.0})
+      y += d.v * 0.05
+    assert (d.nav.turn is not None or d.nav.signaled is not None or not d.nav.skipped) == signalled
+
+
+def test_turn_done_at_its_way_out_without_repulse():
+  # once the car has turned, the blinker drops at the way out even while still yawing, and isn't pulsed again
+  route = route_to_turn(40.0, "left")
+  d = Drive((0, 1), v=5.0)
+  for k in range(60):
+    d.step(route, k * 0.25)
+  assert d.nav.signaled == "left"
+  repeats = d.nav.repeat_t
+  # the car turns: heading 0 -> 85 (way out 90), yawing 0.5 rad/s; the route ahead now runs west from the car
+  for k, h in enumerate(np.linspace(0, 85, 40)):
+    d.clock.t += 0.1
+    state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": 0.5, "lane": [0, 1], "routeEnd": 200.0,
+             "route": [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]}
+    d.nav.update(state, True, d.indicator, {"left": 1.0 if k < 30 else 0.05})
+  assert d.nav.signaled is None and d.nav.repeat_t == repeats
+  assert d.nav.cue == "keepRight"

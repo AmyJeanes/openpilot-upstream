@@ -201,6 +201,17 @@ class Route:
       return None
     return [link.lane(self.right), link.lanes]
 
+  def lane_frac(self) -> float | None:
+    """The car's lane as lane() gives it, but between lanes as it moves across: 0.0 the middle of the leftmost."""
+    link = self.links[self.seg] if self.seg < len(self.links) else None
+    if link is None or not link.lanes or self.misaligned > LANE_ALIGN:
+      return None
+    return round((self.right - link.inner) / link.width - 0.5, 2)
+
+  def two_way(self) -> bool | None:
+    link = self.links[self.seg] if self.seg < len(self.links) else None
+    return None if link is None else link.back > 0
+
   def changes(self, values, distance: float) -> list[list[float]]:
     """[[m ahead, value], ...] where a per-segment value changes within `distance` m, from the car's segment on."""
     out: list[list[float]] = []
