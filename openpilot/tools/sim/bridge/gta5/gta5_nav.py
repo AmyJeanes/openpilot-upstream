@@ -82,6 +82,16 @@ FORK_LAST_DIST = 40.0  # m, at least
 FORK_KEEP = 4.0  # s before a fork that the keep desire starts
 FORK_KEEP_DIST = 60.0  # m, at least
 FORK_KEEP_PAST = 40.0  # m past it
+# A slip lane or turn bay (GTA's centre turn bays are the road's median) opening this near before a turn: the turn is
+# signalled, and slowed for, from where it opens, so that the model takes it into the bay
+BAY_BEFORE = 70.0  # m
+BAY_SIGNAL = 5.0  # m before it opens
+# and the car changes lanes into it as it opens, from the lane beside it, then signals the turn (by BAY_LAST at the
+# latest): from the lane beside a bay the model carries straight on
+BAY_CHANGE = os.getenv("GTA5_BAY", "1") != "0"
+BAY_OPEN = 3.0  # m before it opens
+BAY_LAST = 18.0  # m before the turn
+BAY_SPEED = 4.5  # m/s, changing into it
 # Bends and ramps: no faster than this sideways acceleration, measured over CURVE_WINDOW m of route. The Tesla's
 # steering is limited to 3.6 m/s^2 (3 m/s^2 and road roll) and in our drives saturated at about 3.
 CURVE_ACCEL = 2.0  # m/s^2
@@ -97,6 +107,7 @@ KEEP_UNTIL = 0.05  # probability of the turn, once past where it was
 KEEP_FOR = 30.0  # m driven at least
 KEEP_GAP = 0.5  # s off to repeat it: openpilot reads the desire every 0.2 s
 KEEP_AFTER_TURN = 60.0  # m: the model's expectation of the turn just taken fades only after it
+KEEP_MIN_SPEED = 3.0  # m/s: pulling away, its turn probabilities are noise
 # the driver's gas press that gets the car moving again, which the model won't do itself once stopped
 GO_AFTER = 1.0  # s stopped
 GO_GREEN = 0.4  # s since traffic last showed red
@@ -127,16 +138,21 @@ class Turn:
 
 
 class Fork:
-  def __init__(self, dist: float, side: str, lanes: int, lanes_in: int, keep: bool):
+  def __init__(self, dist: float, side: str, lanes: int, lanes_in: int, keep: bool, other: int = 0, slip: bool = False):
     self.dist = dist  # m along the route
     self.side = side  # the branch the route takes
     self.ours, self.lanes_in = lanes, lanes_in  # lanes on the route's branch, and on the road before
+    self.other = other  # lanes on the other branches, which GTA sometimes counts on top of the road's
     self.keep = keep  # whether to hold the keep desire through it
+    self.slip = slip  # the other branch opens a slip lane or turn bay
 
   def lanes(self, n: int) -> tuple[int, int]:
-    if self.lanes_in <= 1 or self.ours >= self.lanes_in:
+    ours = min(self.ours, self.lanes_in - self.other) if 0 < self.other < self.lanes_in else self.ours
+    if self.other and ours >= 3:
+      ours -= 1  # and not the lane beside the other branch on a wide road, which drifts into it
+    if self.lanes_in <= 1 or ours >= self.lanes_in:
       return 0, n - 1  # every lane goes the route's way
-    ours = max(1, min(self.ours, n))
+    ours = max(1, min(ours, n))
     return (0, ours - 1) if self.side == "left" else (n - ours, n - 1)
 
 
@@ -176,8 +192,8 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
 
 def curve_cap(route: np.ndarray, v: float) -> float:
   """The speed now that leaves room to slow for the bends ahead, 0 for none. A bend's curvature is its heading change
-  over CURVE_WINDOW m, but no more than twice that over twice the window: GTA's lanes jog sideways through junctions,
-  turning one way and back within a few metres, which isn't a bend."""
+  over CURVE_WINDOW m, but no more than over twice or four times the window: GTA's lanes jog sideways through junctions
+  and where a freeway splits, turning one way and back, which isn't a bend."""
   heads, starts = headings(route)
   if len(heads) < 3:
     return 0.0
@@ -190,7 +206,7 @@ def curve_cap(route: np.ndarray, v: float) -> float:
 
   def turned(a, b):
     return np.abs(np.interp(b, mids, h) - np.interp(a, mids, h))
-  curvature = np.minimum(turned(s - w, s + w) / CURVE_WINDOW, turned(s - 2 * w, s + 2 * w) / CURVE_WINDOW)
+  curvature = np.minimum.reduce([turned(s - k * w, s + k * w) for k in (1, 2, 4)]) / CURVE_WINDOW
   # the turns themselves have their own speed
   speed = np.maximum(np.sqrt(CURVE_ACCEL / np.maximum(curvature, 1e-4)), TURN_SPEED)
   return float(np.min(np.sqrt(speed ** 2 + 2 * SLOW_DECEL * np.maximum(s - w - v * SLOW_LAG, 0.0))))
@@ -235,6 +251,7 @@ class Nav:
     self.turn_point: np.ndarray | None = None  # where the signaled turn is
     self.turned_at = -1e9  # self.driven when the last turn was done
     self.min_ahead = MIN_AHEAD
+    self.bay_to = 0.0  # self.driven to which the car is changing into, or is in, a turn bay
     self.yaw = 0.0
     self.lane: tuple[int, int] | None = None  # the car's lane [i from the left, of n], once it has held LANE_STEADY
     self.lane_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
@@ -336,8 +353,12 @@ class Nav:
     forks = self._forks(state.get("forks"), route, turn)
     caps = [self._change_lane(forks + ([turn] if turn is not None else []), route, v, now)]
     if turn is not None and turn.dist < LOOKAHEAD:
-      caps.append(slow_for(turn.speed, turn.dist - TURN_SLOW_BY, v))
-      self._signal(turn, route, indicator, v, now, heading)
+      bay = self._bay(forks, turn)
+      caps.append(slow_for(turn.speed, turn.dist - max(TURN_SLOW_BY, bay + BAY_SIGNAL), v))
+      self._enter_bay(turn, bay, v, now)
+      if self.changing is not None and self.driven < self.bay_to:
+        caps.append(BAY_SPEED)
+      self._signal(turn, route, indicator, v, now, heading, bay)
     if self.turn is not None:
       caps.append(self.turn.speed)
       if v < 0.3:
@@ -348,7 +369,7 @@ class Nav:
           self.repeat_t, self.stopped = now, False
     caps.append(curve_cap(route, v))
     caps.append(limit_cap(state.get("limits") or [], v))
-    self._keep_fork(forks[0] if forks else None, route, desire, v, now)
+    self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
     self._keep_straight(turn, desire, v, now)
     self._set_desire(now)
 
@@ -374,12 +395,20 @@ class Nav:
   def _forks(self, forks: list | None, route: np.ndarray, turn: Turn | None) -> list[Fork]:
     """The forks ahead, before any turn."""
     out = []
-    for d, side, lanes, lanes_in, keep in forks or []:
+    for d, side, *rest in forks or []:
       if d > FORK_LOOKAHEAD or (turn is not None and d > turn.dist):
         break
       if d > 0 and not self._is_skipped(route, d):
-        out.append(Fork(d, side, lanes, lanes_in, keep))
+        out.append(Fork(d, side, *rest))
     return out
+
+  @staticmethod
+  def _bay(forks: list[Fork], turn: Turn | None) -> float:
+    """How far before the turn ahead a slip lane or turn bay for it opens, 0 for none."""
+    if turn is None:
+      return 0.0
+    bays = [turn.dist - f.dist for f in forks if f.slip and f.side != turn.side and turn.dist - f.dist < BAY_BEFORE]
+    return max(bays) if bays else 0.0
 
   @staticmethod
   def _point(route: np.ndarray, dist: float) -> np.ndarray:
@@ -412,11 +441,14 @@ class Nav:
     if now - self.lane_t > LANE_STALE:
       self.lane = None
 
-  def _signal(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, heading: float):
+  def _signal(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, heading: float, bay: float):
     """Signals the turn once near and slow enough, from its lane; one that can't be taken from the car's lane is left."""
     slow = v < 19 * CV.MPH_TO_MS and self.changing is None
-    if not (turn.dist < SIGNAL_MIN or (turn.dist < max(SIGNAL_MIN, min(SIGNAL_DIST, v * SIGNAL_TIME)) and slow)):
+    window = max(SIGNAL_MIN, min(SIGNAL_DIST, v * SIGNAL_TIME), bay + BAY_SIGNAL)
+    if not (turn.dist < SIGNAL_MIN or (turn.dist < window and slow)):
       return
+    if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
+      return  # into the turn bay first
     if self.lane is not None and self.lane[0] >= 0:
       lo, hi = turn.lanes(self.lane[1])
       if not lo <= self.lane[0] <= hi:
@@ -426,6 +458,8 @@ class Nav:
         self._skip(route, turn.dist, f"{turn.side} turn")
         return
     if self.changing is not None:
+      if self.driven < self.bay_to and turn.dist > BAY_LAST:
+        return  # into the turn bay first
       self._end_change(indicator)
     if now < self.change_hold_until + PARAM_LEAD:
       return  # openpilot is to read NavDesire cleared before the blinker comes on for the turn
@@ -435,6 +469,21 @@ class Nav:
     if DEBUG:
       print(f"nav: signal {turn.side} in {turn.dist:.0f} m, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, lane {self.lane})")
     self.send({"type": "setIndicator", "side": turn.side})
+
+  def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):
+    """Into the turn bay or slip lane for the turn ahead as it opens, from the lane beside it."""
+    if not self._bay_beside(turn, bay) or self.driven < self.bay_to or self.changing is not None:
+      return
+    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED:
+      return
+    self.bay_to = self.driven + turn.dist + TURN_HOLDS
+    self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m")
+
+  def _bay_beside(self, turn: Turn, bay: float) -> bool:
+    """Whether the car is in the lane beside the turn ahead's bay, to change into it."""
+    if not BAY_CHANGE or not bay or self.lane is None:
+      return False
+    return self.lane[0] == (0 if turn.side == "left" else self.lane[1] - 1)
 
   def _change_lane(self, ahead: list, route: np.ndarray, v: float, now: float) -> float:
     """Into the lanes for the turns and forks ahead (nearest first), early enough for the changes the first the car isn't
@@ -479,11 +528,12 @@ class Nav:
       self._start_change("left" if i > hi else "right", f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)")
     return cap
 
-  def _keep_fork(self, fork: Fork | None, route: np.ndarray, desire: dict[str, float], v: float, now: float):
-    """The keep desire towards the route's branch, from a little before the fork to past it; repeated if the model
-    stops expecting it."""
+  def _keep_fork(self, fork: Fork | None, turn: Turn | None, desire: dict[str, float], v: float, now: float):
+    """The keep desire towards the route's branch, from a little before the fork to past it, but not against a turn
+    the other way soon after; repeated as the model forgets it."""
     want = self.fork_keep if self.driven < self.fork_keep_to and self.turn is None else None
-    if fork is not None and fork.keep and self.turn is None and fork.dist < max(FORK_KEEP_DIST, FORK_KEEP * v):
+    against = fork is not None and turn is not None and turn.side != fork.side and turn.dist - fork.dist < FORK_TURN
+    if fork is not None and fork.keep and not against and self.turn is None and fork.dist < max(FORK_KEEP_DIST, FORK_KEEP * v):
       lo, hi = fork.lanes(self.lane[1]) if self.lane is not None else (0, 0)
       if self.lane is None or lo <= self.lane[0] <= hi:
         want = "keepLeft" if fork.side == "left" else "keepRight"
@@ -500,7 +550,8 @@ class Nav:
       self.keeping = None
       return
     if self.keeping is None:
-      if self.driven - self.turned_at < KEEP_AFTER_TURN or abs(self.yaw) > TURNING or (self.lane is not None and self.lane[1] < 2):
+      if (self.driven - self.turned_at < KEEP_AFTER_TURN or abs(self.yaw) > TURNING or v < KEEP_MIN_SPEED
+          or (self.lane is not None and self.lane[1] < 2)):
         return  # the turn just taken, or one lane: nothing to keep from
       side = max(("left", "right"), key=lambda k: desire.get(k, 0.0))
       if desire.get(side, 0.0) > KEEP_ABOVE and (turn is None or turn.dist > KEEP_CLEAR):
@@ -531,7 +582,7 @@ class Nav:
   def _keep_right(self, v: float, now: float):
     """Back over from the oncoming lanes, which the model sometimes drifts into on wide roads."""
     lane = self.lane
-    if not lane or lane[0] >= 0:
+    if not lane or lane[0] >= 0 or self.driven < self.bay_to:  # a centre turn bay is beyond the inside lane
       self.wrong_side_t = None
       return
     self.wrong_side_t = self.wrong_side_t or now

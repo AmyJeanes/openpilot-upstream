@@ -8,7 +8,7 @@ import urllib.request
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
-from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, Link, Paths, wrap
+from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, SLIP_LANE, Link, Paths, wrap
 
 SERVICE_PENALTY, SERVICE_FACTOR = 120, 4.0  # s onto a service road, and its cost over a road's
 HEADING_TOLERANCE = 45.0  # deg: start on a road heading the car's way, not the opposite carriageway
@@ -17,6 +17,7 @@ FORK_SPREAD = 40.0  # deg either side of straight on, up to nav's turns: a road 
 OTHER_LEVEL = 3.0  # m above or below the route: the car is on another road, passing over or under it
 WRONG_WAY = 100.0  # deg from the route's direction: the car isn't driving that part of it
 FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
+LANE_ALIGN = 10.0  # deg
 
 
 def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float]]:
@@ -42,13 +43,15 @@ def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float
 
 
 class Fork:
-  def __init__(self, along: float, side: str, lanes: int, lanes_in: int, keep: bool):
+  def __init__(self, along: float, side: str, lanes: int, lanes_in: int, keep: bool, other: int = 0, slip: bool = False):
     self.along = along  # m along the route
     self.side = side  # the branch the route takes, "left" or "right"
     self.lanes, self.lanes_in = lanes, lanes_in  # on that branch, and on the road before
+    self.other = other  # lanes on the other branches
     # whether it's a fork in the road, rather than GTA splitting a road's lanes before a junction, where the car just
     # keeps to its lane
     self.keep = keep
+    self.slip = slip  # the other branch only opens a slip lane or turn bay, as for a turn soon after
 
 
 class Route:
@@ -62,6 +65,7 @@ class Route:
     self.seg = 0  # the route segment the car is on
     self.right = 0.0  # m right of the route's line
     self.off = 0.0  # m off the route
+    self.misaligned = 0.0  # deg between the car's heading and the route's there
     n = len(points)
     self.z = np.full(n, np.nan)
     self.links: list[Link | None] = [None] * max(n - 1, 0)
@@ -139,8 +143,12 @@ class Route:
     link_in, link = paths.links.get((prev, i)), paths.links.get((i, nxt))
     if link_in is None or link is None:
       return None
-    lane_split = link.no_nav and all(paths.links[(i, j)].no_nav for _, j in others)
-    return Fork(along, side, link.lanes, link_in.lanes, bool(paths.flags[i][2] & 64) or not lane_split)
+    roads = [j for _, j in others if not paths.flags[j][1] & SLIP_LANE]
+    if not roads:
+      return Fork(along, side, link_in.lanes, link_in.lanes, False, slip=True)
+    lane_split = link.no_nav and all(paths.links[(i, j)].no_nav for j in roads)
+    return Fork(along, side, link.lanes, link_in.lanes, bool(paths.flags[i][2] & 64) or not lane_split,
+                sum(paths.links[(i, j)].lanes for j in roads))
 
   @property
   def length(self) -> float:
@@ -177,6 +185,7 @@ class Route:
     length = max(float(np.hypot(*ab[i])), 1e-6)
     self.right = float((pos[0] - a[i, 0]) * ab[i, 1] - (pos[1] - a[i, 1]) * ab[i, 0]) / length
     self.off = float(d[i])
+    self.misaligned = 0.0 if heading is None else abs((heading - float(np.degrees(np.arctan2(-ab[i, 0], ab[i, 1]))) + 180) % 360 - 180)
     return self.off
 
   def ahead(self, distance: float, step: float) -> np.ndarray:
@@ -185,9 +194,10 @@ class Route:
     return np.stack([np.interp(s, self.along, self.points[:, 0]), np.interp(s, self.along, self.points[:, 1])], axis=1)
 
   def lane(self) -> list[int] | None:
-    """The car's lane, as the plugin reports it: [i from the left, of n], i negative in the oncoming lanes."""
+    """The car's lane, as the plugin reports it: [i from the left, of n], i negative in the oncoming lanes. None where
+    the car isn't heading along the route's link, as where the link jogs sideways between roads' lines."""
     link = self.links[self.seg] if self.seg < len(self.links) else None
-    if link is None or not link.lanes:
+    if link is None or not link.lanes or self.misaligned > LANE_ALIGN:
       return None
     return [link.lane(self.right), link.lanes]
 
@@ -208,7 +218,7 @@ class Route:
     """What nav uses of the route ahead, beyond its points, within `distance` m."""
     return {
       "routeEnd": round(self.length - self.at, 1),
-      "forks": [[round(f.along - self.at, 1), f.side, f.lanes, f.lanes_in, f.keep] for f in self.forks
+      "forks": [[round(f.along - self.at, 1), f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in self.forks
                 if -FORK_BEHIND < f.along - self.at < distance],
       "limits": self.changes(self.limit_list, distance),
       "laneCounts": self.changes(self.lane_counts, distance),

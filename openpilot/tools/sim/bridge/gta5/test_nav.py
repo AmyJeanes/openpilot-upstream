@@ -89,6 +89,8 @@ def test_fork_lanes():
   assert Fork(100.0, "right", 1, 2, True).lanes(2) == (1, 1)
   assert Fork(100.0, "left", 2, 3, True).lanes(3) == (0, 1)
   assert Fork(100.0, "left", 1, 1, False).lanes(2) == (0, 1)  # one lane in: any lane
+  assert Fork(100.0, "left", 4, 4, True, other=1).lanes(4) == (0, 1)  # GTA counts the exit's lane on top
+  assert Fork(100.0, "right", 2, 2, False, slip=True).lanes(2) == (0, 1)  # a bay opening: any lane
 
 
 def test_link_lanes():
@@ -150,3 +152,23 @@ def test_turn_straight_after_a_turn():
     heading = float(np.degrees(np.arctan2(-step[0], step[1])))
     pos = pos + step / np.hypot(*step) * min(d.v * 0.05, np.hypot(*step))
   assert sides == ["left", "right"]
+
+
+def test_left_turn_into_its_bay():
+  # a bay opening 30 m before a left turn, from the inside lane: into the bay, then signal the turn
+  route = route_to_turn(200.0, "left")
+  d = Drive((0, 2), v=6.0)
+  y, order = 0.0, []
+  while y < 195.0:
+    bay_at = 170.0 - y
+    forks = [[bay_at, "right", 2, 2, False, 0, True]] if bay_at > 0 else []
+    d.step(route, y, {"forks": forks, "routeEnd": 300.0 - y})
+    if d.nav.changing == "left" and "bay" not in order:
+      order.append("bay")
+      assert 200.0 - y > 18.0
+    if d.nav.changing and d.indicator == "left" and y > 0 and "bay" in order and 200.0 - y < 26:
+      d.indicator, d.lane = None, (-1, 2)  # in the bay
+    if d.nav.signaled == "left" and "turn" not in order:
+      order.append("turn")
+    y += d.v * 0.05
+  assert order == ["bay", "turn"]

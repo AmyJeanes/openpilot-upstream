@@ -335,9 +335,13 @@ class GTA5World(World):
     state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": []}
     if self.route is None:
       return state
-    lane = self.route.lane() if self.route.off < ON_ROUTE else None
+    lane, plugin = self.route.lane() if self.route.off < ON_ROUTE else None, state.get("lane")
+    if lane and plugin and lane[0] != plugin[0]:
+      lane = None  # they disagree: no lane changes on either
+    elif not lane:
+      lane = plugin
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
-            "lane": lane or state.get("lane")}
+            "lane": lane}
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
