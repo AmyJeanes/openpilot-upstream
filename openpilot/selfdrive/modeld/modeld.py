@@ -134,6 +134,9 @@ class FrameMeta:
       self.frame_id, self.timestamp_sof, self.timestamp_eof = vipc.frame_id, vipc.timestamp_sof, vipc.timestamp_eof
 
 
+CAMERA_STALE = 3.0  # s
+
+
 def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int) -> Tensor:
   view = buffer.view(math.prod(shape), dtype, offset).ensure_allocated()
   return Tensor(UOp.from_buffer(view)).reshape(shape)
@@ -332,16 +335,24 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  last_frames_t = time.monotonic()
 
   while True:
     # the camera server restarted (as the simulator bridge does): take its new buffers, and its frame times from the start
     reconnect = [c for c in ([vipc_client_main, vipc_client_extra] if use_extra_client else [vipc_client_main]) if not c.is_connected()]
+    # a client can miss the restart and keep returning no frames without noticing; start both afresh
+    if not reconnect and time.monotonic() - last_frames_t > CAMERA_STALE:
+      cloudlog.warning(f"no camera frames for {CAMERA_STALE:.0f} s, reconnecting")
+      vipc_client_main = VisionIpcClient("camerad", vipc_client_main_stream, True)
+      vipc_client_extra = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, False)
+      reconnect = [vipc_client_main, vipc_client_extra] if use_extra_client else [vipc_client_main]
     for client in reconnect:
       cloudlog.warning("camera server restarted, reconnecting")
       while not client.connect(False):
         time.sleep(0.1)
     if reconnect:
       meta_main, meta_extra = FrameMeta(), FrameMeta()
+      last_frames_t = time.monotonic()
 
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
     while meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
@@ -374,6 +385,7 @@ def main(demo=False):
       # Use single camera
       buf_extra = buf_main
       meta_extra = meta_main
+    last_frames_t = time.monotonic()
 
     sm.update(0)
     desire = DH.desire
