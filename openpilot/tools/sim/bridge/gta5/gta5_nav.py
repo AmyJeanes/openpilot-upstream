@@ -15,8 +15,9 @@ TURN_ANGLE = 50.0  # deg of heading change along TURN_WINDOW m of route that mak
 TURN_WINDOW = 30.0  # m
 TURN_HOLDS = 20.0  # m past the turn where the route still heads the new way: a jog between lanes comes back
 U_TURN_ANGLE = 135.0  # deg: the model can't make a U-turn, so drive on until GTA routes round instead
-TURN_SPEED = 12 * CV.MPH_TO_MS  # for a square turn; the lane turn desire works below 19 mph
-SOFT_TURN_SPEED = 16 * CV.MPH_TO_MS  # for a turn of TURN_ANGLE
+TURN_SPEED = 4.5  # m/s for a square turn: slower turns tighter, and the lane turn desire works below 19 mph
+SHARP_TURN_SPEED = 4.0  # m/s beyond sharp_angle
+SOFT_TURN_SPEED = 6.0  # m/s for a turn of TURN_ANGLE
 TURN_SLOW_BY = 25.0  # m before the turn
 SLOW_DECEL = 0.6  # m/s^2, the approach the cruise cap allows
 SLOW_LAG = 1.0  # s: openpilot eases into a lower set speed
@@ -153,7 +154,7 @@ class Tune:
   DEFAULTS = {
     "turn_speed_soft": SOFT_TURN_SPEED,  # m/s for a turn of TURN_ANGLE, between it and a square turn by angle
     "turn_speed_square": TURN_SPEED,  # m/s for a square turn
-    "turn_speed_sharp": TURN_SPEED,  # m/s beyond sharp_angle
+    "turn_speed_sharp": SHARP_TURN_SPEED,  # m/s beyond sharp_angle
     "sharp_angle": 110.0,  # deg
     "slow_decel": SLOW_DECEL,  # m/s^2
     "slow_from": LOOKAHEAD,  # m before a turn the slowing for it may start
