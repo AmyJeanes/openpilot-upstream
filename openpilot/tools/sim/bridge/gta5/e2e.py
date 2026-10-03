@@ -153,6 +153,17 @@ class Map:
         for j in range(int(y0 // self.CELL), int(y1 // self.CELL) + 1):
           self.grid[(i, j)].append(s)
     self.grid = {k: np.array(v) for k, v in self.grid.items()}
+    # junction and stop-line nodes, to tell excursions in a junction from those after it
+    self.junctions = defaultdict(list)
+    for n in nodes.values():
+      if n['f'][2] & 4 or (n['f'][1] >> 3) in (15, 16):
+        self.junctions[(int(n['x'] // self.CELL), int(n['y'] // self.CELL))].append((n['x'], n['y']))
+    self.junctions = {k: np.array(v) for k, v in self.junctions.items()}
+
+  def in_junction(self, x: float, y: float) -> bool:
+    i, j = int(x // self.CELL), int(y // self.CELL)
+    cand = [self.junctions[k] for k in ((i + di, j + dj) for di in (-1, 0, 1) for dj in (-1, 0, 1)) if k in self.junctions]
+    return bool(cand) and float(np.min(np.hypot(*(np.concatenate(cand) - [x, y]).T))) < JUNCTION_NEAR
 
   def road_distance(self, x: float, y: float) -> float:
     i, j = int(x // self.CELL), int(y // self.CELL)
@@ -675,6 +686,7 @@ class Trip:
          'kL': round(ds[5], 2) if len(ds) > 6 else None, 'kR': round(ds[6], 2) if len(ds) > 6 else None,
          'lc': str(md.laneChangeState), 'en': bool(ss.enabled), 'alert': ss.alertText1 or None,
          'mt': round(self.rig.sm['modelV2'].modelExecutionTime * 1000, 1), 'drop': round(self.rig.sm['modelV2'].frameDropPerc, 1)}
+    p['junc'] = self.roads.in_junction(p['x'], p['y'])
     prev = self.history[-1] if self.history else None
     self.history.append(p)
     if prev is not None and prev['lane'] and prev['lane'][0] < 0 and prev['v'] > 1.0:
@@ -813,6 +825,7 @@ def results_files(paths):
 
 ONCOMING_OK = 1.0  # s in the oncoming lanes a driver would let go (the lane reading flickers across junctions)
 ONCOMING_SNAPS = 3  # frames saved per trip, as the car has been in the oncoming lanes that long
+JUNCTION_NEAR = 15.0  # m from a junction or stop-line node: in the junction (recorded, as the lane reading there can follow GTA's diagonal links)
 
 
 def safe(r: dict) -> bool:
