@@ -51,6 +51,27 @@ def test_find_turn():
   assert find_turn(np.array([(0.0, y) for y in range(0, 200, 5)], dtype=float)) is None
 
 
+def test_find_turn_on_its_last_segment():
+  # nodes 10 m apart: from 15 m out, the turn's node is the route's first point ahead
+  for before in (25.0, 15.0, 12.0, 8.0, 6.0):
+    t = find_turn(np.array([(0.0, 0.0), (0.0, before), (30.0, before), (60.0, before)]), 5.0)
+    assert t is not None and t.side == "right" and abs(t.dist - before) < 0.1
+  assert find_turn(np.array([(0.0, 0.0), (0.0, 4.0), (30.0, 4.0), (60.0, 4.0)]), 5.0) is None
+
+
+def test_entry_signal_past_the_entry():
+  # sparse approach nodes, signalling 3 m past the default entry (12 m out): the turn must still be found there
+  route = np.array([(0.0, y) for y in np.arange(0.0, 200.0, 20.0)] + [(x, 200.0) for x in np.arange(0.0, 100.0, 10.0)])
+  d = Drive((1, 2), v=5.0)
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(signal_mode="entry", signal_entry_offset=3.0)
+  y = 0.0
+  while y < 200.0 and not d.nav.signaling:
+    d.step(route, y, {"routeEnd": 300.0 - y})
+    y += d.v * 0.05
+  assert signals(d) == ["right"] and 200.0 - y < 13.0
+
+
 def test_turn_from_its_lane():
   route = route_to_turn(300.0)
   d = Drive((1, 2))

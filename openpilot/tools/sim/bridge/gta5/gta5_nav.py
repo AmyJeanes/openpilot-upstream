@@ -282,7 +282,9 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
   ends = np.searchsorted(starts, starts + TURN_WINDOW, side='right') - 1
   idx = np.arange(len(heads))
   change = (heads[ends] - heads + 180) % 360 - 180
-  candidates = np.nonzero((starts >= after) & (ends > idx) & (np.abs(change) >= TURN_ANGLE))[0]
+  # from the segment `after` falls in, as the one into a turn's node starts behind the car near the junction
+  reach = np.append(starts[1:], np.inf)
+  candidates = np.nonzero((reach > after) & (ends > idx) & (np.abs(change) >= TURN_ANGLE))[0]
   for i in candidates:
     j = int(ends[i])
     # the turn is at its sharpest vertex in the window
