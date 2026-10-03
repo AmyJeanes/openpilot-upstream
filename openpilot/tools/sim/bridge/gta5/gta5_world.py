@@ -116,6 +116,8 @@ class GTA5World(World):
     self.dest_from_game = False
     self.game_waypoint: np.ndarray | None = None
     self.route: Route | None = None
+    self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
+    self.cap = 0.0
     self.gps_route: list = []
     if self.map_view:
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
@@ -281,6 +283,7 @@ class GTA5World(World):
       route = self._map_route(state, bearing)
       state = {**state, "route": route, "waypoint": self.dest.tolist() if self.dest is not None else None}
     simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
+    self.cap = simulator_state.cruise_cap
     if self.nav.blinker_gap:
       simulator_state.left_blinker = simulator_state.right_blinker = False
     if arrived:
@@ -308,7 +311,9 @@ class GTA5World(World):
       picked = self.map_view.take_destination()
       if picked is not None:
         self.dest, self.dest_from_game = (np.array(picked[0], dtype=float) if picked[0] else None), False
-    self.route = self.navigator.update(pos, bearing, self.dest, time.monotonic())
+    route = self.navigator.update(pos, bearing, self.dest, time.monotonic())
+    self.routes += route is not None and route is not self.route
+    self.route = route
     return [] if self.route is None else self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist()
 
   def _update_map(self, state: dict, bearing: float, v: float):
@@ -324,6 +329,8 @@ class GTA5World(World):
       "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.ahead(self.route.length, 10.0).round(1).tolist()},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
       "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.simulator_state.is_engaged else ''}",
+      "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),
+              "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
     })
 
   def _set_nav_desire(self, desire: str):
