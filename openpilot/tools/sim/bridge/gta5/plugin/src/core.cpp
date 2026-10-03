@@ -95,6 +95,8 @@ struct Motion {
   float grade = 0, bank = 0;  // radians: nose up, right side down
   Vector3 pos{}, rotVel{}, steerBone{};
   int resets = 0;
+  int collisions = 0;  // frames the car touched something, counted up so a 20 Hz reader misses none
+  float bodyHealth = 0;
 } g_m;
 
 struct Driver {
@@ -491,6 +493,8 @@ void Measure(float dt) {
   g_m.grade = std::asin(std::clamp(front.z - pos.z, -1.0f, 1.0f));
   g_m.bank = std::asin(std::clamp(pos.z - right.z, -1.0f, 1.0f));
   g_m.rotVel = GET_ENTITY_ROTATION_VELOCITY(v);
+  g_m.collisions += HAS_ENTITY_COLLIDED_WITH_ANYTHING(v) ? 1 : 0;
+  g_m.bodyHealth = GET_VEHICLE_BODY_HEALTH(v);
   if (g_veh.wheelLf >= 0) g_m.steerBone = GET_ENTITY_BONE_OBJECT_ROTATION(v, g_veh.wheelLf);
   g_m.valid = true;
 }
@@ -788,6 +792,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
       << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
+      << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
     for (const std::string &part : {Route(now), Lane(now), Traffic(now)})

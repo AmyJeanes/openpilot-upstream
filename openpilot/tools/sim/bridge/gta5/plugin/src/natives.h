@@ -74,6 +74,8 @@ inline void SET_VEHICLE_INDICATOR_LIGHTS(Vehicle v, int turnSignal, BOOL on) { I
 // holds the steering at a fraction of full lock (left positive) for this frame
 inline void SET_VEHICLE_STEER_BIAS(Vehicle v, float bias) { Invoke(0x42A8EC77D5150CBE, v, bias); }
 inline void SET_VEHICLE_FIXED(Vehicle v) { Invoke(0x115722B1B9C14C1C, v); }
+inline BOOL HAS_ENTITY_COLLIDED_WITH_ANYTHING(Entity e) { return Invoke<BOOL>(0x8BAD02F0368D9E14, e); }
+inline float GET_VEHICLE_BODY_HEALTH(Vehicle v) { return Invoke<float>(0xF271147EB7B40F12, v); }
 inline void SET_VEHICLE_MOD_KIT(Vehicle v, int kit) { Invoke(0x1F2AA07F00B3217A, v, kit); }
 // paintType: 0 normal, 1 metallic, 2 pearl, 3 matte, 4 metal, 5 chrome
 inline void SET_VEHICLE_MOD_COLOR_1(Vehicle v, int paintType, int color, int pearl) { Invoke(0x43FEB945EE7F85B8, v, paintType, color, pearl); }
