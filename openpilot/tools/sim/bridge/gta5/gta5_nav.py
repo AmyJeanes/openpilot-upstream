@@ -181,10 +181,10 @@ class Tune:
     "turn_release": HOLD_RELEASE,  # deg
     "turn_release_m": HOLD_RELEASE_M,  # m
     "release_accel": HOLD_RELEASE_ACCEL,  # m/s^2
-    "exit_cue_right": False,  # keepRight out of a right turn too, which can end across the new road's centre line
+    "exit_cue_right": True,  # keepRight out of a right turn too, which can end across the new road's centre line
     # keepRight while the plugin reads the car in the oncoming lanes outside a junction, where the route's reading
     # disagrees and nav has no lane to change back from
-    "oncoming_keep": False,
+    "oncoming_keep": True,
   }
   CHECK_EVERY = 1.0  # s
 
