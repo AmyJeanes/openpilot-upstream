@@ -40,6 +40,7 @@ const STYLE = {  // per road class: colour, minimum width in px
   track: ['#5b4a36', 0.8],
 };
 const LANE_WIDTH = 3.2;  // m drawn per lane
+const CAR_LENGTH = 4.7;  // m
 const CELL = 400;  // m: roads are kept in cells of this size, and only those on screen drawn
 const MIN_SCALE = { service: 0.25, track: 0.25, residential: 0.08, unclassified: 0.08 };  // px/m below which a class is left out
 // The car is drawn where it should be now, carried on from its latest update at its speed and turn rate; a new update's
@@ -217,8 +218,10 @@ function draw() {
   if (car) {
     const [x, y] = toScreen(car.x, car.y);
     const a = car.bearing * Math.PI / 180 + view.rot;  // clockwise from north
-    ctx.save(); ctx.translate(x, y); ctx.rotate(a);
-    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1f6feb'; ctx.lineWidth = 3;
+    // the car's own size when zoomed in, so it stays wider than the route line
+    const k = Math.max(1, CAR_LENGTH * view.scale / 23);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(k, k);
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1f6feb'; ctx.lineWidth = 3 / k;
     ctx.beginPath(); ctx.moveTo(0, -13); ctx.lineTo(9, 10); ctx.lineTo(0, 5); ctx.lineTo(-9, 10); ctx.closePath();
     ctx.stroke(); ctx.fill();
     ctx.restore();
