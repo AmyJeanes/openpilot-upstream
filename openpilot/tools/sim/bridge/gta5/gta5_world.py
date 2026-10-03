@@ -18,6 +18,8 @@ from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
+from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
+from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
 OP_WHEELBASE = 2.7
@@ -25,6 +27,12 @@ OP_STEER_RATIO = 15.38
 MIN_FRAME_SPACING = 0.040  # s
 DEBUG = bool(os.getenv("GTA5_DEBUG"))  # print commanded vs measured motion each second
 LOG = os.getenv("GTA5_LOG")  # a file to record the game state and the controls sent, a JSON line each, for analysis
+MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map view
+MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
+MAP_EVERY = 0.1  # s
+ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
+ROUTE_AHEAD, ROUTE_STEP = 500.0, 5.0  # m: the route nav gets, as the plugin sends GTA's
+CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
 NUDGE_TORQUE = 2000
@@ -101,6 +109,16 @@ class GTA5World(World):
     self.params.remove("NavDesire")  # a killed bridge can leave one
     self.nav = Nav(self._send, self._set_nav_desire)
     self.pull_away = PullAway(self._send)
+    self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
+    self.next_map = 0.0
+    self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
+    self.dest: np.ndarray | None = None
+    self.dest_from_game = False
+    self.game_waypoint: np.ndarray | None = None
+    self.route: Route | None = None
+    self.gps_route: list = []
+    if self.map_view:
+      print(f"gta5: map view on http://localhost:{MAP_PORT}/")
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
@@ -258,14 +276,55 @@ class GTA5World(World):
     self._update_indicator(simulator_state, state.get("indicator"), state["heading"], state["yawRate"])
     desire = self.sm['modelV2'].meta.desireState
     turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight]} if len(desire) > log.Desire.turnRight else {}
+    self.gps_route = state.get("route") or []
+    if self.navigator is not None:
+      route = self._map_route(state, bearing)
+      state = {**state, "route": route, "waypoint": self.dest.tolist() if self.dest is not None else None}
     simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
     if self.nav.blinker_gap:
       simulator_state.left_blinker = simulator_state.right_blinker = False
     if arrived:
       self.q.put(control_cmd_gen("cruise_cancel"))
+      self.dest = None
     self.pull_away.update(state, self.simulator_state.is_engaged)
     self._update_buttons(state)
+    self._update_map(state, bearing, v)
     simulator_state.valid = True
+
+  def _map_route(self, state: dict, bearing: float) -> list:
+    """Our route to the destination, in the form of the plugin's GTA route. The destination is whichever was set last
+    of the game map's waypoint and the map view's."""
+    pos = np.array(state["pos"][:2], dtype=float)
+    waypoint = np.array(state.get("waypoint") or (0.0, 0.0), dtype=float)
+    if waypoint.any():
+      if self.game_waypoint is None or np.hypot(*(waypoint - self.game_waypoint)) > 1.0:
+        self.dest, self.dest_from_game = waypoint, True
+      self.game_waypoint = waypoint
+    else:
+      self.game_waypoint = None
+      if self.dest_from_game and self.dest is not None and np.hypot(*(self.dest - pos)) > CANCELLED_FROM:
+        self.dest = None
+    if self.map_view is not None:
+      picked = self.map_view.take_destination()
+      if picked is not None:
+        self.dest, self.dest_from_game = (np.array(picked[0], dtype=float) if picked[0] else None), False
+    self.route = self.navigator.update(pos, bearing, self.dest, time.monotonic())
+    return [] if self.route is None else self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist()
+
+  def _update_map(self, state: dict, bearing: float, v: float):
+    now = time.monotonic()
+    if self.map_view is None or now < self.next_map:
+      return
+    self.next_map = now + MAP_EVERY
+    waypoint = state.get("waypoint")
+    speed = f"{v * 3.6:.0f} km/h" if self.metric else f"{v / 0.44704:.0f} mph"
+    self.map_view.update({
+      "t": now,
+      "car": {"x": state["pos"][0], "y": state["pos"][1], "bearing": bearing},
+      "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.ahead(self.route.length, 10.0).round(1).tolist()},
+      "waypoint": waypoint if waypoint and any(waypoint) else None,
+      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.simulator_state.is_engaged else ''}",
+    })
 
   def _set_nav_desire(self, desire: str):
     if desire:
@@ -342,6 +401,8 @@ class GTA5World(World):
     self._send({"type": "control", "active": False})
     if self.pinner is not None:
       self.pinner.terminate()
+    if self.map_view is not None:
+      self.map_view.close()
     self.exit_event.set()
     # the camera thread waits for each game frame, and none come once the game connection is gone; wake it so the bridge
     # process can exit, handing it a blank frame rather than the shared memory freed below

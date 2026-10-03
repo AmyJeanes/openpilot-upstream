@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>openpilot map</title>
+<style>
+  :root { --bg: #15171a; --panel: rgba(30, 33, 38, 0.88); --text: #e6e6e6; --muted: #9aa0a6; --accent: #3d8bfd; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #bar { position: fixed; top: 8px; left: 8px; right: 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; pointer-events: none; }
+  #bar > * { pointer-events: auto; }
+  button { background: var(--panel); color: var(--text); border: 1px solid #3a3f46; border-radius: 8px; padding: 8px 12px; font: inherit; }
+  button.on { border-color: var(--accent); color: #fff; background: #1f3b66; }
+  #info { background: var(--panel); border-radius: 8px; padding: 7px 10px; color: var(--muted); white-space: pre; }
+  #pick { position: fixed; display: none; transform: translate(-50%, -100%); margin-top: -10px; background: var(--accent); color: #fff; border: 0; font-weight: 600; }
+  #clear { display: none; }
+  #legend { position: fixed; bottom: 8px; left: 8px; background: var(--panel); border-radius: 8px; padding: 6px 10px; color: var(--muted); font-size: 12px; }
+  #legend i { display: inline-block; width: 18px; height: 4px; margin: 0 4px 2px 8px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<canvas id="map"></canvas>
+<div id="bar">
+  <button id="follow" class="on">Follow</button>
+  <button id="rotate">Heading up</button>
+  <button id="clear">Clear route</button>
+  <span id="info">loading roads…</span>
+</div>
+<button id="pick">Navigate here</button>
+<div id="legend"><i style="background:#3d8bfd"></i>route<i style="background:#ff5fd2"></i>game GPS</div>
+<script>
+// Draws roads.json (polylines in metres, x east, y north) with the car and routes from /state, polled.
+const canvas = document.getElementById('map');
+const ctx = canvas.getContext('2d');
+const info = document.getElementById('info');
+const STYLE = {  // per road class: colour, minimum width in px
+  motorway: ['#8a7440', 2.5], trunk: ['#8a7440', 2], primary: ['#9aa3ad', 1.6], secondary: ['#9aa3ad', 1.4],
+  tertiary: ['#858d96', 1.2], unclassified: ['#6f767e', 1], residential: ['#6f767e', 1], service: ['#4d535a', 0.8],
+  track: ['#5b4a36', 0.8],
+};
+const LANE_WIDTH = 3.2;  // m drawn per lane
+const CELL = 400;  // m: roads are kept in cells of this size, and only those on screen drawn
+const MIN_SCALE = { service: 0.25, track: 0.25, residential: 0.08, unclassified: 0.08 };  // px/m below which a class is left out
+const DELAY = 0.25;  // s the car is drawn behind its latest position, so it moves smoothly between updates
+let cells = new Map(), layerKeys = [], state = null, located = false, drawQueued = false;
+let samples = [], clockOffset = Infinity, car = null;  // car: where it's drawn now
+let view = { x: 0, y: 0, scale: 0.5, rot: 0 };  // centre in metres, px per metre, radians
+let follow = true, headingUp = false;
+
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+  requestDraw();
+}
+
+function toScreen(x, y) {
+  const dx = x - view.x, dy = y - view.y, c = Math.cos(view.rot), n = Math.sin(view.rot);
+  return [innerWidth / 2 + view.scale * (c * dx + n * dy), innerHeight / 2 + view.scale * (n * dx - c * dy)];
+}
+
+function toWorld(sx, sy) {
+  const dx = (sx - innerWidth / 2) / view.scale, dy = (sy - innerHeight / 2) / view.scale;
+  const c = Math.cos(view.rot), n = Math.sin(view.rot);
+  return [view.x + c * dx + n * dy, view.y + n * dx - c * dy];
+}
+
+function polyline(path, pts) {
+  path.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) path.lineTo(pts[i][0], pts[i][1]);
+}
+
+function requestDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => { drawQueued = false; draw(); });
+}
+
+function visibleCells() {
+  const r = Math.hypot(innerWidth, innerHeight) / 2 / view.scale;  // covers any rotation
+  const out = [];
+  for (let cx = Math.floor((view.x - r) / CELL); cx <= Math.floor((view.x + r) / CELL); cx++)
+    for (let cy = Math.floor((view.y - r) / CELL); cy <= Math.floor((view.y + r) / CELL); cy++) {
+      const cell = cells.get(cx + ',' + cy);
+      if (cell) out.push(cell);
+    }
+  return out;
+}
+
+function carNow() {
+  // interpolates the car's samples (by the server's clock) at a fixed delay behind the latest
+  if (!samples.length) return null;
+  const t = performance.now() / 1000 - clockOffset - DELAY;
+  let i = samples.length - 1;
+  while (i > 0 && samples[i - 1].t > t) i--;
+  const b = samples[i], a = samples[Math.max(0, i - 1)];
+  if (a === b || t >= b.t) return b;
+  if (t <= a.t) return a;
+  const k = (t - a.t) / (b.t - a.t), turn = ((b.bearing - a.bearing + 540) % 360) - 180;
+  return { x: a.x + k * (b.x - a.x), y: a.y + k * (b.y - a.y), bearing: a.bearing + k * turn };
+}
+
+function draw() {
+  car = carNow();
+  if (car) {
+    if (follow) { view.x = car.x; view.y = car.y; }
+    if (headingUp) view.rot = -car.bearing * Math.PI / 180;
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#15171a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const s = view.scale * devicePixelRatio, c = Math.cos(view.rot), n = Math.sin(view.rot);
+  ctx.setTransform(s * c, s * n, s * n, -s * c,
+    canvas.width / 2 - s * (c * view.x + n * view.y), canvas.height / 2 - s * (n * view.x - c * view.y));
+  const near = view.scale > 1;
+  ctx.lineCap = near ? 'round' : 'butt';
+  ctx.lineJoin = near ? 'round' : 'bevel';
+  const visible = visibleCells();
+  for (const l of layerKeys) {
+    if (view.scale < (MIN_SCALE[l.cls] || 0)) continue;
+    ctx.strokeStyle = l.colour;
+    ctx.lineWidth = Math.max(l.lanes * LANE_WIDTH, l.minPx * devicePixelRatio / s);
+    for (const cell of visible) { const p = cell.paths.get(l.key); if (p) ctx.stroke(p); }
+  }
+  if (view.scale > 0.8) {
+    ctx.fillStyle = '#d04040';
+    const r = Math.max(1.2, 2.5 / view.scale);
+    for (const cell of visible) for (const [x, y] of cell.signals) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
+  }
+  if (state) {
+    const routes = state.routes || {};
+    for (const [name, colour, width, dash] of [['gps', '#ff5fd2', 5, [10, 7]], ['nav', '#3d8bfd', 6, []]]) {
+      const pts = routes[name];
+      if (!pts || pts.length < 2) continue;
+      const p = new Path2D(); polyline(p, pts);
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = Math.max(width * devicePixelRatio / s, 2);
+      ctx.setLineDash(dash.map(d => d * devicePixelRatio / s));
+      ctx.stroke(p);
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  if (state && state.waypoint) {
+    const [x, y] = toScreen(...state.waypoint);
+    ctx.fillStyle = '#e04848';
+    ctx.beginPath(); ctx.arc(x, y - 14, 7, 0, 7); ctx.moveTo(x - 6, y - 11); ctx.lineTo(x, y); ctx.lineTo(x + 6, y - 11); ctx.fill();
+  }
+  if (car) {
+    const [x, y] = toScreen(car.x, car.y);
+    const a = car.bearing * Math.PI / 180 + view.rot;  // clockwise from north
+    ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1f6feb'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, -13); ctx.lineTo(9, 10); ctx.lineTo(0, 5); ctx.lineTo(-9, 10); ctx.closePath();
+    ctx.stroke(); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function cellAt(x, y) {
+  const key = Math.floor(x / CELL) + ',' + Math.floor(y / CELL);
+  if (!cells.has(key)) cells.set(key, { paths: new Map(), signals: [] });
+  return cells.get(key);
+}
+
+async function loadRoads() {
+  const roads = await (await fetch('roads.json')).json();
+  const kinds = new Map();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const w of roads.ways) {
+    const cls = roads.classes[w[0]], lanes = Math.min(w[1], 6), key = cls + ':' + lanes;
+    if (!kinds.has(key)) kinds.set(key, { key, cls, lanes, order: w[0] });
+    // each segment goes in the cell of its first point
+    let path = null, cell = null;
+    for (let i = 3; i + 3 < w.length; i += 2) {
+      const c = cellAt(w[i], w[i + 1]);
+      if (c !== cell) {
+        cell = c;
+        if (!cell.paths.has(key)) cell.paths.set(key, new Path2D());
+        path = cell.paths.get(key);
+        path.moveTo(w[i], w[i + 1]);
+      }
+      path.lineTo(w[i + 2], w[i + 3]);
+    }
+    for (let i = 3; i < w.length; i += 2) {
+      minX = Math.min(minX, w[i]); maxX = Math.max(maxX, w[i]);
+      minY = Math.min(minY, w[i + 1]); maxY = Math.max(maxY, w[i + 1]);
+    }
+  }
+  for (const [x, y] of roads.signals) cellAt(x, y).signals.push([x, y]);
+  // minor roads first, so main roads draw over them
+  layerKeys = [...kinds.values()].sort((a, b) => b.order - a.order || a.lanes - b.lanes)
+    .map(k => ({ ...k, colour: (STYLE[k.cls] || STYLE.residential)[0], minPx: (STYLE[k.cls] || STYLE.residential)[1] }));
+  if (!located) {
+    view.x = (minX + maxX) / 2; view.y = (minY + maxY) / 2;
+    view.scale = Math.min(innerWidth / (maxX - minX), innerHeight / (maxY - minY)) * 0.9;
+  }
+  info.textContent = `${roads.ways.length} roads`;
+  requestDraw();
+}
+
+async function poll() {
+  try {
+    const r = await fetch('state', { cache: 'no-store' });
+    state = await r.json();
+    if (state.car && state.t !== undefined) {
+      if (!located) { located = true; view.scale = 2; }
+      clockOffset = Math.min(clockOffset, performance.now() / 1000 - state.t);
+      if (!samples.length || state.t > samples[samples.length - 1].t) samples.push({ t: state.t, ...state.car });
+      if (samples.length > 20) samples.shift();
+    }
+    if (state.text) info.textContent = state.text;
+    document.getElementById('clear').style.display = state.waypoint ? 'inline-block' : 'none';
+    requestDraw();
+  } catch (e) {
+    info.textContent = 'no connection';
+  }
+  setTimeout(poll, 100);
+}
+
+// pan with one pointer, zoom with the wheel or two
+const pointers = new Map();
+let pinch = null;
+let tap = null;  // where a press started, while it could still be a tap
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  pinch = null;
+  tap = pointers.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
+  hidePick();
+});
+canvas.addEventListener('pointerup', e => {
+  pointers.delete(e.pointerId);
+  pinch = null;
+  if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 8 && performance.now() - tap.t < 500) showPick(e.clientX, e.clientY);
+  tap = null;
+});
+canvas.addEventListener('pointercancel', e => { pointers.delete(e.pointerId); pinch = null; });
+canvas.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) >= 8) tap = null;
+  if (pointers.size === 1 && !tap) {
+    const [x0, y0] = toWorld(...prev), [x1, y1] = toWorld(e.clientX, e.clientY);
+    view.x -= x1 - x0; view.y -= y1 - y0;
+    setFollow(false);
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinch) zoomAt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, d / pinch);
+    pinch = d;
+  }
+  requestDraw();
+});
+canvas.addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015)); requestDraw(); }, { passive: false });
+
+function zoomAt(sx, sy, k) {
+  const [wx, wy] = toWorld(sx, sy);
+  view.scale = Math.min(40, Math.max(0.02, view.scale * k));
+  if (follow) return;  // keep the car centred
+  const [wx2, wy2] = toWorld(sx, sy);
+  view.x += wx - wx2; view.y += wy - wy2;
+}
+
+// tap the map to navigate there
+const pick = document.getElementById('pick');
+let picked = null;
+function showPick(sx, sy) {
+  picked = toWorld(sx, sy);
+  pick.style.left = sx + 'px'; pick.style.top = sy + 'px'; pick.style.display = 'block';
+}
+function hidePick() { pick.style.display = 'none'; picked = null; }
+async function setDestination(body) {
+  await fetch('destination', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+pick.onclick = () => { if (picked) setDestination({ x: picked[0], y: picked[1] }); hidePick(); };
+document.getElementById('clear').onclick = () => setDestination({});
+
+function setFollow(on) { follow = on; document.getElementById('follow').classList.toggle('on', on); }
+document.getElementById('follow').onclick = () => {
+  setFollow(!follow);
+  if (follow && state && state.car) { view.x = state.car.x; view.y = state.car.y; requestDraw(); }
+};
+document.getElementById('rotate').onclick = e => {
+  headingUp = !headingUp;
+  e.target.classList.toggle('on', headingUp);
+  if (!headingUp) { view.rot = 0; requestDraw(); }
+};
+
+function animate() {
+  // follows the car every frame
+  if (follow && samples.length) draw();
+  requestAnimationFrame(animate);
+}
+
+addEventListener('resize', resize);
+resize();
+loadRoads();
+poll();
+animate();
+</script>
+</body>
+</html>

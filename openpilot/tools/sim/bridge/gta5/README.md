@@ -81,6 +81,9 @@ The model chooses where to turn and doesn't always: after a stop it can carry st
 and no turning to take it stops, so a turn is signalled only within 50 m of one. `GTA5_DEBUG=1` prints nav's decisions.
 `gta5_cmd.py waypoint x= y=` sets a waypoint (`off=1` clears it).
 
+With a map of the game's roads built ([map/README.md](map/README.md)), nav can route over it with a standard router
+instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a map view of the car and its route.
+
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
   car's windscreen bone, and at least 0.29 m below the roof, a Model 3's device height; else 1.22 m above the ground),
