@@ -46,6 +46,7 @@ MAP_VIEW = "http://localhost:8793"
 STATE_LOG = f"{HOME}/gta5test/bridge.jsonl"
 BRIDGE_LOG = f"{HOME}/gta5test/bridge.log"
 SVC = f"{HOME}/gta5test/svc.sh"
+MODEL_FILE = f"{HOME}/gta5test/model"
 OUT_DIR = f"{HOME}/gta5test/e2e"
 MODEL3 = "0x0040B009"  # Amy's Model 3 add-on
 
@@ -222,10 +223,11 @@ def spec_str(t) -> str:
 
 
 def parse_spec(s: str):
+  """'x,y,z,heading[,lane]>dx,dy': the trip, and its start lane or None."""
   a, b = s.split('>')
-  x, y, z, h = (float(v) for v in a.split(','))
+  start = [float(v) for v in a.split(',')]
   dx, dy = (float(v) for v in b.split(','))
-  return x, y, z, h, dx, dy
+  return (*start[:4], dx, dy), (int(start[4]) if len(start) > 4 else None)
 
 
 def pick_trips(m: Map, mode: str, n: int, seed: int) -> list[tuple]:
@@ -291,6 +293,15 @@ class Tail:
 def cmd(type_: str, **kw):
   with socket.create_connection(("127.0.0.1", DEBUG_PORT), timeout=2) as s:
     s.sendall((json.dumps({"type": type_, **kw}) + "\n").encode())
+
+
+def driving_model() -> str:
+  """The driving model svc.sh last started openpilot with (MODEL=...)."""
+  try:
+    with open(MODEL_FILE) as f:
+      return f.read().strip()
+  except OSError:
+    return 'big'
 
 
 def svc(action: str, what: str):
@@ -401,8 +412,9 @@ class Rig:
 # *** a trip ***
 
 class Trip:
-  def __init__(self, rig: Rig, roads: Map, trip_id: str, spec: tuple, args, trace_path: str):
+  def __init__(self, rig: Rig, roads: Map, trip_id: str, spec: tuple, args, trace_path: str, lane: int | None = None):
     self.rig, self.roads, self.id, self.spec, self.args = rig, roads, trip_id, spec, args
+    self.lane = args.lane if lane is None else lane
     self.snap_base = trace_path.removesuffix('.jsonl')
     self.trace = open(trace_path, 'w', buffering=1)
     self.history: deque = deque(maxlen=int(60 / TICK))
@@ -445,7 +457,7 @@ class Trip:
     cmd("world", hour=12, weather="EXTRASUNNY", freeze=1)
     cmd("traffic", on=int(self.args.traffic))
     cmd("lead", remove=1)
-    kw = {"x": x, "y": y, "z": z, "heading": h, "lane": self.args.lane, "fix": 1}
+    kw = {"x": x, "y": y, "z": z, "heading": h, "lane": self.lane, "fix": 1}
     if self.args.car and not getattr(self.args, 'car_spawned', False):
       kw["model"] = self.args.car
       self.args.car_spawned = True
@@ -464,7 +476,7 @@ class Trip:
     rig, (x, y, z, h, dx, dy) = self.rig, self.spec
     self.t0 = time.monotonic()
     rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': self.args.mode, 'car': self.args.car or 'current',
-           'traffic': int(self.args.traffic), 'lane': self.args.lane, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
+           'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
     problem = self.setup()
     if problem:
       return {**rec, 'outcome': 'setup', 'detail': problem}
@@ -587,6 +599,9 @@ class Trip:
       'damage': None if health0 is None else round(health0 - s.get('bodyHealth', health0)), 'end': {'pos': [round(v, 1) for v in s.get('pos', [0, 0, 0])], 'street': s.get('street'),
                                              'left': round(float(np.hypot(s['pos'][0] - dx, s['pos'][1] - dy)))},
       'reroutes': self.reroutes, 'maneuvers': self.maneuvers, 'events': self.events, 'snap': rec_snap,
+      # modeld's run time per frame (ms) and its dropped-frame percentage
+      'model_ms': [round(float(np.mean([p['mt'] for p in self.history])), 1), max(p['mt'] for p in self.history)] if self.history else None,
+      'frame_drop': max(p['drop'] for p in self.history) if self.history else None,
     })
     self.trace.close()
     return rec
@@ -606,7 +621,8 @@ class Trip:
          'bl': 'L' if cs.leftBlinker else 'R' if cs.rightBlinker else '', 'desire': nav_desire, 'street': s.get('street'),
          'pL': round(ds[1], 2) if len(ds) > 6 else None, 'pR': round(ds[2], 2) if len(ds) > 6 else None,
          'kL': round(ds[5], 2) if len(ds) > 6 else None, 'kR': round(ds[6], 2) if len(ds) > 6 else None,
-         'lc': str(md.laneChangeState), 'en': bool(ss.enabled), 'alert': ss.alertText1 or None}
+         'lc': str(md.laneChangeState), 'en': bool(ss.enabled), 'alert': ss.alertText1 or None,
+         'mt': round(self.rig.sm['modelV2'].modelExecutionTime * 1000, 1), 'drop': round(self.rig.sm['modelV2'].frameDropPerc, 1)}
     self.history.append(p)
     if now - self.last_trace >= TRACE_EVERY:
       self.last_trace = now
@@ -737,19 +753,29 @@ def load_results(paths) -> list[dict]:
 
 
 def cmd_run(args):
-  trips: list[tuple[str, tuple]] = []
+  trips: list[tuple[str, tuple, int | None]] = []
   roads = Map()
   if args.trip:
-    for k, t in enumerate(args.trip):
-      spec = parse_spec(t)
-      trips.append((f"trip-{hashlib.sha1(spec_str(spec).encode()).hexdigest()[:6]}", spec))
+    for t in args.trip:
+      spec, lane = parse_spec(t)
+      trips.append((f"trip-{hashlib.sha1(t.encode()).hexdigest()[:6]}", spec, lane))
+  elif args.trips:
+    for line in open(args.trips):
+      line = line.split('#')[0].split()
+      if len(line) == 2:  # id spec
+        trips.append((line[0], *parse_spec(line[1])))
   elif args.replay:
-    known = {r['id']: r['spec'] for r in load_results([])}
+    known = {r['id']: (r['spec'], r.get('lane')) for r in load_results([])}
     for rid in args.replay:
-      trips.append((f"{rid}-r{time.strftime('%H%M')}", parse_spec(known[rid])))
+      spec, lane = parse_spec(known[rid][0])
+      trips.append((f"{rid}-r{time.strftime('%H%M')}", spec, lane if lane is not None else known[rid][1]))
   else:
     picked = pick_trips(roads, args.mode, args.n, args.seed)
-    trips = [(f"{args.mode}{args.seed}-{k:02d}", t) for k, t in enumerate(picked)]
+    trips = [(f"{args.mode}{args.seed}-{k:02d}", t, None) for k, t in enumerate(picked)]
+  if args.reps > 1:
+    trips = [(f"{tid}-{r}", spec, lane) for r in range(args.reps) for tid, spec, lane in trips]
+  if args.tag:
+    trips = [(f"{tid}-{args.tag}", spec, lane) for tid, spec, lane in trips]
   out = args.out or os.path.join(OUT_DIR, f"{args.name or time.strftime('%m%d-%H%M')}.jsonl")
   os.makedirs(os.path.join(os.path.dirname(out), "traces"), exist_ok=True)
   rig = Rig()
@@ -757,7 +783,7 @@ def cmd_run(args):
   print(f"e2e: {len(trips)} trips -> {out}", flush=True)
   status_path = os.path.join(os.path.dirname(out), "status.json")
   counts: Counter = Counter()
-  for k, (tid, spec) in enumerate(trips):
+  for k, (tid, spec, lane) in enumerate(trips):
     for attempt in range(2):
       print(f"e2e: trip {k + 1}/{len(trips)} {tid} {spec_str(spec)}", flush=True)
       with open(status_path, 'w') as f:
@@ -766,7 +792,7 @@ def cmd_run(args):
         broken = rig.health()
         if broken:
           rig.recover(broken)
-        rec = Trip(rig, roads, tid, spec, args, os.path.join(os.path.dirname(out), "traces", f"{tid}.jsonl")).run()
+        rec = Trip(rig, roads, tid, spec, args, os.path.join(os.path.dirname(out), "traces", f"{tid}.jsonl"), lane).run()
       except (OSError, Infra) as e:
         rec = {'id': tid, 'spec': spec_str(spec), 'mode': args.mode, 'outcome': 'infra', 'detail': str(e)}
         try:
@@ -868,6 +894,9 @@ def main():
   r.add_argument('--seed', type=int, default=1)
   r.add_argument('--trip', action='append', help='x,y,z,heading>dx,dy')
   r.add_argument('--replay', action='append', help='a trip id from the results')
+  r.add_argument('--trips', help="a file of trips, a line each: id x,y,z,heading[,lane]>dx,dy")
+  r.add_argument('--reps', type=int, default=1, help='runs of each trip')
+  r.add_argument('--tag', default='', help='appended to trip ids, e.g. the model')
   r.add_argument('--out', help='results file (default ~/gta5test/e2e/<name>.jsonl)')
   r.add_argument('--name')
   r.add_argument('--car', default=MODEL3, help="model to spawn for the first trip ('' keeps the current car)")
