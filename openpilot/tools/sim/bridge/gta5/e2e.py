@@ -31,7 +31,11 @@ import types
 import urllib.request
 from collections import Counter, defaultdict, deque
 
-os.environ.setdefault("OPENPILOT_PREFIX", "gta5")
+# E2E_STACK=sunnypilot drives the sunnypilot port's stack (~/gta5test/spsvc.sh) instead; E2E_SVC, E2E_STATE_LOG,
+# E2E_BRIDGE_LOG and E2E_MODEL_FILE override its parts one by one
+STACK = os.getenv("E2E_STACK", "openpilot")
+_SP = STACK == "sunnypilot"
+os.environ.setdefault("OPENPILOT_PREFIX", "spgta5" if _SP else "gta5")
 
 import numpy as np
 
@@ -43,10 +47,12 @@ HOME = os.path.expanduser("~")
 MAP_DIR = os.getenv("GTA5_MAP", f"{HOME}/gta5map")
 VALHALLA = os.getenv("GTA5_ROUTER", "http://localhost:8002")
 MAP_VIEW = "http://localhost:8793"
-STATE_LOG = f"{HOME}/gta5test/bridge.jsonl"
-BRIDGE_LOG = f"{HOME}/gta5test/bridge.log"
-SVC = f"{HOME}/gta5test/svc.sh"
-MODEL_FILE = f"{HOME}/gta5test/model"
+_LOGS = f"{HOME}/gta5test/sp" if _SP else f"{HOME}/gta5test"
+STATE_LOG = os.getenv("E2E_STATE_LOG", f"{_LOGS}/bridge.jsonl")
+BRIDGE_LOG = os.getenv("E2E_BRIDGE_LOG", f"{_LOGS}/bridge.log")
+SVC = os.getenv("E2E_SVC", f"{HOME}/gta5test/{'spsvc.sh' if _SP else 'svc.sh'}")
+MODEL_FILE = os.getenv("E2E_MODEL_FILE", f"{_LOGS}/model")
+ENGAGEABLE_WAIT = 30.0  # s for openpilot to allow engaging after a teleport (locationd settling)
 OUT_DIR = f"{HOME}/gta5test/e2e"
 MODEL3 = "0x0040B009"  # Amy's Model 3 add-on
 
@@ -301,7 +307,7 @@ def driving_model() -> str:
     with open(MODEL_FILE) as f:
       return f.read().strip()
   except OSError:
-    return 'big'
+    return 'picked' if _SP else 'big'
 
 
 def svc(action: str, what: str):
@@ -388,7 +394,11 @@ class Rig:
       time.sleep(20)
       svc('restart', 'bridge')
     elif what == 'valhalla':
-      svc('restart', 'valhalla')
+      # other Valhalla instances share svc.sh's stop pattern: only wait for it, unless allowed to restart it
+      if os.getenv("E2E_RESTART_VALHALLA") == "1":
+        svc('restart', 'valhalla')
+      time.sleep(10)
+      return
     else:
       svc('restart', 'bridge')
     # the game reconnects to the bridge on its own; openpilot takes a while to come up
@@ -470,17 +480,24 @@ class Trip:
     if abs(angle_diff(rig.state['heading'], h)) > 45:
       return f"placed facing {rig.state['heading']:.0f}, not {h:.0f}"
     rig.wait(1.0)
+    # a teleport upsets locationd ("locationd Temporary Error"): wait until openpilot would engage
+    t = time.monotonic()
+    if not rig.wait(ENGAGEABLE_WAIT, lambda: rig.sm['selfdriveState'].engageable):
+      ss = rig.sm['selfdriveState']
+      return f"not engageable after {ENGAGEABLE_WAIT:.0f} s: {ss.alertText1} {ss.alertText2}".strip()
+    self.engageable_after = round(time.monotonic() - t, 1)
     return None
 
   def run(self) -> dict:
     rig, (x, y, z, h, dx, dy) = self.rig, self.spec
     self.t0 = time.monotonic()
     rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': self.args.mode, 'car': self.args.car or 'current',
-           'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
+           'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'stack': STACK, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
     problem = self.setup()
     if problem:
       return {**rec, 'outcome': 'setup', 'detail': problem}
     s = rig.state
+    rec['engageable_after'] = getattr(self, 'engageable_after', None)
     rec['start'] = {'pos': [round(v, 1) for v in s['pos']], 'heading': round(s['heading']), 'street': s.get('street'), 'lane': s.get('lane')}
     try:
       self.route = plan(s['pos'][0], s['pos'][1], s['heading'], dx, dy)
