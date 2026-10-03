@@ -642,6 +642,7 @@ class Trip:
     s = rig.state
     rec.update({
       'outcome': outcome, 'detail': detail, 'clean': outcome == 'arrived' and not self.reroutes and not self.nudges,
+      'oncoming_s': oncoming_seconds(self.history),
       'duration': round(time.monotonic() - self.t0, 1), 'distance': round(self.distance), 'nudges': self.nudges,
       'collisions': self.collisions,
       'damage': None if health0 is None else round(health0 - s.get('bodyHealth', health0)), 'end': {'pos': [round(v, 1) for v in s.get('pos', [0, 0, 0])], 'street': s.get('street'),
@@ -797,6 +798,22 @@ def results_files(paths):
   return paths or sorted(glob.glob(os.path.join(OUT_DIR, "*.jsonl")))
 
 
+ONCOMING_OK = 1.0  # s in the oncoming lanes a driver would let go (the lane reading flickers across junctions)
+
+
+def oncoming_seconds(hist: list[dict]) -> float:
+  """Time moving in the oncoming lanes."""
+  return round(sum(b['t'] - a['t'] for a, b in zip(hist, hist[1:], strict=False)
+                   if a['lane'] and a['lane'][0] < 0 and a['v'] > 1.0), 1)
+
+
+def safe(r: dict) -> bool:
+  """Arrived with nothing a driver would have taken over for: no collision, gas press or time in the oncoming lanes
+  (reroutes are fine). Results from before oncoming_s count a turn that went into the oncoming lanes."""
+  oncoming = r['oncoming_s'] >= ONCOMING_OK if 'oncoming_s' in r else any(m.get('oncoming') for m in r.get('maneuvers', []))
+  return r['outcome'] == 'arrived' and not r.get('collisions') and not r.get('nudges') and not oncoming
+
+
 def load_results(paths) -> list[dict]:
   out = []
   for p in results_files(paths):
@@ -916,6 +933,7 @@ def cmd_summary(args):
   for r in rs:
     by_mode[r.get('mode', '?')][r['outcome']] += 1
     by_mode[r.get('mode', '?')]['clean'] += bool(r.get('clean'))
+    by_mode[r.get('mode', '?')]['safe'] += safe(r)
   for mode, c in by_mode.items():
     print(f"  {mode}: " + ", ".join(f"{k} {v}" for k, v in c.most_common()))
   ms = [m for r in rs for m in r.get('maneuvers', []) if m.get('real')]
@@ -936,7 +954,7 @@ def cmd_summary(args):
   print(f"reroutes not near a maneuver: {len(elsewhere)}")
   print("failures:")
   for r in rs:
-    if r['outcome'] != 'arrived' or not r.get('clean'):
+    if r['outcome'] != 'arrived' or not r.get('clean') or not safe(r):
       miss = [f"{m['kind']}({','.join(tag_miss(m))})" for m in r.get('maneuvers', []) if m['result'] == 'missed']
       print(f"  {r['id']:16s} {r['outcome']:10s} {r.get('detail', '')[:40]:40s} rr={sum(not rr.get('repeat') for rr in r.get('reroutes', []))} "
             f"nudge={r.get('nudges', 0)} {' '.join(miss)}  [{r['spec']}]")
@@ -975,7 +993,7 @@ def cmd_sweepsum(args):
   by = defaultdict(list)
   for r in rs:
     by[r['variant']].append(r)
-  cols = [('variant', 16), ('trips', 5), ('arrived', 7), ('crash', 5), ('turns', 5), ('made', 5), ('lane ok', 7),
+  cols = [('variant', 16), ('trips', 5), ('arrived', 7), ('safe', 4), ('crash', 5), ('turns', 5), ('made', 5), ('lane ok', 7),
           ('oncoming', 8), ('hit', 4), ('stopped', 7), ('min v', 6), ('v in', 5), ('arc min', 7), ('arc mean', 8),
           ('v out', 5), ('turned', 6)]
   print(" ".join(f"{c:>{w}s}" if k else f"{c:{w}s}" for k, (c, w) in enumerate(cols)) + "  tune")
@@ -999,7 +1017,7 @@ def cmd_sweepsum(args):
       return f"{np.mean([x[key] for x in sp]):.1f}" if sp else '-'
     # how far the car turned, of the turn's angle: under 1 runs wide or misses, over 1 swings round
     ratio = [abs(m['speeds']['turned']) / abs(m['angle']) for m in turns if m.get('speeds') and m.get('angle')]
-    row = [name, len(group), outcomes['arrived'], outcomes['crash'] + outcomes['fell'], len(turns), pct(made), pct(lane_ok),
+    row = [name, len(group), outcomes['arrived'], sum(safe(r) for r in group), outcomes['crash'] + outcomes['fell'], len(turns), pct(made), pct(lane_ok),
            pct(oncoming), pct(hit), pct(stopped), f"{min_v:.1f}", mean('entry'), mean('arc_min'), mean('arc_mean'),
            mean('exit'), f"{np.mean(ratio):.2f}" if ratio else '-']
     print(" ".join(f"{str(v):>{w}s}" if k else f"{str(v):{w}s}" for k, (v, (_, w)) in enumerate(zip(row, cols, strict=True)))
