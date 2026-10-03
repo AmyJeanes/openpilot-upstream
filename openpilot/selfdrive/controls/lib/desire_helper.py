@@ -26,9 +26,9 @@ class NavDesire:
     self.value = ""
     self.t = 0.0
 
-  def get(self) -> str:
+  def get(self, fresh: bool = False) -> str:
     now = time.monotonic()
-    if now - self.t > NAV_READ_EVERY:
+    if fresh or now - self.t > NAV_READ_EVERY:
       self.value, self.t = self.params.get("NavDesire") or "", now
     return self.value
 
@@ -59,7 +59,8 @@ class DesireHelper:
   def update(self, carstate, lateral_active, lane_change_prob):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
-    nav = self.nav.get()
+    # read afresh as a blinker comes on, which means a turn or a lane change by it
+    nav = self.nav.get(one_blinker and not self.prev_one_blinker)
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN and nav != NAV_LANE_CHANGE
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:

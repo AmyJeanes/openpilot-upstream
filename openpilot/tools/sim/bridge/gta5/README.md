@@ -57,20 +57,39 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 ## Navigation
 Set a waypoint on the game's map while engaged and the car follows GTA's GPS route to it: the plugin sends the route (a
 point every 5 m for 500 m) and the bridge (`gta5_nav.py`) finds the turns in it, lowers the set speed to 12 mph for
-each (the car reports a lower cruise speed, as a car's own navigation would), and signals it, which below 19 mph asks
-the driving model for the turn. The model takes that request as a pulse when the blinker comes on, and forgets it at a
-long stop, so the bridge drops the blinker briefly for openpilot (not the car's lights) when the car pulls away again or
-the model stops expecting the turn. Near the waypoint it slows to a stop there and disengages.
+each (16 mph for a gentler one; the car reports a lower cruise speed, as a car's own navigation would), and signals
+it, which below 19 mph asks the driving model for the turn. The model takes that request as a pulse when the blinker
+comes on, and forgets it after several seconds and at a stop, so the bridge drops the blinker briefly for openpilot
+(not the car's lights) every 2.5 s until the turn starts, when the car pulls away again, or when the model stops
+expecting the turn. It slows gently (0.6 m/s^2, done 25 m before the turn), and for bends and ramps on the route to
+2 m/s^2 sideways (the Tesla's steering is limited to about 3). A turn is signalled 5 s before it (28-50 m): further out
+the model stops short of it. A turn straight after another is signalled as soon as the first is done.
+Near the waypoint it slows to a stop there and disengages.
 
-Before a turn, from 150 m to 40 m out, the car changes into the leftmost lane for a left turn or the rightmost for a
-right, and it moves back over if it drifts into the oncoming lanes. The plugin finds the car's lane from GTA's road
-nodes (lanes are 5.4 m wide, out from the median), and the bridge asks for the lane change through openpilot's
-`NavDesire` param, which makes the blinker mean a lane change at any speed rather than the turn it means below 19 mph.
+Before a turn the car changes into the leftmost lane for a left turn or the rightmost for a right, and it moves back
+over if it drifts into the oncoming lanes. Lane changes are planned back from the last place one may start (30 m before
+a turn), about 8 s each, and when there isn't room left the set speed comes down for it; a turn the car still isn't in
+the lane for is left for the route to come round again, as the model won't take it from the wrong lane anyway. The car's
+lane comes from GTA's roads along our route (map/README.md), else from the plugin's guess at the road it's on, and the
+bridge asks for the lane change through openpilot's `NavDesire` param, which makes the blinker mean a lane change at
+any speed rather than the turn it means below 19 mph: it is set 0.4 s before the blinker comes on and kept 0.5 s after
+it goes off, as openpilot reads it every 0.2 s (and afresh as a blinker comes on); no lane change starts while the car
+is still turning. On our routes nav also knows the forks: where a road splits, as at a freeway exit or where GTA splits
+a road's lanes before a junction, it moves into the lanes of the route's branch (planned the same way, and never out of
+the lanes for a fork or turn before it), and for a fork in the road, holds the model's keep desire towards that branch
+from 4 s before it to 40 m past, unless a turn the other way follows. Where a centre turn bay or slip lane opens for
+a turn (GTA's bays are short slip-lane links into the median), the car slows for the turn from there, changes into it
+from the lane beside it, and then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
+lane from the route counts only while the car heads along the route's link and agrees with the plugin's, if it has
+one. With the map's speed limits, engaging sets the limit where the car is, the set speed
+follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set speed alone), and a lower limit ahead
+slows the car before it. Routes avoid service roads (car parks, alleys, drives), which the model doesn't see as roads.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
 U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
 where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take
 rises, nav asks for the keep desire away from it (keepRight against a left turn), meant for forks, which holds it on
-the road. Like a turn, the model forgets it at a stop, so it's asked again as the car pulls away.
+the road; not for 60 m after a turn, as the model's expectation of the turn it took fades, nor on a one-lane road.
+Like a turn, the model forgets it at a stop, so it's asked again as the car pulls away.
 
 Stopped at a red light, the car pulls away by itself once it turns green, with a short press of the gas as a driver
 would give. The game's AI drivers know the lights: those waiting with the car at a red light (or queued behind one) all

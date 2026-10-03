@@ -19,6 +19,7 @@ from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
+from openpilot.tools.sim.bridge.gta5.map.paths import Paths
 from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
@@ -31,7 +32,9 @@ MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map 
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
 MAP_EVERY = 0.1  # s
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
-ROUTE_AHEAD, ROUTE_STEP = 500.0, 5.0  # m: the route nav gets, as the plugin sends GTA's
+ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
+ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugin's guess at the road it's on
+FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
@@ -112,6 +115,8 @@ class GTA5World(World):
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
     self.next_map = 0.0
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
+    if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
+      threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
     self.dest: np.ndarray | None = None
     self.dest_from_game = False
     self.game_waypoint: np.ndarray | None = None
@@ -277,11 +282,16 @@ class GTA5World(World):
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
     self._update_indicator(simulator_state, state.get("indicator"), state["heading"], state["yawRate"])
     desire = self.sm['modelV2'].meta.desireState
-    turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight]} if len(desire) > log.Desire.turnRight else {}
+    turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
+             "keepRight": desire[log.Desire.keepRight]} if len(desire) > log.Desire.keepRight else {}
     self.gps_route = state.get("route") or []
     if self.navigator is not None:
-      route = self._map_route(state, bearing)
-      state = {**state, "route": route, "waypoint": self.dest.tolist() if self.dest is not None else None}
+      state = self._map_route(state, bearing)
+      limits = state.get("limits")
+      known = bool(limits) and limits[0][0] == 0 and limits[0][1] > 0
+      if known:
+        simulator_state.speed_limit = limits[0][1]
+      simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
     simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
     self.cap = simulator_state.cruise_cap
     if self.nav.blinker_gap:
@@ -294,9 +304,17 @@ class GTA5World(World):
     self._update_map(state, bearing, v)
     simulator_state.valid = True
 
-  def _map_route(self, state: dict, bearing: float) -> list:
-    """Our route to the destination, in the form of the plugin's GTA route. The destination is whichever was set last
-    of the game map's waypoint and the map view's."""
+  def _load_paths(self, path: str):
+    try:
+      paths = Paths(path)
+      paths.index()
+      self.navigator.router.paths = paths
+    except (OSError, ValueError, KeyError) as e:
+      print(f"gta5: no road heights or lanes for routes: {e}")
+
+  def _map_route(self, state: dict, bearing: float) -> dict:
+    """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
+    map along it. The destination is whichever was set last of the game map's waypoint and the map view's."""
     pos = np.array(state["pos"][:2], dtype=float)
     waypoint = np.array(state.get("waypoint") or (0.0, 0.0), dtype=float)
     if waypoint.any():
@@ -311,10 +329,19 @@ class GTA5World(World):
       picked = self.map_view.take_destination()
       if picked is not None:
         self.dest, self.dest_from_game = (np.array(picked[0], dtype=float) if picked[0] else None), False
-    route = self.navigator.update(pos, bearing, self.dest, time.monotonic())
+    route = self.navigator.update(pos, bearing, self.dest, time.monotonic(), state["pos"][2])
     self.routes += route is not None and route is not self.route
     self.route = route
-    return [] if self.route is None else self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist()
+    state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": []}
+    if self.route is None:
+      return state
+    lane, plugin = self.route.lane() if self.route.off < ON_ROUTE else None, state.get("lane")
+    if lane and plugin and lane[0] != plugin[0]:
+      lane = None  # they disagree: no lane changes on either
+    elif not lane:
+      lane = plugin
+    return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
+            "lane": lane}
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
