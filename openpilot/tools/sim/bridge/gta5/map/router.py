@@ -68,6 +68,8 @@ class Route:
     self.forks: list[Fork] = []
     if paths is not None and n >= 2:
       self._add_paths(paths)
+    self.limit_list = [round(float(v), 2) for v in self.limits]
+    self.lane_counts = [link.lanes if link is not None else 0 for link in self.links]
 
   def _add_paths(self, paths: Paths):
     pts = self.points
@@ -207,8 +209,8 @@ class Route:
       "routeEnd": round(self.length - self.at, 1),
       "forks": [[round(f.along - self.at, 1), f.side, f.lanes, f.lanes_in, f.keep] for f in self.forks
                 if -FORK_BEHIND < f.along - self.at < distance],
-      "limits": self.changes([round(float(v), 2) for v in self.limits], distance),
-      "laneCounts": self.changes([link.lanes if link is not None else 0 for link in self.links], distance),
+      "limits": self.changes(self.limit_list, distance),
+      "laneCounts": self.changes(self.lane_counts, distance),
     }
 
 
