@@ -355,7 +355,7 @@ class GTA5World(World):
     self.map_view.update({
       "t": now,
       "car": {"x": state["pos"][0], "y": state["pos"][1], "bearing": bearing},
-      "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.ahead(self.route.length, 10.0).round(1).tolist()},
+      "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist()},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
       "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.simulator_state.is_engaged else ''}",
       "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),

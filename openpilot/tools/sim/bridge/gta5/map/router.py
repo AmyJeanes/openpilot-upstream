@@ -202,6 +202,11 @@ class Route:
     s = np.arange(self.at, min(self.at + distance, self.length) + 1e-6, step)
     return np.stack([np.interp(s, self.along, self.points[:, 0]), np.interp(s, self.along, self.points[:, 1])], axis=1)
 
+  def rest(self) -> np.ndarray:
+    """The route on from the car: its own points, so the shape holds still as the car moves (unlike ahead()'s)."""
+    here = [np.interp(self.at, self.along, self.points[:, 0]), np.interp(self.at, self.along, self.points[:, 1])]
+    return np.vstack([here, self.points[self.along > self.at]])
+
   def lane(self) -> list[int] | None:
     """The car's lane, as the plugin reports it: [i from the left, of n], i negative in the oncoming lanes. None where
     the car isn't heading along the route's link, as where the link jogs sideways between roads' lines."""
