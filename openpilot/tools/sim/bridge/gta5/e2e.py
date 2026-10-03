@@ -396,10 +396,13 @@ class Rig:
       return 'bridge'
     if now - max(self.sm.recv_time['selfdriveState'], 0) > STALE and self.sm.recv_frame['selfdriveState'] >= 0:
       return 'openpilot'
+    # modeld can stop alone (as after a bridge restart) while openpilot stays engaged: the car then just stops
+    if now - max(self.sm.recv_time['modelV2'], 0) > STALE and now - self.sm.recv_time['selfdriveState'] < 1.0:
+      return 'modeld'
     return None
 
   def recover(self, what: str):
-    if what == 'openpilot':
+    if what in ('openpilot', 'modeld'):
       svc('restart', 'openpilot')
       time.sleep(20)
       svc('restart', 'bridge')
@@ -414,7 +417,8 @@ class Rig:
     # the game reconnects to the bridge on its own; openpilot takes a while to come up
     self.sm = self.messaging.SubMaster(['selfdriveState', 'carState', 'modelV2'])
     ok = self.wait(120, lambda: time.monotonic() - self.state_t < 1.0 and self.sm.recv_frame['selfdriveState'] > 0
-                   and time.monotonic() - self.sm.recv_time['selfdriveState'] < 1.0)
+                   and time.monotonic() - self.sm.recv_time['selfdriveState'] < 1.0
+                   and time.monotonic() - self.sm.recv_time['modelV2'] < 1.0)
     print(f"e2e: recovered {what}: {ok}", flush=True)
     if not ok:
       raise Infra(f"{what} didn't come back")
