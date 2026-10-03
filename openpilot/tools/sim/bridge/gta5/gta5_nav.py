@@ -27,6 +27,13 @@ SIGNAL_TIME = 5.0  # s
 SIGNAL_DIST = 50.0  # m
 SIGNAL_MIN = 28.0  # m: signal anyway, if in the turn's lane, else leave it unless changing into it
 SIGNAL_LAST = 8.0  # m: signalling at the junction's entry, signal by here whatever the speed
+# How far the model turns depends on its speed in the turn: the turn's speed holds through the arc, until the car heads
+# its way out and is straight, and lifts gently after
+HOLD_RELEASE = 10.0  # deg from the way out
+HOLD_RELEASE_M = 40.0  # m past the turn's point, at the latest
+HOLD_RELEASE_ACCEL = 1.0  # m/s^2
+HOLD_ARC = 10.0  # deg turned: in the arc, for the speeds logged
+HOLD_DONE = 40.0  # m/s: lifted past anything
 SIGNAL_LAST_DIST = 26.0  # m: the last chance, while a lane change into the turn's lane finishes (the turn finder looks from MIN_AHEAD on)
 DONE_HEADING = 20.0  # deg from the turn's exit heading, straightened out
 DONE_YAW_RATE = 0.1  # rad/s
@@ -165,6 +172,12 @@ class Tune:
     "lane_change_fast_early": FAST_EARLY,  # s more above FAST m/s
     "lane_change_last": LANE_CHANGE_DIST,  # m before a turn
     "curve_accel": CURVE_ACCEL,  # m/s^2
+    # held from signalling a turn through its arc, until the car heads within turn_release deg of its way out and is
+    # straight, or is turn_release_m past it; then lifted at release_accel
+    "turn_hold_speed": 0.0,  # m/s, 0: the turn's approach speed
+    "turn_release": HOLD_RELEASE,  # deg
+    "turn_release_m": HOLD_RELEASE_M,  # m
+    "release_accel": HOLD_RELEASE_ACCEL,  # m/s^2
   }
   CHECK_EVERY = 1.0  # s
 
@@ -345,6 +358,7 @@ class Nav:
     self.was_engaged = False
     self.desire = ""  # what NavDesire is set to
     self.entry, self.entry_kind = 0.0, ""  # m to the junction entry of the turn ahead, and what it is
+    self.hold: dict | None = None  # the speed held through the turn signalled last, and the speeds through it
     self.turn: Turn | None = None  # the one being signaled
     self.cooldown_until = 0.0
     self.signaled: str | None = None
@@ -414,6 +428,7 @@ class Nav:
       self.route_end, self.dest = None, None
       self.skipped.clear()
       self.taken.clear()
+      self.hold = None
       return 0.0, False
     self._watch_change(indicator, now)
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
@@ -493,8 +508,8 @@ class Nav:
       if self.changing is not None and self.driven < self.bay_to:
         caps.append(BAY_SPEED)
       self._signal(turn, route, indicator, v, now, heading, bay)
+    caps.append(self._hold_cap(heading, yaw_rate, v, now))
     if self.turn is not None:
-      caps.append(self.turn.speed(t))
       if v < 0.3:
         self.stopped = True
       elif v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY:
@@ -515,6 +530,34 @@ class Nav:
       stop, arrived = self._arrive(v)
       return min(cap, stop) if cap else stop, arrived
     return cap, False
+
+  def _hold_cap(self, heading: float, yaw_rate: float, v: float, now: float) -> float:
+    """The turn's speed, held through its arc and lifted gently once the car is out of it (0 for none); logs the
+    speeds through the turn as it lifts."""
+    h = self.hold
+    if h is None:
+      return 0.0
+    t = self.tune
+    if h['entry_v'] is None and self.driven >= h['entry_at']:
+      h['entry_v'] = v
+    turned = abs(wrap(heading - h['heading']))
+    if h['released'] is None:
+      if turned > HOLD_ARC:
+        h['arc'].append(v)
+      straight = abs(wrap(heading - h['exit'])) < t.turn_release and abs(yaw_rate) < DONE_YAW_RATE
+      if straight and h['arc'] or self.driven > h['end_at']:
+        h['released'] = now
+        if DEBUG:
+          arc = h['arc'] or [v]
+          entry = "-" if h['entry_v'] is None else f"{h['entry_v']:.1f}"
+          speeds = f"entry {entry}, arc min {min(arc):.1f} mean {np.mean(arc):.1f}, exit {v:.1f} m/s"
+          print(f"nav: turn speeds {h['side']} {h['angle']:.0f} deg: {speeds}, turned {turned:.0f} deg, held {h['speed']:.1f}")
+      return h['speed']
+    cap = h['speed'] + t.release_accel * (now - h['released'])
+    if cap > HOLD_DONE:
+      self.hold = None
+      return 0.0
+    return cap
 
   def _turn_over(self, now: float):
     if self.turn_point is not None:
@@ -608,6 +651,10 @@ class Nav:
     if now < self.change_hold_until + PARAM_LEAD:
       return  # openpilot is to read NavDesire cleared before the blinker comes on for the turn
     self.turn, self.signaled, self.turn_from, self.shown = turn, turn.side, self.driven, False
+    t = self.tune
+    self.hold = {'side': turn.side, 'angle': turn.angle, 'exit': turn.exit_heading, 'heading': heading,
+                 'speed': t.turn_hold_speed or turn.speed(t), 'entry_at': self.driven + self.entry, 'entry_v': None,
+                 'end_at': self.driven + turn.dist + t.turn_release_m, 'arc': [], 'released': None}
     self.turn_point = self._point(route, turn.dist)
     self.signal_heading, self.repeat_t = heading, now
     if DEBUG:

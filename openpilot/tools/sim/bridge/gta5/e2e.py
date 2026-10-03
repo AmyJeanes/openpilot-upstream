@@ -101,6 +101,7 @@ MISSED_NEAR = 150.0  # m from the next maneuver when the car leaves the route: t
 REACHED = 35.0  # m: and the car came at least this near it
 DONE_PAST = 25.0  # m along the route past a maneuver, where the car must get to
 DONE_WITHIN = 15.0  # m of that point
+ARC_FROM = 10.0  # deg: in a turn's arc, from its heading before and the one after
 STALE = 5.0  # s without game state or openpilot messages: restart that service
 
 
@@ -780,6 +781,7 @@ class Trip:
       'oncoming': any(p['lane'] and p['lane'][0] < 0 for p in around),
       'end_lane': lanes_after[-1] if lanes_after else None,
       'collision': any(e['event'] == 'collision' and t0 - 5 <= e['t'] for e in self.events),
+      'speeds': turn_speeds(hist, t0),
     })
     tag = f"{m['kind']} {m['angle']}" + (f" -> {m['out'].get('names')}" if m.get('out') else '')
     print(f"  maneuver {i} {result}: {tag}, lane {at(-2)['lane']}, v {at(0)['v']}, signal {None if signal_t is None else round(signal_t, 1)}, stopped {stopped:.0f} s", flush=True)
@@ -936,13 +938,32 @@ def cmd_summary(args):
             f"nudge={r.get('nudges', 0)} {' '.join(miss)}  [{r['spec']}]")
 
 
+def turn_speeds(hist: list[dict], t0: float) -> dict | None:
+  """The speed through a turn passed at t0: entering its arc (turned 10 deg from 4 s before), the slowest and the mean
+  in it, leaving it (within 10 deg of the heading at the end of the history, up to 6 s after), and how far it turned."""
+  near = [p for p in hist if t0 - 6 <= p['t'] <= t0 + 6]
+  if len(near) < 3:
+    return None
+  h0 = min(near, key=lambda p: abs(p['t'] - (t0 - 4)))['h']
+  turned = [angle_diff(p['h'], h0) for p in near]
+  final = turned[-1]
+  arc = [k for k, a in enumerate(turned) if abs(a) > ARC_FROM and abs(a - final) > ARC_FROM]
+  if not arc:
+    return None
+  vs = [near[k]['v'] for k in arc]
+  after = next((near[k]['v'] for k in range(arc[-1] + 1, len(near))), near[arc[-1]]['v'])
+  return {'entry': near[arc[0]]['v'], 'arc_min': min(vs), 'arc_mean': round(float(np.mean(vs)), 2), 'exit': after,
+          'turned': round(final)}
+
+
 def turn_maneuver(m: dict) -> bool:
   return bool(m.get('real')) and m['type'] in (9, 10, 11, 14, 15, 16) and abs(m.get('angle') or 0) >= 45
 
 
 def cmd_sweepsum(args):
   """Per variant: trips and outcomes, and over its turns (45 deg or more) how many were made, ended in a lane of the
-  car's way, went into the oncoming lanes, hit something, stopped before the turn, and the slowest speed by it."""
+  car's way, went into the oncoming lanes, hit something, stopped before the turn, the slowest speed by it, the speeds
+  into, through and out of the arc, and how far the car turned of the turn's angle."""
   rs = [r for r in load_results(args.files) if r.get('variant') is not None]
   if not rs:
     print("no sweep results (trips with a variant)")
@@ -951,7 +972,8 @@ def cmd_sweepsum(args):
   for r in rs:
     by[r['variant']].append(r)
   cols = [('variant', 16), ('trips', 5), ('arrived', 7), ('crash', 5), ('turns', 5), ('made', 5), ('lane ok', 7),
-          ('oncoming', 8), ('hit', 4), ('stopped', 7), ('min v', 6)]
+          ('oncoming', 8), ('hit', 4), ('stopped', 7), ('min v', 6), ('v in', 5), ('arc min', 7), ('arc mean', 8),
+          ('v out', 5), ('turned', 6)]
   print(" ".join(f"{c:>{w}s}" if k else f"{c:{w}s}" for k, (c, w) in enumerate(cols)) + "  tune")
   for name, group in sorted(by.items()):
     turns = [m for r in group for m in r.get('maneuvers', []) if turn_maneuver(m)]
@@ -967,8 +989,15 @@ def cmd_sweepsum(args):
     speeds = [m['min_v'] for m in turns if m.get('min_v') is not None]
     min_v = float(np.mean(speeds)) if speeds else float('nan')
     outcomes = Counter(r['outcome'] for r in group)
+    sp = [m['speeds'] for m in turns if m.get('speeds')]
+
+    def mean(key, sp=sp):
+      return f"{np.mean([x[key] for x in sp]):.1f}" if sp else '-'
+    # how far the car turned, of the turn's angle: under 1 runs wide or misses, over 1 swings round
+    ratio = [abs(m['speeds']['turned']) / abs(m['angle']) for m in turns if m.get('speeds') and m.get('angle')]
     row = [name, len(group), outcomes['arrived'], outcomes['crash'] + outcomes['fell'], len(turns), pct(made), pct(lane_ok),
-           pct(oncoming), pct(hit), pct(stopped), f"{min_v:.1f}"]
+           pct(oncoming), pct(hit), pct(stopped), f"{min_v:.1f}", mean('entry'), mean('arc_min'), mean('arc_mean'),
+           mean('exit'), f"{np.mean(ratio):.2f}" if ratio else '-']
     print(" ".join(f"{str(v):>{w}s}" if k else f"{str(v):{w}s}" for k, (v, (_, w)) in enumerate(zip(row, cols, strict=True)))
           + "  " + json.dumps(group[0].get('tune')))
 

@@ -264,3 +264,23 @@ def test_signal_at_the_junction_entry():
       at = 120.0 - y
     y += d.v * 0.05
   assert at is not None and 12.0 < at < 14.5, at
+
+
+def test_turn_speed_held_through_the_arc():
+  # the turn's speed holds until the car heads its way out and is straight, not when the turn counts as done
+  route = route_to_turn(40.0, "left")
+  d = Drive((0, 1), v=5.0)
+  for k in range(60):
+    d.step(route, k * 0.25)
+  assert d.nav.signaled == "left"
+  ahead = [[-x, 40.0] for x in np.arange(0.0, 300.0, 5.0)]
+  caps = []
+  for h, yaw in [(hh, 0.5) for hh in np.linspace(0, 80, 30)] + [(80.0, 0.3)] * 5 + [(88.0, 0.02)] * 30:
+    d.clock.t += 0.1
+    cap, _ = d.nav.update({"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": yaw, "lane": [0, 1],
+                           "routeEnd": 500.0, "route": ahead}, True, d.indicator, {})
+    caps.append(cap)
+  held = d.nav.tune.turn_speed_square
+  assert d.nav.signaled is None  # done at 25 deg from the way out
+  assert all(abs(c - held) < 1e-6 for c in caps[:35])  # but held through the arc
+  assert caps[-1] > held + 1.0  # and lifted gently once straight
