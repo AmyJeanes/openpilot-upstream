@@ -54,6 +54,7 @@ EXIT_DONE = 25.0  # deg from the turn's way out: done, the blinker off, whatever
 EXIT_CUE = os.getenv("GTA5_EXIT_CUE", "1") != "0"
 EXIT_CUE_FOR = 2.0  # s at most
 EXIT_CUE_YAW = 0.15  # rad/s still turning
+ONCOMING_JUNCTION = 15.0  # m from a junction or stop-line node, inside which the lane reading follows GTA's diagonal links
 MIN_AHEAD = 20.0  # m: GTA's route starts with a jog from the car's lane to its road nodes, which isn't a turn
 MIN_AHEAD_MAP = 5.0  # m: our map's routes start at the car
 TURN_PAST = 8.0  # m past a turn, heading within TURN_PAST_HEADING of its way out: done, as for a turn straight after
@@ -180,6 +181,10 @@ class Tune:
     "turn_release": HOLD_RELEASE,  # deg
     "turn_release_m": HOLD_RELEASE_M,  # m
     "release_accel": HOLD_RELEASE_ACCEL,  # m/s^2
+    "exit_cue_right": False,  # keepRight out of a right turn too, which can end across the new road's centre line
+    # keepRight while the plugin reads the car in the oncoming lanes outside a junction, where the route's reading
+    # disagrees and nav has no lane to change back from
+    "oncoming_keep": False,
   }
   CHECK_EVERY = 1.0  # s
 
@@ -435,6 +440,10 @@ class Nav:
     self.one_way = False  # whether the road is one-way, as a keepLeft on a two-way road drifts into the oncoming lanes
     self.cue: str | None = None  # the keep desire held against swinging round past a turn's way out
     self.cue_until = 0.0
+    self.cue_hold = False  # held its time even once the car is straight
+    self.recover: str | None = None  # keepRight out of the oncoming lanes (oncoming_keep)
+    self.recover_t = 0.0
+    self.oncoming_since: float | None = None
     self.lane: tuple[int, int] | None = None  # the car's lane [i from the left, of n], once it has held LANE_STEADY
     self.lane_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
     self.lane_t = 0.0  # when the lane reading last held
@@ -484,6 +493,8 @@ class Nav:
     self.yaw = state.get("yawRate", 0.0)
     self.lane_frac, self.one_way = state.get("laneFrac"), state.get("twoWay") is False
     self._keep_right(v, now)
+    near = [d for d in (state.get("stops") or []) + (state.get("junctions") or []) if abs(d) < ONCOMING_JUNCTION]
+    self._oncoming_keep(state.get("lanePlugin"), bool(near), now)
     if not route:
       self._cancel(indicator)
       self.keeping, self.fork_keep = None, None
@@ -524,8 +535,12 @@ class Nav:
       out = along > self.turn.dist - TURN_WINDOW / 2 and off < EXIT_DONE
       done = out or along > self.turn.dist + TURN_PAST and off < TURN_PAST_HEADING and abs(yaw_rate) < DONE_YAW_RATE
       turning = yaw_rate if self.turn.side == "left" else -yaw_rate
+      if out and EXIT_CUE and self.turn.side == "right" and t.exit_cue_right:
+        self.cue, self.cue_until, self.cue_hold = "keepRight", now + EXIT_CUE_FOR, True
+        if DEBUG:
+          print("nav: keepRight out of the right turn")
       if out and EXIT_CUE and self.turn.side == "left" and turning > EXIT_CUE_YAW:
-        self.cue, self.cue_until = "keepRight", now + EXIT_CUE_FOR
+        self.cue, self.cue_until, self.cue_hold = "keepRight", now + EXIT_CUE_FOR, False
         if DEBUG:
           print(f"nav: keepRight as the car comes round past the left turn ({turning:.2f} rad/s)")
       if done or along > self.turn.dist + MISSED_BY:
@@ -815,9 +830,10 @@ class Nav:
   def _set_desire(self, now: float):
     """NavDesire: a lane change under way, else a keep desire; the model forgets a keep desire at a stop, as a turn, so
     it goes off briefly as the car pulls away to be seen again."""
-    if self.cue and (now > self.cue_until or abs(self.yaw) < TURNING):
+    if self.cue and (now > self.cue_until or abs(self.yaw) < TURNING and not self.cue_hold):
       self.cue = None
-    want = "laneChange" if self.changing is not None or now < self.change_hold_until else self.cue or self.fork_keep or self.keeping or ""
+    keep = self.cue or self.recover or self.fork_keep or self.keeping or ""
+    want = "laneChange" if self.changing is not None or now < self.change_hold_until else keep
     if want == "keepLeft" and not self.one_way:
       want = ""  # on a two-way road, towards the oncoming lanes
     if want.startswith("keep"):
@@ -841,6 +857,25 @@ class Nav:
     if (self.changing is None and self.turn is None and now - self.wrong_side_t > WRONG_SIDE_FOR and v > LANE_CHANGE_SPEED
         and now - self.change_t > LANE_CHANGE_GAP):
       self._start_change("right", f"out of oncoming lane {-lane[0]}")
+
+  def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float):
+    """keepRight while the plugin's own lane reading has held in the oncoming lanes (oncoming_keep): it's right outside
+    junctions, but nav has no lane, so no lane change back, where the route's reading disagrees."""
+    on = (self.tune.oncoming_keep and bool(plugin_lane) and plugin_lane[0] < 0 and not near_junction and self.turn is None
+          and not self.one_way and self.driven >= self.bay_to and self.v > 1.0)
+    if not on:
+      self.oncoming_since, self.recover = None, None
+      return
+    self.oncoming_since = self.oncoming_since or now
+    if now - self.oncoming_since < WRONG_SIDE_FOR:
+      return
+    if self.recover is None:
+      self.recover_t = now
+      if DEBUG:
+        print(f"nav: keepRight out of oncoming lane {-plugin_lane[0]}")
+    elif now - self.recover_t > self.tune.repulse_every:
+      self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
+    self.recover = "keepRight"
 
   def _start_change(self, side: str, why: str):
     self.changing, self.change_shown, self.change_t = side, False, time.monotonic()

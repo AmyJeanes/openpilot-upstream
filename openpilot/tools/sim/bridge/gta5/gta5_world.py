@@ -345,7 +345,7 @@ class GTA5World(World):
     elif not lane:
       lane = plugin
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
-            "lane": lane, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
+            "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
