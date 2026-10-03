@@ -30,6 +30,8 @@ LIMITS = {
 CITY_Y = 1300.0  # m: Los Santos is south of this
 BLIP = 60.0  # m: a change of limit shorter than this along a road is dropped
 FOLLOWS = 60.0  # deg: a link follows on from another if it turns less than this
+RAMP = 1500.0  # m: a ramp or connector is no longer than this
+LANES_APART = 20.0  # m: GTA draws a freeway's lanes as links side by side, joined by lane changes
 OVERPASS_DZ = 4.0  # m: roads crossing with this much height between them are on different levels
 
 
@@ -225,6 +227,109 @@ def overpasses(xyz, segs):
   return sorted(found)
 
 
+def ramps(nodes, ways, length, streets):
+  """Freeway ramps and connectors, which GTA doesn't mark: one-way links that branch off a freeway (or a highway) and
+  reach an ordinary road, or join a freeway other than the one they left, within RAMP. Links that branch off and come
+  back into the road they left are lanes of it. `ways` is [(a, b, two_way, class, name)], `streets` the street names
+  by street hash; returns {way index: (highway tag, destination)}."""
+  def heading(p, q):
+    return math.degrees(math.atan2(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y']))
+  def turn(h0, h1):
+    return abs((h1 - h0 + 180) % 360 - 180)
+  def main(i):
+    return ways[i][3] in ('motorway', 'trunk')
+  moves = []  # directed (way index, from, to, heading)
+  for i, (a, b, two_way, _, _) in enumerate(ways):
+    moves.append((i, a, b, heading(a, b)))
+    if two_way:
+      moves.append((i, b, a, heading(b, a)))
+  leave, arrive = defaultdict(list), defaultdict(list)
+  for m in moves:
+    leave[m[1]].append(m)
+    arrive[m[2]].append(m)
+  def on(m, forward):  # the moves on from m (or back)
+    return leave[m[2]] if forward else arrive[m[1]]
+  def end(m, forward):
+    return m[2] if forward else m[1]
+
+  def road(m, forward):
+    """The ways along the road from m, going straight on, for 2 RAMP."""
+    out, total = set(), 0.0
+    while m and total < 2 * RAMP:
+      out.add(m[0])
+      total += length[m[0]]
+      m = min(((turn(m[3], n[3]), n) for n in on(m, forward) if main(n[0]) and n[0] != m[0] and n[0] not in out), default=(180, None))
+      m = m[1] if m[0] < 60 else None
+    return out
+
+  def beside(i, along):
+    """Whether way i is part of the road `along` (ways), a lane alongside it or a lane change."""
+    def near(k):
+      p = nodes[k]
+      for j in along:
+        c, d = nodes[ways[j][0]], nodes[ways[j][1]]
+        dx, dy = d['x'] - c['x'], d['y'] - c['y']
+        t = min(max(((p['x'] - c['x']) * dx + (p['y'] - c['y']) * dy) / max(dx * dx + dy * dy, 1e-9), 0.0), 1.0)
+        if math.hypot(c['x'] + t * dx - p['x'], c['y'] + t * dy - p['y']) < LANES_APART and \
+           abs(c['z'] + t * (d['z'] - c['z']) - p['z']) < OVERPASS_DZ:
+          return True
+      return False
+    return i in along or (near(ways[i][0]) and near(ways[i][1]))
+
+  def walk(m0, forward):
+    """Follows one-way links from m0: (its links, the ordinary roads reached, the main roads joined), or None if longer
+    than RAMP."""
+    chain, roads, joins, stack, total = {m0[0]}, set(), set(), [m0], length[m0[0]]
+    while stack:
+      m = stack.pop()
+      k = end(m, forward)
+      if not nodes[k]['f'][2] & 64:  # off the highway
+        roads.update(streets.get(nodes[q]['st'], '') for n in leave[k] + arrive[k] if n[0] not in chain
+                     for q in n[1:3] if not nodes[q]['f'][2] & 64)
+        continue
+      if any(n[0] not in chain and main(n[0]) for n in (arrive[k] if forward else leave[k])):
+        joins.update(n[0] for n in on(m, forward) if n[0] not in chain)
+        continue
+      for n in on(m, forward):
+        if n[0] in chain:
+          continue
+        if ways[n[0]][2]:  # a two-way road
+          (joins if main(n[0]) else roads).add(n[0] if main(n[0]) else ways[n[0]][4] or '')
+          continue
+        chain.add(n[0])
+        total += length[n[0]]
+        if total > RAMP:
+          return None
+        stack.append(n)
+    return chain, roads, joins
+
+  out = {}
+  for k in list(leave):
+    for forward in (True, False):
+      ins, outs = (arrive[k], leave[k]) if forward else (leave[k], arrive[k])
+      for m_in in (m for m in ins if main(m[0])):
+        ahead = [m for m in outs if m[0] != m_in[0] and turn(m_in[3], m[3]) < 90]
+        straight = min((m for m in ahead if main(m[0])), key=lambda m: turn(m_in[3], m[3]), default=None)
+        branches = [m for m in ahead if m is not straight and not ways[m[0]][2]]
+        if not straight or not branches:
+          continue
+        along = road(straight, forward)
+        for m in branches:
+          w = walk(m, forward)
+          if not w:
+            continue
+          chain, roads, joins = w
+          other = {i for i in joins if not beside(i, along)}
+          if not roads and not other:
+            continue  # a lane of the road it left
+          left = {ways[i][4] for i in along}
+          dest = sorted(r for r in roads if r and r not in left) or sorted({ways[i][4] for i in other if ways[i][4]} - left)
+          for i in chain:
+            if i not in out or forward:
+              out[i] = (ways[m_in[0]][3] + '_link', '; '.join(dest[:2]) if forward else '')
+  return out
+
+
 def write_sidecar(path, nodes, used, ways):
   """The roads as arrays for the bridge's map matching (game metres): nodes x, y, z and the links between them.
   `ways` is [(way id, a, b, fwd lanes, back lanes, class, limit, name)]."""
@@ -233,7 +338,7 @@ def write_sidecar(path, nodes, used, ways):
   xyz = np.array([(nodes[k]['x'], nodes[k]['y'], nodes[k]['z']) for k in used], dtype=np.float32)
   segs = np.array([(index[a], index[b]) for _, a, b, *_ in ways], dtype=np.int32)
   d = xyz[segs[:, 1]] - xyz[segs[:, 0]]
-  classes = list(LIMITS)
+  classes = list(LIMITS) + ['motorway_link', 'trunk_link']
   names = sorted({w[7] for w in ways if w[7]})
   name_index = {n: i for i, n in enumerate(names)}
   cross = overpasses(xyz, segs)
@@ -353,6 +458,12 @@ def main():
   limits = blip_limits(nodes, links, street_limits(groups, length), length)
   for row, limit in zip(info, limits, strict=True):
     row[6] = limit
+  destination = {}
+  for i, (tag, dest) in ramps(nodes, [(a, b, bool(back), cls, name) for _, a, b, _, back, cls, _, name, _ in info], length,
+                              streets).items():
+    info[i][5] = tag
+    if dest:
+      destination[info[i][0]] = dest
   ways = []
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
     ways.append((wid, a, b, bool(back)))
@@ -361,8 +472,10 @@ def main():
       tags['lanes:forward'], tags['lanes:backward'] = str(fwd), str(back)
     else:
       tags['oneway'] = 'yes'
-    if name:
+    if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
+    if wid in destination:
+      tags['destination'] = destination[wid]
     if lf[1] & 2:
       tags['gta:narrow'] = 'yes'
     if lf[2] & 1:
