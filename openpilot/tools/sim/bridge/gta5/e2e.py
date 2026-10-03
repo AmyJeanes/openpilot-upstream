@@ -619,6 +619,7 @@ class Trip:
       # modeld's run time per frame (ms) and its dropped-frame percentage
       'model_ms': [round(float(np.mean([p['mt'] for p in self.history])), 1), max(p['mt'] for p in self.history)] if self.history else None,
       'frame_drop': max(p['drop'] for p in self.history) if self.history else None,
+      'nav_log': [[round(t - self.t0, 1), line] for t, line in rig.nav_lines if t >= self.t0 - 10],
     })
     self.trace.close()
     return rec
