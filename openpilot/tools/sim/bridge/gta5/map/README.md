@@ -45,6 +45,12 @@ link) and the forks in it.
 - Ways carry the lanes each way (`lanes:forward` / `lanes:backward`, `oneway`) and street names. Road classes are
   guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
   and alleys (nodes switched off for traffic, or without GPS), track off-road.
+- Ramps are `motorway_link` (`trunk_link` off a highway), so the router gives exits ("Take the exit on the right toward
+  Popular St"). GTA doesn't mark them: a ramp is a run of one-way links that branches off a freeway and, within 1.5 km,
+  reaches an ordinary road or joins another freeway. Runs that come back into the road they left (within 20 m of it and
+  at its height) are its lanes: GTA draws a freeway's lanes as links side by side, with lane changes between them. Ramps
+  carry no name (named for their freeway they'd read as staying on it) and, where it's known, `destination`: the street
+  an off-ramp reaches or the freeway a connector joins. Where two freeways split, both stay freeways (keep left/right).
 - Speed limits (`maxspeed`, mph) come from the road class and the speed class GTA gives each node (slow, normal, fast,
   faster), by the table in `ynd_to_osm.py`'s `LIMITS`. Nearly all the city is "normal", so the road class sets it there:
   30 with one lane each way, 40 with two or more (and on country roads), 20 in car parks and alleys, 15 where it's slow
