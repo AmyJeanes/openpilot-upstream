@@ -136,6 +136,7 @@ function carNow(dt) {
 
 const TRIM_SEARCH = 80;  // m along a route's start to look for where the car is on it
 const TRIM_NEAR = 15;  // m: a route further from the car than this is left whole
+const LEAD_IN = 30, LEAD_STEP = 3;  // m over which the route eases from the arrow to the road's line, in steps of
 
 function fromCar(pts, c) {
   // the route on from the point nearest where the car is drawn, so it starts under the arrow
@@ -148,7 +149,22 @@ function fromCar(pts, c) {
     if (!best || d < best.d) best = { d, i, p: [px, py] };
     along += Math.sqrt(len2);
   }
-  return best && best.d < TRIM_NEAR ? [best.p, ...pts.slice(best.i + 1)] : pts;
+  if (!best || best.d >= TRIM_NEAR) return pts;
+  // the route is the road's line and the car is in its lane beside it: lead in from the arrow, easing over
+  const base = [best.p, ...pts.slice(best.i + 1)], ox = c.x - best.p[0], oy = c.y - best.p[1];
+  const out = [];
+  let s = 0, i = 0;
+  for (; i < base.length && s < LEAD_IN; i++) {
+    const [ax, ay] = base[i];
+    const next = base[i + 1], seg = next ? Math.hypot(next[0] - ax, next[1] - ay) : 0;
+    for (let d = 0; d < seg || d === 0; d += LEAD_STEP) {  // a point every few metres along it, to curve smoothly
+      const f = seg ? Math.min(d / seg, 1) : 0, k = Math.max(0, 1 - (s + d) / LEAD_IN), w = k * k * (3 - 2 * k);
+      out.push([ax + (next ? next[0] - ax : 0) * f + ox * w, ay + (next ? next[1] - ay : 0) * f + oy * w]);
+      if (s + d >= LEAD_IN || !seg) break;
+    }
+    s += seg;
+  }
+  return out.concat(base.slice(i));
 }
 
 function draw() {
