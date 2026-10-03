@@ -456,6 +456,8 @@ class Trip:
     self.stopped_t: float | None = None
     self.last_trace = 0.0
     self.collisions = 0
+    self.oncoming_s = self.oncoming_max = 0.0  # time moving in the oncoming lanes, and the longest stretch
+    self.oncoming_run, self.oncoming_snapped, self.oncoming_snaps = 0.0, False, 0
     self.route_t = 0.0  # when the route being followed was made (trip time)
     self.alert = ''
 
@@ -642,7 +644,7 @@ class Trip:
     s = rig.state
     rec.update({
       'outcome': outcome, 'detail': detail, 'clean': outcome == 'arrived' and not self.reroutes and not self.nudges,
-      'oncoming_s': oncoming_seconds(self.history),
+      'oncoming_s': round(self.oncoming_s, 1), 'oncoming_max': round(self.oncoming_max, 1),
       'duration': round(time.monotonic() - self.t0, 1), 'distance': round(self.distance), 'nudges': self.nudges,
       'collisions': self.collisions,
       'damage': None if health0 is None else round(health0 - s.get('bodyHealth', health0)), 'end': {'pos': [round(v, 1) for v in s.get('pos', [0, 0, 0])], 'street': s.get('street'),
@@ -673,7 +675,18 @@ class Trip:
          'kL': round(ds[5], 2) if len(ds) > 6 else None, 'kR': round(ds[6], 2) if len(ds) > 6 else None,
          'lc': str(md.laneChangeState), 'en': bool(ss.enabled), 'alert': ss.alertText1 or None,
          'mt': round(self.rig.sm['modelV2'].modelExecutionTime * 1000, 1), 'drop': round(self.rig.sm['modelV2'].frameDropPerc, 1)}
+    prev = self.history[-1] if self.history else None
     self.history.append(p)
+    if prev is not None and prev['lane'] and prev['lane'][0] < 0 and prev['v'] > 1.0:
+      self.oncoming_s += p['t'] - prev['t']
+      self.oncoming_run += p['t'] - prev['t']
+      self.oncoming_max = max(self.oncoming_max, self.oncoming_run)
+      if self.oncoming_run >= ONCOMING_OK and not self.oncoming_snapped and self.oncoming_snaps < ONCOMING_SNAPS:
+        # frames to check the lane reading by
+        self.oncoming_snapped, self.oncoming_snaps = True, self.oncoming_snaps + 1
+        self.event('oncoming', lane=prev['lane'], street=p['street'], v=p['v'], snap=self.snap(f"onc{self.oncoming_snaps}"))
+    elif not (p['lane'] and p['lane'][0] < 0):
+      self.oncoming_run, self.oncoming_snapped = 0.0, False
     if now - self.last_trace >= TRACE_EVERY:
       self.last_trace = now
       self.trace.write(json.dumps(p) + "\n")
@@ -799,18 +812,13 @@ def results_files(paths):
 
 
 ONCOMING_OK = 1.0  # s in the oncoming lanes a driver would let go (the lane reading flickers across junctions)
-
-
-def oncoming_seconds(hist: list[dict]) -> float:
-  """Time moving in the oncoming lanes."""
-  return round(sum(b['t'] - a['t'] for a, b in zip(hist, hist[1:], strict=False)
-                   if a['lane'] and a['lane'][0] < 0 and a['v'] > 1.0), 1)
+ONCOMING_SNAPS = 3  # frames saved per trip, as the car has been in the oncoming lanes that long
 
 
 def safe(r: dict) -> bool:
   """Arrived with nothing a driver would have taken over for: no collision, gas press or time in the oncoming lanes
   (reroutes are fine). Results from before oncoming_s count a turn that went into the oncoming lanes."""
-  oncoming = r['oncoming_s'] >= ONCOMING_OK if 'oncoming_s' in r else any(m.get('oncoming') for m in r.get('maneuvers', []))
+  oncoming = r['oncoming_max'] >= ONCOMING_OK if 'oncoming_max' in r else any(m.get('oncoming') for m in r.get('maneuvers', []))
   return r['outcome'] == 'arrived' and not r.get('collisions') and not r.get('nudges') and not oncoming
 
 
