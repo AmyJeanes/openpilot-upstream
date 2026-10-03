@@ -152,7 +152,8 @@ class ModelState:
 
     self.prev_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     self.chestnut = chestnut
-    self.big = chestnut or pkl_path == LOCAL_BIG_PKL
+    # the big models carry spatial features (32x512 per frame) in their history
+    self.big = chestnut or pkl_path == LOCAL_BIG_PKL or self.input_shapes['state_feat_q'][0][-1] > ModelConstants.FEATURE_LEN
 
     stride, y_height, uv_height, _ = get_nv12_info(cam_w, cam_h)
     self.frame_copy_size = stride * (y_height + uv_height)
@@ -283,6 +284,9 @@ def main(demo=False):
     loader.join(BIG_MODEL_TIMEOUT)
     model = big_model
     params.put_bool("ChestnutActive", model is not None)
+  elif os.getenv("MODELD_PKL"):
+    # any driving model compiled for MODELD_DEV with queues in the ONNX (e.g. one from sunnypilot's model list)
+    model = ModelState(vipc_client_main.width, vipc_client_main.height, False, Path(os.environ["MODELD_PKL"]))
   elif os.getenv("MODELD_BIG", "0") == "1":
     model = ModelState(vipc_client_main.width, vipc_client_main.height, False, LOCAL_BIG_PKL)
 
