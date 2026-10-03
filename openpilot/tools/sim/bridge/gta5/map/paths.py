@@ -14,6 +14,8 @@ CAR_HEIGHT = 0.6  # m: the car's position is this far above the road's nodes
 CELL = 20.0  # m
 PED_SPECIALS = {14, 18}
 SLIP_LANE, LEFT_TURN_ONLY = 1, 128  # node flags 1 and 4
+STOP_LINES = {15, 16}  # specials: a traffic light's stop line, a stop junction's
+JUNCTION = 4  # node flags 2
 
 
 def wrap(deg: float) -> float:
@@ -79,6 +81,12 @@ class Paths:
     for i, (x, y) in enumerate(self.xy):
       self.exact[(round(x), round(y))].append(i)
     self.cells: dict[tuple[int, int], set[tuple[int, int]]] | None = None
+
+  def stop_line(self, i: int) -> bool:
+    return (self.flags[i][1] >> 3) in STOP_LINES
+
+  def junction(self, i: int) -> bool:
+    return bool(self.flags[i][2] & JUNCTION)
 
   def ped(self, i: int) -> bool:
     return (self.flags[i][1] >> 3) in PED_SPECIALS

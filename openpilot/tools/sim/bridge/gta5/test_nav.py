@@ -217,3 +217,50 @@ def test_turn_done_at_its_way_out_without_repulse():
     d.nav.update(state, True, d.indicator, {"left": 1.0 if k < 30 else 0.05})
   assert d.nav.signaled is None and d.nav.repeat_t == repeats
   assert d.nav.cue == "keepRight"
+
+
+def test_junction_entry():
+  from openpilot.tools.sim.bridge.gta5.gta5_nav import junction_entry
+  assert junction_entry(100.0, [30.0, 85.0], [100.0]) == (85.0, "stop line")
+  assert junction_entry(100.0, [], [65.0, 82.0, 92.0, 100.0]) == (82.0, "junction")  # back while the nodes are close
+  assert junction_entry(100.0, [], [100.0]) == (85.0, "default")
+
+
+def test_tune_reloads(tmp_path=None):
+  import json as _json
+  import os as _os
+  import tempfile
+  from openpilot.tools.sim.bridge.gta5.gta5_nav import Tune
+  path = _os.path.join(tmp_path or tempfile.mkdtemp(), "tune.json")
+  t = Tune(path)
+  assert t.signal_mode == "time" and t.changed() == {}
+  with open(path, "w") as f:
+    _json.dump({"signal_mode": "entry", "turn_speed_square": 4.0, "nonsense": 1}, f)
+  assert t.refresh(10.0) and t.signal_mode == "entry" and t.turn_speed_square == 4.0
+  assert t.changed() == {"signal_mode": "entry", "turn_speed_square": 4.0}
+  assert not t.refresh(10.5)  # checked at most every second
+  _os.utime(path, (1, 1))
+  with open(path, "w") as f:
+    _json.dump({}, f)
+  assert t.refresh(12.0) and t.changed() == {}
+
+
+def test_signal_at_the_junction_entry():
+  # signal_mode entry: the blinker comes on as the car passes the stop line (15 m before the turn's node), not 5 s out
+  import os as _os
+  import tempfile
+  import json as _json
+  from openpilot.tools.sim.bridge.gta5.gta5_nav import Tune
+  path = _os.path.join(tempfile.mkdtemp(), "tune.json")
+  with open(path, "w") as f:
+    _json.dump({"signal_mode": "entry", "signal_entry_offset": 1.0}, f)
+  route = route_to_turn(120.0)
+  d = Drive((1, 2), v=5.0)
+  d.nav.tune = Tune(path)
+  y, at = 0.0, None
+  while y < 118.0 and at is None:
+    d.step(route, y, {"stops": [105.0 - y], "junctions": [120.0 - y], "routeEnd": 300.0 - y})
+    if d.nav.signaled:
+      at = 120.0 - y
+    y += d.v * 0.05
+  assert at is not None and 12.0 < at < 14.5, at

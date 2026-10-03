@@ -18,6 +18,7 @@ OTHER_LEVEL = 3.0  # m above or below the route: the car is on another road, pas
 WRONG_WAY = 100.0  # deg from the route's direction: the car isn't driving that part of it
 FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
 LANE_ALIGN = 10.0  # deg
+JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
 
 
 def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float]]:
@@ -71,6 +72,8 @@ class Route:
     self.links: list[Link | None] = [None] * max(n - 1, 0)
     self.limits = limits if limits is not None else np.zeros(max(n - 1, 0))  # m/s per segment, 0 unknown
     self.forks: list[Fork] = []
+    self.stops: list[float] = []  # m along the route to stop lines (traffic lights' and stop junctions')
+    self.junctions: list[float] = []  # and to junction nodes
     if paths is not None and n >= 2:
       self._add_paths(paths)
     self.limit_list = [round(float(v), 2) for v in self.limits]
@@ -79,6 +82,12 @@ class Route:
   def _add_paths(self, paths: Paths):
     pts = self.points
     nodes = paths.route_nodes(pts)
+    for k, i in enumerate(nodes):
+      if i is not None and 0 < k < len(pts) - 1:
+        if paths.stop_line(i):
+          self.stops.append(float(self.along[k]))
+        if paths.junction(i):
+          self.junctions.append(float(self.along[k]))
     # the route starts and ends part way along a link: the node before its start and after its end
     if nodes[0] is None and nodes[1] is not None:
       nodes[0] = self._link_end(paths, nodes[1], pts[1] - pts[0], before=True)
@@ -233,6 +242,8 @@ class Route:
                 if -FORK_BEHIND < f.along - self.at < distance],
       "limits": self.changes(self.limit_list, distance),
       "laneCounts": self.changes(self.lane_counts, distance),
+      "stops": [round(a - self.at, 1) for a in self.stops if -JUNCTION_BEHIND < a - self.at < distance],
+      "junctions": [round(a - self.at, 1) for a in self.junctions if -JUNCTION_BEHIND < a - self.at < distance],
     }
 
 

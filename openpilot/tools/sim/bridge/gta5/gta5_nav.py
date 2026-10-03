@@ -1,6 +1,7 @@
 """Navigation: drives the GPS route to the game map's waypoint, as a driver would with openpilot's lane turn desire. It
 moves into the lane for each turn and fork on the route, slows for it, signals it, and stops at the waypoint. PullAway
 pulls away from a light once it turns green."""
+import json
 import math
 import os
 import time
@@ -25,6 +26,7 @@ LOOKAHEAD = 250.0  # m, turns further on don't cap the speed yet
 SIGNAL_TIME = 5.0  # s
 SIGNAL_DIST = 50.0  # m
 SIGNAL_MIN = 28.0  # m: signal anyway, if in the turn's lane, else leave it unless changing into it
+SIGNAL_LAST = 8.0  # m: signalling at the junction's entry, signal by here whatever the speed
 SIGNAL_LAST_DIST = 26.0  # m: the last chance, while a lane change into the turn's lane finishes (the turn finder looks from MIN_AHEAD on)
 DONE_HEADING = 20.0  # deg from the turn's exit heading, straightened out
 DONE_YAW_RATE = 0.1  # rad/s
@@ -124,10 +126,89 @@ GO_GAS = 0.5  # s
 GO_EVERY = 3.0  # s
 GO_TRIES = 3
 GO_CLEAR = 15.0  # m: a vehicle nearer ahead leads the car away
+# A turn's junction entry: GTA's stop line (11-22 m before the turn's node in the junction), else its junction nodes
+ENTRY_STOP_BEFORE = 50.0  # m before the turn
+ENTRY_JUNCTION_BEFORE = 40.0  # m
+ENTRY_GAP = 15.0  # m between a junction's nodes
+ENTRY_PAST = 3.0  # m past the turn's point, a junction node of it
+ENTRY_MIN = 5.0  # m before the turn: nearer, the junction nodes say nothing more than the turn
+ENTRY_DEFAULT = 15.0  # m before the turn
 
 
 def wrap(deg: float) -> float:
   return (deg + 180) % 360 - 180
+
+
+class Tune:
+  """Nav's turn parameters, from a JSON file (GTA5_NAVTUNE) read again whenever it changes, so a test harness can sweep
+  them without restarting the bridge; the defaults are those above. Keys left out keep their defaults."""
+  DEFAULTS = {
+    "turn_speed_soft": SOFT_TURN_SPEED,  # m/s for a turn of TURN_ANGLE, between it and a square turn by angle
+    "turn_speed_square": TURN_SPEED,  # m/s for a square turn
+    "turn_speed_sharp": TURN_SPEED,  # m/s beyond sharp_angle
+    "sharp_angle": 110.0,  # deg
+    "slow_decel": SLOW_DECEL,  # m/s^2
+    "slow_from": LOOKAHEAD,  # m before a turn the slowing for it may start
+    "slow_done": TURN_SLOW_BY,  # m before slow_ref the car is down to the turn's speed
+    "slow_ref": "turn",  # "turn" (its node, in the junction) or "entry" (the junction's entry: the stop line)
+    "signal_mode": "time",  # "time": SIGNAL_TIME ahead; "entry": at signal_entry_offset from the junction's entry
+    "signal_time": SIGNAL_TIME,  # s
+    "signal_min": SIGNAL_MIN,  # m
+    "signal_max": SIGNAL_DIST,  # m
+    "signal_entry_offset": 0.0,  # m past the junction's entry (negative before it)
+    "repulse_every": PULSE_EVERY,  # s
+    "repulse_until_turned": TURN_STARTED,  # deg
+    "repulse_after_stop_until": STOP_REPEAT_TURNED,  # deg
+    "repulse_below_prob": REPEAT_BELOW,
+    "lane_change_time": LANE_CHANGE_TIME,  # s each
+    "lane_change_early": LANE_CHANGE_EARLY,  # s
+    "lane_change_fast_early": FAST_EARLY,  # s more above FAST m/s
+    "lane_change_last": LANE_CHANGE_DIST,  # m before a turn
+    "curve_accel": CURVE_ACCEL,  # m/s^2
+  }
+  CHECK_EVERY = 1.0  # s
+
+  def __init__(self, path: str | None = None):
+    self.path = path if path is not None else os.getenv("GTA5_NAVTUNE")
+    self.values = dict(self.DEFAULTS)
+    self.mtime: float | None = None
+    self.next_check = 0.0
+    self.refresh(0.0)
+
+  def __getattr__(self, key):
+    try:
+      return self.__dict__["values"][key]
+    except KeyError:
+      raise AttributeError(key) from None
+
+  def refresh(self, now: float) -> bool:
+    """Reads the file again if it changed; returns whether it did."""
+    if not self.path or now < self.next_check:
+      return False
+    self.next_check = now + self.CHECK_EVERY
+    try:
+      mtime = os.path.getmtime(self.path)
+      if mtime == self.mtime:
+        return False
+      with open(self.path) as f:
+        given = json.load(f)
+    except (OSError, ValueError) as e:
+      if self.mtime is not None or os.path.exists(self.path):
+        print(f"nav: tune {self.path}: {e}")
+      self.mtime = None
+      return False
+    self.mtime = mtime
+    unknown = sorted(set(given) - set(self.DEFAULTS))
+    if unknown:
+      print(f"nav: tune ignores {unknown}")
+    self.values = {**self.DEFAULTS, **{k: v for k, v in given.items() if k in self.DEFAULTS}}
+    return True
+
+  def changed(self) -> dict:
+    return {k: v for k, v in self.values.items() if v != self.DEFAULTS[k]}
+
+
+TUNE = Tune("")  # the defaults
 
 
 class Turn:
@@ -137,9 +218,11 @@ class Turn:
     self.exit_heading = exit_heading  # game heading (deg counterclockwise from north) after the turn
     self.angle = angle  # deg turned
 
-  @property
-  def speed(self) -> float:
-    return float(np.interp(self.angle, [TURN_ANGLE, 90.0], [SOFT_TURN_SPEED, TURN_SPEED]))
+  def speed(self, tune: Tune | None = None) -> float:
+    t = tune or TUNE
+    if self.angle > t.sharp_angle:
+      return t.turn_speed_sharp
+    return float(np.interp(self.angle, [TURN_ANGLE, 90.0], [t.turn_speed_soft, t.turn_speed_square]))
 
   def lanes(self, n: int) -> tuple[int, int]:
     """The lanes (from the left) of n to take it from."""
@@ -202,7 +285,7 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
   return None
 
 
-def curve_cap(route: np.ndarray, v: float) -> float:
+def curve_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> float:
   """The speed now that leaves room to slow for the bends ahead, 0 for none. A bend's curvature is its heading change
   over CURVE_WINDOW m, but no more than over twice or four times the window: GTA's lanes jog sideways through junctions
   and where a freeway splits, turning one way and back, which isn't a bend."""
@@ -220,8 +303,9 @@ def curve_cap(route: np.ndarray, v: float) -> float:
     return np.abs(np.interp(b, mids, h) - np.interp(a, mids, h))
   curvature = np.minimum.reduce([turned(s - k * w, s + k * w) for k in (1, 2, 4)]) / CURVE_WINDOW
   # the turns themselves have their own speed
-  speed = np.maximum(np.sqrt(CURVE_ACCEL / np.maximum(curvature, 1e-4)), TURN_SPEED)
-  return float(np.min(np.sqrt(speed ** 2 + 2 * SLOW_DECEL * np.maximum(s - w - v * SLOW_LAG, 0.0))))
+  t = tune or TUNE
+  speed = np.maximum(np.sqrt(t.curve_accel / np.maximum(curvature, 1e-4)), t.turn_speed_square)
+  return float(np.min(np.sqrt(speed ** 2 + 2 * t.slow_decel * np.maximum(s - w - v * SLOW_LAG, 0.0))))
 
 
 def limit_cap(limits: list, v: float) -> float:
@@ -231,15 +315,36 @@ def limit_cap(limits: list, v: float) -> float:
   return min(caps) if caps else 0.0
 
 
-def slow_for(speed: float, dist: float, v: float) -> float:
-  return math.sqrt(speed ** 2 + 2 * SLOW_DECEL * max(0.0, dist - v * SLOW_LAG))
+def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> float:
+  return math.sqrt(speed ** 2 + 2 * decel * max(0.0, dist - v * SLOW_LAG))
+
+
+def junction_entry(turn_dist: float, stops: list, junctions: list) -> tuple[float, str]:
+  """Where the car enters a turn's junction (m ahead, from the same point as turn_dist): its stop line within
+  ENTRY_STOP_BEFORE m before the turn, else the first of the junction's nodes leading up to it, else ENTRY_DEFAULT m
+  before it; and which of those it is."""
+  before = [d for d in stops if turn_dist - ENTRY_STOP_BEFORE < d <= turn_dist]
+  if before:
+    return max(before), "stop line"
+  run = sorted((d for d in junctions if turn_dist - ENTRY_JUNCTION_BEFORE < d <= turn_dist + ENTRY_PAST), reverse=True)
+  first = None
+  for d in run:  # back from the turn while the nodes stay close together
+    if first is not None and first - d > ENTRY_GAP:
+      break
+    first = d
+  if first is not None and first < turn_dist - ENTRY_MIN:
+    return first, "junction"
+  return turn_dist - ENTRY_DEFAULT, "default"
 
 
 class Nav:
-  def __init__(self, send, set_desire):
+  def __init__(self, send, set_desire, tune: Tune | None = None):
     self.send = send  # to the plugin
     self.set_desire = set_desire  # openpilot's NavDesire
+    self.tune = tune or Tune()
+    self.was_engaged = False
     self.desire = ""  # what NavDesire is set to
+    self.entry, self.entry_kind = 0.0, ""  # m to the junction entry of the turn ahead, and what it is
     self.turn: Turn | None = None  # the one being signaled
     self.cooldown_until = 0.0
     self.signaled: str | None = None
@@ -290,6 +395,10 @@ class Nav:
     """Returns the cruise cap (m/s, 0 for none) and whether to disengage, having arrived. `desire` is the model's
     probability of each turn ("left", "right") and keep ("keepLeft", "keepRight")."""
     now = time.monotonic()
+    if self.tune.refresh(now) or engaged and not self.was_engaged:
+      print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
+    self.was_engaged = engaged
+    t = self.tune
     v = self.v = state.get("vEgo", 0.0)
     step = v * min(now - self.last_t, 0.1)
     self.last_t = now
@@ -374,24 +483,27 @@ class Nav:
       turn = None
     forks = self._forks(state.get("forks"), route, turn)
     caps = [self._change_lane(forks + ([turn] if turn is not None else []), route, v, now)]
-    if turn is not None and turn.dist < LOOKAHEAD:
+    if turn is not None:
+      self.entry, self.entry_kind = junction_entry(turn.dist, state.get("stops") or [], state.get("junctions") or [])
+    if turn is not None and turn.dist < t.slow_from:
       bay = self._bay(forks, turn)
-      caps.append(slow_for(turn.speed, turn.dist - max(TURN_SLOW_BY, bay + BAY_SIGNAL), v))
+      ref = self.entry if t.slow_ref == "entry" else turn.dist
+      caps.append(slow_for(turn.speed(t), min(ref - t.slow_done, turn.dist - bay - BAY_SIGNAL), v, t.slow_decel))
       self._enter_bay(turn, bay, v, now)
       if self.changing is not None and self.driven < self.bay_to:
         caps.append(BAY_SPEED)
       self._signal(turn, route, indicator, v, now, heading, bay)
     if self.turn is not None:
-      caps.append(self.turn.speed)
+      caps.append(self.turn.speed(t))
       if v < 0.3:
         self.stopped = True
       elif v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY:
         turned = abs(wrap(heading - self.signal_heading))
-        fading = desire.get(self.turn.side, 1.0) < REPEAT_BELOW or now - self.repeat_t > PULSE_EVERY
-        if turned < TURN_STARTED and fading or self.stopped and turned < STOP_REPEAT_TURNED:
+        fading = desire.get(self.turn.side, 1.0) < t.repulse_below_prob or now - self.repeat_t > t.repulse_every
+        if turned < t.repulse_until_turned and fading or self.stopped and turned < t.repulse_after_stop_until:
           self.repeat_t = now
         self.stopped = False
-    caps.append(curve_cap(route, v))
+    caps.append(curve_cap(route, v, t))
     caps.append(limit_cap(state.get("limits") or [], v))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
     self._keep_straight(turn, desire, v, now)
@@ -467,16 +579,23 @@ class Nav:
 
   def _signal(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, heading: float, bay: float):
     """Signals the turn once near and slow enough, from its lane; one that can't be taken from the car's lane is left."""
+    t = self.tune
     slow = v < 19 * CV.MPH_TO_MS and self.changing is None
-    window = max(SIGNAL_MIN, min(SIGNAL_DIST, v * SIGNAL_TIME), bay + BAY_SIGNAL)
-    if not (turn.dist < SIGNAL_MIN or (turn.dist < window and slow)):
-      return
+    if t.signal_mode == "entry" and self.min_ahead == MIN_AHEAD_MAP:
+      # at the junction's entry, as a driver does (too early, the model takes it for a lane change or turns short)
+      due = self.entry <= -t.signal_entry_offset or turn.dist < SIGNAL_LAST
+      if not (due and (slow or turn.dist < SIGNAL_LAST)):
+        return
+    else:
+      window = max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
+      if not (turn.dist < t.signal_min or (turn.dist < window and slow)):
+        return
     if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
       return  # into the turn bay first
     if self.lane is not None and self.lane[0] >= 0:
       lo, hi = turn.lanes(self.lane[1])
       if not lo <= self.lane[0] <= hi:
-        if turn.dist > LANE_CHANGE_DIST or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
+        if turn.dist > t.lane_change_last or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
           return  # a lane change towards it may still come or finish
         if self._sure_wrong(lo, hi):
           self._end_change(indicator)
@@ -493,7 +612,8 @@ class Nav:
     self.signal_heading, self.repeat_t = heading, now
     if DEBUG:
       lane = f"lane {self.lane} at {self.lane_frac}"
-      print(f"nav: signal {turn.side} in {turn.dist:.0f} m, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
+      entry = f"{self.entry_kind} in {self.entry:.0f} m"
+      print(f"nav: signal {turn.side} in {turn.dist:.0f} m, {entry}, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
     self.send({"type": "setIndicator", "side": turn.side})
 
   def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):
@@ -538,13 +658,13 @@ class Nav:
     i, n = self.lane
     changes = lo - i if i < lo else i - hi
     fork = isinstance(m, Fork)
-    last = max(FORK_LAST_DIST, FORK_LAST * v) if fork else LANE_CHANGE_DIST
+    last = max(FORK_LAST_DIST, FORK_LAST * v) if fork else self.tune.lane_change_last
     where = self._point(route, max(m.dist, 0.0))
     key = (fork, round(float(where[0])), round(float(where[1])))
     if self.change_tries.get(key, 0) >= LANE_CHANGE_TRIES:
       return 0.0  # the model won't: there's no lane there
     room = m.dist - last
-    need = changes * LANE_CHANGE_TIME
+    need = changes * self.tune.lane_change_time
     if fork and room < 0 and self.changing is None:
       if not self._sure_wrong(lo, hi):
         return 0.0
@@ -552,7 +672,7 @@ class Nav:
       self.skip_turns_to = self.driven + m.dist + FORK_TURN
       return 0.0
     cap = max(FORK_MIN_SPEED if fork else LANE_CHANGE_MIN_SPEED, room / need) if room < need * v else 0.0
-    early = LANE_CHANGE_EARLY + (FAST_EARLY if v > FAST else 0.0)
+    early = self.tune.lane_change_early + (self.tune.lane_change_fast_early if v > FAST else 0.0)
     if (self.changing is None and room > 0 and room < (need + early) * max(v, LANE_CHANGE_MIN_SPEED)
         and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING):
       if self.change_from == self.lane:
@@ -576,7 +696,7 @@ class Nav:
       if DEBUG and want:
         print(f"nav: {want} for the fork in {self.fork_keep_to - self.driven - FORK_KEEP_PAST:.0f} m")
       self.fork_keep, self.fork_keep_t = want, now
-    elif want and v > 1.0 and now - self.fork_keep_t > PULSE_EVERY and self.driven < self.fork_keep_to - FORK_KEEP_PAST:
+    elif want and v > 1.0 and now - self.fork_keep_t > self.tune.repulse_every and self.driven < self.fork_keep_to - FORK_KEEP_PAST:
       self.fork_keep_t, self.keep_gap_until = now, now + KEEP_GAP
 
   def _keep_straight(self, turn: Turn | None, desire: dict[str, float], v: float, now: float):
@@ -595,7 +715,7 @@ class Nav:
       return
     if self.driven - self.keep_from > KEEP_FOR and max(desire.get("left", 0.0), desire.get("right", 0.0)) < KEEP_UNTIL:
       self.keeping = None
-    elif self.fork_keep is None and v > 1.0 and now - self.keep_t > PULSE_EVERY:
+    elif self.fork_keep is None and v > 1.0 and now - self.keep_t > self.tune.repulse_every:
       self.keep_t, self.keep_gap_until = now, now + KEEP_GAP
 
   def _set_desire(self, now: float):
