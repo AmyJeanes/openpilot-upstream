@@ -57,6 +57,7 @@ class SimulatorState:
     self.right_blinker = False
 
     self.speed_limit: float = 0  # m/s, 0 if unknown
+    self.speed_limit_follow = False  # whether the set speed follows the speed limit as it changes, as from a map
     self.cruise_cap: float = 0  # m/s, a lower cruise speed the car asks for, as for a turn on its route; 0 for none
 
   @property

@@ -34,6 +34,7 @@ MAP_EVERY = 0.1  # s
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
 ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
 ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugin's guess at the road it's on
+FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
@@ -287,8 +288,10 @@ class GTA5World(World):
     if self.navigator is not None:
       state = self._map_route(state, bearing)
       limits = state.get("limits")
-      if limits and limits[0][0] == 0 and limits[0][1] > 0:
+      known = bool(limits) and limits[0][0] == 0 and limits[0][1] > 0
+      if known:
         simulator_state.speed_limit = limits[0][1]
+      simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
     simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
     self.cap = simulator_state.cruise_cap
     if self.nav.blinker_gap:

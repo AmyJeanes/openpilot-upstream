@@ -38,6 +38,7 @@ class SimulatedTesla:
     self.metric = self.params.get_bool("IsMetric")
     self.cruise_enabled = False
     self.set_speed = 0.0  # m/s, 0 until first set
+    self.limit = 0.0  # the speed limit last seen
     self.presses: deque[tuple[int, int]] = deque()
 
   def press(self, button: int, step: int = 1):
@@ -48,6 +49,10 @@ class SimulatedTesla:
     unit = CV.KPH_TO_MS if self.metric else CV.MPH_TO_MS
     while self.presses:
       self.handle_press(*self.presses.popleft(), simulator_state, unit)
+    limit = simulator_state.speed_limit
+    if simulator_state.speed_limit_follow and self.cruise_enabled and limit and limit != self.limit:
+      self.set_speed = max(round(limit / unit) * unit, MIN_SET_SPEED)
+    self.limit = limit
     if simulator_state.user_brake > 0 or self.sm['carControl'].cruiseControl.cancel:
       self.cruise_enabled = False
 

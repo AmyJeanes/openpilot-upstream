@@ -73,8 +73,9 @@ bridge asks for the lane change through openpilot's `NavDesire` param, which mak
 any speed rather than the turn it means below 19 mph. On our routes nav also knows the forks: where a road splits, as at
 a freeway exit or where GTA splits a road's lanes before a junction, it moves into the lanes of the route's branch
 (planned the same way, and never out of the lanes for a fork or turn before it), and for a fork in the road, holds the
-model's keep desire towards that branch from 4 s before it to 40 m past. A lower speed limit ahead on the map slows the
-car before it.
+model's keep desire towards that branch from 4 s before it to 40 m past. With the map's speed limits, engaging sets
+the limit where the car is, the set speed follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set
+speed alone), and a lower limit ahead slows the car before it.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
 U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
 where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take
