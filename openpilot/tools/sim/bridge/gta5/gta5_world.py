@@ -19,6 +19,7 @@ from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
+from openpilot.tools.sim.bridge.gta5.map.paths import Paths
 from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
@@ -112,6 +113,8 @@ class GTA5World(World):
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
     self.next_map = 0.0
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
+    if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
+      threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
     self.dest: np.ndarray | None = None
     self.dest_from_game = False
     self.game_waypoint: np.ndarray | None = None
@@ -294,6 +297,14 @@ class GTA5World(World):
     self._update_map(state, bearing, v)
     simulator_state.valid = True
 
+  def _load_paths(self, path: str):
+    try:
+      paths = Paths(path)
+      paths.index()
+      self.navigator.router.paths = paths
+    except (OSError, ValueError, KeyError) as e:
+      print(f"gta5: no road heights or lanes for routes: {e}")
+
   def _map_route(self, state: dict, bearing: float) -> list:
     """Our route to the destination, in the form of the plugin's GTA route. The destination is whichever was set last
     of the game map's waypoint and the map view's."""
@@ -311,7 +322,7 @@ class GTA5World(World):
       picked = self.map_view.take_destination()
       if picked is not None:
         self.dest, self.dest_from_game = (np.array(picked[0], dtype=float) if picked[0] else None), False
-    route = self.navigator.update(pos, bearing, self.dest, time.monotonic())
+    route = self.navigator.update(pos, bearing, self.dest, time.monotonic(), state["pos"][2])
     self.routes += route is not None and route is not self.route
     self.route = route
     return [] if self.route is None else self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist()
