@@ -31,6 +31,7 @@ LOG = os.getenv("GTA5_LOG")  # a file to record the game state and the controls 
 MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map view
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
 MAP_EVERY = 0.1  # s
+LANE_LINE_EVERY = 0.5  # s
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
 ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
 ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugin's guess at the road it's on
@@ -114,6 +115,7 @@ class GTA5World(World):
     self.pull_away = PullAway(self._send)
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
     self.next_map = 0.0
+    self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
     if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
       threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
@@ -365,12 +367,15 @@ class GTA5World(World):
 
   def _lane_line(self, state: dict, v: float) -> list:
     """The route in the lanes nav aims for, for the map."""
-    r = self.route
+    r, now = self.route, time.monotonic()
     if r is None:
       return []
+    if r is self.lane_line[0] and now < self.lane_line[1]:
+      return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
     line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune))
-    return [] if line is None else line.round(1).tolist()
+    self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
+    return self.lane_line[2]
 
   def _set_nav_desire(self, desire: str):
     if desire:
