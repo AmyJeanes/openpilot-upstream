@@ -78,7 +78,8 @@ MAX_REROUTES = 5
 REPEAT_WITHIN = 20.0  # m from the last reroute: the same one again
 OFF_ROAD = 15.0  # m from any road link
 OFF_ROAD_FOR = 5.0  # s
-COLLISION_DECEL = -12.0  # m/s^2 measured
+COLLISION_GAP = 1.0  # s between contacts that count as separate collisions
+CRASH_WITHIN, CRASH_STOP = 3.0, 5.0  # s: stopped this soon after a collision, and for this long, is a crash
 FALL = 5.0  # m dropped within a second: off a bridge or ramp
 MISSED_NEAR = 150.0  # m from the next maneuver when the car leaves the route: that maneuver was missed
 REACHED = 35.0  # m: and the car came at least this near it
@@ -313,7 +314,8 @@ class Rig:
     self.log = Tail(BRIDGE_LOG)
     self.state: dict = {}
     self.state_t = 0.0
-    self.min_accel = 0.0
+    self.contacts = 0  # frames the plugin saw the car touch something, since last taken
+    self.last_contacts: int | None = None
     self.view: dict = {}
     self.view_t = 0.0
     self.nav_lines: list[tuple[float, str]] = []
@@ -329,7 +331,10 @@ class Rig:
         continue
       if s.get('inVehicle'):
         self.state, self.state_t = s, now
-        self.min_accel = min(self.min_accel, s.get('aMeas', 0.0))
+        n = s.get('collisions')
+        if n is not None:
+          self.contacts += max(0, n - self.last_contacts) if self.last_contacts is not None else 0
+          self.last_contacts = n
     for line in self.log.lines():
       if line.startswith(('nav:', 'router:')) or 'Traceback' in line or 'Error' in line:
         self.nav_lines.append((now, line.strip()))
@@ -340,8 +345,8 @@ class Rig:
       except (OSError, ValueError):
         pass
 
-  def take_min_accel(self) -> float:
-    a, self.min_accel = self.min_accel, 0.0
+  def take_contacts(self) -> int:
+    a, self.contacts = self.contacts, 0
     return a
 
   @property
@@ -488,7 +493,9 @@ class Trip:
     self.pending = 1 if self.route['maneuvers'] and self.route['maneuvers'][0]['type'] in (1, 2, 3) else 0
     timeout = max(180.0, 2.5 * self.route['time'] + 120)
     outcome, detail = None, ''
-    rig.take_min_accel()
+    rig.take_contacts()
+    health0 = s.get('bodyHealth')
+    last_contact = -1e9
     last_pos = np.array(s['pos'][:2])
     while outcome is None:
       time.sleep(TICK)
@@ -516,9 +523,12 @@ class Trip:
         self.event('fell', dz=round(ago['z'] - s['pos'][2], 1))
         outcome, detail = 'fell', f"{ago['z'] - s['pos'][2]:.0f} m from ({ago['x']:.0f}, {ago['y']:.0f})"
         break
-      if rig.take_min_accel() < COLLISION_DECEL:
-        self.collisions += 1
-        self.event('collision')
+      if rig.take_contacts():
+        if now - last_contact > COLLISION_GAP:
+          self.collisions += 1
+          self.event('collision', v=round(v, 1), lane=s.get('lane'), street=s.get('street'),
+                     damage=None if health0 is None else round(health0 - s.get('bodyHealth', health0)))
+        last_contact = now
       if not rig.engaged:
         if left < ARRIVED_WITHIN:
           outcome = 'arrived'
@@ -540,6 +550,9 @@ class Trip:
       if v < STOPPED and left > ARRIVED_WITHIN:
         self.stopped_t = self.stopped_t or now
         stood = now - self.stopped_t
+        if stood > CRASH_STOP and self.stopped_t - last_contact < CRASH_WITHIN:
+          outcome, detail = 'crash', f"stopped by a collision, {left:.0f} m left"
+          break
         if self.nudges < NUDGES and stood > NUDGE_AFTER:
           self.nudges += 1
           if self.nudges == 1:
@@ -570,7 +583,8 @@ class Trip:
     rec.update({
       'outcome': outcome, 'detail': detail, 'clean': outcome == 'arrived' and not self.reroutes and not self.nudges,
       'duration': round(time.monotonic() - self.t0, 1), 'distance': round(self.distance), 'nudges': self.nudges,
-      'collisions': self.collisions, 'end': {'pos': [round(v, 1) for v in s.get('pos', [0, 0, 0])], 'street': s.get('street'),
+      'collisions': self.collisions,
+      'damage': None if health0 is None else round(health0 - s.get('bodyHealth', health0)), 'end': {'pos': [round(v, 1) for v in s.get('pos', [0, 0, 0])], 'street': s.get('street'),
                                              'left': round(float(np.hypot(s['pos'][0] - dx, s['pos'][1] - dy)))},
       'reroutes': self.reroutes, 'maneuvers': self.maneuvers, 'events': self.events, 'snap': rec_snap,
     })
