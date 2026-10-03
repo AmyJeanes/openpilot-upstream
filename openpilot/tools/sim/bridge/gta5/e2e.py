@@ -11,6 +11,13 @@ arrives, disengages, gets stuck, leaves the road, reroutes too often or runs out
   e2e.py run --replay city1-03                       a trip again, by its id in the results
   e2e.py pick --mode city --n 5 --seed 1             only print trips
   e2e.py summary [results.jsonl ...]                 outcomes, maneuvers, failures across runs
+  e2e.py run --trips f --tune t.json                 nav's turn parameters for every trip (see below)
+  e2e.py sweep --variants v.json --trips f --reps 2  each trip with each variant of nav's turn parameters
+  e2e.py sweepsum [results.jsonl ...]                turns per variant: made, lane, oncoming, collisions, stops, speed
+
+Nav's turn parameters (gta5_nav.Tune) come from the file the bridge was started with as GTA5_NAVTUNE (svc.sh:
+BRIDGE_EXTRA="GTA5_NAVTUNE=$HOME/gta5test/navtune.json"); --tune and sweep write it before each trip (E2E_NAVTUNE, the
+same path by default). A variants file is {"name": {param: value, ...}, ...}; {} is the defaults.
 
 Every maneuver on the route is scored: done, or missed (a reroute near it), with the car's lane, speed, set speed, the
 nav's signal and the model's desire probabilities over the approach. Gas presses are only the test driver's, after the
@@ -54,6 +61,8 @@ SVC = os.getenv("E2E_SVC", f"{HOME}/gta5test/{'spsvc.sh' if _SP else 'svc.sh'}")
 MODEL_FILE = os.getenv("E2E_MODEL_FILE", f"{_LOGS}/model")
 ENGAGEABLE_WAIT = 30.0  # s for openpilot to allow engaging after a teleport (locationd settling)
 OUT_DIR = f"{HOME}/gta5test/e2e"
+NAVTUNE = os.getenv("E2E_NAVTUNE", f"{HOME}/gta5test/navtune.json")
+TUNE_ACK = 4.0  # s for the bridge to log the parameters it read
 MODEL3 = "0x0040B009"  # Amy's Model 3 add-on
 
 CITY = (-1500, 1500, -2500, 1000)  # x0, x1, y0, y1: Los Santos
@@ -422,8 +431,10 @@ class Rig:
 # *** a trip ***
 
 class Trip:
-  def __init__(self, rig: Rig, roads: Map, trip_id: str, spec: tuple, args, trace_path: str, lane: int | None = None):
+  def __init__(self, rig: Rig, roads: Map, trip_id: str, spec: tuple, args, trace_path: str, lane: int | None = None,
+               tune: dict | None = None, variant: str | None = None):
     self.rig, self.roads, self.id, self.spec, self.args = rig, roads, trip_id, spec, args
+    self.tune, self.variant = tune, variant
     self.lane = args.lane if lane is None else lane
     self.snap_base = trace_path.removesuffix('.jsonl')
     self.trace = open(trace_path, 'w', buffering=1)
@@ -442,6 +453,19 @@ class Trip:
     self.collisions = 0
     self.route_t = 0.0  # when the route being followed was made (trip time)
     self.alert = ''
+
+  def write_tune(self) -> bool:
+    """Writes nav's turn parameters for this trip; whether the bridge logged reading them."""
+    rig = self.rig
+    rig.update()
+    seen = len(rig.nav_lines)
+    with open(NAVTUNE + ".tmp", 'w') as f:
+      json.dump(self.tune, f)
+    os.replace(NAVTUNE + ".tmp", NAVTUNE)
+    ok = rig.wait(TUNE_ACK, lambda: any(line.startswith('nav: tune') for _, line in rig.nav_lines[seen:]))
+    if not ok:
+      print(f"e2e: the bridge didn't read {NAVTUNE}: is it running with GTA5_NAVTUNE={NAVTUNE}?", flush=True)
+    return ok
 
   def snap(self, name: str) -> str:
     """Saves the cameras' next frames as <trace>_<name>_road.png etc."""
@@ -493,6 +517,8 @@ class Trip:
     self.t0 = time.monotonic()
     rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': self.args.mode, 'car': self.args.car or 'current',
            'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'stack': STACK, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
+    if self.tune is not None:
+      rec.update({'variant': self.variant, 'tune': self.tune, 'tune_ack': self.write_tune()})
     problem = self.setup()
     if problem:
       return {**rec, 'outcome': 'setup', 'detail': problem}
@@ -738,6 +764,8 @@ class Trip:
         signal_t = None
     desires = sorted({p['desire'] for p in window if p['desire']})
     stopped = sum(TICK for p in hist if t0 - 20 <= p['t'] <= t0 and p['v'] < STOPPED)
+    around = [p for p in hist if t0 - 2 <= p['t']]
+    lanes_after = [p['lane'] for p in hist if p['t'] > t0 + 1 and p['lane']]
     nav_lines = [line for t, line in self.rig.nav_lines if self.t0 + t0 - 25 <= t <= self.t0 + t0 + 5]
     self.maneuvers.append({
       'i': i, 'result': result, 'route_n': len(self.reroutes),
@@ -748,6 +776,10 @@ class Trip:
       'max_turn_p': None if not prob_key else max((p[prob_key] or 0) for p in window) if window else None,
       'max_keep': max((max(p['kL'] or 0, p['kR'] or 0) for p in window), default=None),
       'desires': desires, 'stopped_before': round(stopped, 1), 'nav': nav_lines[-12:],
+      'min_v': round(min((p['v'] for p in hist if t0 - 10 <= p['t'] <= t0 + 3), default=0.0), 2),
+      'oncoming': any(p['lane'] and p['lane'][0] < 0 for p in around),
+      'end_lane': lanes_after[-1] if lanes_after else None,
+      'collision': any(e['event'] == 'collision' and t0 - 5 <= e['t'] for e in self.events),
     })
     tag = f"{m['kind']} {m['angle']}" + (f" -> {m['out'].get('names')}" if m.get('out') else '')
     print(f"  maneuver {i} {result}: {tag}, lane {at(-2)['lane']}, v {at(0)['v']}, signal {None if signal_t is None else round(signal_t, 1)}, stopped {stopped:.0f} s", flush=True)
@@ -770,9 +802,8 @@ def load_results(paths) -> list[dict]:
   return out
 
 
-def cmd_run(args):
+def read_trips(args, roads) -> list[tuple[str, tuple, int | None]]:
   trips: list[tuple[str, tuple, int | None]] = []
-  roads = Map()
   if args.trip:
     for t in args.trip:
       spec, lane = parse_spec(t)
@@ -790,10 +821,38 @@ def cmd_run(args):
   else:
     picked = pick_trips(roads, args.mode, args.n, args.seed)
     trips = [(f"{args.mode}{args.seed}-{k:02d}", t, None) for k, t in enumerate(picked)]
+  return trips
+
+
+def cmd_run(args):
+  roads = Map()
+  trips = read_trips(args, roads)
   if args.reps > 1:
     trips = [(f"{tid}-{r}", spec, lane) for r in range(args.reps) for tid, spec, lane in trips]
   if args.tag:
     trips = [(f"{tid}-{args.tag}", spec, lane) for tid, spec, lane in trips]
+  tune = None
+  if getattr(args, 'tune', None):
+    with open(args.tune) as f:
+      tune = json.load(f)
+  name = os.path.splitext(os.path.basename(args.tune))[0] if tune is not None else None
+  drive(args, roads, [(tid, spec, lane, tune, name) for tid, spec, lane in trips])
+
+
+def cmd_sweep(args):
+  """Each trip with each variant of nav's turn parameters, alternating variants trip by trip so that drift in the game
+  over the run falls on all of them alike."""
+  roads = Map()
+  with open(args.variants) as f:
+    variants = json.load(f)
+  base = read_trips(args, roads)
+  tag = f"-{args.tag}" if args.tag else ''
+  trips = [(f"{tid}-{name}-{r}{tag}", spec, lane, tune, name)
+           for r in range(args.reps) for tid, spec, lane in base for name, tune in variants.items()]
+  drive(args, roads, trips)
+
+
+def drive(args, roads, trips):
   out = args.out or os.path.join(OUT_DIR, f"{args.name or time.strftime('%m%d-%H%M')}.jsonl")
   os.makedirs(os.path.join(os.path.dirname(out), "traces"), exist_ok=True)
   rig = Rig()
@@ -801,7 +860,7 @@ def cmd_run(args):
   print(f"e2e: {len(trips)} trips -> {out}", flush=True)
   status_path = os.path.join(os.path.dirname(out), "status.json")
   counts: Counter = Counter()
-  for k, (tid, spec, lane) in enumerate(trips):
+  for k, (tid, spec, lane, tune, variant) in enumerate(trips):
     for attempt in range(2):
       print(f"e2e: trip {k + 1}/{len(trips)} {tid} {spec_str(spec)}", flush=True)
       with open(status_path, 'w') as f:
@@ -810,7 +869,8 @@ def cmd_run(args):
         broken = rig.health()
         if broken:
           rig.recover(broken)
-        rec = Trip(rig, roads, tid, spec, args, os.path.join(os.path.dirname(out), "traces", f"{tid}.jsonl"), lane).run()
+        rec = Trip(rig, roads, tid, spec, args, os.path.join(os.path.dirname(out), "traces", f"{tid}.jsonl"), lane,
+                   tune, variant).run()
       except (OSError, Infra) as e:
         rec = {'id': tid, 'spec': spec_str(spec), 'mode': args.mode, 'outcome': 'infra', 'detail': str(e)}
         try:
@@ -876,6 +936,43 @@ def cmd_summary(args):
             f"nudge={r.get('nudges', 0)} {' '.join(miss)}  [{r['spec']}]")
 
 
+def turn_maneuver(m: dict) -> bool:
+  return bool(m.get('real')) and m['type'] in (9, 10, 11, 14, 15, 16) and abs(m.get('angle') or 0) >= 45
+
+
+def cmd_sweepsum(args):
+  """Per variant: trips and outcomes, and over its turns (45 deg or more) how many were made, ended in a lane of the
+  car's way, went into the oncoming lanes, hit something, stopped before the turn, and the slowest speed by it."""
+  rs = [r for r in load_results(args.files) if r.get('variant') is not None]
+  if not rs:
+    print("no sweep results (trips with a variant)")
+    return
+  by = defaultdict(list)
+  for r in rs:
+    by[r['variant']].append(r)
+  cols = [('variant', 16), ('trips', 5), ('arrived', 7), ('crash', 5), ('turns', 5), ('made', 5), ('lane ok', 7),
+          ('oncoming', 8), ('hit', 4), ('stopped', 7), ('min v', 6)]
+  print(" ".join(f"{c:>{w}s}" if k else f"{c:{w}s}" for k, (c, w) in enumerate(cols)) + "  tune")
+  for name, group in sorted(by.items()):
+    turns = [m for r in group for m in r.get('maneuvers', []) if turn_maneuver(m)]
+    n = len(turns) or 1
+
+    def pct(k, n=n):
+      return f"{100 * k / n:.0f}%"
+    made = sum(m['result'] == 'done' for m in turns)
+    lane_ok = sum(bool(m.get('end_lane')) and m['end_lane'][0] >= 0 for m in turns)
+    oncoming = sum(bool(m.get('oncoming')) for m in turns)
+    hit = sum(bool(m.get('collision')) for m in turns)
+    stopped = sum(m.get('stopped_before', 0) >= 2 for m in turns)
+    speeds = [m['min_v'] for m in turns if m.get('min_v') is not None]
+    min_v = float(np.mean(speeds)) if speeds else float('nan')
+    outcomes = Counter(r['outcome'] for r in group)
+    row = [name, len(group), outcomes['arrived'], outcomes['crash'] + outcomes['fell'], len(turns), pct(made), pct(lane_ok),
+           pct(oncoming), pct(hit), pct(stopped), f"{min_v:.1f}"]
+    print(" ".join(f"{str(v):>{w}s}" if k else f"{str(v):{w}s}" for k, (v, (_, w)) in enumerate(zip(row, cols, strict=True)))
+          + "  " + json.dumps(group[0].get('tune')))
+
+
 def tag_miss(m: dict) -> list[str]:
   """Rough reasons a maneuver was missed, from the approach."""
   tags = []
@@ -920,6 +1017,17 @@ def main():
   r.add_argument('--car', default=MODEL3, help="model to spawn for the first trip ('' keeps the current car)")
   r.add_argument('--lane', type=int, default=9, help='start lane from the left (clamped: 9 is the rightmost)')
   r.add_argument('--traffic', type=int, default=0)
+  r.add_argument('--tune', help="nav's turn parameters for every trip, a JSON file ({} is the defaults)")
+  sw = sub.add_parser('sweep')
+  sw.add_argument('--variants', required=True, help='{"name": {param: value, ...}, ...}')
+  for a, kw in (('--mode', {'choices': ['city', 'map'], 'default': 'city'}), ('--n', {'type': int, 'default': 10}),
+                ('--seed', {'type': int, 'default': 1}), ('--trip', {'action': 'append'}), ('--replay', {'action': 'append'}),
+                ('--trips', {}), ('--reps', {'type': int, 'default': 1}), ('--tag', {'default': ''}), ('--out', {}),
+                ('--name', {}), ('--car', {'default': MODEL3}), ('--lane', {'type': int, 'default': 9}),
+                ('--traffic', {'type': int, 'default': 0})):
+    sw.add_argument(a, **kw)
+  ss = sub.add_parser('sweepsum')
+  ss.add_argument('files', nargs='*')
   pk = sub.add_parser('pick')
   pk.add_argument('--mode', choices=['city', 'map'], default='city')
   pk.add_argument('--n', type=int, default=10)
@@ -927,7 +1035,7 @@ def main():
   sm = sub.add_parser('summary')
   sm.add_argument('files', nargs='*')
   args = p.parse_args()
-  {'run': cmd_run, 'pick': cmd_pick, 'summary': cmd_summary}[args.command](args)
+  {'run': cmd_run, 'sweep': cmd_sweep, 'sweepsum': cmd_sweepsum, 'pick': cmd_pick, 'summary': cmd_summary}[args.command](args)
 
 
 if __name__ == '__main__':

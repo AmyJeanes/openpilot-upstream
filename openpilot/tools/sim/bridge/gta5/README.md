@@ -99,6 +99,12 @@ would give. The game's AI drivers know the lights: those waiting with the car at
 clear at once when it turns green, about 2 s before they move. With no AI traffic around, as with `traffic on=0`, the car
 can't tell, and waits for the gas, as on the real car; nor does it go while traffic crosses ahead or someone is in front.
 
+Nav's turn parameters (speeds by turn angle, where slowing starts and ends, when to signal, re-pulsing, lane change
+lead) can come from a JSON file, `GTA5_NAVTUNE`, read again whenever it changes, for sweeps with `e2e.py sweep`; keys
+left out keep the defaults (`gta5_nav.Tune`). With `"signal_mode": "entry"` a turn is signalled at
+`signal_entry_offset` m past its junction's entry (GTA's stop line, else its junction nodes), as a driver signals on
+entering the junction, rather than 5 s before it.
+
 The model chooses where to turn and doesn't always: after a stop it can carry straight on, and with a turn asked for
 and no turning to take it stops, so a turn is signalled only within 50 m of one. `GTA5_DEBUG=1` prints nav's decisions.
 `gta5_cmd.py waypoint x= y=` sets a waypoint (`off=1` clears it).
