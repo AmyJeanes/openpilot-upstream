@@ -1104,6 +1104,16 @@ void HandleMessage(const Message &m, double now) {
     g_noTraffic = !MsgBool(m, "on", true);
     if (g_noTraffic) ClearModel(0, 300.0f);  // any model
     Log(std::string("traffic ") + (g_noTraffic ? "off" : "on"));
+  } else if (type == "world") {
+    // a repeatable scene for tests: the time of day, the weather held, and the clock stopped with freeze=1
+    if (m.count("hour")) SET_CLOCK_TIME(static_cast<int>(MsgNum(m, "hour")), static_cast<int>(MsgNum(m, "minute", 0)), 0);
+    std::string weather = MsgStr(m, "weather");
+    if (!weather.empty()) {
+      SET_WEATHER_TYPE_NOW_PERSIST(weather.c_str());
+      SET_OVERRIDE_WEATHER(weather.c_str());
+    }
+    if (m.count("freeze")) PAUSE_CLOCK(MsgBool(m, "freeze"));
+    Log("world: hour " + Num(MsgNum(m, "hour", -1)) + ", weather " + weather + ", freeze " + Num(MsgNum(m, "freeze", -1)));
   } else if (type == "setup") {
     Setup s;
     s.x = static_cast<float>(MsgNum(m, "x", NAN));

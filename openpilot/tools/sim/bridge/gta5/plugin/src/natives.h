@@ -108,6 +108,8 @@ inline void SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0x95E3D6257B
 inline void SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(float a, float b) { Invoke(0x7A556143A1C03898, a, b); }
 inline void SET_CLOCK_TIME(int h, int m, int s) { Invoke(0x47C3B5848C3E45D8, h, m, s); }
 inline void SET_WEATHER_TYPE_NOW_PERSIST(const char *w) { Invoke(0xED712CA327900C8A, w); }
+inline void SET_OVERRIDE_WEATHER(const char *w) { Invoke(0xA43D5C6FE51ADBEF, w); }
+inline void PAUSE_CLOCK(BOOL toggle) { Invoke(0x4055E40BD2DBEC1D, toggle); }
 inline void SET_MAX_WANTED_LEVEL(int lvl) { Invoke(0xAA5F02DB48D704B9, lvl); }
 inline void CLEAR_PLAYER_WANTED_LEVEL(int player) { Invoke(0xB302540597885499, player); }
 inline BOOL IS_PAUSE_MENU_ACTIVE() { return Invoke<BOOL>(0xB0034A223497FFCB); }

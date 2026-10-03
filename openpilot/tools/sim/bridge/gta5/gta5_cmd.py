@@ -4,6 +4,8 @@
   gta5_cmd.py burst /tmp/burst 40               save the next 40 frames' luma, quarter size, as JPEGs
   gta5_cmd.py setup x=2420 y=3000 z=46 model=sultan speed=20 hour=12 weather=EXTRASUNNY
                                                 spawn a car and/or put it on the road nearest a point
+  gta5_cmd.py world hour=12 weather=EXTRASUNNY freeze=1
+                                                set the time and weather, and stop the clock
   gta5_cmd.py camera yaw=5 pitch=0              rotate the camera on its mount (degrees)"""
 import json
 import socket
