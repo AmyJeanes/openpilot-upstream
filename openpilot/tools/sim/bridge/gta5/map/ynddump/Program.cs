@@ -35,9 +35,9 @@ foreach (var (name, fe) in ynds.OrderBy(k => k.Key))
   foreach (var n in y.Nodes)
   {
     var r = n.RawData;
-    w.WriteLine(string.Format(inv, "{{\"t\":\"n\",\"a\":{0},\"i\":{1},\"x\":{2:F2},\"y\":{3:F2},\"z\":{4:F2},\"f\":[{5},{6},{7},{8},{9}],\"st\":{10}}}",
+    w.WriteLine(string.Format(inv, "{{\"t\":\"n\",\"a\":{0},\"i\":{1},\"x\":{2:F2},\"y\":{3:F2},\"z\":{4:F2},\"f\":[{5},{6},{7},{8},{9}],\"st\":{10},\"sp\":{11}}}",
       n.AreaID, n.NodeID, n.Position.X, n.Position.Y, n.Position.Z,
-      r.Flags0.Value, r.Flags1.Value, r.Flags2.Value, r.Flags3.Value, r.Flags4.Value, r.StreetName.Hash));
+      r.Flags0.Value, r.Flags1.Value, r.Flags2.Value, r.Flags3.Value, r.Flags4.Value, r.StreetName.Hash, (int)n.Speed));
     nn++;
     if (r.StreetName.Hash != 0) streets.Add(r.StreetName.Hash);
     for (int k = 0; k < n.LinkCount; k++)

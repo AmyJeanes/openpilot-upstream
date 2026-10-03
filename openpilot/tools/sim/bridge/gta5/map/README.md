@@ -17,7 +17,7 @@ The map is the game's data, so it isn't in the repository; build it from your co
    ```
 2. Convert it, in a Python environment with `osmium` and `pyvalhalla` (`uv venv ~/gta5map/.venv && uv pip install osmium pyvalhalla numpy`):
    ```bash
-   python ynd_to_osm.py paths.jsonl ~/gta5map/gta5.osm.pbf             # the map
+   python ynd_to_osm.py paths.jsonl ~/gta5map/gta5.osm.pbf --sidecar ~/gta5map/nodes.npz  # the map
    python osm_to_roads.py ~/gta5map/gta5.osm.pbf ~/gta5map/roads.json  # the map view's roads
    valhalla_build_config --mjolnir-tile-dir ~/gta5map/tiles --mjolnir-tile-extract ~/gta5map/tiles.tar \
      --mjolnir-timezone '' --mjolnir-admin '' > ~/gta5map/valhalla.json
@@ -40,6 +40,20 @@ The route sets off the way the car faces, and when the car leaves it nav routes 
 - Ways carry the lanes each way (`lanes:forward` / `lanes:backward`, `oneway`) and street names. Road classes are
   guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
   and alleys (nodes switched off for traffic, or without GPS), track off-road.
+- Speed limits (`maxspeed`, mph) come from the road class and the speed class GTA gives each node (slow, normal, fast,
+  faster), by the table in `ynd_to_osm.py`'s `LIMITS`. Nearly all the city is "normal", so the road class sets it there:
+  30 with one lane each way, 40 with two or more (and on country roads), 20 in car parks and alleys, 15 where it's slow
+  (docks, runways). "Fast" is the open country road (Route 68, Joshua Rd: 50) and the freeway in places (55); "faster"
+  is the freeway (65). The city's slower freeway stretches are 50, its one-lane ramps 40. A street gets its most common
+  limit along its length, and a stretch shorter than 60 m on the way through a junction takes the limit on both sides
+  of it, so the limit doesn't change at every junction (GTA's junction links belong to the crossing street, and lane
+  counts change at them).
+- Nodes carry their height, `ele` (game z, metres). `--sidecar` also writes the roads as arrays for map matching:
+  `x`, `y`, `z`, `node_id` per node; per link (one per OSM way; `way_id` is the way's, as in Valhalla's
+  `trace_attributes`) `a`, `b` (node indices, in its direction of travel), `lanes_fwd`, `lanes_back`, `heading` (deg
+  clockwise from north, a to b), `length`, `road_class` (into `classes`), `maxspeed_mph`, `name` (into `names`, -1 for
+  none); and where links cross more than 4 m apart in height, as at overpasses, `overpass_links`, `overpass_xy` and
+  `overpass_z` (each link's height there).
 - Traffic lights are `highway=traffic_signals` on the stop line node. Flags with no OSM equivalent keep a `gta:` prefix:
   junction, no left / right turn, slip lane, keep left / right, left turn only lane.
 - openpilot's driving model can't turn back on itself, so every move that turns back more than 135 degrees is a
