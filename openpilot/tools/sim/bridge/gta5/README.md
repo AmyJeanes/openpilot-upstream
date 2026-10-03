@@ -62,7 +62,9 @@ it, which below 19 mph asks the driving model for the turn. The model takes that
 comes on, and forgets it after several seconds and at a stop, so the bridge drops the blinker briefly for openpilot
 (not the car's lights) every 2.5 s until the turn starts, when the car pulls away again, or when the model stops
 expecting the turn. It slows gently (0.6 m/s^2, done 25 m before the turn), and for bends and ramps on the route to
-2.5 m/s^2 sideways. Near the waypoint it slows to a stop there and disengages.
+2 m/s^2 sideways (the Tesla's steering is limited to about 3). A turn is signalled 5 s before it (28-50 m): further out
+the model stops short of it. A turn straight after another is signalled as soon as the first is done.
+Near the waypoint it slows to a stop there and disengages.
 
 Before a turn the car changes into the leftmost lane for a left turn or the rightmost for a right, and it moves back
 over if it drifts into the oncoming lanes. Lane changes are planned back from the last place one may start (30 m before
@@ -70,17 +72,20 @@ a turn), about 8 s each, and when there isn't room left the set speed comes down
 the lane for is left for the route to come round again, as the model won't take it from the wrong lane anyway. The car's
 lane comes from GTA's roads along our route (map/README.md), else from the plugin's guess at the road it's on, and the
 bridge asks for the lane change through openpilot's `NavDesire` param, which makes the blinker mean a lane change at
-any speed rather than the turn it means below 19 mph. On our routes nav also knows the forks: where a road splits, as at
-a freeway exit or where GTA splits a road's lanes before a junction, it moves into the lanes of the route's branch
-(planned the same way, and never out of the lanes for a fork or turn before it), and for a fork in the road, holds the
-model's keep desire towards that branch from 4 s before it to 40 m past. With the map's speed limits, engaging sets
-the limit where the car is, the set speed follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set
-speed alone), and a lower limit ahead slows the car before it.
+any speed rather than the turn it means below 19 mph: it is set 0.4 s before the blinker comes on and kept 0.5 s after
+it goes off, as openpilot reads it every 0.2 s (and afresh as a blinker comes on); no lane change starts while the car
+is still turning. On our routes nav also knows the forks: where a road splits, as at a freeway exit or where GTA splits
+a road's lanes before a junction, it moves into the lanes of the route's branch (planned the same way, and never out of
+the lanes for a fork or turn before it), and for a fork in the road, holds the model's keep desire towards that branch
+from 4 s before it to 40 m past. With the map's speed limits, engaging sets the limit where the car is, the set speed
+follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set speed alone), and a lower limit ahead
+slows the car before it. Routes avoid service roads (car parks, alleys, drives), which the model doesn't see as roads.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
 U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
 where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take
 rises, nav asks for the keep desire away from it (keepRight against a left turn), meant for forks, which holds it on
-the road. Like a turn, the model forgets it at a stop, so it's asked again as the car pulls away.
+the road; not for 60 m after a turn, as the model's expectation of the turn it took fades, nor on a one-lane road.
+Like a turn, the model forgets it at a stop, so it's asked again as the car pulls away.
 
 Stopped at a red light, the car pulls away by itself once it turns green, with a short press of the gas as a driver
 would give. The game's AI drivers know the lights: those waiting with the car at a red light (or queued behind one) all

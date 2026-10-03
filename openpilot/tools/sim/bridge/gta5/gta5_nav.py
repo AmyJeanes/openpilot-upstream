@@ -20,8 +20,11 @@ TURN_SLOW_BY = 25.0  # m before the turn
 SLOW_DECEL = 0.6  # m/s^2, the approach the cruise cap allows
 SLOW_LAG = 1.0  # s: openpilot eases into a lower set speed
 LOOKAHEAD = 250.0  # m, turns further on don't cap the speed yet
-SIGNAL_DIST = 50.0  # m: signal from here once below the lane change speed, which would ask for a lane change instead
-SIGNAL_ALWAYS_DIST = 30.0  # m: signal anyway, if in the turn's lane, else leave it unless changing into it
+# Signal SIGNAL_TIME before a turn (no further out than SIGNAL_DIST) once below the lane change speed, which would ask
+# for a lane change instead: further out, the model stops short with a turn asked for and no turning to take.
+SIGNAL_TIME = 5.0  # s
+SIGNAL_DIST = 50.0  # m
+SIGNAL_MIN = 28.0  # m: signal anyway, if in the turn's lane, else leave it unless changing into it
 SIGNAL_LAST_DIST = 26.0  # m: the last chance, while a lane change into the turn's lane finishes (the turn finder looks from MIN_AHEAD on)
 DONE_HEADING = 20.0  # deg from the turn's exit heading, straightened out
 DONE_YAW_RATE = 0.1  # rad/s
@@ -34,10 +37,13 @@ REPEAT_EVERY = 2.0  # s at most
 REPEAT_BELOW = 0.1  # the model's probability of the turn
 PULSE_EVERY = 2.5  # s, until the turn starts, and for keep desires while held
 TURN_STARTED = 15.0  # deg turned since signaling
-MIN_AHEAD = 20.0  # m: the route starts with a jog from the car's lane to GTA's road nodes, which isn't a turn
+MIN_AHEAD = 20.0  # m: GTA's route starts with a jog from the car's lane to its road nodes, which isn't a turn
+MIN_AHEAD_MAP = 5.0  # m: our map's routes start at the car
+TURN_PAST = 8.0  # m past a turn, heading within TURN_PAST_HEADING of its way out: done, as for a turn straight after
+TURN_PAST_HEADING = 45.0  # deg
 CONFIRM = 0.5  # s a turn must stay in the route before it counts, past the route's jitter at junctions
 BEHIND_BY = 2.0  # m
-COOLDOWN = 3.0  # s after a turn, while the rest of it may still look like a turn ahead
+COOLDOWN = 3.0  # s after a turn without lane changes, while the car straightens out
 ARRIVE_DECEL = 0.7  # m/s^2
 ARRIVE_LAG = 1.0  # s: openpilot eases into a lower set speed
 ARRIVE_KEEP = 100.0  # m: GTA clears the waypoint as the car nears it, so stop on the straight distance left to it
@@ -59,7 +65,14 @@ LANE_CHANGE_TRIES = 3  # for one turn or fork, without getting nearer its lane
 LANE_STEADY = 0.5  # s a lane reading must hold
 LANE_STALE = 3.0  # s without a steady reading
 WRONG_SIDE_FOR = 1.0  # s in the oncoming lanes before moving back over
+TURNING = 0.1  # rad/s: no lane change while turning
+# The blinker means a lane change below 19 mph only once openpilot has read NavDesire (every 0.2 s), and a turn
+# otherwise: the param is set this long before the blinker comes on, and kept this long after it goes off.
+PARAM_LEAD = 0.4  # s
+PARAM_HOLD = 0.5  # s
 SKIP_PAST = 60.0  # m: a turn or fork left to the route is forgotten this far behind
+SKIP_NEAR = 20.0  # m: a turn or fork found this near one left to the route is the same
+TAKEN_NEAR = 12.0  # m, or near a turn taken, as a turn may follow straight after
 FORK_TURN = 80.0  # m: a turn this soon after a fork left to the route goes with it, as from a road's lanes split at a junction
 # Forks: the route's branch and its lanes come from the map; the keep desire towards it (the model's fork desires)
 # holds the model to that side through the split.
@@ -69,9 +82,11 @@ FORK_LAST_DIST = 40.0  # m, at least
 FORK_KEEP = 4.0  # s before a fork that the keep desire starts
 FORK_KEEP_DIST = 60.0  # m, at least
 FORK_KEEP_PAST = 40.0  # m past it
-# Bends and ramps: no faster than this sideways acceleration, measured over CURVE_WINDOW m of route
-CURVE_ACCEL = 2.5  # m/s^2
-CURVE_WINDOW = 30.0  # m
+# Bends and ramps: no faster than this sideways acceleration, measured over CURVE_WINDOW m of route. The Tesla's
+# steering is limited to 3.6 m/s^2 (3 m/s^2 and road roll) and in our drives saturated at about 3.
+CURVE_ACCEL = 2.0  # m/s^2
+CURVE_WINDOW = 20.0  # m
+CURVE_STEP = 2.5  # m
 CURVE_LOOKAHEAD = 300.0  # m
 LIMIT_DECEL = 0.8  # m/s^2, slowing for a lower speed limit ahead
 # The model has no desire for straight on, and sometimes turns where the route doesn't, as from a lane that becomes a
@@ -81,6 +96,7 @@ KEEP_CLEAR = 80.0  # m: no turn on the route nearer than this
 KEEP_UNTIL = 0.05  # probability of the turn, once past where it was
 KEEP_FOR = 30.0  # m driven at least
 KEEP_GAP = 0.5  # s off to repeat it: openpilot reads the desire every 0.2 s
+KEEP_AFTER_TURN = 60.0  # m: the model's expectation of the turn just taken fades only after it
 # the driver's gas press that gets the car moving again, which the model won't do itself once stopped
 GO_AFTER = 1.0  # s stopped
 GO_GREEN = 0.4  # s since traffic last showed red
@@ -159,21 +175,25 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
 
 
 def curve_cap(route: np.ndarray, v: float) -> float:
-  """The speed now that leaves room to slow for the bends ahead, 0 for none."""
+  """The speed now that leaves room to slow for the bends ahead, 0 for none. A bend's curvature is its heading change
+  over CURVE_WINDOW m, but no more than twice that over twice the window: GTA's lanes jog sideways through junctions,
+  turning one way and back within a few metres, which isn't a bend."""
   heads, starts = headings(route)
   if len(heads) < 3:
     return 0.0
-  ends = np.searchsorted(starts, starts + CURVE_WINDOW, side='right') - 1
-  span = starts[ends] - starts
-  ok = (span > CURVE_WINDOW / 2) & (starts < CURVE_LOOKAHEAD)
-  if not ok.any():
+  h = np.unwrap(np.radians(heads))
+  mids = starts + np.diff(np.append(starts, starts[-1] + 5.0)) / 2
+  s = np.arange(0.0, min(CURVE_LOOKAHEAD, float(mids[-1])), CURVE_STEP)
+  if len(s) == 0:
     return 0.0
-  curvature = np.radians(np.abs((heads[ends] - heads + 180) % 360 - 180)) / np.maximum(span, 1.0)
+  w = CURVE_WINDOW / 2
+
+  def turned(a, b):
+    return np.abs(np.interp(b, mids, h) - np.interp(a, mids, h))
+  curvature = np.minimum(turned(s - w, s + w) / CURVE_WINDOW, turned(s - 2 * w, s + 2 * w) / CURVE_WINDOW)
   # the turns themselves have their own speed
   speed = np.maximum(np.sqrt(CURVE_ACCEL / np.maximum(curvature, 1e-4)), TURN_SPEED)
-  # from the middle of the window, where the bend is
-  dist = np.maximum(starts + span / 2 - v * SLOW_LAG, 0.0)
-  return float(np.min(np.sqrt(speed ** 2 + 2 * SLOW_DECEL * dist)[ok]))
+  return float(np.min(np.sqrt(speed ** 2 + 2 * SLOW_DECEL * np.maximum(s - w - v * SLOW_LAG, 0.0))))
 
 
 def limit_cap(limits: list, v: float) -> float:
@@ -210,10 +230,17 @@ class Nav:
     self.change_t = 0.0  # when it started, or the last ended
     self.change_tries: dict[tuple, int] = {}  # lane changes for each turn or fork (by where it is), without progress
     self.change_from: tuple[int, int] | None = None  # the lane the last change started from
+    self.change_send_at = 0.0  # when to put the blinker on for it, once openpilot has read NavDesire; 0 once on
+    self.change_hold_until = 0.0  # NavDesire stays a lane change until then, after the blinker went off
+    self.turn_point: np.ndarray | None = None  # where the signaled turn is
+    self.turned_at = -1e9  # self.driven when the last turn was done
+    self.min_ahead = MIN_AHEAD
+    self.yaw = 0.0
     self.lane: tuple[int, int] | None = None  # the car's lane [i from the left, of n], once it has held LANE_STEADY
     self.lane_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
     self.lane_t = 0.0  # when the lane reading last held
     self.skipped: list[np.ndarray] = []  # where turns and forks left to the route are
+    self.taken: list[np.ndarray] = []  # where turns taken are
     self.skip_turns_to = 0.0  # self.driven to which turns are left to the route, after a fork that was
     self.v = 0.0
     self.wrong_side_t: float | None = None  # since when the car has been in the oncoming lanes
@@ -244,8 +271,13 @@ class Nav:
       self._set_desire(now)
       self.route_end, self.dest = None, None
       self.skipped.clear()
+      self.taken.clear()
       return 0.0, False
     self._watch_change(indicator, now)
+    if self.changing is not None and self.change_send_at and now >= self.change_send_at:
+      self.change_send_at = 0.0
+      self.send({"type": "setIndicator", "side": self.changing})
+    self.yaw = state.get("yawRate", 0.0)
     self._keep_right(v, now)
     if not route:
       self._cancel(indicator)
@@ -262,6 +294,7 @@ class Nav:
     waypoint = np.array(state.get("waypoint") or (0.0, 0.0), dtype=float)
     self.dest = waypoint if waypoint.any() else route[-1]  # (0, 0) as GTA clears it
     self.route_end = None
+    self.min_ahead = MIN_AHEAD_MAP if state.get("routeEnd") is not None else MIN_AHEAD
     if state.get("routeEnd") is not None:
       if state["routeEnd"] < ARRIVE_KEEP * 5:
         self.route_end = float(state["routeEnd"])
@@ -273,21 +306,23 @@ class Nav:
     heading, yaw_rate = state["heading"], state["yawRate"]
     self.skipped = [p for p in self.skipped if np.hypot(*(p - pos)) < SKIP_PAST + 2 * FORK_LOOKAHEAD
                     and not self._passed(p, pos, heading)]
+    self.taken = [p for p in self.taken if np.hypot(*(p - pos)) < SKIP_PAST]
 
-    # the driver's own indicator takes over from ours, once ours has shown
+    # the bridge cancels the indicator once the car has turned, as does the driver to take over from ours, once shown
     self.shown |= self.signaled is not None and indicator == self.signaled
     if self.signaled is not None and self.shown and indicator != self.signaled:
+      self._turn_over(now)
       self.turn, self.signaled = None, None
-      self.cooldown_until = now + COOLDOWN
 
     if self.turn is not None:
-      done = (self.driven - self.turn_from > self.turn.dist - TURN_WINDOW / 2 and abs(wrap(heading - self.turn.exit_heading)) < DONE_HEADING
-              and abs(yaw_rate) < DONE_YAW_RATE)
-      if done or self.driven - self.turn_from > self.turn.dist + MISSED_BY:
+      along, off = self.driven - self.turn_from, abs(wrap(heading - self.turn.exit_heading))
+      done = (along > self.turn.dist - TURN_WINDOW / 2 and off < DONE_HEADING and abs(yaw_rate) < DONE_YAW_RATE
+              or along > self.turn.dist + TURN_PAST and off < TURN_PAST_HEADING)
+      if done or along > self.turn.dist + MISSED_BY:
         if DEBUG:
-          print(f"nav: turn {'done' if done else 'missed'} after {self.driven - self.turn_from:.0f} m (car {heading:.0f})")
+          print(f"nav: turn {'done' if done else 'missed'} after {along:.0f} m (car {heading:.0f})")
+        self._turn_over(now)
         self._cancel(indicator)
-        self.cooldown_until = now + COOLDOWN
 
     turn = self._next_turn(route) if self.turn is None else None
     if turn is not None and self._behind(route, heading):
@@ -324,9 +359,14 @@ class Nav:
       return min(cap, stop) if cap else stop, arrived
     return cap, False
 
+  def _turn_over(self, now: float):
+    if self.turn_point is not None:
+      self.taken.append(self.turn_point)  # the rest of it can look like a turn ahead
+    self.cooldown_until, self.turned_at, self.turn_point = now + COOLDOWN, self.driven, None
+
   def _next_turn(self, route: np.ndarray) -> Turn | None:
     """The first turn ahead not left to the route."""
-    turn = find_turn(route, max(MIN_AHEAD, self.skip_turns_to - self.driven))
+    turn = find_turn(route, max(self.min_ahead, self.skip_turns_to - self.driven))
     while turn is not None and self._is_skipped(route, turn.dist):
       turn = find_turn(route, turn.dist + TURN_HOLDS)
     return turn
@@ -347,10 +387,10 @@ class Nav:
     return np.array([np.interp(dist, along, route[:, 0]), np.interp(dist, along, route[:, 1])])
 
   def _is_skipped(self, route: np.ndarray, dist: float) -> bool:
-    if not self.skipped:
+    if not self.skipped and not self.taken:
       return False
     p = self._point(route, max(dist, 0.0))
-    return any(np.hypot(*(p - s)) < TURN_HOLDS for s in self.skipped)
+    return any(np.hypot(*(p - s)) < SKIP_NEAR for s in self.skipped) or any(np.hypot(*(p - s)) < TAKEN_NEAR for s in self.taken)
 
   def _skip(self, route: np.ndarray, dist: float, what: str):
     if DEBUG:
@@ -374,10 +414,8 @@ class Nav:
 
   def _signal(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, heading: float):
     """Signals the turn once near and slow enough, from its lane; one that can't be taken from the car's lane is left."""
-    if now < self.cooldown_until:
-      return
     slow = v < 19 * CV.MPH_TO_MS and self.changing is None
-    if not (turn.dist < SIGNAL_ALWAYS_DIST or (turn.dist < SIGNAL_DIST and slow)):
+    if not (turn.dist < SIGNAL_MIN or (turn.dist < max(SIGNAL_MIN, min(SIGNAL_DIST, v * SIGNAL_TIME)) and slow)):
       return
     if self.lane is not None and self.lane[0] >= 0:
       lo, hi = turn.lanes(self.lane[1])
@@ -387,8 +425,12 @@ class Nav:
         self._end_change(indicator)
         self._skip(route, turn.dist, f"{turn.side} turn")
         return
-    self._end_change(indicator)
+    if self.changing is not None:
+      self._end_change(indicator)
+    if now < self.change_hold_until + PARAM_LEAD:
+      return  # openpilot is to read NavDesire cleared before the blinker comes on for the turn
     self.turn, self.signaled, self.turn_from, self.shown = turn, turn.side, self.driven, False
+    self.turn_point = self._point(route, turn.dist)
     self.signal_heading, self.repeat_t = heading, now
     if DEBUG:
       print(f"nav: signal {turn.side} in {turn.dist:.0f} m, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, lane {self.lane})")
@@ -429,7 +471,7 @@ class Nav:
       return 0.0
     cap = max(FORK_MIN_SPEED if fork else LANE_CHANGE_MIN_SPEED, room / need) if room < need * v else 0.0
     if (self.changing is None and room > 0 and room < (need + LANE_CHANGE_EARLY) * max(v, LANE_CHANGE_MIN_SPEED)
-        and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until):
+        and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING):
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
@@ -458,6 +500,8 @@ class Nav:
       self.keeping = None
       return
     if self.keeping is None:
+      if self.driven - self.turned_at < KEEP_AFTER_TURN or abs(self.yaw) > TURNING or (self.lane is not None and self.lane[1] < 2):
+        return  # the turn just taken, or one lane: nothing to keep from
       side = max(("left", "right"), key=lambda k: desire.get(k, 0.0))
       if desire.get(side, 0.0) > KEEP_ABOVE and (turn is None or turn.dist > KEEP_CLEAR):
         self.keeping, self.keep_from, self.keep_t = "keepRight" if side == "left" else "keepLeft", self.driven, now
@@ -472,7 +516,7 @@ class Nav:
   def _set_desire(self, now: float):
     """NavDesire: a lane change under way, else a keep desire; the model forgets a keep desire at a stop, as a turn, so
     it goes off briefly as the car pulls away to be seen again."""
-    want = "laneChange" if self.changing is not None else self.fork_keep or self.keeping or ""
+    want = "laneChange" if self.changing is not None or now < self.change_hold_until else self.fork_keep or self.keeping or ""
     if want.startswith("keep"):
       if self.v < 0.3:
         self.keep_stopped = True
@@ -500,7 +544,7 @@ class Nav:
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
     self._set_desire(self.change_t)
-    self.send({"type": "setIndicator", "side": side})
+    self.change_send_at = self.change_t + PARAM_LEAD
 
   def _watch_change(self, indicator: str | None, now: float):
     if self.changing is None:
@@ -515,7 +559,8 @@ class Nav:
       return
     if indicator == self.changing:
       self.send({"type": "indicatorOff"})
-    self.changing, self.change_t = None, time.monotonic()
+    self.changing, self.change_t, self.change_send_at = None, time.monotonic(), 0.0
+    self.change_hold_until = self.change_t + PARAM_HOLD
     self._set_desire(self.change_t)
 
   def _arrive(self, v: float) -> tuple[float, bool]:

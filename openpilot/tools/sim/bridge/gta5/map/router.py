@@ -10,9 +10,10 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, Link, Paths, wrap
 
+SERVICE_PENALTY, SERVICE_FACTOR = 120, 4.0  # s onto a service road, and its cost over a road's
 HEADING_TOLERANCE = 45.0  # deg: start on a road heading the car's way, not the opposite carriageway
 SNAP_TOLERANCE = 60.0  # deg, the roads leaving the next node of the road found at the car's height and heading
-FORK_SPREAD = 40.0  # deg either side of straight on: a road branching off within this is a fork, not a turn
+FORK_SPREAD = 40.0  # deg either side of straight on, up to nav's turns: a road branching off within this is a fork
 OTHER_LEVEL = 3.0  # m above or below the route: the car is on another road, passing over or under it
 WRONG_WAY = 100.0  # deg from the route's direction: the car isn't driving that part of it
 FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
@@ -241,6 +242,8 @@ class Router:
     request = {
       'locations': [start, location(dest)],
       'costing': 'auto',
+      # car parks, alleys and drives (GTA's nodes off for traffic or without GPS), which the model doesn't take for roads
+      'costing_options': {'auto': {'service_penalty': SERVICE_PENALTY, 'service_factor': SERVICE_FACTOR}},
       'directions_options': {'units': 'kilometers'},
     }
     trip = self._post('route', request)['trip']

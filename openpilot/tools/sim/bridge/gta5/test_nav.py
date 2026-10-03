@@ -98,3 +98,55 @@ def test_link_lanes():
   assert two_way.lane(-6.0) == -2
   one_way = Link([0, 0, 2 << 5])
   assert one_way.lane(-2.0) == 0 and one_way.lane(2.0) == 1 and one_way.lane(-20.0) == 0
+
+
+def test_lane_change_param_before_blinker():
+  # openpilot reads NavDesire every 0.2 s: the blinker before it would ask for a turn below 19 mph
+  route = route_to_turn(200.0)
+  d = Drive((0, 2), v=7.0)
+  events, last_desire, last_ind = [], "", None
+  y = 0.0
+  while y < 190.0:
+    d.step(route, y)
+    if d.nav.desire != last_desire:
+      events.append((d.clock.t, "desire", d.nav.desire))
+      last_desire = d.nav.desire
+    if d.indicator != last_ind:
+      events.append((d.clock.t, "blinker", d.indicator))
+      last_ind = d.indicator
+    if d.nav.changing and d.indicator and y > 50:
+      d.indicator = None  # the bridge cancels it once the lane change is done
+      d.lane = (1, 2)
+    y += d.v * 0.05
+  on = next(t for t, kind, v in events if kind == "desire" and v == "laneChange")
+  blink = next(t for t, kind, v in events if kind == "blinker" and v == "right")
+  assert blink - on >= 0.35
+  off = next(t for t, kind, v in events if kind == "desire" and v == "" and t > blink)
+  blink_off = next(t for t, kind, v in events if kind == "blinker" and v is None and t > blink)
+  assert off - blink_off >= 0.45
+
+
+def test_turn_straight_after_a_turn():
+  # left, then right 35 m on: the second is signalled without waiting out a cooldown
+  first = route_to_turn(100.0, "left", after=0.0)
+  route = np.concatenate((first, [(-x, 100.0) for x in np.arange(0.0, 35.0, 5.0)], [(-35.0, 100.0 + y) for y in np.arange(5.0, 100.0, 5.0)]))
+  sides = []
+  d = Drive((0, 1), v=5.0)
+  pos, heading = np.array([0.0, 0.0]), 0.0
+  for _ in range(2000):
+    d.clock.t += 0.05
+    along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
+    s = along[int(np.argmin(np.hypot(*(route - pos).T)))]
+    ahead = [pos.tolist()] + [p.tolist() for p, a in zip(route, along, strict=True) if a > s + 0.5]
+    state = {"vEgo": d.v, "pos": [*pos, 0.0], "heading": heading, "yawRate": 0.0, "lane": [0, 1], "route": ahead, "routeEnd": along[-1] - s}
+    d.nav.update(state, True, d.indicator, {})
+    if d.nav.signaled and (not sides or sides[-1] != d.nav.signaled):
+      sides.append(d.nav.signaled)
+    # follow the route, heading along it
+    nxt = np.array(ahead[1]) if len(ahead) > 1 else pos
+    step = nxt - pos
+    if np.hypot(*step) < 1e-6:
+      break
+    heading = float(np.degrees(np.arctan2(-step[0], step[1])))
+    pos = pos + step / np.hypot(*step) * min(d.v * 0.05, np.hypot(*step))
+  assert sides == ["left", "right"]
