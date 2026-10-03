@@ -68,14 +68,20 @@ TRACE_EVERY = 0.5  # s
 STOPPED = 0.3  # m/s
 NUDGE_AFTER = 10.0  # s stopped, short of the destination: the test driver presses the gas
 NUDGES = 3
+# s of full throttle: a Model 3 pulls about 9 m/s^2, so this gets it rolling and openpilot takes it from there
+START_GAS, NUDGE_GAS = 0.25, 0.3
 STUCK_AFTER = 15.0  # s stopped after the last nudge
+PINNED = 5.0  # m moved over all the nudges, less than which the car is against a wall or kerb
+FIRST_MANEUVER = 150.0  # m: picked trips have no maneuver nearer the start
 ARRIVED_WITHIN = 40.0  # m of the destination, disengaged
 MAX_REROUTES = 5
 REPEAT_WITHIN = 20.0  # m from the last reroute: the same one again
 OFF_ROAD = 15.0  # m from any road link
 OFF_ROAD_FOR = 5.0  # s
 COLLISION_DECEL = -12.0  # m/s^2 measured
+FALL = 5.0  # m dropped within a second: off a bridge or ramp
 MISSED_NEAR = 150.0  # m from the next maneuver when the car leaves the route: that maneuver was missed
+REACHED = 35.0  # m: and the car came at least this near it
 DONE_PAST = 25.0  # m along the route past a maneuver, where the car must get to
 DONE_WITHIN = 15.0  # m of that point
 STALE = 5.0  # s without game state or openpilot messages: restart that service
@@ -246,6 +252,8 @@ def pick_trips(m: Map, mode: str, n: int, seed: int) -> list[tuple]:
       continue
     if any(mm['type'] in (12, 13) for mm in ms) or not any(mm['real'] and mm['along'] > 30 for mm in ms):
       continue
+    if any(mm['real'] and mm['along'] < FIRST_MANEUVER for mm in ms):
+      continue  # nav needs room to get up to speed and into lane
     if ms[0].get('bearing') is not None and abs(angle_diff(ms[0]['bearing'], bearing)) > 60:
       continue  # the router starts it on the other carriageway
     trips.append((round(x, 1), round(y, 1), round(z, 1), round(heading), round(dx, 1), round(dy, 1)))
@@ -405,6 +413,8 @@ class Trip:
     self.stopped_t: float | None = None
     self.last_trace = 0.0
     self.collisions = 0
+    self.route_t = 0.0  # when the route being followed was made (trip time)
+    self.alert = ''
 
   def snap(self, name: str) -> str:
     """Saves the cameras' next frames as <trace>_<name>_road.png etc."""
@@ -473,7 +483,7 @@ class Trip:
     if not rig.set_engaged(True):
       ss = rig.sm['selfdriveState']
       return {**rec, 'outcome': 'no_engage', 'detail': f"{ss.alertText1} {ss.alertText2}".strip()}
-    cmd("gas", secs=0.5)  # the model won't pull away from a stop
+    cmd("gas", secs=START_GAS)  # the model won't pull away from a stop
     self.t0 = time.monotonic()
     self.pending = 1 if self.route['maneuvers'] and self.route['maneuvers'][0]['type'] in (1, 2, 3) else 0
     timeout = max(180.0, 2.5 * self.route['time'] + 120)
@@ -497,6 +507,15 @@ class Trip:
       self._sample(now, s, cs, ss)
       self._follow(now, pos)
       left = float(np.hypot(*(pos - np.array([dx, dy]))))
+      if ss.alertText1 != self.alert:
+        self.alert = ss.alertText1
+        if self.alert:
+          self.event('alert', text=f"{ss.alertText1} {ss.alertText2}".strip(), v=round(v, 1), street=s.get('street'))
+      ago = next((p for p in reversed(self.history) if p['t'] <= self.history[-1]['t'] - 1.0), None)
+      if ago is not None and ago['z'] - s['pos'][2] > FALL:
+        self.event('fell', dz=round(ago['z'] - s['pos'][2], 1))
+        outcome, detail = 'fell', f"{ago['z'] - s['pos'][2]:.0f} m from ({ago['x']:.0f}, {ago['y']:.0f})"
+        break
       if rig.take_min_accel() < COLLISION_DECEL:
         self.collisions += 1
         self.event('collision')
@@ -523,11 +542,15 @@ class Trip:
         stood = now - self.stopped_t
         if self.nudges < NUDGES and stood > NUDGE_AFTER:
           self.nudges += 1
+          if self.nudges == 1:
+            self.nudged_from = pos.copy()
           self.event('nudge', n=self.nudges, street=s.get('street'))
-          cmd("gas", secs=0.6)
+          cmd("gas", secs=NUDGE_GAS)
           self.stopped_t = now
         elif self.nudges >= NUDGES and stood > STUCK_AFTER:
-          outcome, detail = ('crash' if self.collisions else 'stuck'), f"{left:.0f} m left"
+          # the gas presses barely moved it: it's up against something
+          pinned = float(np.hypot(*(pos - self.nudged_from))) < PINNED
+          outcome, detail = ('crash' if self.collisions or pinned else 'stuck'), f"{left:.0f} m left"
           break
       else:
         self.stopped_t = None
@@ -609,6 +632,11 @@ class Trip:
     left_at = next((p for p in reversed(self.history) if p['t'] < self.history[-1]['t'] - 1.5), self.history[-1])
     nxt = next((i for i in range(self.pending, len(ms)) if ms[i]['type'] not in (7, 8)), None)
     near = None if nxt is None else math.hypot(left_at['x'] - ms[nxt]['x'], left_at['y'] - ms[nxt]['y'])
+    # a maneuver the car never came near on this route (as one round the block behind it) wasn't the one it missed
+    reached = None if nxt is None else min((math.hypot(p['x'] - ms[nxt]['x'], p['y'] - ms[nxt]['y'])
+                                            for p in self.history if p['t'] >= self.route_t), default=1e9)
+    if reached is not None and reached > REACHED:
+      near = None
     rr = {'t': round(time.monotonic() - self.t0, 1), 'pos': [round(v, 1) for v in s['pos']], 'heading': round(s['heading']),
           'street': s.get('street'), 'lane': s.get('lane'), 'v': round(s.get('vEgo', 0.0), 1),
           'maneuver': nxt if near is not None and near < MISSED_NEAR else None,
@@ -628,6 +656,7 @@ class Trip:
     self.event('reroute', **{k: rr[k] for k in ('street', 'lane', 'maneuver', 'maneuver_dist')}, kind=rr.get('kind'))
     try:
       self.route = plan(s['pos'][0], s['pos'][1], s['heading'], self.spec[4], self.spec[5])
+      self.route_t = self.history[-1]['t']
       self.pending = 1 if self.route['maneuvers'] and self.route['maneuvers'][0]['type'] in (1, 2, 3) else 0
       rr['new_route'] = {'length': round(self.route['length']), 'maneuvers': [m['kind'] for m in self.route['maneuvers']]}
     except (OSError, ValueError, KeyError) as e:
