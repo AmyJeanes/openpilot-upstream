@@ -18,6 +18,7 @@ OTHER_LEVEL = 3.0  # m above or below the route: the car is on another road, pas
 WRONG_WAY = 100.0  # deg from the route's direction: the car isn't driving that part of it
 FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
 LANE_ALIGN = 10.0  # deg
+LANES_NEAR = 60.0  # m from a point to look for a link with its lanes
 JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
 
 
@@ -206,6 +207,56 @@ class Route:
     """The route on from the car: its own points, so the shape holds still as the car moves (unlike ahead()'s)."""
     here = [np.interp(self.at, self.along, self.points[:, 0]), np.interp(self.at, self.along, self.points[:, 1])]
     return np.vstack([here, self.points[self.along > self.at]])
+
+  def lanes_at(self, ahead: float, after: bool = False) -> int:
+    """The lanes the car's way just before (after: just past) a point `ahead` m on, from the nearest link with them."""
+    k = int(np.searchsorted(self.along, self.at + ahead + (1.0 if after else -1.0), side='right')) - 1
+    ks = range(max(k, 0), len(self.links)) if after else range(min(k, len(self.links) - 1), -1, -1)
+    for j in ks:
+      if abs(self.along[j] - self.at - ahead) > LANES_NEAR:
+        break
+      link = self.links[j]
+      if link is not None and link.lanes:
+        return link.lanes
+    return 0
+
+  def lane_line(self, keys: list[tuple[float, float]]) -> np.ndarray | None:
+    """The route on from the car (rest()'s points, and one at each of keys) moved off the road's line into the lanes
+    keys gives ([(m on, lane from the left)], a ramp between each two), by each link's own lanes; across links without
+    them, as inside junctions, the offset runs evenly between the known ones."""
+    first = int(np.searchsorted(self.along, self.at, side='right'))
+    if first >= len(self.points) or not keys:
+      return None
+    pts = self.rest()
+    s = np.concatenate(([0.0], self.along[first:] - self.at))
+    links = [self.links[k] for k in range(first - 1, len(self.points) - 1)]
+    kx = np.array([d for d, _ in keys], dtype=float)
+    kx = kx + np.arange(len(kx)) * 1e-3  # a step where two keys share a place
+    ky = np.array([lane for _, lane in keys], dtype=float)
+    s2 = np.unique(np.concatenate((s, kx[(kx > 0) & (kx < s[-1])])))
+    xy = np.stack([np.interp(s2, s, pts[:, 0]), np.interp(s2, s, pts[:, 1])], axis=1)
+    lane = np.interp(s2, kx, ky)
+    seg = np.clip(np.searchsorted(s, (s2[:-1] + s2[1:]) / 2, side='right') - 1, 0, len(links) - 1)
+    offs = np.full(len(s2), np.nan)
+    for i, j in enumerate(seg):
+      link = links[j]
+      if link is None or not link.lanes:
+        continue
+      for v in (i, i + 1):  # the segment's ends, averaged with the next's at a shared point
+        off = link.inner + (min(max(lane[v], -link.back), link.lanes - 1) + 0.5) * link.width
+        offs[v] = off if np.isnan(offs[v]) else (offs[v] + off) / 2
+    known = ~np.isnan(offs)
+    if not known.any():
+      return None
+    offs = np.interp(s2, s2[known], offs[known])
+    d = np.diff(xy, axis=0)
+    normals = np.stack([d[:, 1], -d[:, 0]], axis=1) / np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-6)[:, None]  # to the right
+    vn = np.concatenate((normals[:1], normals[:-1] + normals[1:], normals[-1:]))
+    vn /= np.maximum(np.hypot(vn[:, 0], vn[:, 1]), 1e-6)[:, None]
+    # out further at a corner, so the segments either side stay their offset from the road's line
+    out = np.concatenate((normals[:1], normals))
+    vn /= np.maximum(np.einsum('ij,ij->i', vn, out), 0.5)[:, None]
+    return xy + vn * offs[:, None]
 
   def lane(self) -> list[int] | None:
     """The car's lane, as the plugin reports it: [i from the left, of n], i negative in the oncoming lanes. None where

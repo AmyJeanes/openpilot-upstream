@@ -16,7 +16,7 @@ from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
-from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway
+from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths
@@ -355,12 +355,22 @@ class GTA5World(World):
     self.map_view.update({
       "t": now,
       "car": {"x": state["pos"][0], "y": state["pos"][1], "bearing": bearing},
-      "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist()},
+      "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
+                 "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
       "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.simulator_state.is_engaged else ''}",
       "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),
               "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
     })
+
+  def _lane_line(self, state: dict, v: float) -> list:
+    """The route in the lanes nav aims for, for the map."""
+    r = self.route
+    if r is None:
+      return []
+    forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
+    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune))
+    return [] if line is None else line.round(1).tolist()
 
   def _set_nav_desire(self, desire: str):
     if desire:

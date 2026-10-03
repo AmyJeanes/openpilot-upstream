@@ -183,8 +183,10 @@ function draw() {
   }
   if (state) {
     const routes = state.routes || {};
-    for (const [name, colour, width, dash] of [['gps', '#ff5fd2', 5, [10, 7]], ['nav', '#3d8bfd', 6, []]]) {
-      const pts = car ? fromCar(routes[name], car) : routes[name];
+    // nav's route in the lanes it aims for, else along the road's line
+    const nav = routes.lanes && routes.lanes.length > 1 ? routes.lanes : routes.nav;
+    for (const [line, colour, width, dash] of [[routes.gps, '#ff5fd2', 5, [10, 7]], [nav, '#3d8bfd', 6, []]]) {
+      const pts = car ? fromCar(line, car) : line;
       if (!pts || pts.length < 2) continue;
       const p = new Path2D(); polyline(p, pts);
       ctx.strokeStyle = colour;

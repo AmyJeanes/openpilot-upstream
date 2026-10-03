@@ -1,8 +1,9 @@
 import numpy as np
 
 import openpilot.tools.sim.bridge.gta5.gta5_nav as nav_mod
-from openpilot.tools.sim.bridge.gta5.gta5_nav import Fork, Nav, find_turn
+from openpilot.tools.sim.bridge.gta5.gta5_nav import Fork, Nav, find_turn, lane_plan
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
+from openpilot.tools.sim.bridge.gta5.map.router import Route
 
 
 class Clock:
@@ -305,3 +306,45 @@ def test_turn_speed_held_through_the_arc():
   assert d.nav.signaled is None  # done at 25 deg from the way out
   assert all(abs(c - held) < 1e-6 for c in caps[:35])  # but held through the arc
   assert caps[-1] > held + 1.0  # and lifted gently once straight
+
+
+def lane_route(points, links: list) -> Route:
+  r = Route(np.array(points, dtype=float), [])
+  r.links = links if isinstance(links, list) else [links] * (len(points) - 1)
+  return r
+
+
+def lane_line(r: Route, lane, v=8.0) -> np.ndarray:
+  return r.lane_line(lane_plan(r.rest(), [], lane, r.lanes_at, v))
+
+
+def x_at(line: np.ndarray, y: float) -> float:
+  return float(line[np.argmin(np.abs(line[:, 1] - y) + 1000 * (np.abs(line[:, 0]) > 20))][0])
+
+
+def test_lane_line_moves_over_for_a_right_turn():
+  two = Link([0, 0, 2 << 5])  # one-way, two lanes centred on the line
+  line = lane_line(lane_route(route_to_turn(200.0), two), (0, 2))
+  assert abs(x_at(line, 20.0) + 2.75) < 0.1  # the left lane
+  assert abs(x_at(line, 175.0) - 2.75) < 0.1  # the right one, changed by 30 m before
+  east = line[line[:, 0] > 40.0]
+  assert len(east) and np.allclose(east[:, 1], 200.0 - 2.75, atol=0.1)  # and out of the turn in the right lane
+
+
+def test_lane_line_arrives_left_from_a_left_turn():
+  two = Link([0, 0, 2 << 5])
+  line = lane_line(lane_route(route_to_turn(200.0, "left"), two), (0, 2))
+  assert abs(x_at(line, 100.0) + 2.75) < 0.1  # already in the turn's lane
+  west = line[line[:, 0] < -40.0]
+  assert len(west) and np.allclose(west[:, 1], 200.0 - 2.75, atol=0.1)
+
+
+def test_lane_line_across_links_without_lanes():
+  # a junction's insides between a two-lane road and a three-lane one: the offset runs evenly, not to the road's line
+  pts = [(0.0, y) for y in np.arange(0.0, 200.0, 5.0)]
+  links = [Link([0, 0, 2 << 5])] * 10 + [None] * 5 + [Link([0, 0, 3 << 5])] * (len(pts) - 16)
+  line = lane_line(lane_route(pts, links), (1, 2))
+  xs = [x_at(line, y) for y in (40.0, 50.0, 60.0, 65.0, 75.0, 100.0)]
+  assert abs(xs[0] - 2.75) < 0.1 and abs(xs[-1]) < 0.1  # lane 1 of 2, then of 3
+  assert abs(xs[2] - 1.65) < 0.1 and abs(xs[3] - 1.1) < 0.1
+  assert all(a >= b - 1e-6 for a, b in zip(xs, xs[1:], strict=False))

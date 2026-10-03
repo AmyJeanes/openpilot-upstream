@@ -79,6 +79,7 @@ FORK_MIN_SPEED = 10.0  # m/s, for a fork, as on a freeway
 LANE_CHANGE_TIMEOUT = 10.0  # s
 LANE_CHANGE_GAP = 2.0  # s between lane changes
 LANE_CHANGE_TRIES = 3  # for one turn or fork, without getting nearer its lane
+LANE_LINE_CHANGE = 40.0  # m a lane change takes on the map's lane line
 LANE_STEADY = 0.5  # s a lane reading must hold
 LANE_STALE = 3.0  # s without a steady reading
 SKIP_SURE = 0.6  # lanes from the turn's lanes, by the car's position on the route, to leave the turn to the route
@@ -332,6 +333,49 @@ def limit_cap(limits: list, v: float) -> float:
 
 def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> float:
   return math.sqrt(speed ** 2 + 2 * decel * max(0.0, dist - v * SLOW_LAG))
+
+
+def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None) -> list[tuple[float, float]]:
+  """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
+  two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
+  in, by where nav's changes for it must have ended, and arrives from a turn in its side's outside lane. lanes_at(m,
+  after) is the lanes the car's way just before (after: past) a point."""
+  t = tune or TUNE
+  ahead: list[Turn | Fork] = []
+  turn = find_turn(route, MIN_AHEAD_MAP)
+  while turn is not None:
+    ahead.append(turn)
+    turn = find_turn(route, turn.dist + TURN_HOLDS)
+  ahead += [Fork(d, side, *rest) for d, side, *rest in forks if d > 0]
+  ahead.sort(key=lambda m: m.dist)
+  cur = lane[0] if lane else 0
+  keys = [(0.0, float(cur))]
+  free = 0.0  # m along from which the next change may start: past the turn or fork before
+  if cur < 0:
+    free, cur = -cur * LANE_LINE_CHANGE, 0
+    keys.append((free, 0.0))
+  for m in ahead:
+    n = lanes_at(m.dist, False)
+    if n <= 0:
+      continue
+    cur = min(cur, n - 1)
+    lo, hi = m.lanes(n)
+    if not lo <= cur <= hi:
+      want = lo if cur < lo else hi
+      last = max(FORK_LAST_DIST, FORK_LAST * v) if isinstance(m, Fork) else t.lane_change_last
+      end = min(max(m.dist - last, free), m.dist)
+      start = min(max(end - abs(want - cur) * LANE_LINE_CHANGE, free), end)
+      keys += [(start, float(cur)), (end, float(want))]
+      cur = want
+    if isinstance(m, Turn):
+      new = 0 if m.side == "left" else max(lanes_at(m.dist, True) - 1, 0)
+      free = m.dist + TURN_HOLDS
+    else:
+      new = max(cur - max(n - m.ours, 0), 0) if m.side == "right" else cur  # numbered from the branch's own left lane
+      free = m.dist
+    keys += [(m.dist, float(cur)), (m.dist, float(new))]
+    cur = new
+  return keys
 
 
 def junction_entry(turn_dist: float, stops: list, junctions: list) -> tuple[float, str]:
