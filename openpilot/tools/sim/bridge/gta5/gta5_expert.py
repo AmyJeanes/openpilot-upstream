@@ -19,13 +19,17 @@ lead of about 3, as the AI settles 1-2 m/s under its cap. `dest` ignores a route
 trip's. Off the map's routes the AI drives to the game's waypoint, or wanders. Each game state appends a JSON line to
 the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target,
 the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can be
-filtered later. The engage key stops the AI and expert mode; so does arriving, hold_after s after
+filtered later. speed_by_class ("residential:10,primary:14,motorway:18", classes as Valhalla names them, ramp for
+ramps, default for the rest) caps the speed by the road's class, slowing ahead for a lower one, and decel_fast is the
+slowing rate above 12 m/s. The engage key stops the AI and expert mode; so does arriving, hold_after s after
 stopping, and the control file is set off. With expert mode off, the bridge turns off a plugin AI driver left on
 (always without GTA5_EXPERT, else once the bridge starts or while openpilot is engaged)."""
 import json
 import math
 import os
+import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -35,10 +39,13 @@ POLL_EVERY = 0.5  # s
 DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "aggr": 0.0, "task": "longrange", "limits": True,
             "need_route": False, "dest": None, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0, "targets": "junction",
             "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "launch": None, "decel": 0.0, "turn_speed": 6.0,
-            "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0}
+            "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0,
+            "speed_by_class": None, "decel_fast": 0.0}
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
-LIMIT_LOOKAHEAD = 300.0  # m, lower speed limits ahead slowed for
+LIMIT_LOOKAHEAD = 600.0  # m, lower speed limits ahead slowed for
+FAST = 12.0  # m/s, above which decel_fast is the slowing rate
+ROUTER = os.getenv("GTA5_ROUTER")  # Valhalla, for the road classes along a route
 HOLD_SPEED = 0.01  # m/s: the AI pulls up and waits in its lane, as in a queue
 ARRIVE_DECEL = 1.0  # m/s^2, arrive=gentle without decel
 EVENT_MIN = 8.0  # m ahead: a junction or maneuver nearer than this is being driven through
@@ -164,6 +171,7 @@ class Expert:
     self.aborts: int | None = None
     self.arrived = False
     self.arrived_t = 0.0
+    self.classes: tuple = (None, [])  # the route they're for, and the road class of each of its segments
     self.collisions0 = 0  # the plugin counts frames in contact since the car was entered
     self.cmd, self.cmd_t = 0.0, 0.0  # the ramped speed, and when it was worked out
     self.target_t = 0.0
@@ -281,6 +289,8 @@ class Expert:
 
   def _new_route(self, route):
     self.route, self.target, self.anchor, self.final, self.done = route, None, None, False, set()
+    if route is not None and self._class_caps() and ROUTER:
+      threading.Thread(target=self._fetch_classes, args=(route,), daemon=True).start()
     if route is None:
       self.mans, self.events = [], []
       if self.sent_target is not None:
@@ -350,6 +360,63 @@ class Expert:
       print("gta5: expert arrived", flush=True)
     self._desire(route, state, now)
 
+  def _class_caps(self) -> dict[str, float]:
+    """speed_by_class as {road class: m/s}, from "residential:10,primary:14" or a JSON object."""
+    spec = self.cfg.get("speed_by_class")
+    if isinstance(spec, dict):
+      return {str(k): float(v) for k, v in spec.items()}
+    out = {}
+    for part in str(spec or "").split(","):
+      k, _, v = part.partition(":")
+      try:
+        out[k.strip()] = float(v)
+      except ValueError:
+        pass
+    return out
+
+  def _fetch_classes(self, route):
+    """Valhalla's road class (use "ramp" as the class ramp) of each segment of the route's shape, into self.classes."""
+    from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
+    classes: list[str | None] = [None] * max(len(route.points) - 1, 0)
+    try:
+      req = {"shape": [dict(zip(("lat", "lon"), to_lat_lon(float(x), float(y)), strict=True)) for x, y in route.points],
+             "shape_match": "walk_or_snap", "costing": "auto",
+             "filters": {"attributes": ["edge.road_class", "edge.use", "edge.begin_shape_index", "edge.end_shape_index",
+                                        "matched.edge_index"], "action": "include"}}
+      http = urllib.request.Request(f"{ROUTER}/trace_attributes", json.dumps(req).encode(), {"Content-Type": "application/json"})
+      trace = json.loads(urllib.request.urlopen(http, timeout=5).read())
+    except (OSError, ValueError) as e:
+      print(f"gta5: expert: no road classes: {e}", flush=True)
+      return
+    edges = trace.get("edges", [])
+    names = ["ramp" if e.get("use") == "ramp" else e.get("road_class") for e in edges]
+    if trace.get("matched_points"):
+      for k, m in enumerate(trace["matched_points"][:len(classes)]):
+        i = m.get("edge_index")
+        classes[k] = names[i] if i is not None and i < len(names) else None
+    else:
+      for e, name in zip(edges, names, strict=True):
+        classes[e.get("begin_shape_index", 0):e.get("end_shape_index", 0)] = [name] * (e.get("end_shape_index", 0) - e.get("begin_shape_index", 0))
+      classes = classes[:max(len(route.points) - 1, 0)]
+    self.classes = (route, classes)
+
+  def _class_cap(self, route, k: int, caps: dict[str, float]) -> float:
+    """The speed_by_class cap on segment k: "default", else the lowest, where the class isn't known (yet)."""
+    known = self.classes[1] if self.classes[0] is route else []
+    name = known[k] if k < len(known) else None
+    if name in caps:
+      return caps[name]
+    return caps.get("default", min(caps.values()))
+
+  def _allowed(self, s: float, d: float, decel: float) -> float:
+    """The speed from which to slow to s within d m: at decel, and at decel_fast above FAST."""
+    fast = float(self.cfg["decel_fast"]) or decel
+    d = max(d, 0.0)
+    slow_part = max(FAST * FAST - s * s, 0.0) / (2 * decel)
+    if d <= slow_part:
+      return math.sqrt(s * s + 2 * decel * d)
+    return math.sqrt(max(s, FAST) ** 2 + 2 * fast * (d - slow_part))
+
   def _speed(self, route, v: float, now: float) -> float:
     """The AI's speed cap: the set cap or the map's limit where lower; with decel, lower ahead of turns, lower limits and
     (arrive=gentle) a stop short of the route's end; with ramp, raised from the car's speed no faster than that."""
@@ -358,6 +425,9 @@ class Expert:
     limits = route.limits if c["limits"] else []
     if route.seg < len(limits) and limits[route.seg] > 0:
       cap = min(cap, float(limits[route.seg]))
+    caps = self._class_caps()
+    if caps:
+      cap = min(cap, self._class_cap(route, route.seg, caps))
     decel, gentle = float(c["decel"]), c["arrive"] == "gentle"
     ahead: list[tuple[float, float]] = []  # (m ahead, m/s there)
     if decel > 0:
@@ -368,11 +438,17 @@ class Expert:
           break
         if 0 < limits[k] < cap:
           ahead.append((d, float(limits[k])))
+      for k in range(route.seg + 1, len(route.points) - 1) if caps else ():
+        d = float(route.along[k]) - at
+        if d > LIMIT_LOOKAHEAD:
+          break
+        if self._class_cap(route, k, caps) < cap:
+          ahead.append((d, self._class_cap(route, k, caps)))
     if gentle:
       ahead.append((route.length - at - float(c["stop_before"]), HOLD_SPEED))
       decel = decel if decel > 0 else ARRIVE_DECEL
     for d, s in ahead:
-      cap = min(cap, math.sqrt(s * s + 2 * decel * max(d, 0.0)))
+      cap = min(cap, self._allowed(s, d, decel))
     ramp = float(c["ramp"])
     if ramp > 0:
       dt = min(max(now - self.cmd_t, 0.0), 0.5)
