@@ -247,6 +247,8 @@ def test_turn_done_at_its_way_out_without_repulse():
   # once the car has turned, the blinker drops at the way out even while still yawing, and isn't pulsed again
   route = route_to_turn(40.0, "left")
   d = Drive((0, 1), v=5.0)
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(left_signal_max_entry=0.0)  # signalled at 25 m, without a stop line
   for k in range(60):
     d.step(route, k * 0.25)
   assert d.nav.signaled == "left"
@@ -267,7 +269,7 @@ def test_exit_cue_stacked_within_the_turn():
   route = route_to_turn(40.0, "left")
   d = Drive((0, 1), v=5.0)
   d.nav.tune = nav_mod.Tune("")
-  d.nav.tune.values.update(exit_cue_at=0.5)
+  d.nav.tune.values.update(exit_cue_at=0.5, left_signal_max_entry=0.0)
   for k in range(60):
     d.step(route, k * 0.25)
   assert d.nav.signaled == "left" and "+keepRight" not in d.desires
@@ -295,6 +297,16 @@ def test_left_signal_waits_for_the_stop_line():
       y += d.v * 0.05
     at[wait] = 80.0 - y
   assert at[0.0] > 5.0 and 2.0 < at[3.0] <= 3.0
+  # not held just after a lane change towards it, whose desire would carry on into the junction instead
+  d = Drive((0, 2), v=5.0)
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(left_signal_max_entry=3.0)
+  y = 0.0
+  while y < 100.0 and not signals(d):
+    d.nav.change_side, d.nav.change_t = "left", d.clock.t - 2.0
+    d.step(route, y, {"stops": [80.0 - y], "routeEnd": 300.0 - y})
+    y += d.v * 0.05
+  assert abs((80.0 - y) - at[0.0]) < 1.0
 
 def test_junction_entry():
   from openpilot.tools.sim.bridge.gta5.gta5_nav import junction_entry
@@ -347,6 +359,8 @@ def test_turn_speed_held_through_the_arc():
   # the turn's speed holds until the car heads its way out and is straight, not when the turn counts as done
   route = route_to_turn(40.0, "left")
   d = Drive((0, 1), v=5.0)
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(left_signal_max_entry=0.0)  # signalled at 25 m, without a stop line
   for k in range(60):
     d.step(route, k * 0.25)
   assert d.nav.signaled == "left"

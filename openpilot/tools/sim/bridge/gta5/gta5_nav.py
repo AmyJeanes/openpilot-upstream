@@ -143,6 +143,7 @@ ENTRY_GAP = 15.0  # m between a junction's nodes
 ENTRY_PAST = 3.0  # m past the turn's point, a junction node of it
 ENTRY_MIN = 5.0  # m before the turn: nearer, the junction nodes say nothing more than the turn
 ENTRY_DEFAULT = 15.0  # m before the turn
+LEFT_SIGNAL_AFTER_CHANGE = 8.0  # s after a lane change towards a left turn its signal isn't held for the stop line
 
 
 def wrap(deg: float) -> float:
@@ -172,7 +173,7 @@ class Tune:
     "signal_min_entry": 0.0,
     # m before the junction's entry a left turn's time-mode signal waits for (0: off); signalled well before its stop
     # line, the model turns in early and can cut into the near, oncoming half of a split junction
-    "left_signal_max_entry": 0.0,
+    "left_signal_max_entry": 0.5,
     "repulse_every": PULSE_EVERY,  # s
     "repulse_until_turned": TURN_STARTED,  # deg
     "repulse_after_stop_until": STOP_REPEAT_TURNED,  # deg
@@ -442,6 +443,7 @@ class Nav:
     self.seen: tuple[str, float] | None = None  # the turn ahead's side, and since when
     self.changing: str | None = None  # the side of nav's lane change under way
     self.change_turn = False  # whether it's into the lanes for a turn
+    self.change_side: str | None = None  # the last lane change's side, under way or ended
     self.change_shown = False
     self.change_t = 0.0  # when it started, or the last ended
     self.change_tries: dict[tuple, int] = {}  # lane changes for each turn or fork (by where it is), without progress
@@ -753,7 +755,10 @@ class Nav:
       early = t.signal_min_entry > 0 and self.entry < t.signal_min_entry
       if not (turn.dist < t.signal_min or ((early or turn.dist < window) and slow)):
         return False
-      if turn.side == "left" and t.left_signal_max_entry > 0 and self.entry > t.left_signal_max_entry and turn.dist >= SIGNAL_LAST:
+      # not after a lane change towards it: held, its lane change desire carries on into the junction
+      changed = self.change_side == "left" and (self.changing is not None or now - self.change_t < LEFT_SIGNAL_AFTER_CHANGE)
+      if (turn.side == "left" and t.left_signal_max_entry > 0 and self.entry > t.left_signal_max_entry and not changed
+          and turn.dist >= SIGNAL_LAST):
         return False
     if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
       return False  # into the turn bay first
@@ -930,6 +935,7 @@ class Nav:
 
   def _start_change(self, side: str, why: str, turn: bool = False):
     self.changing, self.change_shown, self.change_t, self.change_turn = side, False, time.monotonic(), turn
+    self.change_side = side
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
     self._set_desire(self.change_t)
