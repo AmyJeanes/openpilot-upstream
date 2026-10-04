@@ -470,6 +470,19 @@ def cmd(type_: str, **kw):
     s.sendall((json.dumps({"type": type_, **kw}) + "\n").encode())
 
 
+def ai_off():
+  """Hands the car back from the plugin's AI driver: one left on (an expert run) overrides openpilot for every trip."""
+  from openpilot.tools.sim.bridge.gta5.gta5_expert import CONTROL
+  try:
+    if CONTROL.exists():
+      tmp = CONTROL.with_suffix(".tmp")
+      tmp.write_text(json.dumps({"on": False}) + "\n")
+      tmp.replace(CONTROL)
+    cmd("ai", on=0, indicator="off")
+  except OSError as e:
+    print(f"e2e: couldn't turn the AI driver off: {e}", flush=True)
+
+
 def driving_model() -> str:
   """The driving model svc.sh last started openpilot with (MODEL=...)."""
   try:
@@ -1241,6 +1254,7 @@ def drive(args, roads, trips):
   os.makedirs(trace_dir, exist_ok=True)
   rig = Rig()
   rig.wait(2)
+  ai_off()
   print(f"e2e: {len(trips)} trips -> {out}, about {sum(trip_minutes(spec, args) for _, spec, *_ in trips):.0f} min", flush=True)
   status_path = os.path.join(os.path.dirname(out), "status.json")
   counts: Counter = Counter()
