@@ -389,6 +389,7 @@ def main(demo=False):
 
     sm.update(0)
     desire = DH.desire
+    stacked = DH.stacked
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["narrowRoadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
@@ -409,6 +410,8 @@ def main(demo=False):
     vec_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     if desire >= 0 and desire < ModelConstants.DESIRE_LEN:
       vec_desire[desire] = 1
+    if 0 < stacked < ModelConstants.DESIRE_LEN:
+      vec_desire[stacked] = 1
 
     # tracked dropped frames
     vipc_dropped_frames = max(0, meta_main.frame_id - last_vipc_frame_id - 1)

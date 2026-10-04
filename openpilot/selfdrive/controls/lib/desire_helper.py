@@ -17,6 +17,9 @@ LANE_TURN_SPEED = 19 * CV.MPH_TO_MS
 NAV_LANE_CHANGE = "laneChange"
 # or one of the model's keep desires, for a fork, which openpilot itself never asks for
 NAV_KEEP = {"keepLeft": log.Desire.keepLeft, "keepRight": log.Desire.keepRight}
+# after a "+", a keep desire given alongside whatever else the model gets ("+keepRight" with a turn, "laneChange+keepRight");
+# the model was trained on one desire at a time, so two at once is out of its training distribution
+NAV_STACK = "+"
 NAV_READ_EVERY = 0.2  # s
 
 
@@ -33,9 +36,15 @@ class NavDesire:
     return self.value
 
 
+def nav_split(nav: str) -> tuple[str, int]:
+  """NavDesire's own request, and the keep desire stacked on it if any."""
+  base, _, stacked = nav.partition(NAV_STACK)
+  return base, NAV_KEEP.get(stacked, log.Desire.none)
+
+
 def lane_turn_desire(CS, nav: str = "") -> int:
   """The turn a blinker asks for at low speed, unless the blind spot that way is occupied; overrides any lane change."""
-  if CS.vEgo < LANE_TURN_SPEED and nav != NAV_LANE_CHANGE:
+  if CS.vEgo < LANE_TURN_SPEED and nav_split(nav)[0] != NAV_LANE_CHANGE:
     if CS.leftBlinker and not CS.rightBlinker and not CS.leftBlindspot:
       return log.Desire.turnLeft
     if CS.rightBlinker and not CS.leftBlinker and not CS.rightBlindspot:
@@ -50,6 +59,7 @@ class DesireHelper:
     self.lane_change_timer = 0.0
     self.prev_one_blinker = False
     self.desire = log.Desire.none
+    self.stacked = log.Desire.none  # a second desire for the model, only when a navigation source stacks one
     self.nav = NavDesire()
 
   @staticmethod
@@ -60,7 +70,7 @@ class DesireHelper:
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     # read afresh as a blinker comes on, which means a turn or a lane change by it
-    nav = self.nav.get(one_blinker and not self.prev_one_blinker)
+    nav, stacked = nav_split(self.nav.get(one_blinker and not self.prev_one_blinker))
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN and nav != NAV_LANE_CHANGE
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
@@ -114,4 +124,5 @@ class DesireHelper:
       elif self.lane_change_direction == LaneChangeDirection.right:
         self.desire = log.Desire.laneChangeRight
     if self.desire == log.Desire.none:
-      self.desire = NAV_KEEP.get(nav, log.Desire.none)
+      self.desire = NAV_KEEP.get(nav, stacked)
+    self.stacked = stacked if stacked != self.desire else log.Desire.none
