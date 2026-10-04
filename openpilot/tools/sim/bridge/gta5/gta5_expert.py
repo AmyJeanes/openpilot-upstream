@@ -4,13 +4,21 @@ model (~/gta5test/notes/ai_driver.md has the research).
 Off unless the bridge runs with GTA5_EXPERT set: 1 for the control file at CONTROL, or the file's path. The bridge then
 watches that file (gta5_cmd.py expert on|off|route writes it; changes from before the bridge started are ignored):
   {"on": true, "speed": 12, "style": 1076369579, "ability": 1, "aggr": 0, "task": "longrange", "limits": true,
-   "need_route": false, "ahead_min": 60, "ahead_max": 120, "past": 25}
+   "need_route": false, "dest": null, "ahead_min": 60, "ahead_max": 120, "past": 25, "targets": "junction",
+   "retarget_every": 0, "ramp": 0, "lead": 2, "decel": 0, "turn_speed": 6, "arrive": "task", "stop_before": 15,
+   "speed_step": 0.5}
 While on, openpilot is kept disengaged and nav's cues wait. On our map's route (GTA5_ROUTER) the plugin's AI driver is
 given a target 60-120 m ahead, just past the next junction or maneuver, so its own short pathfinding can only take the
-route's way through it; the indicators follow the route's turns, ramps and exits, and `label` holds the desire they stand
-for. Off the map's routes the AI drives to the game's waypoint, or wanders. Each game state appends a JSON line to the
-log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target, the
-label and the lane readings, so samples can be filtered later. The engage key stops the AI and expert mode."""
+route's way through it (targets=smooth: ahead_max on, moved only once ahead_min is left, at most every retarget_every
+s); the indicators follow the route's turns, ramps and exits, and `label` holds the desire they stand for. Its speed cap
+is `speed`, or the map's limit where lower; ramp (m/s^2) raises it from the car's speed (at most `lead` m/s above it)
+rather than at once, decel (m/s^2) lowers it ahead of turns (to turn_speed) and lower limits, and arrive=gentle brings
+it to a stop stop_before m short of the route's end and holds it there, rather than the task's own arrival. `dest`
+ignores a route that doesn't end near it, as the last trip's. Off the map's routes the AI drives to the game's
+waypoint, or wanders. Each game state appends a JSON line to the log (GTA5_EXPERT_LOG, else expert.jsonl beside
+GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target, the label, the lane readings and the drive's
+collisions (frames in contact since it started), so samples can be filtered later. The engage key stops the AI and
+expert mode."""
 import json
 import math
 import os
@@ -22,7 +30,13 @@ import numpy as np
 CONTROL = Path("/tmp/gta5_expert.json")
 POLL_EVERY = 0.5  # s
 DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "aggr": 0.0, "task": "longrange", "limits": True,
-            "need_route": False, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0}
+            "need_route": False, "dest": None, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0, "targets": "junction",
+            "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "decel": 0.0, "turn_speed": 6.0, "arrive": "task",
+            "stop_before": 15.0, "speed_step": 0.5}
+DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
+LIMIT_LOOKAHEAD = 300.0  # m, lower speed limits ahead slowed for
+HOLD_SPEED = 0.01  # m/s: the AI pulls up and waits in its lane, as in a queue
+ARRIVE_DECEL = 1.0  # m/s^2, arrive=gentle without decel
 EVENT_MIN = 8.0  # m ahead: a junction or maneuver nearer than this is being driven through
 BEFORE_EVENT = 10.0  # m: a straight target that would land in a junction stays this far short of it
 RETARGET_NEAR = 30.0  # m from the target, whatever it's for
@@ -118,6 +132,7 @@ class Expert:
     self.on = False  # asked for and not stopped since
     self.active = False  # driving: the plugin was asked to
     self.last_t = None
+    self.game_t = 0.0
     self.next_cancel = 0.0
     self.log = None
     self.warned = False
@@ -142,6 +157,9 @@ class Expert:
     self.next_indicator = 0.0
     self.aborts: int | None = None
     self.arrived = False
+    self.collisions0 = 0  # the plugin counts frames in contact since the car was entered
+    self.cmd, self.cmd_t = 0.0, 0.0  # the ramped speed, and when it was worked out
+    self.target_t = 0.0
 
   # *** control file ***
 
@@ -169,14 +187,23 @@ class Expert:
     elif self.active:
       self._send_settings()  # settings changed while driving
 
-  def _settings(self) -> dict:
+  def _settings(self, speed: float | None = None) -> dict:
     c = self.cfg
-    return {"speed": float(c["speed"]), "style": int(c["style"]), "ability": float(c["ability"]), "aggr": float(c["aggr"]),
-            "task": str(c["task"])}
+    out = {"style": int(c["style"]), "ability": float(c["ability"]), "aggr": float(c["aggr"]), "task": str(c["task"])}
+    if speed is not None:
+      out["speed"] = round(speed, 2)
+      self.sent_speed = speed
+    return out
 
   def _send_settings(self):
-    self.send({"type": "ai", **self._settings()})
-    self.sent_speed = float(self.cfg["speed"])
+    # a ramped speed goes on from where it is
+    self.send({"type": "ai", **self._settings(None if float(self.cfg["ramp"]) > 0 else float(self.cfg["speed"]))})
+
+  def _start_speed(self, v: float) -> float:
+    if float(self.cfg["ramp"]) > 0:
+      self.cmd, self.cmd_t = max(v, 0.0) + float(self.cfg["lead"]), self.game_t
+      return min(self.cmd, float(self.cfg["speed"]))
+    return float(self.cfg["speed"])
 
   # *** each bridge step ***
 
@@ -200,6 +227,7 @@ class Expert:
     if state.get("t") == self.last_t:
       return True
     self.last_t = state.get("t")
+    self.game_t = float(state.get("t") or now)  # the ramp's clock: the game's, which stops while it does
     ai = state.get("ai") or {}
     if self.aborts is None:
       self.aborts = ai.get("aborts", 0)
@@ -207,20 +235,24 @@ class Expert:
       self.on = False
       self._stop("the driver pressed the engage key", plugin=False)
       return False
+    dest = self.cfg.get("dest")
+    if route is not None and dest and np.hypot(*(route.points[-1] - np.asarray(dest[:2], dtype=float))) > DEST_NEAR:
+      route = None  # the last trip's, still there until the router has the new one
     if route is None and self.cfg["need_route"] and not self.active:
       self._write(state, ai)
       return True  # waiting for the route
+    v = state.get("vEgo", 0.0)
     if not self.active:
       self.active = True
       self.clear_nav_desire()
-      self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings()})
-      self.sent_speed = float(self.cfg["speed"])
+      self.collisions0 = state.get("collisions", 0)
+      self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings(self._start_speed(v))})
       self.next_request = now + REQUEST_EVERY
     elif not ai.get("on") and now >= self.next_request:
       # the plugin dropped it (reloaded, or the player out of the driver's seat): ask again
       self.next_request = now + REQUEST_EVERY
       self.sent_target = None
-      self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings()})
+      self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings(self._start_speed(v))})
     if route is not self.route:
       self._new_route(route)
     if route is not None:
@@ -250,6 +282,12 @@ class Expert:
     if route.length <= hi:
       return route.length, None, True
     ahead = [e for e in self.events if e > at + EVENT_MIN]
+    if c["targets"] == "smooth":
+      # ahead_max on, moved on only once ahead_min is left, and not inside a junction
+      near = next((e for e in ahead if abs(e - hi) < past), None)
+      if near is None:
+        return hi, None, False
+      return (near - BEFORE_EVENT if near - BEFORE_EVENT >= lo else near + past), None, False
     if not ahead or ahead[0] + past > hi:
       if ahead and ahead[0] < hi + BEFORE_EVENT:
         return max(lo, ahead[0] - BEFORE_EVENT), None, False  # short of a junction just beyond reach
@@ -265,11 +303,13 @@ class Expert:
     return max(target, min(hi, nxt - BEFORE_EVENT if nxt is not None else route.length)), anchor, False
 
   def _follow(self, route, state: dict, now: float):
-    at = route.at
-    due = self.target is None or (not self.final and (self.target_along - at < RETARGET_NEAR or
-                                                       (self.anchor is not None and at > self.anchor + EVENT_MIN) or
-                                                       (self.anchor is None and self.target_along - at < float(self.cfg["ahead_min"]))))
+    at, c = route.at, self.cfg
+    due = self.target is None or (not self.final and (self.target_along - at < RETARGET_NEAR or (
+      now - self.target_t >= float(c["retarget_every"]) and
+      ((self.anchor is not None and at > self.anchor + EVENT_MIN) or
+       (self.anchor is None and self.target_along - at < float(c["ahead_min"]))))))
     if due:
+      self.target_t = now
       self.target_along, self.anchor, self.final = self._pick(route)
       xy = route_point(route, self.target_along)
       z = float(np.interp(self.target_along, route.along, route.z)) if not np.isnan(route.z).any() else state["pos"][2]
@@ -278,18 +318,48 @@ class Expert:
     if t != self.sent_target:
       self.send({"type": "ai", "x": t[0], "y": t[1], "z": t[2], "stop": FINAL_STOP if self.final else STOP_RANGE})
       self.sent_target = t
-    # speed: the cap, or the map's limit where lower
-    cap = float(self.cfg["speed"])
-    limit = float(route.limits[route.seg]) if self.cfg["limits"] and route.seg < len(route.limits) else 0.0
-    if limit > 0:
-      cap = min(cap, limit)
-    if abs(cap - self.sent_speed) >= SPEED_STEP:
+    v = state.get("vEgo", 0.0)
+    cap = self._speed(route, v, self.game_t)
+    step = float(c["speed_step"])
+    if abs(cap - self.sent_speed) >= step or (cap < step and self.sent_speed != cap):
       self.send({"type": "ai", "speed": round(cap, 2)})
       self.sent_speed = cap
-    if self.final and route.length - at < ARRIVED and state.get("vEgo", 0) < 0.5 and not self.arrived:
+    gentle = c["arrive"] == "gentle"
+    left = route.length - at - (float(c["stop_before"]) if gentle else 0.0)
+    if self.final and left < ARRIVED and v < 0.5 and not self.arrived:
       self.arrived = True
       print("gta5: expert arrived", flush=True)
     self._desire(route, state, now)
+
+  def _speed(self, route, v: float, now: float) -> float:
+    """The AI's speed cap: the set cap or the map's limit where lower; with decel, lower ahead of turns, lower limits and
+    (arrive=gentle) a stop short of the route's end; with ramp, raised from the car's speed no faster than that."""
+    c, at = self.cfg, route.at
+    cap = float(c["speed"])
+    limits = route.limits if c["limits"] else []
+    if route.seg < len(limits) and limits[route.seg] > 0:
+      cap = min(cap, float(limits[route.seg]))
+    decel, gentle = float(c["decel"]), c["arrive"] == "gentle"
+    ahead: list[tuple[float, float]] = []  # (m ahead, m/s there)
+    if decel > 0:
+      ahead += [(m.along - at, float(c["turn_speed"])) for i, m in enumerate(self.mans) if m.turn and i not in self.done]
+      for k in range(route.seg + 1, len(limits)):
+        d = float(route.along[k]) - at
+        if d > LIMIT_LOOKAHEAD:
+          break
+        if 0 < limits[k] < cap:
+          ahead.append((d, float(limits[k])))
+    if gentle:
+      ahead.append((route.length - at - float(c["stop_before"]), HOLD_SPEED))
+      decel = decel if decel > 0 else ARRIVE_DECEL
+    for d, s in ahead:
+      cap = min(cap, math.sqrt(s * s + 2 * decel * max(d, 0.0)))
+    ramp = float(c["ramp"])
+    if ramp > 0:
+      dt = min(max(now - self.cmd_t, 0.0), 0.5)
+      self.cmd, self.cmd_t = min(cap, self.cmd + ramp * dt, max(v, 0.0) + float(c["lead"])), now
+      cap = self.cmd
+    return max(cap, HOLD_SPEED)
 
   def _desire(self, route, state: dict, now: float):
     at, v, heading = route.at, state.get("vEgo", 0.0), state.get("heading", 0.0)
@@ -351,5 +421,6 @@ class Expert:
       "routeEnd": None if r is None else round(r.length - r.at, 1), "lane": lane, "lanePlugin": plugin,
       "laneFrac": state.get("laneFrac"), "twoWay": state.get("twoWay"),
       "oncoming": any(bool(x) and x[0] < 0 for x in (lane, plugin)), "traffic": state.get("traffic"),
-      "collisions": state.get("collisions"), "street": state.get("street"),
+      "collisions": state.get("collisions", 0) - self.collisions0 if self.active else 0,
+      "collisionsTotal": state.get("collisions"), "street": state.get("street"),
     }) + "\n")

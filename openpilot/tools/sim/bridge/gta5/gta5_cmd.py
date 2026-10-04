@@ -13,7 +13,9 @@
                                                 drives our route to the destination set; off stops it
   gta5_cmd.py expert route L1 [speed=12 ...]    put the car at an e2e trip's start (a name in ~/gta5test/e2e/*.txt, or
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
-  gta5_cmd.py expert status                     the control file"""
+  gta5_cmd.py expert status                     the control file
+  expert options (gta5_expert.py): speed style ability aggr ramp decel lead turn_speed arrive=gentle stop_before
+  targets=smooth ahead_min ahead_max past retarget_every limits=0"""
 import glob
 import json
 import os
@@ -97,7 +99,7 @@ def expert(argv: list[str]) -> None:
     req = urllib.request.Request(f"{MAP_VIEW}/destination", json.dumps({"x": dx, "y": dy}).encode(),
                                  {"Content-Type": "application/json"})
     urllib.request.urlopen(req, timeout=5).read()
-    print(f"wrote {write_control({'on': True, 'need_route': True, **options(argv[2:])})}")
+    print(f"wrote {write_control({'on': True, 'need_route': True, 'dest': [dx, dy], **options(argv[2:])})}")
   else:
     sys.exit(__doc__)
 
