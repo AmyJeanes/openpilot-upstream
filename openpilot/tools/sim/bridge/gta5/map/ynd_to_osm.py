@@ -12,8 +12,12 @@ from collections import defaultdict
 import osmium
 
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
+from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, wrap
 
 U_TURN = 135.0  # deg: openpilot's driving model can't turn back on itself, so the map forbids it
+TURN_FLAG = 45.0  # deg: a move turning more than this is a left or right turn, for GTA's no left / no right flags
+JUNCTION_SPAN = 20.0  # m across a junction from its node, to the ways out of it
+MAX_VIA = 5  # ways in a turn restriction
 GAP = 40.0  # m: links this short between two roads, as through a median or a junction, are part of a turn
 GAP_LINKS = 4
 PED_SPECIALS = {14, 18}  # 10 marks a vehicle node at a pedestrian crossing
@@ -356,14 +360,22 @@ def write_sidecar(path, nodes, used, ways):
   return len(cross)
 
 
-def node_tags(n):
+def node_tags(n, stop='both'):
+  """`stop`, for a stop line: 'forward' (its ways are drawn towards its junction), 'both' or 'none' (no junction ahead:
+  left out)."""
   f0, f1, f2, f4 = n['f'][0], n['f'][1], n['f'][2], n['f'][4]
   tags = {}
   special = f1 >> 3
-  if special == TRAFFIC_LIGHT:
+  if special in (TRAFFIC_LIGHT, STOP_JUNCTION) and stop == 'none':
+    pass
+  elif special == TRAFFIC_LIGHT:
     tags['highway'] = 'traffic_signals'
+    if stop == 'forward':
+      tags['traffic_signals:direction'] = 'forward'
   elif special == STOP_JUNCTION:
     tags['highway'] = 'stop'
+    if stop == 'forward':
+      tags['direction'] = 'forward'
   elif special == PED_CROSSING:
     tags['highway'] = 'crossing'
   for bit, flags, tag in ((4, f2, 'gta:junction'), (128, f0, 'gta:no_left'), (64, f0, 'gta:no_right'),
@@ -421,6 +433,167 @@ def no_u_turns(nodes, ways):
   return out
 
 
+def lane_node(n):
+  return bool(n['f'][1] & 1 or n['f'][4] & 128)  # GTA's slip lane and left turn only flags: turn lanes and bays
+
+
+def turn_lanes(nodes, rows, streets, junction):
+  """Turn lanes and bays (one-way links at GTA's slip lane or left turn only nodes) as the road they split off, rather
+  than as minor roads: its class (up to primary) and, along to the junction, its name. `rows` is [(a, b, two_way,
+  class, name)], junction(node) where roads meet; returns {row index: (class, name)}."""
+  rank = {'service': 0, 'residential': 1, 'primary': 2}
+  arrive = defaultdict(list)  # node -> [(row, from node)]
+  for r, (a, b, two_way, _, _) in enumerate(rows):
+    arrive[b].append((r, a))
+    if two_way:
+      arrive[a].append((r, b))
+
+  def lane(r):
+    a, b, two_way = rows[r][:3]
+    return not two_way and (lane_node(nodes[a]) or lane_node(nodes[b]))
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def behind(s, nxt, seen, lanes):  # the row arriving at s that runs on into s -> nxt, and where it comes from
+    cands = [(abs(wrap(heading(p, s) - heading(s, nxt))), q, p) for q, p in arrive[s] if q not in seen and lane(q) == lanes]
+    best = min(cands, default=None)
+    return best[1:] if best and best[0] < FOLLOWS else None
+
+  out = {}
+  for r, (a, b, _, cls, name) in enumerate(rows):
+    if not lane(r) or cls not in rank:
+      continue
+    s, nxt, seen = a, b, {r}
+    while lane_node(nodes[s]):  # back along the lane to where it splits off the road
+      step = behind(s, nxt, seen, True)
+      if step is None:
+        break
+      seen.add(step[0])
+      s, nxt = step[1], s
+    parent = behind(s, nxt, seen, False) if not junction(s) else None
+    if parent is None:
+      continue
+    road_cls, road_name = rows[parent[0]][3], rows[parent[0]][4]
+    q, p = parent
+    for _ in range(3):  # links touching junctions have no name: the road's further back
+      if road_name:
+        break
+      step = behind(p, rows[q][1] if rows[q][0] == p else rows[q][0], {q}, False)
+      if step is None:
+        break
+      q, p = step
+      road_name = rows[q][4]
+    if road_cls not in ('primary', 'residential') or rank[road_cls] <= rank[cls]:
+      road_cls = cls
+    end = nodes[b]
+    if not (junction(b) or lane_node(end) or streets.get(end['st']) == road_name):
+      road_name = None  # it turns off the road (a slip road)
+    if (road_cls, name or road_name) != (cls, name):
+      out[r] = (road_cls, name or road_name)
+  return out
+
+
+def stop_directions(nodes, rows, toward):
+  """Which way each stop line faces: tagged direction=forward, every two-way way at it is drawn towards its junction,
+  so this turns ways round. `rows` is [(a, b, two_way)], `toward` {stop line node: nodes on from it towards its
+  junction}; returns the stop lines it faces (where two need a way drawn both ways, the second keeps no direction)
+  and the rows to turn round."""
+  at = defaultdict(list)
+  for r, (a, b, two_way) in enumerate(rows):
+    if two_way:
+      at[a].append(r)
+      at[b].append(r)
+  drawn, faced = {}, set()
+  for i in sorted(toward):
+    want = {}
+    for r in at[i]:
+      a, b, _ = rows[r]
+      other = b if a == i else a
+      want[r] = (i, other) if other in toward[i] else (other, i)
+    if all(drawn.get(r, w) == w for r, w in want.items()):
+      drawn.update(want)
+      faced.add(i)
+  return faced, {r for r, ab in drawn.items() if rows[r][:2] != ab}
+
+
+def turn_restrictions(nodes, ways, toward, flags):
+  """GTA's no left / no right turn flags, and its left turn only lanes, as OSM restrictions at the junction ahead of
+  the node: from the way into the junction's node (from the node, along the ways to it, where lanes join on the way),
+  through the junction's own nodes, to each way out turning that way by more than TURN_FLAG; and at the node itself.
+  `ways` is [(way id, a, b, two_way)], `toward` {node: {next node: nodes on to the junction}}, `flags` {node: (no
+  left, no right, a left turn only lane)}; returns [(restriction, from way, via, to way)], via [('n', node)] or
+  [('w', way id), ...]; how many were left out for going through more than MAX_VIA ways; and how many approaches were
+  left as they are, where GTA's flags forbid every way out."""
+  way_of, out, into = {}, defaultdict(list), defaultdict(list)
+  for wid, a, b, two_way in ways:
+    for p, q in ((a, b), (b, a)) if two_way else ((a, b),):
+      way_of[(p, q)] = wid
+      out[p].append(q)
+      into[q].append(p)
+
+  def length(p, q):
+    return math.hypot(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def kind_of(turn, no_left, no_right, left_only):
+    if turn > TURN_FLAG:
+      return 'no_left_turn' if no_left else None
+    if turn < -TURN_FLAG:
+      return 'no_right_turn' if no_right or left_only else None
+    return 'no_straight_on' if left_only else None
+
+  found, skipped, dead_ends = set(), 0, 0
+  for i in sorted(flags):
+    if not toward.get(i):
+      continue
+    for p in set(into[i]) - set(toward[i]):  # and the ways off at the node itself, as a slip road from it
+      for m in out[i]:
+        turn = wrap(heading(i, m) - heading(p, i))
+        kind = kind_of(turn, *flags[i])
+        if kind and m not in toward[i] and m != p and abs(turn) <= U_TURN:
+          found.add((kind, way_of[(p, i)], (('n', i),), way_of[(i, m)]))
+    for path in toward[i].values():
+      junction, h_in = path[-1], heading(path[0], path[-1])
+      # and the road's way in, as the link on to the junction can jog across lanes: a turn by either
+      h_road = min((heading(p, i) for p in set(into[i]) - set(toward[i])), default=h_in, key=lambda h: abs(wrap(h - h_in)))
+      joined = any(set(into[n]) - {path[k + 1]} != {path[k - 1]} for k, n in enumerate(path[1:-1], 1))
+      lead = [way_of[(p, q)] for p, q in zip(path[:-1], path[1:], strict=True)] if joined else [way_of[(path[-2], junction)]]
+      seen, stack, exits = set(path), [(junction, [], 0.0)], []
+      while stack:
+        n, inner, dist = stack.pop()
+        for m in out[n]:
+          if m in seen:
+            continue
+          seen.add(m)
+          w = way_of[(n, m)]
+          turn = wrap(heading(n, m) - h_in)  # left positive
+          if abs(turn) <= TURN_FLAG and dist + length(n, m) <= JUNCTION_SPAN and set(out[m]) - {n}:
+            stack.append((m, inner + [w], dist + length(n, m)))  # on across it, as to a divided road's far side
+          elif abs(turn) <= U_TURN:
+            by_road = wrap(heading(n, m) - h_road)
+            exits.append((turn if abs(turn) > TURN_FLAG or abs(by_road) > U_TURN else by_road, inner, w))
+      kinds = [kind_of(turn, *flags[i]) for turn, _, _ in exits]
+      if all(kinds):
+        dead_ends += 1  # GTA's flags leave no way out: forbid none
+        continue
+      moves = [(tuple(inner) + (w,), kind) for (_, inner, w), kind in zip(exits, kinds, strict=True)]
+      for move, kind in moves:
+        if kind is None:
+          continue
+        # forbid it from the first way it doesn't share with an allowed move: Valhalla misses routes past restrictions
+        # through ways
+        n = next(n for n in range(1, len(move) + 1) if all(k for m, k in moves if m[:n] == move[:n]))
+        via = lead[1:] + list(move[:n - 1])
+        if len(via) > MAX_VIA:
+          skipped += 1
+          continue
+        found.add((kind, lead[0], tuple(('w', v) for v in via) or (('n', junction),), move[n - 1]))
+  return [(kind, wf, list(via), wt) for kind, wf, via, wt in sorted(found)], skipped, dead_ends
+
+
 def node_id(k):
   return k[0] * 65536 + k[1] + 1
 
@@ -439,11 +612,6 @@ def main():
   used = sorted({k for e in es for k in e})
   print(f"{len(used)} nodes, {len(es)} ways ({len(cross)} carriageway crossovers dropped)")
 
-  w = osmium.SimpleWriter(args.out, overwrite=True)
-  for k in used:
-    n = nodes[k]
-    lat, lon = to_lat_lon(n['x'], n['y'])
-    w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat), tags={**node_tags(n), 'ele': f"{n['z']:.1f}"}))
   info = []  # (way id, a, b, fwd, back, class, limit, name, link flags)
   for i, ((a, b), (fwd, back, lf)) in enumerate(sorted(es.items())):
     if not fwd:  # one-way the other way: draw it in its direction of travel
@@ -451,6 +619,32 @@ def main():
     cls = highway(nodes, a, b, fwd, back)
     st = nodes[a]['st'] if nodes[a]['st'] == nodes[b]['st'] else 0
     info.append([i + 1, a, b, fwd, back, cls, speed_limit(nodes, a, b, cls, fwd, back), streets.get(st), lf])
+  out, into = defaultdict(list), defaultdict(list)
+  for _, a, b, _, back, *_ in info:
+    out[a].append(b)
+    into[b].append(a)
+    if back:
+      out[b].append(a)
+      into[a].append(b)
+
+  def moves_out(k):
+    return out.get(k, ())
+
+  def moves_into(k):
+    return into.get(k, ())
+
+  def link_length(p, q):
+    return math.hypot(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def link_heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def junction(k):  # where roads meet
+    return bool(nodes[k]['f'][2] & 4) and roads_cross([link_heading(k, m) for m in {*out.get(k, ()), *into.get(k, ())}])
+  lanes = turn_lanes(nodes, [(a, b, bool(back), cls, name) for _, a, b, _, back, cls, _, name, _ in info], streets, junction)
+  for r, (cls, name) in lanes.items():  # keeping their limits, which come from the street's
+    info[r][5], info[r][7] = cls, name
+  print(f"{len(lanes)} turn lane links as the road they split off")
   length = [math.hypot(nodes[b]['x'] - nodes[a]['x'], nodes[b]['y'] - nodes[a]['y']) for _, a, b, *_ in info]
   groups = [(streets.get(nodes[a]['st']), streets.get(nodes[b]['st']), speed_class(nodes, a, b), limit)
             for _, a, b, _, _, _, limit, _, _ in info]
@@ -464,6 +658,34 @@ def main():
     info[i][5] = tag
     if dest:
       destination[info[i][0]] = dest
+
+  # stop lines and GTA's turn flags are for the junction ahead of them
+  stops = [k for k in used if nodes[k]['f'][1] >> 3 in (TRAFFIC_LIGHT, STOP_JUNCTION) and not junction(k)]
+  flags = {k: (bool(nodes[k]['f'][0] & 128), bool(nodes[k]['f'][0] & 64), bool(nodes[k]['f'][4] & 128)) for k in used
+           if (nodes[k]['f'][0] & 192 or nodes[k]['f'][4] & 128) and not junction(k)}
+  score = junction_scores(stops, moves_out, link_length, junction)
+  toward = {k: toward_junction(k, moves_out, moves_into, link_length, link_heading, junction, score) for k in {*stops, *flags}}
+  lanes_to = {}
+  for _, a, b, fwd, back, *_ in info:
+    lanes_to[(a, b)], lanes_to[(b, a)] = fwd, back
+  for k, (no_left, no_right, left_only) in flags.items():  # on a wider road, left turn only is its left lane's
+    flags[k] = (no_left, no_right, left_only and all(lanes_to[(k, j)] == 1 for j in toward[k]))
+  faced, flip = stop_directions(nodes, [(a, b, bool(back)) for _, a, b, _, back, *_ in info],
+                                {k: set(toward[k]) for k in stops if toward[k]})
+  for r in flip:
+    row = info[r]
+    row[1], row[2], row[3], row[4] = row[2], row[1], row[4], row[3]
+  stop = {k: 'forward' if k in faced else 'both' if toward[k] else 'none' for k in stops}
+  either, none = sum(v == 'both' for v in stop.values()), sum(v == 'none' for v in stop.values())
+  print(f"{len(stops)} stop lines: {len(faced)} facing their junction ({len(flip)} ways turned round), {either} either way, " +
+        f"{none} with no junction ahead left out")
+
+  w = osmium.SimpleWriter(args.out, overwrite=True)
+  for k in used:
+    n = nodes[k]
+    lat, lon = to_lat_lon(n['x'], n['y'])
+    w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat),
+                                       tags={**node_tags(n, stop.get(k, 'both')), 'ele': f"{n['z']:.1f}"}))
   ways = []
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
     ways.append((wid, a, b, bool(back)))
@@ -481,13 +703,18 @@ def main():
     if lf[2] & 1:
       tags['gta:no_nav'] = 'yes'
     w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)], tags=tags))
-  restrictions = no_u_turns(nodes, ways)
-  for i, (wi, via, wo) in enumerate(restrictions):
-    via = [(kind, node_id(ref) if kind == 'n' else ref, 'via') for kind, ref in via]
-    w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': 'no_u_turn'},
+  restrictions = [('no_u_turn', *r) for r in no_u_turns(nodes, ways)]
+  u_turns = len(restrictions)
+  turns, skipped, dead_ends = turn_restrictions(nodes, ways, toward, flags)
+  restrictions += turns
+  for i, (kind, wi, via, wo) in enumerate(restrictions):
+    via = [(t, node_id(ref) if t == 'n' else ref, 'via') for t, ref in via]
+    w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': kind},
                                                members=[('w', wi, 'from'), *via, ('w', wo, 'to')]))
   w.close()
-  print(f"{len(restrictions)} U-turns forbidden")
+  kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
+  print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
+        "approaches GTA leaves no way out of left out")
   if args.sidecar:
     n = write_sidecar(args.sidecar, nodes, used, [r[:8] for r in info])
     print(f"{n} links crossing on different levels -> {args.sidecar}")

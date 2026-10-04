@@ -44,7 +44,9 @@ link) and the forks in it.
 ## The map
 - Ways carry the lanes each way (`lanes:forward` / `lanes:backward`, `oneway`) and street names. Road classes are
   guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
-  and alleys (nodes switched off for traffic, or without GPS), track off-road.
+  and alleys (nodes switched off for traffic, or without GPS), track off-road. GTA splits a road's lanes into separate
+  links before a junction; its turn lanes and bays (one-way links at its slip lane and left turn only nodes) take the
+  class (up to primary) and name of the road they split off, so the router doesn't avoid them as minor roads.
 - Ramps are `motorway_link` (`trunk_link` off a highway), so the router gives exits ("Take the exit on the right toward
   Popular St"). GTA doesn't mark them: a ramp is a run of one-way links that branches off a freeway and, within 1.5 km,
   reaches an ordinary road or joins another freeway. Runs that come back into the road they left (within 20 m of it and
@@ -65,8 +67,21 @@ link) and the forks in it.
   clockwise from north, a to b), `length`, `road_class` (into `classes`), `maxspeed_mph`, `name` (into `names`, -1 for
   none); and where links cross more than 4 m apart in height, as at overpasses, `overpass_links`, `overpass_xy` and
   `overpass_z` (each link's height there).
-- Traffic lights are `highway=traffic_signals` on the stop line node. Flags with no OSM equivalent keep a `gta:` prefix:
-  junction, no left / right turn, slip lane, keep left / right, left turn only lane.
+- Traffic lights are `highway=traffic_signals` on the stop line node, stop junctions `highway=stop`. GTA's don't say
+  which way they face: a stop line is for the junction ahead of it within 30 m (GTA's are 12-24 m before it), or 50 m
+  if that's nearer than the one behind; where a road has junctions about as near both ways, the one with more stop
+  lines. Junctions are GTA's junction nodes where links cross (it also flags the nodes where a road's lanes split). A
+  stop line facing its junction gets `traffic_signals:direction` / `direction=forward`, with the two-way ways at it
+  drawn towards the junction; one with no junction ahead, as on a one-way link leaving one, is left out. Valhalla 3.9
+  reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav's own
+  stop list follows it (`paths.py`, `GTA5_STOP_DIRECTION=1`).
+- Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
+  turn only lane.
+- GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /
+  `no_straight_on` restrictions at the junction ahead of the node (as found for stop lines), to each way out turning
+  more than 45 degrees that way, measured across the junction's node and up to 20 m on (a divided road's far side), and
+  at the node itself. Where the flags leave an approach no way out they're ignored. Restrictions through ways go only
+  as far as needed: Valhalla misses better routes past them.
 - openpilot's driving model can't turn back on itself, so every move that turns back more than 135 degrees is a
   `no_u_turn` restriction: at a node, and through up to four short links (40 m) as through a median gap or a turning
   loop. GTA's nodes allow them everywhere. The short two-way links joining a divided road's carriageways away from

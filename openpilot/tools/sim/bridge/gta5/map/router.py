@@ -1,6 +1,7 @@
 """Routes over a Valhalla server (map/README.md), as a car's navigation would, and follows the car along the route."""
 import json
 import math
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -20,6 +21,8 @@ FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
 LANE_ALIGN = 10.0  # deg
 LANES_NEAR = 60.0  # m from a point to look for a link with its lanes
 JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
+# a stop line counts only on the way towards its junction, not for a route leaving the junction past it (off: both)
+STOP_DIRECTION = os.getenv("GTA5_STOP_DIRECTION", "0") == "1"
 
 
 def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float]]:
@@ -85,7 +88,7 @@ class Route:
     nodes = paths.route_nodes(pts)
     for k, i in enumerate(nodes):
       if i is not None and 0 < k < len(pts) - 1:
-        if paths.stop_line(i):
+        if paths.stop_line(i) and (not STOP_DIRECTION or self._stops_here(paths, nodes, k)):
           self.stops.append(float(self.along[k]))
         if paths.junction(i):
           self.junctions.append(float(self.along[k]))
@@ -123,6 +126,11 @@ class Route:
       fork = self._fork(paths, prev, i, nxt, float(self.along[k]))
       if fork is not None:
         self.forks.append(fork)
+
+  @staticmethod
+  def _stops_here(paths: Paths, nodes: list[int | None], k: int) -> bool:
+    nxt = next((j for j in nodes[k + 1:] if j is not None and j != nodes[k]), None)
+    return nxt is None or paths.stop_for(nodes[k], nxt)
 
   @staticmethod
   def _link_end(paths: Paths, i: int, direction: np.ndarray, before: bool) -> int | None:
