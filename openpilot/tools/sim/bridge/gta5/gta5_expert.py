@@ -21,9 +21,11 @@ the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else /tmp/gta5_expe
 the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can be
 filtered later. speed_by_class ("residential:10,primary:14,motorway:18", classes as Valhalla names them, ramp for
 ramps, default for the rest) caps the speed by the road's class, slowing ahead for a lower one, and decel_fast is the
-slowing rate above 12 m/s. The engage key stops the AI and expert mode; so does arriving, hold_after s after
-stopping, and the control file is set off. With expert mode off, the bridge turns off a plugin AI driver left on
-(always without GTA5_EXPERT, else once the bridge starts or while openpilot is engaged)."""
+slowing rate above 12 m/s. unstick: stopped unstick_after s not at a light, the AI drives with unstick_style
+(steering round a parked car) until it has moved unstick_dist m or unstick_for s have passed. The engage key stops
+the AI and expert mode; so does arriving, hold_after s after stopping, and the control file is set off. With expert
+mode off, the bridge turns off a plugin AI driver left on (always without GTA5_EXPERT, else once the bridge starts or
+while openpilot is engaged)."""
 import json
 import math
 import os
@@ -40,7 +42,8 @@ DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "ag
             "need_route": False, "dest": None, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0, "targets": "junction",
             "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "launch": None, "decel": 0.0, "turn_speed": 6.0,
             "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0,
-            "speed_by_class": None, "decel_fast": 0.0}
+            "speed_by_class": None, "decel_fast": 0.0, "unstick": False, "unstick_after": 10.0,
+            "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0}
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
 LIMIT_LOOKAHEAD = 600.0  # m, lower speed limits ahead slowed for
@@ -172,6 +175,8 @@ class Expert:
     self.arrived = False
     self.arrived_t = 0.0
     self.classes: tuple = (None, [])  # the route they're for, and the road class of each of its segments
+    self.stopped_since: float | None = None  # game time the car stopped, not at a light
+    self.unstick_from: tuple | None = None  # (game time, m along the route) while steering round a blockage
     self.collisions0 = 0  # the plugin counts frames in contact since the car was entered
     self.cmd, self.cmd_t = 0.0, 0.0  # the ramped speed, and when it was worked out
     self.target_t = 0.0
@@ -332,6 +337,8 @@ class Expert:
     return max(target, min(hi, nxt - BEFORE_EVENT if nxt is not None else route.length)), anchor, False
 
   def _follow(self, route, state: dict, now: float):
+    if self.cfg["unstick"]:
+      self._unstick(route, state)
     at, c = route.at, self.cfg
     due = self.target is None or (not self.final and (self.target_along - at < RETARGET_NEAR or (
       now - self.target_t >= float(c["retarget_every"]) and
@@ -359,6 +366,37 @@ class Expert:
       self.arrived, self.arrived_t = True, self.game_t
       print("gta5: expert arrived", flush=True)
     self._desire(route, state, now)
+
+  def _unstick(self, route, state: dict):
+    """Stopped a while, not at a light, with the route going on: steer round what's in the way (a parked car, which a
+    style without SteerAroundStationaryCars waits behind for ever) with unstick_style, until the car has moved on
+    unstick_dist m or unstick_for s have passed."""
+    c, t, v = self.cfg, self.game_t, state.get("vEgo", 0.0)
+    if self.unstick_from is not None:
+      t0, at0 = self.unstick_from
+      if route.at - at0 >= float(c["unstick_dist"]) or t - t0 >= float(c["unstick_for"]):
+        self.unstick_from, self.stopped_since = None, None
+        self.send({"type": "ai", "style": int(c["style"])})
+        self._event("unstick", phase="end", moved=round(route.at - at0, 1), secs=round(t - t0, 1))
+      return
+    ai = state.get("ai") or {}
+    going_on = route.length - route.at > float(c["stop_before"]) + ARRIVED
+    blocked = v < STANDSTILL and not ai.get("stoppedAtLight") and not self.arrived and going_on
+    if not blocked:
+      self.stopped_since = None
+      return
+    if self.stopped_since is None:
+      self.stopped_since = t
+    elif t - self.stopped_since > float(c["unstick_after"]):
+      self.unstick_from = (t, route.at)
+      self.send({"type": "ai", "style": int(c["unstick_style"])})
+      self.target = None  # a fresh target: the plugin tasks the AI again with the new style
+      print(f"gta5: expert unstick: stopped {t - self.stopped_since:.0f} s, not at a light", flush=True)
+      self._event("unstick", phase="start", stopped=round(t - self.stopped_since, 1), pos=state.get("pos"))
+
+  def _event(self, what: str, **kw):
+    if self.log is not None:
+      self.log.write(json.dumps({"mono": round(time.monotonic(), 3), "event": what, **kw}) + "\n")
 
   def _class_caps(self) -> dict[str, float]:
     """speed_by_class as {road class: m/s}, from "residential:10,primary:14" or a JSON object."""
@@ -546,5 +584,5 @@ class Expert:
       "laneFrac": state.get("laneFrac"), "twoWay": state.get("twoWay"),
       "oncoming": any(bool(x) and x[0] < 0 for x in (lane, plugin)), "traffic": state.get("traffic"),
       "collisions": state.get("collisions", 0) - self.collisions0 if self.active else 0,
-      "collisionsTotal": state.get("collisions"), "street": state.get("street"),
+      "collisionsTotal": state.get("collisions"), "street": state.get("street"), "unstick": self.unstick_from is not None,
     }) + "\n")
