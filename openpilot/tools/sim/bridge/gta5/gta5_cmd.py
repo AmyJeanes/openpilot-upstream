@@ -14,7 +14,7 @@
   gta5_cmd.py expert route L1 [speed=12 ...]    put the car at an e2e trip's start (a name in ~/gta5test/e2e/*.txt, or
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
   gta5_cmd.py expert status                     the control file
-  expert options (gta5_expert.py): speed style ability aggr ramp decel lead turn_speed arrive=gentle stop_before
+  expert options (gta5_expert.py): speed style ability aggr task ramp lead launch decel turn_speed arrive=gentle stop_before
   targets=smooth ahead_min ahead_max past retarget_every limits=0"""
 import glob
 import json

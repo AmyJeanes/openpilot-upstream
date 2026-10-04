@@ -5,20 +5,21 @@ Off unless the bridge runs with GTA5_EXPERT set: 1 for the control file at CONTR
 watches that file (gta5_cmd.py expert on|off|route writes it; changes from before the bridge started are ignored):
   {"on": true, "speed": 12, "style": 1076369579, "ability": 1, "aggr": 0, "task": "longrange", "limits": true,
    "need_route": false, "dest": null, "ahead_min": 60, "ahead_max": 120, "past": 25, "targets": "junction",
-   "retarget_every": 0, "ramp": 0, "lead": 2, "decel": 0, "turn_speed": 6, "arrive": "task", "stop_before": 15,
-   "speed_step": 0.5}
+   "retarget_every": 0, "ramp": 0, "lead": 2, "launch": null, "decel": 0, "turn_speed": 6, "arrive": "task",
+   "stop_before": 15, "speed_step": 0.5}
 While on, openpilot is kept disengaged and nav's cues wait. On our map's route (GTA5_ROUTER) the plugin's AI driver is
 given a target 60-120 m ahead, just past the next junction or maneuver, so its own short pathfinding can only take the
 route's way through it (targets=smooth: ahead_max on, moved only once ahead_min is left, at most every retarget_every
 s); the indicators follow the route's turns, ramps and exits, and `label` holds the desire they stand for. Its speed cap
-is `speed`, or the map's limit where lower; ramp (m/s^2) raises it from the car's speed (at most `lead` m/s above it)
-rather than at once, decel (m/s^2) lowers it ahead of turns (to turn_speed) and lower limits, and arrive=gentle brings
-it to a stop stop_before m short of the route's end and holds it there, rather than the task's own arrival. `dest`
-ignores a route that doesn't end near it, as the last trip's. Off the map's routes the AI drives to the game's
-waypoint, or wanders. Each game state appends a JSON line to the log (GTA5_EXPERT_LOG, else expert.jsonl beside
-GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target, the label, the lane readings and the drive's
-collisions (frames in contact since it started), so samples can be filtered later. The engage key stops the AI and
-expert mode."""
+is `speed`, or the map's limit where lower; ramp (m/s^2) raises it from the car's speed (at most `lead` m/s above it,
+`launch` from a standstill) rather than at once, decel (m/s^2) lowers it ahead of turns (to turn_speed) and lower
+limits, and arrive=gentle brings it to a stop stop_before m short of the route's end and holds it there, rather than the
+task's own arrival. A ramp wants task=coord, as the longrange task doesn't take a raised cap until it's re-tasked, and a
+lead of about 3, as the AI settles 1-2 m/s under its cap. `dest` ignores a route that doesn't end near it, as the last
+trip's. Off the map's routes the AI drives to the game's waypoint, or wanders. Each game state appends a JSON line to
+the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target,
+the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can be
+filtered later. The engage key stops the AI and expert mode."""
 import json
 import math
 import os
@@ -31,8 +32,9 @@ CONTROL = Path("/tmp/gta5_expert.json")
 POLL_EVERY = 0.5  # s
 DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "aggr": 0.0, "task": "longrange", "limits": True,
             "need_route": False, "dest": None, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0, "targets": "junction",
-            "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "decel": 0.0, "turn_speed": 6.0, "arrive": "task",
-            "stop_before": 15.0, "speed_step": 0.5}
+            "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "launch": None, "decel": 0.0, "turn_speed": 6.0,
+            "arrive": "task", "stop_before": 15.0, "speed_step": 0.5}
+STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
 LIMIT_LOOKAHEAD = 300.0  # m, lower speed limits ahead slowed for
 HOLD_SPEED = 0.01  # m/s: the AI pulls up and waits in its lane, as in a queue
@@ -199,9 +201,14 @@ class Expert:
     # a ramped speed goes on from where it is
     self.send({"type": "ai", **self._settings(None if float(self.cfg["ramp"]) > 0 else float(self.cfg["speed"]))})
 
+  def _lead(self, v: float) -> float:
+    """How far above the car's speed a ramped cap may be."""
+    launch = self.cfg.get("launch")
+    return float(launch) if launch is not None and v < STANDSTILL else float(self.cfg["lead"])
+
   def _start_speed(self, v: float) -> float:
     if float(self.cfg["ramp"]) > 0:
-      self.cmd, self.cmd_t = max(v, 0.0) + float(self.cfg["lead"]), self.game_t
+      self.cmd, self.cmd_t = max(v, 0.0) + self._lead(v), self.game_t
       return min(self.cmd, float(self.cfg["speed"]))
     return float(self.cfg["speed"])
 
@@ -357,7 +364,7 @@ class Expert:
     ramp = float(c["ramp"])
     if ramp > 0:
       dt = min(max(now - self.cmd_t, 0.0), 0.5)
-      self.cmd, self.cmd_t = min(cap, self.cmd + ramp * dt, max(v, 0.0) + float(c["lead"])), now
+      self.cmd, self.cmd_t = min(cap, self.cmd + ramp * dt, max(v, 0.0) + self._lead(v)), now
       cap = self.cmd
     return max(cap, HOLD_SPEED)
 
