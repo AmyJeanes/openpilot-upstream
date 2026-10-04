@@ -34,7 +34,7 @@ and puts it on the road nearest a point (`heading=` the way nearer that, `lane=`
 throttle and logs the motion, `latlog` logs the steering loop each frame, `interleave` switches interleaving and the
 present hook, `camera forward=` moves the mount for the current car model (saved in `gta5op.ini`), `paint` and `trim`
 recolour the car (where its model allows), and `engage`, `indicator` and `cruise dir=down five=1` press those keys. For testing,
-`traffic on=0` clears and stops traffic, `lead dist=30 speed=0` places a car about that far ahead in the lane
+`traffic on=0` clears and stops traffic (see [Varied scenes](#varied-scenes) for the scene commands), `lead dist=30 speed=0` places a car about that far ahead in the lane
 (`leadspeed v=` changes its speed, `remove=1` deletes it, `clear=<model>` any left behind) and the state then reports
 its true range, `gas secs=1` presses the gas as the driver would, the state's `vehicleAhead` is the range to the first
 vehicle straight ahead, and `GTA5_LOG=<file>` on terminal 2 records the game state and the controls sent, a JSON line
@@ -134,6 +134,46 @@ CPU (about 1.2 cores per camera, with the system ffmpeg); the video is about 75 
 camera's offset from the car's origin, which the poses are moved to (1,0.6 by default, the plugin's mount on the test
 car). `python -m openpilot.tools.sim.bridge.gta5.gta5_record finalize <segment>` remakes a segment's safetensors from its
 `gta5.npz`, and `replay` makes a synthetic segment from a `GTA5_LOG`, for testing loaders.
+
+The camera's mount comes from the plugin's state when it reports one (`GTA5_RECORD_MOUNT` is then unused): `gta5.json`
+has it as `mount` (forward, up) and `mount_detail` (with x right, pitch and yaw, which the poses include), and the scene
+at the segment's start as `scene` (the car, weather and time, traffic density). A change of mount ends the segment.
+
+### Varied scenes
+For training data that isn't all one car on a sunny afternoon, `gta5_cmd.py` sets the scene (each is also a plugin command
+of the same name, and the state reports it):
+- `world hour= minute= weather= [transition=<s>] [rain=0-1|-1] [freeze=1] [clear=1]`: the time and the weather (EXTRASUNNY,
+  CLEAR, CLOUDS, OVERCAST, SMOG, FOGGY, CLEARING, RAIN, THUNDER), at once or over a transition, the rain and puddles
+  (-1 the weather's own), the clock stopped; `clear=1` lets the game's weather cycle again. State: `world`.
+- `traffic vehicles= peds= parked= [random= scenario=] [reset=1]`: density multipliers (0-3), held each frame until
+  changed; `on=0` still clears and stops traffic. State: `density`.
+- `vehicle <car> [primary= secondary= pearl= wheel= dirt=] [colours=keep] [force=1]`: swaps the player's car for a new
+  one where it is, at its speed, deleting the old one (the same model is only recoloured). `vehicle list` shows the
+  curated cars (`gta5_scene.py`: about 20 common sedans, hatchbacks, SUVs, vans and a pickup), `model3` is the add-on
+  Model 3, and any model name or 0x hash works; `random` picks one. Colours are palette indices, random unless given.
+  State: `vehicle` (model, name, colours, dirt, swaps, error).
+- `mount dashcam|comma [drop= back=] [jitter=1|0] [dx= dy= dz= pitch= yaw=]`: `comma` (the default) is a comma device's
+  place, at the height openpilot's calibration expects; `dashcam` probes the car's own collision down its centre line
+  for the roof over the driver and the windscreen ahead, and puts the camera `drop` m (0.08) below the roof and `back` m
+  (0.06) behind the glass, ahead of the driver's seat (from the windscreen bone and the model's height when the probes
+  miss; the comma place if the result is outside the cabin). `jitter=1` adds up to 2 cm and 0.5 deg at random. State:
+  `mount` (mode, source: bone, dims or ini for comma, probe or bones for dashcam; x, y, z, pitch, yaw on the car).
+- `randomise [seed] [model_share=0.6] [mount=dashcam|comma|keep] [jitter=0] [vehicle=0] [world=0] [traffic=0] [dry=1]`
+  picks all of these for a drive, repeatably for a seed, prints them as one `randomise {json}` line, sends them, and
+  waits 3 s for the car swap so a following `setup` places the new car. 60% Model 3, else the curated cars; half the
+  time the model's own colours, else real-world shares (white, black, grey, silver, then blue, red...); time 75% day
+  (07-19), 10% dawn or dusk, 15% night; weather mostly clear or cloudy, 5% fog, 5% smog, 9% rain or thunder; vehicle
+  density 0.3-1.5 (mostly 1), pedestrians 0.3-1.2, both halved at night; the dashcam mount 5-10 cm below the roof with
+  jitter. `record_run.py --randomise` runs it before each trip; leave its `--weathers`, `--hours-of-day` and `--traffic`
+  unset, as they'd override it.
+
+Other cars are for recording the AI expert: the bridge still models a Model 3 (its steering angle comes from the
+curvature through the Model 3's vehicle model), the plugin's throttle table, coasting and brake gain were measured on a
+sedan, its steer bias limit is a fraction of each car's own lock (the curvature gain is relearned per car), and the
+driving model judges speed from the camera's height, so a dashcam mount or a tall car makes modeld's recorded outputs
+and calibration unlike a comma device's. Keep openpilot runs on the Model 3 with the comma mount. On the Model 3 at the
+comma mount (1.22 m above the ground), the bonnet isn't in the road camera, and is the bottom eighth or so of the wide
+camera's picture, with the wipers below it.
 
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the

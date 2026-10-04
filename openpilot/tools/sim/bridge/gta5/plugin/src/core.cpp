@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <deque>
@@ -14,6 +15,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "capture.h"
 #include "core_api.h"
@@ -84,10 +86,53 @@ struct HeldKey {
 
 struct VehicleInfo {
   Vehicle handle = 0;
+  Hash model = 0;
+  std::string name;  // the model's display name
   float wheelBase = 2.7f;
-  float mountX = 0, mountY = 0, mountZ = 1.0f;
+  float mountX = 0, mountY = 0, mountZ = 1.0f;  // the camera's position on the car, m right, forward and up of its origin
+  float baseX = 0, baseY = 0, baseZ = 1.0f;     // the same before the mount's jitter
+  std::string mountSource;  // how the base was found: bone, dims, ini (comma mount); probe, bones (dashcam)
+  double dashcamAt = 0;     // when to find the dashcam mount: the car's collision isn't there on its first frames
   int wheelLf = -1;
 } g_veh;
+
+// Where the camera goes on each car. "comma" (the default): where a comma device mounts, low enough for openpilot's
+// calibration; "dashcam": a dashcam's place for training data, high at the top centre of the windscreen, drop m below
+// the roof and back m behind the glass. The jitter (m right, forward, up; deg pitch, yaw) is added to either.
+struct Mount {
+  std::string mode = "comma";
+  float drop = 0.08f, back = 0.06f;
+  float dx = 0, dy = 0, dz = 0, pitch = 0, yaw = 0;
+} g_mount;
+
+// held each frame while set; traffic off zeroes them all
+struct Density {
+  bool set = false;
+  float vehicles = 1, random = 1, parked = 1, peds = 1, scenario = 1;
+} g_density;
+
+// what the world command last set, for the state (the clock's pause can't be read back)
+struct World {
+  std::string weather;
+  float transition = 0, rain = -1;
+  bool frozen = false;
+} g_world;
+
+// palette indices to apply to a car, -1 to leave one
+struct Colours {
+  int primary = -1, secondary = -1, pearl = -1, wheel = -1;
+  float dirt = -1;
+};
+
+// a car swap: the player's car replaced with a new one of a model, where it is and at its speed
+struct Swap {
+  int step = 0;  // 0 idle, 1 model loading
+  Hash model = 0;
+  Colours colours;
+  double t = 0;
+  int swaps = 0;
+  std::string error;
+} g_swap;
 
 struct Motion {
   bool valid = false;
@@ -302,7 +347,16 @@ float WrapDeg(float d) {
 // *** camera ***
 
 void AttachCamera() {
-  for (Cam c : g_cams) HARD_ATTACH_CAM_TO_ENTITY(c, g_veh.handle, g_camPitch, 0.0f, g_camYaw, g_veh.mountX, g_veh.mountY, g_veh.mountZ, TRUE);
+  for (Cam c : g_cams)
+    HARD_ATTACH_CAM_TO_ENTITY(c, g_veh.handle, g_camPitch + g_mount.pitch, 0.0f, g_camYaw + g_mount.yaw, g_veh.mountX, g_veh.mountY, g_veh.mountZ, TRUE);
+}
+
+// the mount from its base and jitter, onto the camera
+void ApplyMount() {
+  g_veh.mountX = g_veh.baseX + g_mount.dx;
+  g_veh.mountY = g_veh.baseY + g_mount.dy;
+  g_veh.mountZ = g_veh.baseZ + g_mount.dz;
+  if (g_cam) AttachCamera();
 }
 
 // A camera per view rather than one whose field of view changes: the game can apply a new field of view a frame late,
@@ -380,11 +434,13 @@ void ReleaseCamera() {
 
 // *** vehicle ***
 
-std::string ModelKey(Vehicle v) {
+std::string HashKey(Hash h) {
   char key[16];
-  snprintf(key, sizeof(key), "0x%08X", GET_ENTITY_MODEL(v));
+  snprintf(key, sizeof(key), "0x%08X", h);
   return key;
 }
+
+std::string ModelKey(Vehicle v) { return HashKey(GET_ENTITY_MODEL(v)); }
 
 void ReleaseControls() {
   if (g_veh.handle && DOES_ENTITY_EXIST(g_veh.handle)) {
@@ -393,6 +449,111 @@ void ReleaseControls() {
     SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 1, FALSE);
   }
   g_ctl.holding = false;
+}
+
+// A comma device's place: behind the windscreen, from the car's windscreen bone, else a quarter of the way to its front
+void CommaMount() {
+  Vehicle v = g_veh.handle;
+  Vector3 mn{}, mx{};
+  GET_MODEL_DIMENSIONS(g_veh.model, &mn, &mx);
+  g_veh.baseX = 0;
+  g_veh.baseY = std::isnan(g_cfg.mountForward) ? 0.25f * mx.y : g_cfg.mountForward;
+  g_veh.baseZ = mn.z + g_cfg.mountHeight;
+  g_veh.mountSource = "dims";
+  // behind the windscreen, as a comma device is mounted, whatever the cabin's height; the bone sits low on the glass
+  int ws = GET_ENTITY_BONE_INDEX_BY_NAME(v, "windscreen");
+  if (ws >= 0 && std::isnan(g_cfg.mountForward)) {
+    Vector3 w = GET_WORLD_POSITION_OF_ENTITY_BONE(v, ws);
+    Vector3 l = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, w.x, w.y, w.z);
+    g_veh.baseY = l.y;
+    // and at least as high as a comma device sits below the roof (a Model 3 calibrates to 1.20-1.23 m, 0.29 m below
+    // its roof): the driving model judges scale from the camera's height, reading speeds 20% fast from 9 cm too low
+    g_veh.baseZ = std::max(l.z + 0.08f, mx.z - 0.29f);
+    g_veh.mountSource = "bone";
+  }
+  // a mount set with the camera command for this model
+  char saved[32];
+  GetPrivateProfileStringA("mount_forward", ModelKey(v).c_str(), "", saved, sizeof(saved), IniPath().c_str());
+  if (saved[0]) {
+    g_veh.baseY = static_cast<float>(atof(saved));
+    g_veh.mountSource = "ini";
+  }
+}
+
+// a bone's position in the car's own axes
+bool BoneLocal(Vehicle v, const char *bone, Vector3 &out) {
+  int i = GET_ENTITY_BONE_INDEX_BY_NAME(v, bone);
+  if (i < 0) return false;
+  Vector3 w = GET_WORLD_POSITION_OF_ENTITY_BONE(v, i);
+  out = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, w.x, w.y, w.z);
+  return true;
+}
+
+// the top of the car's own body straight down through a point (its axes), from a probe of its collision
+bool SurfaceZ(Vehicle v, float x, float y, float top, float bottom, float &z) {
+  Vector3 a = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(v, x, y, top), b = GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(v, x, y, bottom);
+  int test = START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(a.x, a.y, a.z, b.x, b.y, b.z, 2, 0, 7);
+  BOOL hit = FALSE;
+  Vector3 end{}, normal{};
+  Entity e = 0;
+  if (GET_SHAPE_TEST_RESULT(test, &hit, &end, &normal, &e) != 2 || !hit || (e && e != v)) return false;
+  z = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, end.x, end.y, end.z).z;
+  return true;
+}
+
+// A dashcam's place, at the top centre of the windscreen: probes down the car's centre line give the roof's height over
+// the driver and where the windscreen falls through drop below it; the camera goes back behind the glass there. Without
+// them, the windscreen bone and the model's top stand in, the glass taken as rising 1.2 m back per m up. A result
+// outside the cabin keeps the comma mount.
+void DashcamMount() {
+  Vehicle v = g_veh.handle;
+  Vector3 mn{}, mx{}, seat{}, ws{};
+  GET_MODEL_DIMENSIONS(g_veh.model, &mn, &mx);
+  bool hasSeat = BoneLocal(v, "seat_dside_f", seat), hasWs = BoneLocal(v, "windscreen", ws);
+  float seatY = hasSeat ? seat.y : 0.0f;
+  constexpr float STEP = 0.05f;
+  float y0 = seatY - 0.4f, y1 = hasWs ? ws.y + 0.8f : 0.7f * mx.y;
+  std::vector<float> zs;
+  for (float y = y0; y <= y1 && zs.size() < 120; y += STEP) {
+    float z = NAN;
+    zs.push_back(SurfaceZ(v, 0.0f, y, mx.z + 0.5f, mn.z + 0.3f, z) ? z : NAN);
+  }
+  int hits = 0;
+  float roof = -1e9f;
+  for (size_t i = 0; i < zs.size(); i++) {
+    hits += !std::isnan(zs[i]);
+    if (y0 + i * STEP <= seatY + 0.3f && !std::isnan(zs[i])) roof = std::max(roof, zs[i]);
+  }
+  bool roofOk = roof > mn.z + 0.9f && roof < mx.z + 0.05f;
+  float camY = NAN, camZ = NAN;
+  std::string source;
+  if (roofOk) {
+    camZ = roof - g_mount.drop;
+    // forward from over the driver to where the glass falls through the camera's height
+    for (size_t i = 1; i < zs.size(); i++) {
+      float y = y0 + i * STEP, a = zs[i - 1], b = zs[i];
+      if (y - STEP < seatY || std::isnan(a) || std::isnan(b) || !(a > camZ && b <= camZ)) continue;
+      camY = y - STEP + STEP * (a - camZ) / (a - b) - g_mount.back;
+      source = "probe";
+      break;
+    }
+  }
+  if (source.empty() && hasWs) {
+    camZ = (roofOk ? roof : mx.z - 0.03f) - g_mount.drop;
+    camY = ws.y - 1.2f * std::max(0.0f, camZ - ws.z) - g_mount.back;
+    source = "bones";
+  }
+  if (hasSeat && camY < seatY + 0.3f) camY = seatY + 0.3f;  // ahead of the driver's head
+  bool ok = !source.empty() && camZ > mn.z + 0.8f && camZ < mx.z && camY > mn.y && camY < mx.y;
+  Log("dashcam mount: " + (ok ? source : "none, comma mount kept") + ", " + std::to_string(hits) + "/" + std::to_string(zs.size()) +
+      " probes hit, roof " + (roofOk ? Num(roof) : "?") + ", seat " + (hasSeat ? Num(seat.y) : "?") + ", windscreen " +
+      (hasWs ? Vec(ws) : "?") + " -> " + Num(camY) + " fwd, " + Num(camZ) + " up");
+  if (!ok) return;
+  g_veh.baseX = 0;
+  g_veh.baseY = camY;
+  g_veh.baseZ = camZ;
+  g_veh.mountSource = source;
+  ApplyMount();
 }
 
 void OnVehicleChanged(Vehicle v) {
@@ -407,25 +568,14 @@ void OnVehicleChanged(Vehicle v) {
   g_m.resets = resets + 1;
   g_indicator = 0;
   if (!v) return;
+  g_veh.model = GET_ENTITY_MODEL(v);
+  for (const char *c = GET_DISPLAY_NAME_FROM_VEHICLE_MODEL(g_veh.model); c && *c; c++)
+    if (isalnum(static_cast<unsigned char>(*c)) || *c == '_' || *c == ' ') g_veh.name += *c;
   Vector3 mn{}, mx{};
-  GET_MODEL_DIMENSIONS(GET_ENTITY_MODEL(v), &mn, &mx);
-  g_veh.mountX = 0;
-  g_veh.mountY = std::isnan(g_cfg.mountForward) ? 0.25f * mx.y : g_cfg.mountForward;
-  g_veh.mountZ = mn.z + g_cfg.mountHeight;
-  // behind the windscreen, as a comma device is mounted, whatever the cabin's height; the bone sits low on the glass
-  int ws = GET_ENTITY_BONE_INDEX_BY_NAME(v, "windscreen");
-  if (ws >= 0 && std::isnan(g_cfg.mountForward)) {
-    Vector3 w = GET_WORLD_POSITION_OF_ENTITY_BONE(v, ws);
-    Vector3 l = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, w.x, w.y, w.z);
-    g_veh.mountY = l.y;
-    // and at least as high as a comma device sits below the roof (a Model 3 calibrates to 1.20-1.23 m, 0.29 m below
-    // its roof): the driving model judges scale from the camera's height, reading speeds 20% fast from 9 cm too low
-    g_veh.mountZ = std::max(l.z + 0.08f, mx.z - 0.29f);
-  }
-  // a mount set with the camera command for this model
-  char saved[32];
-  GetPrivateProfileStringA("mount_forward", ModelKey(v).c_str(), "", saved, sizeof(saved), IniPath().c_str());
-  if (saved[0]) g_veh.mountY = static_cast<float>(atof(saved));
+  GET_MODEL_DIMENSIONS(g_veh.model, &mn, &mx);
+  CommaMount();
+  ApplyMount();
+  if (g_mount.mode == "dashcam") g_veh.dashcamAt = QpcSeconds() + 0.3;
   int lf = GET_ENTITY_BONE_INDEX_BY_NAME(v, "wheel_lf"), lr = GET_ENTITY_BONE_INDEX_BY_NAME(v, "wheel_lr");
   g_veh.wheelLf = lf;
   if (lf >= 0 && lr >= 0) {
@@ -801,6 +951,77 @@ std::string Traffic(double now) {
   return traffic;
 }
 
+std::string WeatherName(Hash h) {
+  static const char *NAMES[] = {"EXTRASUNNY", "CLEAR", "CLOUDS", "SMOG", "FOGGY", "OVERCAST", "RAIN", "THUNDER", "CLEARING", "NEUTRAL",
+                                "SNOW", "BLIZZARD", "SNOWLIGHT", "XMAS", "HALLOWEEN", "RAIN_HALLOWEEN", "SNOW_HALLOWEEN"};
+  static Hash hashes[std::size(NAMES)] = {};
+  if (!hashes[0])
+    for (size_t i = 0; i < std::size(NAMES); i++) hashes[i] = GET_HASH_KEY(NAMES[i]);
+  for (size_t i = 0; i < std::size(NAMES); i++)
+    if (hashes[i] == h) return NAMES[i];
+  return HashKey(h);
+}
+
+// "world":{hour, minute, weather (the type it's mostly), from, to, mix (the blend between them, 1 all to), rain (the rain
+// and puddle level now), and what the world command last set: set (a weather), transition (s), rainSet, frozen}
+std::string WorldState(double now) {
+  static std::string out;
+  static double next = 0;
+  if (now < next) return out;
+  next = now + 0.5;
+  uint64_t from = 0, to = 0, mixSlot = 0;
+  GET_CURR_WEATHER_STATE(&from, &to, &mixSlot);
+  float mix = 0;
+  std::memcpy(&mix, &mixSlot, sizeof(mix));
+  std::string a = WeatherName(static_cast<Hash>(from)), b = WeatherName(static_cast<Hash>(to));
+  out = "\"world\":{\"hour\":" + std::to_string(GET_CLOCK_HOURS()) + ",\"minute\":" + std::to_string(GET_CLOCK_MINUTES()) + ",\"weather\":\"" +
+        (mix < 0.5f ? a : b) + "\",\"from\":\"" + a + "\",\"to\":\"" + b + "\",\"mix\":" + Num(mix) + ",\"rain\":" + Num(GET_RAIN_LEVEL()) +
+        ",\"set\":\"" + g_world.weather + "\",\"transition\":" + Num(g_world.transition) + ",\"rainSet\":" + Num(g_world.rain) +
+        ",\"frozen\":" + (g_world.frozen ? "true" : "false") + "}";
+  return out;
+}
+
+// "density":{off (traffic off), set (multipliers held), vehicles, random, parked, peds, scenario}
+std::string DensityState() {
+  const Density &d = g_density;
+  return "\"density\":{\"off\":" + std::string(g_noTraffic ? "true" : "false") + ",\"set\":" + (d.set ? "true" : "false") +
+         ",\"vehicles\":" + Num(d.vehicles) + ",\"random\":" + Num(d.random) + ",\"parked\":" + Num(d.parked) + ",\"peds\":" + Num(d.peds) +
+         ",\"scenario\":" + Num(d.scenario) + "}";
+}
+
+// "vehicle":{model (its hash, as gta5op.ini's keys), name, colours [primary, secondary, pearlescent, wheel], dirt, swaps,
+// loading (a swap waiting for its model), error (the last swap's)}
+std::string VehicleState(double now) {
+  static std::string out;
+  static double next = 0;
+  static Vehicle last = 0;
+  static int lastSwaps = -1, lastStep = -1;
+  if (now < next && last == g_veh.handle && lastSwaps == g_swap.swaps && lastStep == g_swap.step) return out;
+  next = now + 0.5;
+  last = g_veh.handle;
+  lastSwaps = g_swap.swaps;
+  lastStep = g_swap.step;
+  uint64_t c[4] = {};
+  GET_VEHICLE_COLOURS(g_veh.handle, &c[0], &c[1]);
+  GET_VEHICLE_EXTRA_COLOURS(g_veh.handle, &c[2], &c[3]);
+  auto colour = [&](int i) { return std::to_string(static_cast<int32_t>(static_cast<uint32_t>(c[i]))); };
+  out = "\"vehicle\":{\"model\":\"" + HashKey(g_veh.model) + "\",\"name\":\"" + g_veh.name + "\",\"colours\":[" + colour(0) + "," + colour(1) +
+        "," + colour(2) + "," + colour(3) + "],\"dirt\":" + Num(GET_VEHICLE_DIRT_LEVEL(g_veh.handle)) + ",\"swaps\":" + std::to_string(g_swap.swaps) +
+        ",\"loading\":" + (g_swap.step ? "true" : "false");
+  if (!g_swap.error.empty()) out += ",\"error\":\"" + g_swap.error + "\"";
+  return out + "}";
+}
+
+// "mount":{mode, source, pending (the dashcam place still to find), x, y, z (m right, forward and up of the car's
+// origin), pitch, yaw (deg, up and left), base [x, y, z] before the jitter, jitter [x, y, z, pitch, yaw]}
+std::string MountState() {
+  const Mount &m = g_mount;
+  return "\"mount\":{\"mode\":\"" + m.mode + "\",\"source\":\"" + g_veh.mountSource + "\",\"pending\":" + (g_veh.dashcamAt > 0 ? "true" : "false") +
+         ",\"x\":" + Num(g_veh.mountX) + ",\"y\":" + Num(g_veh.mountY) + ",\"z\":" + Num(g_veh.mountZ) + ",\"pitch\":" + Num(g_camPitch + m.pitch) +
+         ",\"yaw\":" + Num(g_camYaw + m.yaw) + ",\"base\":[" + Num(g_veh.baseX) + "," + Num(g_veh.baseY) + "," + Num(g_veh.baseZ) + "],\"jitter\":[" +
+         Num(m.dx) + "," + Num(m.dy) + "," + Num(m.dz) + "," + Num(m.pitch) + "," + Num(m.yaw) + "]}";
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -819,11 +1040,11 @@ void Publish(double now, bool inVehicle) {
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle)})
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle), VehicleState(now), MountState()})
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
-  s << "}";
+  s << "," << WorldState(now) << "," << DensityState() << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
 }
@@ -895,6 +1116,69 @@ void StepSetup(Ped ped, double now) {
     }
     s.step = 0;
   }
+}
+
+void ApplyColours(Vehicle v, const Colours &c) {
+  uint64_t slot[4] = {};
+  if (c.primary >= 0 || c.secondary >= 0) {
+    // the paint command's custom colours would cover the palette's
+    CLEAR_VEHICLE_CUSTOM_PRIMARY_COLOUR(v);
+    CLEAR_VEHICLE_CUSTOM_SECONDARY_COLOUR(v);
+    GET_VEHICLE_COLOURS(v, &slot[0], &slot[1]);
+    SET_VEHICLE_COLOURS(v, c.primary >= 0 ? c.primary : static_cast<int>(slot[0] & 0xFFFFFFFF), c.secondary >= 0 ? c.secondary : static_cast<int>(slot[1] & 0xFFFFFFFF));
+  }
+  if (c.pearl >= 0 || c.wheel >= 0) {
+    GET_VEHICLE_EXTRA_COLOURS(v, &slot[2], &slot[3]);
+    SET_VEHICLE_EXTRA_COLOURS(v, c.pearl >= 0 ? c.pearl : static_cast<int>(slot[2] & 0xFFFFFFFF), c.wheel >= 0 ? c.wheel : static_cast<int>(slot[3] & 0xFFFFFFFF));
+  }
+  if (c.dirt >= 0) SET_VEHICLE_DIRT_LEVEL(v, std::min(c.dirt, 15.0f));
+}
+
+// Replaces the player's car with one of the swap's model, where it was, facing its way at its speed (or spawns one at the
+// player on foot). The old car is deleted.
+void StepSwap(Ped ped, double now) {
+  Swap &s = g_swap;
+  if (s.step != 1) return;
+  if (!HAS_MODEL_LOADED(s.model)) {
+    if (now - s.t > 10) {
+      s.error = "model didn't load";
+      Log("vehicle: " + HashKey(s.model) + " didn't load");
+      s.step = 0;
+    }
+    return;
+  }
+  s.step = 0;
+  Vehicle old = IS_PED_IN_ANY_VEHICLE(ped, FALSE) ? GET_VEHICLE_PED_IS_IN(ped, FALSE) : 0;
+  Entity at = old ? old : ped;
+  Vector3 p = GET_ENTITY_COORDS(at, TRUE);
+  float heading = GET_ENTITY_HEADING(at), speed = old ? GET_ENTITY_SPEED_VECTOR(old, TRUE).y : 0.0f;
+  // above the old one until it's gone
+  Vehicle v = CREATE_VEHICLE(s.model, p.x, p.y, p.z + 4.0f, heading, FALSE, FALSE, FALSE);
+  SET_MODEL_AS_NO_LONGER_NEEDED(s.model);
+  if (!v) {
+    s.error = "vehicle creation failed";
+    Log("vehicle: creation failed");
+    return;
+  }
+  SET_ENTITY_AS_MISSION_ENTITY(v, TRUE, TRUE);  // so a later swap can delete it
+  SET_VEHICLE_HAS_BEEN_OWNED_BY_PLAYER(v, TRUE);
+  SET_PED_INTO_VEHICLE(ped, v, -1);
+  if (old && DOES_ENTITY_EXIST(old)) {
+    SET_ENTITY_AS_MISSION_ENTITY(old, TRUE, TRUE);
+    DELETE_VEHICLE(&old);
+  }
+  SET_ENTITY_COORDS(v, p.x, p.y, p.z, FALSE, FALSE, FALSE, FALSE);
+  SET_ENTITY_HEADING(v, heading);
+  SET_VEHICLE_ON_GROUND_PROPERLY(v, 5.0f);
+  SET_VEHICLE_ENGINE_ON(v, TRUE, TRUE, FALSE);
+  if (speed > 1.0f) SET_VEHICLE_FORWARD_SPEED(v, speed);
+  ApplyColours(v, s.colours);
+  // the AI driver's task was for the old car: give it again for this one
+  g_ai.tasked = false;
+  g_ai.taskedKey.clear();
+  s.swaps++;
+  s.error.clear();
+  Log("vehicle: swapped to " + HashKey(s.model) + " at " + Vec(p) + ", speed " + Num(speed));
 }
 
 void RemoveLead() {
@@ -1156,16 +1440,62 @@ void HandleMessage(const Message &m, double now) {
     g_camYaw = static_cast<float>(MsgNum(m, "yaw", g_camYaw));
     // mount position for this car, meters: forward of the vehicle origin, and up from the ground
     if (m.count("forward") && g_veh.handle) {
-      g_veh.mountY = static_cast<float>(MsgNum(m, "forward"));
-      WritePrivateProfileStringA("mount_forward", ModelKey(g_veh.handle).c_str(), Num(g_veh.mountY).c_str(), IniPath().c_str());
+      g_veh.baseY = static_cast<float>(MsgNum(m, "forward"));
+      WritePrivateProfileStringA("mount_forward", ModelKey(g_veh.handle).c_str(), Num(g_veh.baseY).c_str(), IniPath().c_str());
     }
     if (m.count("height")) {
       float height = static_cast<float>(MsgNum(m, "height"));
-      g_veh.mountZ += height - g_cfg.mountHeight;
+      g_veh.baseZ += height - g_cfg.mountHeight;
       g_cfg.mountHeight = height;
     }
+    ApplyMount();
     Log("camera: forward " + Num(g_veh.mountY) + ", up " + Num(g_veh.mountZ) + ", pitch " + Num(g_camPitch) + ", yaw " + Num(g_camYaw));
     if (g_cam) AttachCamera();
+  } else if (type == "mount") {
+    // where the camera goes on each car: mode=comma|dashcam; drop, back (m, dashcam: below the roof, behind the glass);
+    // the jitter added to it: dx, dy, dz (m right, forward, up), pitch, yaw (deg); jitter=0 clears it
+    std::string mode = MsgStr(m, "mode", g_mount.mode);
+    if (mode == "comma" || mode == "dashcam") g_mount.mode = mode;
+    g_mount.drop = std::clamp(static_cast<float>(MsgNum(m, "drop", g_mount.drop)), 0.0f, 0.5f);
+    g_mount.back = std::clamp(static_cast<float>(MsgNum(m, "back", g_mount.back)), 0.0f, 0.5f);
+    if (m.count("jitter") && !MsgBool(m, "jitter")) g_mount.dx = g_mount.dy = g_mount.dz = g_mount.pitch = g_mount.yaw = 0;
+    g_mount.dx = std::clamp(static_cast<float>(MsgNum(m, "dx", g_mount.dx)), -0.2f, 0.2f);
+    g_mount.dy = std::clamp(static_cast<float>(MsgNum(m, "dy", g_mount.dy)), -0.2f, 0.2f);
+    g_mount.dz = std::clamp(static_cast<float>(MsgNum(m, "dz", g_mount.dz)), -0.2f, 0.2f);
+    g_mount.pitch = std::clamp(static_cast<float>(MsgNum(m, "pitch", g_mount.pitch)), -10.0f, 10.0f);
+    g_mount.yaw = std::clamp(static_cast<float>(MsgNum(m, "yaw", g_mount.yaw)), -10.0f, 10.0f);
+    if (g_veh.handle) {
+      CommaMount();
+      ApplyMount();
+      g_veh.dashcamAt = g_mount.mode == "dashcam" ? now : 0;
+    }
+    Log("mount " + g_mount.mode + ", drop " + Num(g_mount.drop) + ", back " + Num(g_mount.back) + ", jitter " + Num(g_mount.dx) + "," +
+        Num(g_mount.dy) + "," + Num(g_mount.dz) + " m, " + Num(g_mount.pitch) + "," + Num(g_mount.yaw) + " deg");
+  } else if (type == "vehicle") {
+    // model= (a name, or a hash as 0x...) replaces the player's car with a new one of it, where it is and at its speed,
+    // unless it's that model already (force=1 replaces it anyway); primary, secondary, pearl, wheel (palette indices) and
+    // dirt (0-15) colour the new car, or with no model the current one
+    Colours c;
+    c.primary = static_cast<int>(MsgNum(m, "primary", -1));
+    c.secondary = static_cast<int>(MsgNum(m, "secondary", -1));
+    c.pearl = static_cast<int>(MsgNum(m, "pearl", -1));
+    c.wheel = static_cast<int>(MsgNum(m, "wheel", -1));
+    c.dirt = static_cast<float>(MsgNum(m, "dirt", -1));
+    std::string model = MsgStr(m, "model");
+    Hash hash = model.empty() ? 0 : model.rfind("0x", 0) == 0 ? static_cast<Hash>(std::strtoul(model.c_str(), nullptr, 16)) : GET_HASH_KEY(model.c_str());
+    if (!hash || (g_veh.handle && hash == g_veh.model && !MsgBool(m, "force"))) {
+      if (g_veh.handle) ApplyColours(g_veh.handle, c);
+      g_swap.error.clear();
+    } else if (!IS_MODEL_IN_CDIMAGE(hash) || !IS_MODEL_A_VEHICLE(hash)) {
+      g_swap.error = "no vehicle model " + HashKey(hash);
+      Log("vehicle: " + g_swap.error);
+    } else {
+      REQUEST_MODEL(hash);
+      g_swap.step = 1;
+      g_swap.model = hash;
+      g_swap.colours = c;
+      g_swap.t = now;
+    }
   } else if (type == "interleave") {
     g_cfg.interleave = MsgBool(m, "on", g_cfg.interleave);
     g_cfg.interleaveLag = std::clamp(static_cast<int>(MsgNum(m, "lag", g_cfg.interleaveLag)), 0, 8);
@@ -1275,19 +1605,58 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {
+    // on=0 clears and stops traffic; density multipliers, held each frame until changed: vehicles (random= follows it
+    // unless given), parked, peds (scenario= follows it unless given); reset=1 lets the game choose again
     g_noTraffic = !MsgBool(m, "on", true);
     if (g_noTraffic) ClearModel(0, 300.0f);  // any model
-    Log(std::string("traffic ") + (g_noTraffic ? "off" : "on"));
-  } else if (type == "world") {
-    // a repeatable scene for tests: the time of day, the weather held, and the clock stopped with freeze=1
-    if (m.count("hour")) SET_CLOCK_TIME(static_cast<int>(MsgNum(m, "hour")), static_cast<int>(MsgNum(m, "minute", 0)), 0);
-    std::string weather = MsgStr(m, "weather");
-    if (!weather.empty()) {
-      SET_WEATHER_TYPE_NOW_PERSIST(weather.c_str());
-      SET_OVERRIDE_WEATHER(weather.c_str());
+    Density &d = g_density;
+    auto mult = [&](const char *key, float fallback) { return std::clamp(static_cast<float>(MsgNum(m, key, fallback)), 0.0f, 3.0f); };
+    if (MsgBool(m, "reset")) d = Density{};
+    if (m.count("vehicles") || m.count("random") || m.count("parked") || m.count("peds") || m.count("scenario")) {
+      d.set = true;
+      d.vehicles = mult("vehicles", d.vehicles);
+      d.random = mult("random", m.count("vehicles") ? d.vehicles : d.random);
+      d.parked = mult("parked", d.parked);
+      d.peds = mult("peds", d.peds);
+      d.scenario = mult("scenario", m.count("peds") ? d.peds : d.scenario);
     }
-    if (m.count("freeze")) PAUSE_CLOCK(MsgBool(m, "freeze"));
-    Log("world: hour " + Num(MsgNum(m, "hour", -1)) + ", weather " + weather + ", freeze " + Num(MsgNum(m, "freeze", -1)));
+    Log(std::string("traffic ") + (g_noTraffic ? "off" : "on") + (d.set ? ", vehicles " + Num(d.vehicles) + ", random " + Num(d.random) +
+        ", parked " + Num(d.parked) + ", peds " + Num(d.peds) + ", scenario " + Num(d.scenario) : ""));
+  } else if (type == "world") {
+    // a repeatable scene for tests: the time of day (hour, minute), the weather held (weather=, at once or over
+    // transition= s; clear=1 lets the game's weather cycle again), the rain and puddles (rain=0-1, -1 the weather's
+    // own), and the clock stopped with freeze=1
+    if (m.count("hour"))
+      SET_CLOCK_TIME(std::clamp(static_cast<int>(MsgNum(m, "hour")), 0, 23), std::clamp(static_cast<int>(MsgNum(m, "minute", 0)), 0, 59), 0);
+    if (MsgBool(m, "clear")) {
+      CLEAR_OVERRIDE_WEATHER();
+      CLEAR_WEATHER_TYPE_PERSIST();
+      g_world.weather.clear();
+    }
+    std::string weather;
+    for (char c : MsgStr(m, "weather"))
+      if (isalnum(static_cast<unsigned char>(c)) || c == '_') weather += static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    if (!weather.empty()) {
+      g_world.weather = weather;
+      g_world.transition = std::max(0.0f, static_cast<float>(MsgNum(m, "transition", 0)));
+      if (g_world.transition > 0) {
+        CLEAR_OVERRIDE_WEATHER();  // an override holds the weather it names, at once
+        SET_WEATHER_TYPE_OVERTIME_PERSIST(weather.c_str(), g_world.transition);
+      } else {
+        SET_WEATHER_TYPE_NOW_PERSIST(weather.c_str());
+        SET_OVERRIDE_WEATHER(weather.c_str());
+      }
+    }
+    if (m.count("rain")) {
+      g_world.rain = std::clamp(static_cast<float>(MsgNum(m, "rain")), -1.0f, 1.0f);
+      SET_RAIN(g_world.rain < 0 ? -1.0f : g_world.rain);
+    }
+    if (m.count("freeze")) {
+      g_world.frozen = MsgBool(m, "freeze");
+      PAUSE_CLOCK(g_world.frozen);
+    }
+    Log("world: hour " + Num(MsgNum(m, "hour", -1)) + ", weather " + weather + ", transition " + Num(g_world.transition) + ", rain " +
+        Num(MsgNum(m, "rain", -2)) + ", freeze " + Num(MsgNum(m, "freeze", -1)));
   } else if (type == "setup") {
     Setup s;
     s.x = static_cast<float>(MsgNum(m, "x", NAN));
@@ -1349,15 +1718,21 @@ extern "C" __declspec(dllexport) void CoreTick() {
   Ped ped = PLAYER_PED_ID();
   if (g_setup.step) StepSetup(ped, now);
   StepLead(now);
-  if (g_noTraffic) {
-    SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
-    SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
-    SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
-    SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(0.0f);
-    SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(0.0f, 0.0f);
+  StepSwap(ped, now);
+  if (g_noTraffic || g_density.set) {
+    const Density &d = g_noTraffic ? Density{true, 0, 0, 0, 0, 0} : g_density;
+    SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(d.vehicles);
+    SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(d.random);
+    SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(d.parked);
+    SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(d.peds);
+    SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(d.scenario, d.scenario);
   }
   Vehicle v = IS_PED_IN_ANY_VEHICLE(ped, FALSE) ? GET_VEHICLE_PED_IS_IN(ped, FALSE) : 0;
   if (v != g_veh.handle) OnVehicleChanged(v);
+  if (v && g_veh.dashcamAt > 0 && now >= g_veh.dashcamAt) {
+    g_veh.dashcamAt = 0;
+    if (g_mount.mode == "dashcam") DashcamMount();
+  }
 
   bool connected = g_link.Connected();
   bool want = connected && v != 0;

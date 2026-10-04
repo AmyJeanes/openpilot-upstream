@@ -101,6 +101,19 @@ inline void SET_VEHICLE_EXTRA_COLOUR_5(Vehicle v, int color) { Invoke(0xF40DD601
 inline void SET_VEHICLE_EXTRA_COLOUR_6(Vehicle v, int color) { Invoke(0x6089CDF6A57F326C, v, color); }
 inline void SET_VEHICLE_CUSTOM_SECONDARY_COLOUR(Vehicle v, int r, int g, int b) { Invoke(0x36CED73BFED89754, v, r, g, b); }
 inline void SET_VEHICLE_FORWARD_SPEED(Vehicle v, float s) { Invoke(0xAB54A438726D25D5, v, s); }
+// palette indices (DurtyFree's vehicleColors.json): primary and secondary, then pearlescent and wheel
+inline void SET_VEHICLE_COLOURS(Vehicle v, int primary, int secondary) { Invoke(0x4F1D4BE3A7F24601, v, primary, secondary); }
+inline void GET_VEHICLE_COLOURS(Vehicle v, uint64_t *primary, uint64_t *secondary) { Invoke(0xA19435F193E081AC, v, primary, secondary); }
+inline void SET_VEHICLE_EXTRA_COLOURS(Vehicle v, int pearl, int wheel) { Invoke(0x2036F561ADD12E33, v, pearl, wheel); }
+inline void GET_VEHICLE_EXTRA_COLOURS(Vehicle v, uint64_t *pearl, uint64_t *wheel) { Invoke(0x3BC4245933A166F7, v, pearl, wheel); }
+inline void CLEAR_VEHICLE_CUSTOM_PRIMARY_COLOUR(Vehicle v) { Invoke(0x55E1D2758F34E437, v); }
+inline void CLEAR_VEHICLE_CUSTOM_SECONDARY_COLOUR(Vehicle v) { Invoke(0x5FFBDEEC3E8E2009, v); }
+inline void SET_VEHICLE_DIRT_LEVEL(Vehicle v, float dirt) { Invoke(0x79D3B596FE44EE8B, v, dirt); }  // 0-15
+inline float GET_VEHICLE_DIRT_LEVEL(Vehicle v) { return Invoke<float>(0x8F17BC8BA08DA62B, v); }
+inline BOOL IS_MODEL_IN_CDIMAGE(Hash m) { return Invoke<BOOL>(0x35B9E0803292B641, m); }
+inline BOOL IS_MODEL_A_VEHICLE(Hash m) { return Invoke<BOOL>(0x19AAC8F07BFEC53E, m); }
+inline const char *GET_DISPLAY_NAME_FROM_VEHICLE_MODEL(Hash m) { return Invoke<const char *>(0xB215AAC32D25D019, m); }
+inline void SET_VEHICLE_HAS_BEEN_OWNED_BY_PLAYER(Vehicle v, BOOL owned) { Invoke(0x2B5F9D2AF1F1722D, v, owned); }
 
 // world and paths
 inline BOOL LOAD_ALL_PATH_NODES(BOOL all) { return Invoke<BOOL>(0xC2AB6BFE34E92F8B, all); }
@@ -127,6 +140,16 @@ inline void SET_CLOCK_TIME(int h, int m, int s) { Invoke(0x47C3B5848C3E45D8, h, 
 inline void SET_WEATHER_TYPE_NOW_PERSIST(const char *w) { Invoke(0xED712CA327900C8A, w); }
 inline void SET_OVERRIDE_WEATHER(const char *w) { Invoke(0xA43D5C6FE51ADBEF, w); }
 inline void PAUSE_CLOCK(BOOL toggle) { Invoke(0x4055E40BD2DBEC1D, toggle); }
+inline int GET_CLOCK_HOURS() { return Invoke<int>(0x25223CA6B4D20B7F); }
+inline int GET_CLOCK_MINUTES() { return Invoke<int>(0x13D2B8ADD79640F2); }
+inline void SET_WEATHER_TYPE_OVERTIME_PERSIST(const char *w, float secs) { Invoke(0xFB5045B7C42B75BF, w, secs); }
+inline void CLEAR_OVERRIDE_WEATHER() { Invoke(0x338D2E3477711050); }
+inline void CLEAR_WEATHER_TYPE_PERSIST() { Invoke(0xCCC39339BEF76CF5); }
+// the weather blending from type 1 to type 2; hashes and the float are written to 8-byte slots
+inline void GET_CURR_WEATHER_STATE(uint64_t *from, uint64_t *to, uint64_t *mix) { Invoke(0xF3BBE884A14BB413, from, to, mix); }
+// rain and puddles, 0-1 (above 0.5 only puddles form faster); -1 goes back to the weather's own
+inline void SET_RAIN(float level) { Invoke(0x643E26EA6E024D92, level); }
+inline float GET_RAIN_LEVEL() { return Invoke<float>(0x96695E368AD855F3); }
 inline void SET_MAX_WANTED_LEVEL(int lvl) { Invoke(0xAA5F02DB48D704B9, lvl); }
 inline void CLEAR_PLAYER_WANTED_LEVEL(int player) { Invoke(0xB302540597885499, player); }
 inline BOOL IS_PAUSE_MENU_ACTIVE() { return Invoke<BOOL>(0xB0034A223497FFCB); }

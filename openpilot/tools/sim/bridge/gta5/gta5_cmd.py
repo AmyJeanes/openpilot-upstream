@@ -5,7 +5,20 @@
   gta5_cmd.py setup x=2420 y=3000 z=46 model=sultan speed=20 hour=12 weather=EXTRASUNNY
                                                 spawn a car and/or put it on the road nearest a point
   gta5_cmd.py world hour=12 weather=EXTRASUNNY freeze=1
-                                                set the time and weather, and stop the clock
+                                                set the time and weather, and stop the clock (minute=; transition=30 changes
+                                                the weather over 30 s; rain=0-1 the rain and puddles, -1 the weather's own;
+                                                clear=1 lets the game's weather cycle again)
+  gta5_cmd.py traffic vehicles=0.6 peds=0.8 parked=1
+                                                traffic and pedestrian density, held until changed (reset=1; on=0 none)
+  gta5_cmd.py vehicle premier [colours=random|keep] [primary=111 secondary=0 pearl=5 wheel=156 dirt=2] [force=1]
+                                                swap the player's car for a new one where it is (model3, a car of
+                                                `vehicle list`, any model name or 0x hash; random picks one), coloured
+  gta5_cmd.py mount dashcam [drop=0.08 back=0.06] [jitter=1] [dx= dy= dz= pitch= yaw=]
+                                                the camera at the top of the windscreen (comma: a comma device's place, the
+                                                default); jitter=1 moves it a little at random, jitter=0 not at all
+  gta5_cmd.py randomise [seed] [model_share=0.6] [mount=dashcam|comma|keep] [jitter=0] [vehicle=0] [world=0] [traffic=0]
+             [dry=1]                            pick a drive's weather, time, traffic, car, colours and mount (gta5_scene.py),
+                                                print them as a JSON line and set them; waits for the car swap
   gta5_cmd.py camera yaw=5 pitch=0              rotate the camera on its mount (degrees)
   gta5_cmd.py ai on speed=12 style=1076369579   the game's AI drives the car: to the map's waypoint, else wandering
   gta5_cmd.py ai x=100 y=-200 z=30              ... to a point; ai off gives the car back
@@ -19,18 +32,21 @@
 import glob
 import json
 import os
+import random
 import socket
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
+from openpilot.tools.sim.bridge.gta5 import gta5_scene
 from openpilot.tools.sim.bridge.gta5.gta5_expert import CONTROL, control_path
 from openpilot.tools.sim.bridge.gta5.gta5_rx import DEBUG_PORT
 
 TRIPS = os.getenv("GTA5_TRIPS", os.path.expanduser("~/gta5test/e2e/*.txt"))
 MAP_VIEW = f"http://localhost:{os.getenv('GTA5_MAP_PORT', '8793')}"
 SETUP_WAIT = 6.0  # s: the plugin places the car about 3.5 s after the setup command
+SWAP_WAIT = 3.0  # s: a car swap waits for its model to load, well under a second for a car already streamed
 
 
 def parse(value: str):
@@ -48,9 +64,9 @@ def options(args: list[str]) -> dict:
   return out
 
 
-def send(cmd: dict) -> None:
+def send(*cmds: dict) -> None:
   with socket.create_connection(("127.0.0.1", DEBUG_PORT)) as s:
-    s.sendall((json.dumps(cmd) + "\n").encode())
+    s.sendall("".join(json.dumps(cmd) + "\n" for cmd in cmds).encode())
 
 
 def find_trip(name: str) -> str:
@@ -104,12 +120,60 @@ def expert(argv: list[str]) -> None:
     sys.exit(__doc__)
 
 
+def vehicle(argv: list[str]) -> None:
+  if not argv or argv[0] == "list":
+    print(f"model3 {gta5_scene.MODEL_3} (add-on, the bridge's car)")
+    for c in gta5_scene.CARS:
+      print(f"{c.name} {c.hash} {c.kind}")
+    return
+  opts = options(argv[1:])
+  seed = opts.pop("seed", None)
+  rng = random.Random(None if seed is None else int(seed))
+  car = gta5_scene.pick_car(rng, float(opts.pop("model_share", 0))) if argv[0] == "random" else argv[0]
+  cmd = {"type": "vehicle", "model": gta5_scene.model_for(car)}
+  if opts.pop("colours", "random") == "random":
+    cmd.update({k: v for k, v in gta5_scene.pick_colours(rng, car).items() if k != "group"})
+  cmd.update(opts)
+  print(json.dumps(cmd))
+  send(cmd)
+
+
+def mount(argv: list[str]) -> None:
+  if not argv or argv[0] not in ("comma", "dashcam"):
+    sys.exit(__doc__)
+  opts = options(argv[1:])
+  seed = opts.pop("seed", None)
+  cmd = {"type": "mount", "mode": argv[0]}
+  if "jitter" in opts:
+    picked = gta5_scene.pick_mount(random.Random(None if seed is None else int(seed)), argv[0], bool(opts.pop("jitter")))
+    cmd.update({k: v for k, v in picked.items() if k not in ("mode", "drop")})
+  cmd.update(opts)
+  print(json.dumps(cmd))
+  send(cmd)
+
+
+def randomise(argv: list[str]) -> None:
+  seeded = bool(argv) and "=" not in argv[0]
+  seed = int(argv[0]) if seeded else random.randrange(1 << 31)
+  opts = options(argv[1:] if seeded else argv)
+  choice = gta5_scene.pick(seed, model_share=float(opts.get("model_share", 0.6)), mount=str(opts.get("mount", "dashcam")),
+                           jitter=bool(opts.get("jitter", 1)), vehicle=bool(opts.get("vehicle", 1)), world=bool(opts.get("world", 1)),
+                           traffic=bool(opts.get("traffic", 1)))
+  print("randomise " + json.dumps(choice), flush=True)
+  if opts.get("dry"):
+    return
+  send(*gta5_scene.commands(choice))
+  if "vehicle" in choice:
+    time.sleep(float(opts.get("wait", SWAP_WAIT)))  # a setup sent during the swap would place the old car
+
+
 def main(argv: list[str]) -> None:
   if not argv:
     print(__doc__)
     sys.exit(1)
-  if argv[0] == "expert":
-    expert(argv[1:])
+  sub = {"expert": expert, "vehicle": vehicle, "mount": mount, "randomise": randomise}.get(argv[0])
+  if sub is not None:
+    sub(argv[1:])
     return
   cmd: dict = {"type": argv[0]}
   if argv[0] == "snap":
