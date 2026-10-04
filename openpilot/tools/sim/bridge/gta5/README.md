@@ -123,6 +123,18 @@ gives the car back. Expert mode (`gta5_expert.py`, on with `GTA5_EXPERT=1` on te
 AI's target 60-120 m ahead just past the next junction, with the indicators from the route's turns, openpilot disengaged
 and a JSON line per frame in `expert.jsonl` beside `GTA5_LOG`; `expert off` stops it.
 
+## Recording
+`GTA5_RECORD=<folder>` on terminal 2 records the drive for training the driving model, in comma's comma1M segment layout
+(`gta5_record.py`): each minute in the car becomes `<folder>/data/<hex>/` with the road and wide frames camerad got as
+HEVC (`fcamera.hevc`, `ecamera.hevc`), `frame_info.safetensors` and `localizer.safetensors` (the game's own poses, with
+the map placed at Los Angeles), which the commaai/torchtitan and openpilot.distill loaders read; and `gta5.npz` with the
+game state, nav's and the AI driver's inputs, and modeld's outputs per frame, with the desire input it was given.
+`SEND_RAW_PRED=1` on terminal 1 adds modeld's raw output vector, its vision features included. libx265 encodes on the
+CPU (about 1.3 cores per camera); the video is about 30 MB a minute per camera. `GTA5_RECORD_MOUNT=<forward>,<up>` is the
+camera's offset from the car's origin, which the poses are moved to (1,0.6 by default, the plugin's mount on the test
+car). `python -m openpilot.tools.sim.bridge.gta5.gta5_record finalize <segment>` remakes a segment's safetensors from its
+`gta5.npz`, and `replay` makes a synthetic segment from a `GTA5_LOG`, for testing loaders.
+
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
   car's windscreen bone, and at least 0.29 m below the roof, a Model 3's device height; else 1.22 m above the ground),

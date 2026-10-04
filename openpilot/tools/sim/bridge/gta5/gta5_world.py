@@ -18,6 +18,7 @@ from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
+from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths
@@ -128,6 +129,7 @@ class GTA5World(World):
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
     self.cap = 0.0
     self.gps_route: list = []
+    self.recorder = Recorder(RECORD, self) if RECORD else None
     if self.map_view:
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
 
@@ -446,11 +448,15 @@ class GTA5World(World):
     name = "wide" if wide else "road"
     with self.lock:
       slot = self.slots.get(name)
-    if slot is None:
-      return None
-    buf = self.shm[name].buf
-    assert buf is not None
-    return bytes(buf[slot * NV12_SIZE:(slot + 1) * NV12_SIZE])
+      state, arrived = self.state, self.last_frame_time
+    frame = None
+    if slot is not None:
+      buf = self.shm[name].buf
+      assert buf is not None
+      frame = bytes(buf[slot * NV12_SIZE:(slot + 1) * NV12_SIZE])
+    if self.recorder is not None:
+      self.recorder.add(wide, frame, state, arrived)
+    return frame
 
   def tick(self):
     pass
@@ -479,4 +485,6 @@ class GTA5World(World):
         shm.unlink()
       except FileNotFoundError:
         pass
+    if self.recorder is not None:
+      self.recorder.close()
     print(f"gta5: closing ({reason})")
