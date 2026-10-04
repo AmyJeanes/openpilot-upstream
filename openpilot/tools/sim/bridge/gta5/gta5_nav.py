@@ -155,6 +155,7 @@ class Tune:
   DEFAULTS = {
     "turn_speed_soft": SOFT_TURN_SPEED,  # m/s for a turn of TURN_ANGLE, between it and a square turn by angle
     "turn_speed_square": TURN_SPEED,  # m/s for a square turn
+    "turn_speed_square_right": 0.0,  # m/s for a square right turn (0: turn_speed_square)
     "turn_speed_sharp": SHARP_TURN_SPEED,  # m/s beyond sharp_angle
     "sharp_angle": 110.0,  # deg
     "slow_decel": SLOW_DECEL,  # m/s^2
@@ -169,6 +170,9 @@ class Tune:
     # m before the junction's entry the time mode signals by whatever the speed (0: off); the route's turn point is
     # the junction's centre, and too close to a right turn's corner the model goes straight on
     "signal_min_entry": 0.0,
+    # m before the junction's entry a left turn's time-mode signal waits for (0: off); signalled well before its stop
+    # line, the model turns in early and can cut into the near, oncoming half of a split junction
+    "left_signal_max_entry": 0.0,
     "repulse_every": PULSE_EVERY,  # s
     "repulse_until_turned": TURN_STARTED,  # deg
     "repulse_after_stop_until": STOP_REPEAT_TURNED,  # deg
@@ -253,7 +257,8 @@ class Turn:
     t = tune or TUNE
     if self.angle > t.sharp_angle:
       return t.turn_speed_sharp
-    return float(np.interp(self.angle, [TURN_ANGLE, 90.0], [t.turn_speed_soft, t.turn_speed_square]))
+    square = t.turn_speed_square_right if self.side == "right" and t.turn_speed_square_right > 0 else t.turn_speed_square
+    return float(np.interp(self.angle, [TURN_ANGLE, 90.0], [t.turn_speed_soft, square]))
 
   def lanes(self, n: int) -> tuple[int, int]:
     """The lanes (from the left) of n to take it from."""
@@ -747,6 +752,8 @@ class Nav:
       window = max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
       early = t.signal_min_entry > 0 and self.entry < t.signal_min_entry
       if not (turn.dist < t.signal_min or ((early or turn.dist < window) and slow)):
+        return False
+      if turn.side == "left" and t.left_signal_max_entry > 0 and self.entry > t.left_signal_max_entry and turn.dist >= SIGNAL_LAST:
         return False
     if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
       return False  # into the turn bay first

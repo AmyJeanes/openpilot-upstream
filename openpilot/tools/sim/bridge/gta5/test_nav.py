@@ -280,6 +280,22 @@ def test_exit_cue_stacked_within_the_turn():
       assert d.nav.desire != "+keepRight"
   assert "+keepRight" in d.desires and d.nav.signaled is None and d.desires[-1] == "keepRight"
 
+
+def test_left_signal_waits_for_the_stop_line():
+  # left_signal_max_entry: a left turn's signal waits until its stop line (20 m before the turn) is 3 m off; never sooner
+  route = route_to_turn(100.0, "left")
+  at = {}
+  for wait in (0.0, 3.0):
+    d = Drive((0, 2), v=5.0)
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(left_signal_max_entry=wait)
+    y = 0.0
+    while y < 100.0 and not signals(d):
+      d.step(route, y, {"stops": [80.0 - y], "routeEnd": 300.0 - y})
+      y += d.v * 0.05
+    at[wait] = 80.0 - y
+  assert at[0.0] > 5.0 and 2.0 < at[3.0] <= 3.0
+
 def test_junction_entry():
   from openpilot.tools.sim.bridge.gta5.gta5_nav import junction_entry
   assert junction_entry(100.0, [30.0, 85.0], [100.0]) == (85.0, "stop line")
