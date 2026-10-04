@@ -13,7 +13,8 @@ arrives, disengages, gets stuck, leaves the road, reroutes too often or runs out
   e2e.py summary [results.jsonl ...]                 outcomes, maneuvers, failures across runs
   e2e.py run --trips f --tune t.json                 nav's turn parameters for every trip (see below)
   e2e.py sweep --variants v.json --trips f --reps 2  each trip with each variant of nav's turn parameters
-  e2e.py sweepsum [results.jsonl ...]                turns per variant: made, lane, oncoming, collisions, stops, speed
+  e2e.py sweepsum [results.jsonl ...]                turns per variant: made, lane, landed, oncoming, collisions, stops, speed
+  e2e.py sweepsum --backfill [...]                   and turns' landing lanes from the traces of results from before them
 
 Nav's turn parameters (gta5_nav.Tune) come from the file the bridge was started with as GTA5_NAVTUNE (svc.sh:
 BRIDGE_EXTRA="GTA5_NAVTUNE=$HOME/gta5test/navtune.json"); --tune and sweep write it before each trip (E2E_NAVTUNE, the
@@ -471,6 +472,7 @@ class Trip:
     self.oncoming_run, self.oncoming_snapped, self.oncoming_snaps = 0.0, False, 0
     self.route_t = 0.0  # when the route being followed was made (trip time)
     self.alert = ''
+    self.landing: list[dict] = []  # turns scored done whose landing lane is still to be read
 
   def write_tune(self) -> bool:
     """Writes nav's turn parameters for this trip; whether the bridge logged reading them."""
@@ -644,6 +646,7 @@ class Trip:
       for i in range(self.pending, len(self.route['maneuvers'])):  # the last ones, to the destination
         if self.route['maneuvers'][i]['type'] not in (4, 5, 6):
           self._score(i, 'done')
+    self._land(final=True)
     if outcome not in ('arrived', 'infra'):
       rec_snap = self.snap('end')
       rig.wait(1.0)
@@ -689,6 +692,7 @@ class Trip:
     p['junc'] = self.roads.in_junction(p['x'], p['y'])
     prev = self.history[-1] if self.history else None
     self.history.append(p)
+    self._land()
     if prev is not None and prev['lane'] and prev['lane'][0] < 0 and prev['v'] > 1.0:
       self.oncoming_s += p['t'] - prev['t']
       self.oncoming_run += p['t'] - prev['t']
@@ -702,6 +706,15 @@ class Trip:
     if now - self.last_trace >= TRACE_EVERY:
       self.last_trace = now
       self.trace.write(json.dumps(p) + "\n")
+
+  def _land(self, final: bool = False):
+    """Reads the landing lane of each turn the car has got LAND_FAR m past (or LAND_WAIT s, or at the trip's end)."""
+    p = self.history[-1] if self.history else None
+    for m in list(self.landing):
+      if not final and p and math.hypot(p['x'] - m['x'], p['y'] - m['y']) < LAND_FAR and p['t'] < m['t'] + LAND_WAIT:
+        continue
+      self.landing.remove(m)
+      m['land'] = landing(list(self.history), m)
 
   def _follow(self, now, pos):
     """Scores the route's maneuvers as the car gets past them, and the one it missed when the bridge reroutes."""
@@ -799,7 +812,7 @@ class Trip:
     lanes_after = [p['lane'] for p in hist if p['t'] > t0 + 1 and p['lane']]
     nav_lines = [line for t, line in self.rig.nav_lines if self.t0 + t0 - 25 <= t <= self.t0 + t0 + 5]
     self.maneuvers.append({
-      'i': i, 'result': result, 'route_n': len(self.reroutes),
+      'i': i, 'result': result, 'route_n': len(self.reroutes), 't': t0,
       **{key: m[key] for key in ('kind', 'type', 'angle', 'x', 'y', 'along', 'real', 'in', 'out', 'fork', 'signal', 'instruction')},
       'closest': round(d[k], 1), 'z': hist[k]['z'], 'street': hist[k]['street'],
       'approach': {f"{dt}s": at(dt) for dt in (-10, -5, -2, 0)},
@@ -813,6 +826,8 @@ class Trip:
       'collision': any(e['event'] == 'collision' and t0 - 5 <= e['t'] for e in self.events),
       'speeds': turn_speeds(hist, t0),
     })
+    if result == 'done' and turn_maneuver(self.maneuvers[-1]):
+      self.landing.append(self.maneuvers[-1])
     tag = f"{m['kind']} {m['angle']}" + (f" -> {m['out'].get('names')}" if m.get('out') else '')
     print(f"  maneuver {i} {result}: {tag}, lane {at(-2)['lane']}, v {at(0)['v']}, signal {None if signal_t is None else round(signal_t, 1)}, stopped {stopped:.0f} s", flush=True)
 
@@ -826,6 +841,60 @@ def results_files(paths):
 ONCOMING_OK = 1.0  # s in the oncoming lanes a driver would let go (the lane reading flickers across junctions)
 ONCOMING_SNAPS = 3  # frames saved per trip, as the car has been in the oncoming lanes that long
 JUNCTION_NEAR = 15.0  # m from a junction or stop-line node: in the junction (recorded, as the lane reading there can follow GTA's diagonal links)
+# m past a turn's point where the lane it lands in is read: out of the junction, and before nav's lane plan can move on
+# for the next maneuver (gta5_nav.TURN_HOLDS, then a lane per LANE_LINE_CHANGE m)
+LAND_FROM, LAND_TO = 10.0, 35.0
+# m: where the road on is junction nodes all the way (they come close together), past the turn's diagonal links
+LAND_JUNCTION_FROM, LAND_FAR = 20.0, 50.0
+LAND_WAIT = 20.0  # s after the turn to stop waiting for the car to get past it
+
+
+def landing(hist: list[dict], m: dict, in_junction=None) -> dict | None:
+  """The lane the car lands in after a turn (the reading most often seen out of the junction LAND_FROM to LAND_TO m past
+  its point, else LAND_JUNCTION_FROM to LAND_FAR in it), against the one nav's lane plan (gta5_nav.lane_plan) has it
+  arrive in: the turn side's lane, 0 from the left for a left turn and the rightmost for a right. A history without
+  junction flags takes them from in_junction(x, y)."""
+  clear, junction = [], []
+  for p in hist:
+    if p['t'] <= m['t']:
+      continue
+    d = math.hypot(p['x'] - m['x'], p['y'] - m['y'])
+    if d > LAND_FAR:
+      break
+    if not p['lane']:
+      continue
+    junc = p['junc'] if 'junc' in p else bool(in_junction and in_junction(p['x'], p['y']))
+    if LAND_FROM <= d <= LAND_TO and not junc:
+      clear.append(tuple(p['lane']))
+    elif d >= LAND_JUNCTION_FROM and junc:
+      junction.append(tuple(p['lane']))
+  lanes = clear or junction
+  if not lanes:
+    return None
+  lane = Counter(lanes).most_common(1)[0][0]
+  planned = 0 if m['type'] in LEFT else lane[1] - 1
+  return {'lane': list(lane), 'planned': planned, 'ok': lane[0] == planned, 'reads': len(lanes), 'junc': not clear}
+
+
+def backfill_landing(rs: list[dict]):
+  """Reads the landing lane of done turns in results from before it was recorded, from their 2 Hz traces (the turn's
+  time being the trace point nearest its point)."""
+  roads = None
+  for r in rs:
+    turns = [m for m in r.get('maneuvers', []) if 'land' not in m and m['result'] == 'done' and turn_maneuver(m)]
+    path = os.path.join(r.get('_dir', OUT_DIR), 'traces', f"{r['id']}.jsonl")
+    if not turns or not os.path.exists(path):
+      continue
+    hist = [json.loads(line) for line in open(path)]
+    if not hist:
+      continue
+    if roads is None and 'junc' not in hist[0]:
+      roads = Map()
+    for m in turns:
+      t = m.get('t')
+      if t is None:
+        t = min(hist, key=lambda p, m=m: math.hypot(p['x'] - m['x'], p['y'] - m['y']))['t']
+      m['land'] = landing(hist, {**m, 't': t}, roads.in_junction if roads else None)
 
 
 def safe(r: dict) -> bool:
@@ -840,10 +909,16 @@ def load_results(paths) -> list[dict]:
   for p in results_files(paths):
     for line in open(p):
       try:
-        out.append(json.loads(line))
+        out.append({**json.loads(line), '_dir': os.path.dirname(p)})
       except ValueError:
         pass
   return out
+
+
+def landings(turns: list[dict]) -> str:
+  """Done turns that landed in nav's planned lane, of those with a landing reading."""
+  read = [m['land'] for m in turns if m.get('land')]
+  return f"{sum(x['ok'] for x in read)}/{len(read)}"
 
 
 def read_trips(args, roads) -> list[tuple[str, tuple, int | None]]:
@@ -961,6 +1036,14 @@ def cmd_summary(args):
   kinds = defaultdict(Counter)
   for m in ms:
     kinds[m['kind']][m['result']] += 1
+  if args.backfill:
+    backfill_landing(rs)
+  turns = [m for r in rs for m in r.get('maneuvers', []) if turn_maneuver(m)]
+  left = [m for m in turns if m['type'] in LEFT]
+  right = [m for m in turns if m['type'] not in LEFT]
+  wide = [m for m in turns if m.get('land') and m['land']['lane'][1] > 1]
+  print(f"turns landed in nav's lane: {landings(turns)} (left {landings(left)}, right {landings(right)}, "
+        f"onto 2+ lanes {landings(wide)})")
   print("real maneuvers (done/missed):")
   for kind, c in sorted(kinds.items(), key=lambda kv: -sum(kv[1].values())):
     print(f"  {kind:14s} {c['done']:3d} / {c['missed']:3d}")
@@ -1005,17 +1088,20 @@ def turn_maneuver(m: dict) -> bool:
 
 def cmd_sweepsum(args):
   """Per variant: trips and outcomes, and over its turns (45 deg or more) how many were made, ended in a lane of the
-  car's way, went into the oncoming lanes, hit something, stopped before the turn, the slowest speed by it, the speeds
-  into, through and out of the arc, and how far the car turned of the turn's angle."""
+  car's way, landed in nav's planned lane (of those with a landing reading; and of those onto 2+ lanes), went into the
+  oncoming lanes, hit something, stopped before the turn, the slowest speed by it, the speeds into, through and out of
+  the arc, and how far the car turned of the turn's angle."""
   rs = [r for r in load_results(args.files) if r.get('variant') is not None]
   if not rs:
     print("no sweep results (trips with a variant)")
     return
+  if args.backfill:
+    backfill_landing(rs)
   by = defaultdict(list)
   for r in rs:
     by[r['variant']].append(r)
   cols = [('variant', 16), ('trips', 5), ('arrived', 7), ('safe', 4), ('crash', 5), ('turns', 5), ('made', 5), ('lane ok', 7),
-          ('oncoming', 8), ('hit', 4), ('stopped', 7), ('min v', 6), ('v in', 5), ('arc min', 7), ('arc mean', 8),
+          ('landed', 6), ('land 2+', 7), ('oncoming', 8), ('hit', 4), ('stopped', 7), ('min v', 6), ('v in', 5), ('arc min', 7), ('arc mean', 8),
           ('v out', 5), ('turned', 6)]
   print(" ".join(f"{c:>{w}s}" if k else f"{c:{w}s}" for k, (c, w) in enumerate(cols)) + "  tune")
   for name, group in sorted(by.items()):
@@ -1026,8 +1112,13 @@ def cmd_sweepsum(args):
       return f"{100 * k / n:.0f}%"
     made = sum(m['result'] == 'done' for m in turns)
     lane_ok = sum(bool(m.get('end_lane')) and m['end_lane'][0] >= 0 for m in turns)
+    land = [m['land'] for m in turns if m.get('land')]
+    wide = [x for x in land if x['lane'][1] > 1]
+
+    def landed(xs):
+      return f"{100 * sum(x['ok'] for x in xs) / len(xs):.0f}%" if xs else '-'
     oncoming = sum(bool(m.get('oncoming')) for m in turns)
-    hit = sum(bool(m.get('collision')) for m in turns)
+    hit =sum(bool(m.get('collision')) for m in turns)
     stopped = sum(m.get('stopped_before', 0) >= 2 for m in turns)
     speeds = [m['min_v'] for m in turns if m.get('min_v') is not None]
     min_v = float(np.mean(speeds)) if speeds else float('nan')
@@ -1039,7 +1130,7 @@ def cmd_sweepsum(args):
     # how far the car turned, of the turn's angle: under 1 runs wide or misses, over 1 swings round
     ratio = [abs(m['speeds']['turned']) / abs(m['angle']) for m in turns if m.get('speeds') and m.get('angle')]
     row = [name, len(group), outcomes['arrived'], sum(safe(r) for r in group), outcomes['crash'] + outcomes['fell'], len(turns), pct(made), pct(lane_ok),
-           pct(oncoming), pct(hit), pct(stopped), f"{min_v:.1f}", mean('entry'), mean('arc_min'), mean('arc_mean'),
+           landed(land), landed(wide), pct(oncoming), pct(hit), pct(stopped), f"{min_v:.1f}", mean('entry'), mean('arc_min'), mean('arc_mean'),
            mean('exit'), f"{np.mean(ratio):.2f}" if ratio else '-']
     print(" ".join(f"{str(v):>{w}s}" if k else f"{str(v):{w}s}" for k, (v, (_, w)) in enumerate(zip(row, cols, strict=True)))
           + "  " + json.dumps(group[0].get('tune')))
@@ -1100,12 +1191,14 @@ def main():
     sw.add_argument(a, **kw)
   ss = sub.add_parser('sweepsum')
   ss.add_argument('files', nargs='*')
+  ss.add_argument('--backfill', action='store_true', help="read turns' landing lanes from the traces of older results")
   pk = sub.add_parser('pick')
   pk.add_argument('--mode', choices=['city', 'map'], default='city')
   pk.add_argument('--n', type=int, default=10)
   pk.add_argument('--seed', type=int, default=1)
   sm = sub.add_parser('summary')
   sm.add_argument('files', nargs='*')
+  sm.add_argument('--backfill', action='store_true', help="read turns' landing lanes from the traces of older results")
   args = p.parse_args()
   {'run': cmd_run, 'sweep': cmd_sweep, 'sweepsum': cmd_sweepsum, 'pick': cmd_pick, 'summary': cmd_summary}[args.command](args)
 
