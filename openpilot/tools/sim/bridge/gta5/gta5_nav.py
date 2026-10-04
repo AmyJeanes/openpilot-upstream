@@ -174,6 +174,9 @@ class Tune:
     # m before the junction's entry a left turn's time-mode signal waits for (0: off); signalled well before its stop
     # line, the model turns in early and can cut into the near, oncoming half of a split junction
     "left_signal_max_entry": 0.5,
+    # m past a turn's point it is given up if the car hasn't started turning (0: MISSED_BY), and no more pulses past the
+    # point; a pulse still in the model's memory after a miss turns it at the next opening, a wall as often as a road
+    "unturned_cancel": 0.0,
     "repulse_every": PULSE_EVERY,  # s
     "repulse_until_turned": TURN_STARTED,  # deg
     "repulse_after_stop_until": STOP_REPEAT_TURNED,  # deg
@@ -572,7 +575,9 @@ class Nav:
         self.cue, self.cue_until, self.cue_hold = "keepRight", now + EXIT_CUE_FOR, False
         if DEBUG:
           print(f"nav: keepRight as the car comes round past the left turn ({turning:.2f} rad/s)")
-      if done or along > self.turn.dist + MISSED_BY:
+      unturned = (t.unturned_cancel > 0 and along > self.turn.dist + t.unturned_cancel
+                  and abs(wrap(heading - self.signal_heading)) < TURN_STARTED)
+      if done or along > self.turn.dist + MISSED_BY or unturned:
         if DEBUG:
           print(f"nav: turn {'done' if done else 'missed'} after {along:.0f} m (car {heading:.0f})")
         self._turn_over(now)
@@ -603,7 +608,8 @@ class Nav:
     if self.turn is not None:
       if v < 0.3:
         self.stopped = True
-      elif v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY:
+      elif (v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY
+            and (t.unturned_cancel <= 0 or self.driven - self.turn_from < self.turn.dist)):
         turned = abs(wrap(heading - self.signal_heading))
         fading = desire.get(self.turn.side, 1.0) < t.repulse_below_prob or now - self.repeat_t > t.repulse_every
         if turned < t.repulse_until_turned and fading or self.stopped and turned < t.repulse_after_stop_until:

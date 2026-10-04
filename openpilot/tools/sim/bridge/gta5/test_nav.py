@@ -308,6 +308,28 @@ def test_left_signal_waits_for_the_stop_line():
     y += d.v * 0.05
   assert abs((80.0 - y) - at[0.0]) < 1.0
 
+
+def test_unturned_turn_given_up_past_its_point():
+  # unturned_cancel: a car that drives straight on past the turn gets no more pulses past its point, and loses the
+  # signal this far past it instead of at MISSED_BY
+  route = route_to_turn(40.0, "left")
+  gone = {}
+  for cancel in (0.0, 10.0):
+    d = Drive((0, 1), v=5.0)
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(unturned_cancel=cancel, left_signal_max_entry=0.0)
+    y, pulses = 0.0, []
+    while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
+      d.step(route, y, {"routeEnd": 300.0 - y})
+      if d.nav.signaled is not None and y > 40.0:
+        pulses.append(d.nav.repeat_t)
+      y += d.v * 0.05
+    gone[cancel] = y - 40.0
+    if cancel:
+      assert len(set(pulses)) <= 1
+  assert 9.0 < gone[10.0] < 12.0 and gone[0.0] > 30.0, gone
+
+
 def test_junction_entry():
   from openpilot.tools.sim.bridge.gta5.gta5_nav import junction_entry
   assert junction_entry(100.0, [30.0, 85.0], [100.0]) == (85.0, "stop line")
