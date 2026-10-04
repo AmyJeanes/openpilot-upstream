@@ -16,6 +16,7 @@ from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
+from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
@@ -113,6 +114,7 @@ class GTA5World(World):
     self.params.remove("NavDesire")  # a killed bridge can leave one
     self.nav = Nav(self._send, self._set_nav_desire)
     self.pull_away = PullAway(self._send)
+    self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
     self.next_map = 0.0
     self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
@@ -294,6 +296,13 @@ class GTA5World(World):
       if known:
         simulator_state.speed_limit = limits[0][1]
       simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
+    if self.expert.update(state, self.route, self.simulator_state.is_engaged):
+      # the game's AI drives (gta5_expert.py): openpilot stays disengaged, and nav and pull-away wait
+      simulator_state.cruise_cap = self.cap = 0.0
+      self._update_buttons(state)
+      self._update_map(state, bearing, v)
+      simulator_state.valid = True
+      return
     simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
     self.cap = simulator_state.cruise_cap
     if self.nav.blinker_gap:

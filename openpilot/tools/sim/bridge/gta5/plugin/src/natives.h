@@ -36,6 +36,21 @@ inline void DELETE_PED(Ped *p) { Invoke(0x9614299DCB53E54B, p); }
 inline Ped CREATE_RANDOM_PED_AS_DRIVER(Vehicle v, BOOL returnHandle) { return Invoke<Ped>(0x9B62392B474F44A0, v, returnHandle); }
 inline void SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(Ped p, BOOL on) { Invoke(0x9F8AA94D6D97DBF4, p, on); }
 inline void TASK_VEHICLE_DRIVE_WANDER(Ped p, Vehicle v, float speed, int style) { Invoke(0x480142959D337D00, p, v, speed, style); }
+inline void TASK_VEHICLE_DRIVE_TO_COORD(Ped p, Vehicle v, float x, float y, float z, float speed, int p6, Hash model, int style, float stopRange, float straightLine) {
+  Invoke(0xE2A2AA2F659D77A7, p, v, x, y, z, speed, p6, model, style, stopRange, straightLine);
+}
+inline void TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE(Ped p, Vehicle v, float x, float y, float z, float speed, int style, float stopRange) {
+  Invoke(0x158BB33F920D360C, p, v, x, y, z, speed, style, stopRange);
+}
+inline void SET_DRIVE_TASK_DRIVING_STYLE(Ped p, int style) { Invoke(0xDACE1BE37D88AF67, p, style); }
+inline void SET_DRIVE_TASK_MAX_CRUISE_SPEED(Ped p, float speed, BOOL updateBaseTask) { Invoke(0x404A5AA9B9F0B746, p, speed, updateBaseTask); }
+inline void SET_DRIVER_ABILITY(Ped p, float ability) { Invoke(0xB195FFA8042FC5C3, p, ability); }
+inline void SET_DRIVER_AGGRESSIVENESS(Ped p, float aggressiveness) { Invoke(0xA731F608CA104E3C, p, aggressiveness); }
+inline void SET_PED_KEEP_TASK(Ped p, BOOL on) { Invoke(0x971D38760FBC02EF, p, on); }
+inline void CLEAR_PED_TASKS(Ped p) { Invoke(0xE1EF3C1216AFF2CD, p); }
+// taskHash: GET_HASH_KEY("SCRIPT_TASK_<name>"); 0 waiting to start, 1 running, 7 finished or never given
+inline int GET_SCRIPT_TASK_STATUS(Ped p, Hash taskHash) { return Invoke<int>(0x77F1BEB8863288D5, p, taskHash); }
+inline Ped GET_PED_IN_VEHICLE_SEAT(Vehicle v, int seat, BOOL p2) { return Invoke<Ped>(0xBB40DD2270B65366, v, seat, p2); }
 // flags: 2 vehicles; result 2 when ready
 inline int START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(float x1, float y1, float z1, float x2, float y2, float z2, int flags, Entity ignore, int p8) {
   return Invoke<int>(0x377906D8A31E5586, x1, y1, z1, x2, y2, z2, flags, ignore, p8);
@@ -166,6 +181,7 @@ enum Input {
   INPUT_VEH_MOVE_LR = 59,
   INPUT_VEH_ACCELERATE = 71,
   INPUT_VEH_BRAKE = 72,
+  INPUT_VEH_EXIT = 75,
   INPUT_VEH_HANDBRAKE = 76,
 };
 

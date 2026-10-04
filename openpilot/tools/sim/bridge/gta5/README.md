@@ -114,6 +114,15 @@ and no turning to take it stops, so a turn is signalled only within 50 m of one.
 With a map of the game's roads built ([map/README.md](map/README.md)), nav can route over it with a standard router
 instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a map view of the car and its route.
 
+## AI expert driver
+The game's own traffic AI can drive the car, as expert driving to record. `gta5_cmd.py ai on` tasks the player as the
+driver of its car (to the map's waypoint, else wandering; `x= y= z=` for a point, `speed=` m/s cap, `style=` driving style
+bits, `ability=`, `aggr=`), ignores openpilot's controls and the player's driving keys, and `ai off` (or the engage key)
+gives the car back. Expert mode (`gta5_expert.py`, on with `GTA5_EXPERT=1` on terminal 2) follows our map's route:
+`gta5_cmd.py expert route <trip>` places the car at an e2e trip's start, sets its destination and drives it, keeping the
+AI's target 60-120 m ahead just past the next junction, with the indicators from the route's turns, openpilot disengaged
+and a JSON line per frame in `expert.jsonl` beside `GTA5_LOG`; `expert off` stops it.
+
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
   car's windscreen bone, and at least 0.29 m below the roof, a Model 3's device height; else 1.22 m above the ground),

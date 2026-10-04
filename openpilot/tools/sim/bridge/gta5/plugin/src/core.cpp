@@ -171,9 +171,33 @@ struct Lead {
 } g_lead;
 bool g_noTraffic = false;
 double g_testGasUntil = 0;  // the gas command presses the pedal until then
+
+// The AI expert driver: the player's ped drives its own car with a vehicle task, to a target the bridge keeps moving along
+// the route (or the map's waypoint, or wandering), while openpilot's controls and the player's driving inputs are ignored.
+struct Ai {
+  bool on = false;
+  bool hasTarget = false;
+  Vector3 target{};
+  float speed = 12.0f;     // m/s, the task's cruise speed and its cap
+  int style = 1076369579;  // the story-mode taxi's: stops for cars, peds and lights, no short cuts
+  float ability = 1.0f, aggressiveness = 0.0f;
+  float stopRange = 5.0f, straightLine = 10.0f;
+  std::string task = "longrange";  // or coord, wander
+  std::string mode;                // what it drives to: target, waypoint, wander
+  // what the game was given, re-tasked only when it changes: re-tasking makes the AI hesitate
+  bool tasked = false, speedPending = false, stylePending = false;
+  std::string taskedKey;
+  Vector3 taskedTarget{}, waypoint{};
+  double taskedAt = -1e9, waypointAt = -1e9;
+  int status = 7, retasks = 0, aborts = 0;
+  std::string error;
+} g_ai;
+std::atomic<bool> g_aiOn{false};
+std::atomic<int> g_aiAbortPresses{0};  // the engage key while the AI drives
 bool LeadTruth(float &ahead, float &left, float &speed);
 float CameraHeight(double now);
 float VehicleAhead(double now);
+std::string AiState(Vehicle v);
 
 void Log(const std::string &msg) {
   std::lock_guard lk(g_logMutex);
@@ -795,7 +819,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    for (const std::string &part : {Route(now), Lane(now), Traffic(now)})
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle)})
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
@@ -996,6 +1020,118 @@ float CameraHeight(double now) {
   return height;
 }
 
+// *** AI driver ***
+
+void AiOn(Ped ped) {
+  g_ai.on = true;
+  g_aiOn = true;
+  g_ai.hasTarget = g_ai.tasked = false;
+  g_ai.error.clear();
+  g_aiAbortPresses = 0;
+  // openpilot's last command lets go: the handbrake it may hold, and its outputs in the state
+  if (g_ctl.wasLive) ReleaseControls();
+  g_ctl.wasLive = false;
+  g_ctl.steerOut = g_ctl.throttleOut = g_ctl.brakeOut = 0;
+  SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(ped, TRUE);
+  Log("ai on: " + g_ai.task + ", speed " + Num(g_ai.speed) + ", style " + std::to_string(g_ai.style) + ", ability " + Num(g_ai.ability) +
+      ", aggressiveness " + Num(g_ai.aggressiveness));
+}
+
+void AiOff(Ped ped, const std::string &why) {
+  if (!g_ai.on) return;
+  if (g_ai.tasked) CLEAR_PED_TASKS(ped);  // leaves a driver in its seat, unlike the _IMMEDIATELY version
+  SET_PED_KEEP_TASK(ped, FALSE);
+  SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(ped, FALSE);
+  g_ai.on = g_ai.tasked = false;
+  g_aiOn = false;
+  g_ai.status = 7;
+  g_ai.mode.clear();
+  Log("ai off (" + why + ")");
+}
+
+float Dist2d(const Vector3 &a, const Vector3 &b) { return std::hypot(a.x - b.x, a.y - b.y); }
+
+void StepAi(Ped ped, Vehicle v, double now) {
+  if (g_aiAbortPresses.exchange(0) && g_ai.on) {
+    g_ai.aborts++;
+    AiOff(ped, "engage key");
+  }
+  if (!g_ai.on) return;
+  if (!v || GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) != ped) {
+    g_ai.error = v ? "not the driver" : "not in a vehicle";
+    AiOff(ped, g_ai.error);
+    return;
+  }
+  for (int input : {INPUT_VEH_MOVE_LR, INPUT_VEH_ACCELERATE, INPUT_VEH_BRAKE, INPUT_VEH_HANDBRAKE, INPUT_VEH_EXIT})
+    DISABLE_CONTROL_ACTION(0, input, TRUE);
+  // the task's own indicators come and go; the bridge's stay on, so the frames match its desire labels
+  SET_VEHICLE_INDICATOR_LIGHTS(v, 1, g_indicator == 1);
+  SET_VEHICLE_INDICATOR_LIGHTS(v, 0, g_indicator == 2);
+
+  bool wander = g_ai.task == "wander" || (!g_ai.hasTarget && !IS_WAYPOINT_ACTIVE());
+  g_ai.mode = wander ? "wander" : g_ai.hasTarget ? "target" : "waypoint";
+  Vector3 target = g_ai.target;
+  if (g_ai.mode == "waypoint") {
+    if (now - g_ai.waypointAt > 1.0) {
+      // the road node nearest the waypoint, whose blip has no height
+      Vector3 w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID())), node{};
+      float heading = 0;
+      g_ai.waypoint = GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(w.x, w.y, w.z, &node, &heading, 1, 3.0f, 0.0f) ? node : w;
+      g_ai.waypointAt = now;
+    }
+    target = g_ai.waypoint;
+  }
+  std::string task = wander ? "wander" : g_ai.task == "coord" ? "coord" : "longrange";
+  static const Hash taskHashes[3] = {GET_HASH_KEY("SCRIPT_TASK_VEHICLE_DRIVE_WANDER"), GET_HASH_KEY("SCRIPT_TASK_VEHICLE_DRIVE_TO_COORD"),
+                                     GET_HASH_KEY("SCRIPT_TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE")};
+  Hash hash = taskHashes[task == "wander" ? 0 : task == "coord" ? 1 : 2];
+  g_ai.status = g_ai.tasked ? GET_SCRIPT_TASK_STATUS(ped, hash) : 7;
+
+  std::string key = task + ":" + g_ai.mode;
+  bool changed = key != g_ai.taskedKey || (!wander && Dist2d(target, g_ai.taskedTarget) + std::fabs(target.z - g_ai.taskedTarget.z) > 1.0f);
+  // a finished task arrived or gave up: again, now and then, unless it's there
+  bool retry = g_ai.tasked && g_ai.status == 7 && now - g_ai.taskedAt > 2.0 && (wander || Dist2d(g_m.pos, target) > g_ai.stopRange + 5.0f);
+  if (!g_ai.tasked || (changed && (key != g_ai.taskedKey || now - g_ai.taskedAt > 0.5)) || retry) {
+    SET_DRIVER_ABILITY(ped, g_ai.ability);
+    SET_DRIVER_AGGRESSIVENESS(ped, g_ai.aggressiveness);
+    if (task == "wander") TASK_VEHICLE_DRIVE_WANDER(ped, v, g_ai.speed, g_ai.style);
+    else if (task == "coord")
+      TASK_VEHICLE_DRIVE_TO_COORD(ped, v, target.x, target.y, target.z, g_ai.speed, 0, GET_ENTITY_MODEL(v), g_ai.style, g_ai.stopRange, g_ai.straightLine);
+    else TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE(ped, v, target.x, target.y, target.z, g_ai.speed, g_ai.style, g_ai.stopRange);
+    SET_PED_KEEP_TASK(ped, TRUE);
+    if (!g_ai.tasked || retry || key != g_ai.taskedKey)
+      Log("ai: " + key + " to " + Vec(target) + (retry ? " (again)" : ""));
+    g_ai.tasked = true;
+    g_ai.taskedKey = key;
+    g_ai.taskedTarget = target;
+    g_ai.taskedAt = now;
+    g_ai.retasks++;
+    g_ai.speedPending = true;  // once the task runs: it may not take them before
+    g_ai.status = 0;
+  }
+  if (g_ai.status == 1 && (g_ai.speedPending || g_ai.stylePending)) {
+    SET_DRIVE_TASK_CRUISE_SPEED(ped, g_ai.speed);
+    SET_DRIVE_TASK_MAX_CRUISE_SPEED(ped, g_ai.speed, TRUE);
+    if (g_ai.stylePending) SET_DRIVE_TASK_DRIVING_STYLE(ped, g_ai.style);
+    g_ai.speedPending = g_ai.stylePending = false;
+  }
+}
+
+// "ai":{on, mode, task, status (the game's: 0 starting, 1 running, 7 finished), target, speed, style, retasks, aborts (the
+// engage key), stoppedAtLight, error}
+std::string AiState(Vehicle v) {
+  std::string s = "\"ai\":{\"on\":" + std::string(g_ai.on ? "true" : "false");
+  if (g_ai.on) {
+    s += ",\"mode\":\"" + g_ai.mode + "\",\"task\":\"" + g_ai.task + "\",\"status\":" + std::to_string(g_ai.status) + ",\"speed\":" + Num(g_ai.speed) +
+         ",\"style\":" + std::to_string(g_ai.style) + ",\"retasks\":" + std::to_string(g_ai.retasks) +
+         ",\"stoppedAtLight\":" + (IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS(v) ? "true" : "false");
+    if (g_ai.tasked && g_ai.mode != "wander") s += ",\"target\":" + Vec(g_ai.taskedTarget);
+  }
+  s += ",\"aborts\":" + std::to_string(g_ai.aborts);
+  if (!g_ai.error.empty()) s += ",\"error\":\"" + g_ai.error + "\"";
+  return s + "}";
+}
+
 void HandleMessage(const Message &m, double now) {
   std::string type = MsgStr(m, "type");
   if (type == "control") {
@@ -1103,6 +1239,39 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "waypoint") {
     if (MsgBool(m, "off")) SET_WAYPOINT_OFF();
     else SET_NEW_WAYPOINT(static_cast<float>(MsgNum(m, "x")), static_cast<float>(MsgNum(m, "y")));
+  } else if (type == "ai") {
+    // the AI driver: on=1|0; x, y, z its target (clear=1 drops it: the waypoint, else wandering); speed (m/s cap), style,
+    // ability, aggr, stop (m, the target's stop range), task (longrange, coord or wander), straight (m, coord's straight
+    // line distance), indicator (left, right or off)
+    Ped ped = PLAYER_PED_ID();
+    if (m.count("on")) {
+      if (!MsgBool(m, "on")) AiOff(ped, "asked");
+      else if (!g_ai.on) AiOn(ped);
+    }
+    if (m.count("speed")) {
+      g_ai.speed = std::clamp(static_cast<float>(MsgNum(m, "speed")), 0.0f, 70.0f);
+      g_ai.speedPending = true;
+    }
+    if (m.count("style")) {
+      g_ai.style = static_cast<int>(static_cast<int64_t>(MsgNum(m, "style")));
+      g_ai.stylePending = true;
+    }
+    g_ai.ability = std::clamp(static_cast<float>(MsgNum(m, "ability", g_ai.ability)), 0.0f, 1.0f);
+    g_ai.aggressiveness = std::clamp(static_cast<float>(MsgNum(m, "aggr", g_ai.aggressiveness)), 0.0f, 1.0f);
+    g_ai.stopRange = static_cast<float>(MsgNum(m, "stop", g_ai.stopRange));
+    g_ai.straightLine = static_cast<float>(MsgNum(m, "straight", g_ai.straightLine));
+    if (m.count("task")) g_ai.task = MsgStr(m, "task");
+    if (MsgBool(m, "clear")) g_ai.hasTarget = false;
+    if (m.count("x") && m.count("y")) {
+      g_ai.target.x = static_cast<float>(MsgNum(m, "x"));
+      g_ai.target.y = static_cast<float>(MsgNum(m, "y"));
+      g_ai.target.z = static_cast<float>(MsgNum(m, "z", g_m.pos.z));
+      g_ai.hasTarget = true;
+    }
+    if (m.count("indicator")) {
+      std::string side = MsgStr(m, "indicator");
+      SetIndicator(side == "left" ? 1 : side == "right" ? 2 : 0);
+    }
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {
@@ -1252,12 +1421,15 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (v) {
     UpdateIndicator();
     Measure(dt);
-    ApplyControls(dt, now);
   }
+  StepAi(ped, v, now);
+  // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
+  if (v && !g_ai.on) ApplyControls(dt, now);
   Publish(now, v != 0);
 }
 
 extern "C" __declspec(dllexport) void CoreShutdown() {
+  AiOff(PLAYER_PED_ID(), "shutdown");  // a task left running would keep driving under the reloaded core
   ReleaseControls();
   ReleaseCamera();
   RemoveLead();
@@ -1270,7 +1442,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
 }
 
 extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
-  if (static_cast<int>(key) == g_cfg.keyEngage) g_engagePresses++;
+  if (static_cast<int>(key) == g_cfg.keyEngage) (g_aiOn ? g_aiAbortPresses : g_engagePresses)++;
   else if (static_cast<int>(key) == g_cfg.keyLeft) g_leftPresses++;
   else if (static_cast<int>(key) == g_cfg.keyRight) g_rightPresses++;
 }
