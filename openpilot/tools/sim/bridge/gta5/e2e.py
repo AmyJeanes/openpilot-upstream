@@ -4,7 +4,7 @@
 Needs the services running (svc.sh: valhalla, openpilot, bridge with GTA5_MAP, GTA5_ROUTER, GTA5_LOG and GTA5_DEBUG) and
 the game in a car. Each trip puts the car at a start, sets the map view's destination, engages and watches until the car
 arrives, disengages, gets stuck, leaves the road, reroutes too often or runs out of time. A JSON line per trip goes to
---out; a 2 Hz trace of each to <out dir>/traces/<id>.jsonl.
+--out; a 2 Hz trace of each to <out dir>/traces/<out name>/<id>.jsonl (its path in the record as 'trace').
 
   e2e.py run --mode city --n 20 --seed 1             random trips in Los Santos (or --mode map, the whole map)
   e2e.py run --trip "x,y,z,heading>dx,dy"            one trip; heading in game degrees (counterclockwise from north)
@@ -15,6 +15,13 @@ arrives, disengages, gets stuck, leaves the road, reroutes too often or runs out
   e2e.py sweep --variants v.json --trips f --reps 2  each trip with each variant of nav's turn parameters
   e2e.py sweepsum [results.jsonl ...]                turns per variant: made, lane, landed, oncoming, collisions, stops, speed
   e2e.py sweepsum --backfill [...]                   and turns' landing lanes from the traces of results from before them
+  e2e.py shorten --trips f [...] > short.txt          short trips for those trips' turns (see below)
+  e2e.py sweep --short --trips short.txt --reps 8 ... run them: missed turns end the trip, shorter timeout
+
+A short trip starts SHORT_BEFORE m before a turn, at a game road node (so the game faces the car along the road), and
+ends SHORT_AFTER m past it, built from the trip's route in earlier results (or, with --results, every turn on those
+results' routes). sweepsum reports each variant's rates with 95% ranges, and each variant against the first (or
+"base") trip for trip, run for run.
 
 Nav's turn parameters (gta5_nav.Tune) come from the file the bridge was started with as GTA5_NAVTUNE (svc.sh:
 BRIDGE_EXTRA="GTA5_NAVTUNE=$HOME/gta5test/navtune.json"); --tune and sweep write it before each trip (E2E_NAVTUNE, the
@@ -31,6 +38,7 @@ import json
 import math
 import os
 import random
+import re
 import socket
 import subprocess
 import sys
@@ -81,6 +89,7 @@ LEFT = {3, 6, 13, 14, 15, 16, 19, 21, 24, 38}
 RIGHT = {2, 5, 9, 10, 11, 12, 18, 20, 23, 37}
 
 TICK = 0.1  # s
+TRACE_SLACK = 300.0  # s after a result's trip its old-style trace (named by trip id alone) may have last been written
 TRACE_EVERY = 0.5  # s
 STOPPED = 0.3  # m/s
 NUDGE_AFTER = 10.0  # s stopped, short of the destination: the test driver presses the gas
@@ -104,6 +113,17 @@ DONE_PAST = 25.0  # m along the route past a maneuver, where the car must get to
 DONE_WITHIN = 15.0  # m of that point
 ARC_FROM = 10.0  # deg: in a turn's arc, from its heading before and the one after
 STALE = 5.0  # s without game state or openpilot messages: restart that service
+# short trips (shorten, run --short): one turn, its approach and the way out of it, to run more of them
+SHORT_BEFORE = 150.0  # m along the road from the start to the turn
+SHORT_AFTER = 120.0  # m on to the destination (the bridge arrives 20-40 m short of it, past where landing lanes are read)
+SHORT_SLACK = 40.0  # m either way the start or destination may move to find a node for it
+SHORT_MIN = 60.0  # m: the least road before the turn a start can make do with
+SHORT_TIMEOUT = 120.0  # s
+MISS_GRACE = 15.0  # s a short trip goes on after a missed maneuver (to see what the car does straight after), then ends
+EDGE_ANGLE = 35.0  # deg from a turn's bearing in or out, for the links into and out of it
+WALK_TURN = 45.0  # deg: the most a road bends from one link to the next, walking along it
+SPAWN_STRAIGHT = 20.0  # deg between a start node's links: the game faces the car along the road there
+SPAWN_ALONE = 4.0  # m: no other node this near a start (setup puts the car at the node nearest it: an overpass's, say)
 
 
 # *** the map and trips ***
@@ -160,6 +180,20 @@ class Map:
       if n['f'][2] & 4 or (n['f'][1] >> 3) in (15, 16):
         self.junctions[(int(n['x'] // self.CELL), int(n['y'] // self.CELL))].append((n['x'], n['y']))
     self.junctions = {k: np.array(v) for k, v in self.junctions.items()}
+    # the links each way they can be driven, to walk along roads (short trips)
+    self.nodes, self.streets, self.ynd = nodes, streets, ynd
+    self.out, self.into, self.lanes = defaultdict(list), defaultdict(list), {}
+    for (a, b), (fwd, back, _) in es.items():
+      if (a, b) in cross:
+        continue
+      for p, q, n in ((a, b, fwd), (b, a, back)):
+        if n:
+          self.out[p].append(q)
+          self.into[q].append(p)
+          self.lanes[(p, q)] = n
+    self.node_cells = defaultdict(list)
+    for k, n in nodes.items():
+      self.node_cells[(int(n['x'] // self.CELL), int(n['y'] // self.CELL))].append(k)
 
   def in_junction(self, x: float, y: float) -> bool:
     i, j = int(x // self.CELL), int(y // self.CELL)
@@ -176,6 +210,119 @@ class Map:
     ab = b - a
     t = np.clip(np.einsum('ij,ij->i', p - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0, 1)
     return float(np.min(np.hypot(*(a + ab * t[:, None] - p).T)))
+
+  def bearing(self, a, b) -> float:
+    """Compass bearing (clockwise from north) of the link a->b."""
+    na, nb = self.nodes[a], self.nodes[b]
+    return math.degrees(math.atan2(nb['x'] - na['x'], nb['y'] - na['y'])) % 360
+
+  def gap(self, a, b) -> float:
+    na, nb = self.nodes[a], self.nodes[b]
+    return math.hypot(nb['x'] - na['x'], nb['y'] - na['y'])
+
+  def nodes_near(self, x: float, y: float, r: float) -> list:
+    i, j, n = int(x // self.CELL), int(y // self.CELL), int(r // self.CELL) + 1
+    return [k for di in range(-n, n + 1) for dj in range(-n, n + 1) for k in self.node_cells.get((i + di, j + dj), ())
+            if math.hypot(self.nodes[k]['x'] - x, self.nodes[k]['y'] - y) < r]
+
+  def link_at(self, x: float, y: float, bearing: float, into: bool, names=None):
+    """The link running within EDGE_ANGLE of bearing that ends nearest (x, y) from behind it (into), or starts nearest
+    it and goes on past it, on a street of `names` if it can (an overpass's links can run the same way): (a, b) or None."""
+    ux, uy = math.sin(math.radians(bearing)), math.cos(math.radians(bearing))
+    best = None
+    for a in self.nodes_near(x, y, 60.0):
+      for b in self.out[a]:
+        ang = abs(angle_diff(self.bearing(a, b), bearing))
+        end, other = (self.nodes[b], self.nodes[a]) if into else (self.nodes[a], self.nodes[b])
+        if ang > EDGE_ANGLE or (((other['x'] - x) * ux + (other['y'] - y) * uy) > 0) == into:
+          continue
+        score = math.hypot(end['x'] - x, end['y'] - y) + 0.3 * ang
+        if names and self.streets.get(self.nodes[a]['st']) not in names:
+          score += 30
+        if best is None or score < best[0]:
+          best = (score, a, b)
+    return best and best[1:]
+
+  def walk(self, k, bearing: float, far: float, back: bool) -> list:
+    """[(node, m)] along the road from k (whose way is bearing), against the way of travel (back) or with it, out to far
+    m: at each node the link that bends least, staying on the street if it can."""
+    path, d, seen = [(k, 0.0)], 0.0, {k}
+    while d < far:
+      best = None
+      for n in (self.into[k] if back else self.out[k]):
+        b = self.bearing(n, k) if back else self.bearing(k, n)
+        bend = abs(angle_diff(b, bearing))
+        if n in seen or bend > WALK_TURN:
+          continue
+        score = bend + (0 if self.nodes[n]['st'] == self.nodes[k]['st'] else 20)
+        if best is None or score < best[0]:
+          best = (score, n, b)
+      if best is None:
+        break
+      _, n, bearing = best
+      d += self.gap(k, n)
+      k = n
+      seen.add(k)
+      path.append((k, d))
+    return path
+
+  def spawnable(self, prev, k, nxt) -> str | None:
+    """Why the car can't start at node k, on the road prev -> k -> nxt (None: it can)."""
+    n = self.nodes[k]
+    if n['f'][2] & 4 or (n['f'][1] >> 3) in (15, 16):
+      return 'junction'
+    if prev is not None and abs(angle_diff(self.bearing(prev, k), self.bearing(k, nxt))) > SPAWN_STRAIGHT:
+      return 'bend'
+    if len(self.nodes_near(n['x'], n['y'], SPAWN_ALONE)) > 1:
+      return 'another node near'
+    return None
+
+  def short_trip(self, x: float, y: float, b_in: float, b_out: float, before: float = SHORT_BEFORE,
+                 after: float = SHORT_AFTER, names_in=None, names_out=None):
+    """A trip from a node about `before` m up the road into a turn at (x, y) to one about `after` m on past it (compass
+    bearings in and out of it): (spec, info) or (None, why not)."""
+    link_in, link_out = self.link_at(x, y, b_in, True, names_in), self.link_at(x, y, b_out, False, names_out)
+    if not link_in or not link_out:
+      return None, f"no road {'into' if not link_in else 'out of'} the turn"
+    u, v = link_in
+    d0 = math.hypot(self.nodes[u]['x'] - x, self.nodes[u]['y'] - y)
+    walked = self.walk(u, self.bearing(u, v), before + SHORT_SLACK, back=True)
+    chain, dist = [v] + [k for k, _ in walked], [0.0] + [d0 + d for _, d in walked]
+    why = {i: self.spawnable(chain[i + 1] if i + 1 < len(chain) else None, chain[i], chain[i - 1]) for i in range(1, len(chain))}
+    near = [i for i in why if why[i] is None and abs(dist[i] - before) <= SHORT_SLACK]
+    notes = []
+    if near:
+      i = min(near, key=lambda i: abs(dist[i] - before))
+    else:
+      ok = [i for i in why if why[i] is None and dist[i] >= SHORT_MIN]
+      if not ok:
+        return None, f"no node to start at {SHORT_MIN:.0f} m or more before it (road walked back {dist[-1]:.0f} m)"
+      i = min(ok, key=lambda i: abs(dist[i] - before))
+      notes.append(f"{'short' if dist[i] < before else 'long'} road in: no node to start at nearer {before:.0f} m")
+    k, ahead = chain[i], chain[i - 1]
+    off = angle_diff(self.bearing(k, ahead), b_in)
+    if abs(off) > 30:
+      notes.append(f"the road bends {off:+.0f} deg on the way in")
+    a, b = link_out
+    d1 = math.hypot(self.nodes[a]['x'] - x, self.nodes[a]['y'] - y) + self.gap(a, b)
+    on = [(a, 0.0)] + [(n, d1 + d) for n, d in self.walk(b, self.bearing(a, b), after + SHORT_SLACK, back=False)]
+    ends = [(n, d) for n, d in on if d >= after - SHORT_SLACK and not self.nodes[n]['f'][2] & 4]
+    dn, dd = min(ends, key=lambda e: abs(e[1] - after)) if ends else on[-1]
+    if dd < after - SHORT_SLACK:
+      notes.append(f"short road out ({dd:.0f} m)")
+    kind = self.ynd.highway(self.nodes, k, ahead, self.lanes.get((k, ahead), 0), self.lanes.get((ahead, k), 0))
+    if kind in ('motorway', 'trunk'):
+      notes.append(f"starts on a {kind}")
+    reach = min(math.hypot(self.nodes[n]['x'] - x, self.nodes[n]['y'] - y)
+                for n, _ in self.walk(k, self.bearing(k, ahead), dist[i] + 20, back=False))
+    if reach > 25:
+      notes.append(f"the road on from the start passes {reach:.0f} m from the turn")
+    sx, sy, sz = (self.nodes[k][c] for c in 'xyz')
+    spec = (round(sx, 1), round(sy, 1), round(sz, 1), round((-self.bearing(k, ahead)) % 360), round(self.nodes[dn]['x'], 1),
+            round(self.nodes[dn]['y'], 1))
+    return spec, {'before': round(dist[i]), 'after': round(dd), 'lanes': self.lanes.get((k, ahead)),
+                  'street': self.streets.get(self.nodes[k]['st']), 'street_out': self.streets.get(self.nodes[dn]['st']),
+                  'notes': notes}
 
 
 def angle_diff(a, b):
@@ -473,6 +620,7 @@ class Trip:
     self.route_t = 0.0  # when the route being followed was made (trip time)
     self.alert = ''
     self.landing: list[dict] = []  # turns scored done whose landing lane is still to be read
+    self.miss_t: float | None = None  # when a short trip missed a maneuver
 
   def write_tune(self) -> bool:
     """Writes nav's turn parameters for this trip; whether the bridge logged reading them."""
@@ -535,7 +683,8 @@ class Trip:
   def run(self) -> dict:
     rig, (x, y, z, h, dx, dy) = self.rig, self.spec
     self.t0 = time.monotonic()
-    rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': self.args.mode, 'car': self.args.car or 'current',
+    rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': 'short' if getattr(self.args, 'short', False) else self.args.mode,
+           'car': self.args.car or 'current',
            'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'stack': STACK, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
     if self.tune is not None:
       rec.update({'variant': self.variant, 'tune': self.tune, 'tune_ack': self.write_tune()})
@@ -566,7 +715,7 @@ class Trip:
     cmd("gas", secs=START_GAS)  # the model won't pull away from a stop
     self.t0 = time.monotonic()
     self.pending = 1 if self.route['maneuvers'] and self.route['maneuvers'][0]['type'] in (1, 2, 3) else 0
-    timeout = max(180.0, 2.5 * self.route['time'] + 120)
+    timeout = SHORT_TIMEOUT if getattr(self.args, 'short', False) else max(180.0, 2.5 * self.route['time'] + 120)
     outcome, detail = None, ''
     rig.take_contacts()
     health0 = s.get('bodyHealth')
@@ -612,6 +761,9 @@ class Trip:
         break
       if sum(not r['repeat'] for r in self.reroutes) > MAX_REROUTES:
         outcome = 'reroutes'
+        break
+      if self.miss_t is not None and now - self.miss_t > MISS_GRACE:
+        outcome, detail = 'missed', f"{left:.0f} m left"
         break
       if now - self.t0 > timeout:
         outcome, detail = 'timeout', f"{left:.0f} m left"
@@ -770,6 +922,8 @@ class Trip:
     if rr['maneuver'] is not None:
       rr['kind'] = ms[nxt]['kind']
       self._score(nxt, 'missed')
+      if getattr(self.args, 'short', False) and self.miss_t is None:
+        self.miss_t = time.monotonic()
     self.reroutes.append(rr)
     self.event('reroute', **{k: rr[k] for k in ('street', 'lane', 'maneuver', 'maneuver_dist')}, kind=rr.get('kind'))
     try:
@@ -814,6 +968,7 @@ class Trip:
     self.maneuvers.append({
       'i': i, 'result': result, 'route_n': len(self.reroutes), 't': t0,
       **{key: m[key] for key in ('kind', 'type', 'angle', 'x', 'y', 'along', 'real', 'in', 'out', 'fork', 'signal', 'instruction')},
+      'bearing': m.get('bearing'),
       'closest': round(d[k], 1), 'z': hist[k]['z'], 'street': hist[k]['street'],
       'approach': {f"{dt}s": at(dt) for dt in (-10, -5, -2, 0)},
       'signal_t': None if signal_t is None else round(signal_t, 1),
@@ -876,14 +1031,29 @@ def landing(hist: list[dict], m: dict, in_junction=None) -> dict | None:
   return {'lane': list(lane), 'planned': planned, 'ok': lane[0] == planned, 'reads': len(lanes), 'junc': not clear}
 
 
+def trace_of(r: dict) -> str | None:
+  """A result's trace: its recorded path, or for results from before that, traces/<id>.jsonl unless a later run of the
+  same id has written over it since (None)."""
+  if r.get('trace'):
+    return r['trace'] if os.path.exists(r['trace']) else None
+  path = os.path.join(r.get('_dir', OUT_DIR), 'traces', f"{r['id']}.jsonl")
+  if not os.path.exists(path):
+    return None
+  try:
+    end = time.mktime(time.strptime(r['started'], '%Y-%m-%d %H:%M:%S')) + (r.get('duration') or 0) + TRACE_SLACK
+  except (KeyError, ValueError):
+    return path
+  return path if os.path.getmtime(path) <= end else None
+
+
 def backfill_landing(rs: list[dict]):
   """Reads the landing lane of done turns in results from before it was recorded, from their 2 Hz traces (the turn's
   time being the trace point nearest its point)."""
   roads = None
   for r in rs:
     turns = [m for m in r.get('maneuvers', []) if 'land' not in m and m['result'] == 'done' and turn_maneuver(m)]
-    path = os.path.join(r.get('_dir', OUT_DIR), 'traces', f"{r['id']}.jsonl")
-    if not turns or not os.path.exists(path):
+    path = trace_of(r)
+    if not turns or path is None:
       continue
     hist = [json.loads(line) for line in open(path)]
     if not hist:
@@ -909,10 +1079,85 @@ def load_results(paths) -> list[dict]:
   for p in results_files(paths):
     for line in open(p):
       try:
-        out.append({**json.loads(line), '_dir': os.path.dirname(p)})
+        out.append({**json.loads(line), '_dir': os.path.dirname(p), '_file': os.path.basename(p)})
       except ValueError:
         pass
   return out
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+  """95% range of a rate k/n (Wilson score interval)."""
+  if not n:
+    return 0.0, 1.0
+  p = k / n
+  c = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+  mid = (p + z * z / (2 * n)) / (1 + z * z / n)
+  return max(0.0, mid - c), min(1.0, mid + c)
+
+
+def rate(k: int, n: int) -> str:
+  lo, hi = wilson(k, n)
+  return f"{k}/{n} ({100 * lo:.0f}-{100 * hi:.0f}%)"
+
+
+def mean_range(xs: list[float], n: int = 2000) -> str:
+  """Mean and its 95% bootstrap range."""
+  if not xs:
+    return '-'
+  rng = np.random.default_rng(0)
+  means = rng.choice(np.array(xs), (n, len(xs))).mean(axis=1)
+  return f"{np.mean(xs):.1f} ({np.percentile(means, 2.5):.1f}-{np.percentile(means, 97.5):.1f})"
+
+
+def sign_p(wins: int, losses: int) -> float:
+  """Two-sided sign test (exact): how likely a split this uneven is by chance."""
+  n = wins + losses
+  if not n:
+    return 1.0
+  k = min(wins, losses)
+  return min(1.0, 2 * sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n)
+
+
+def hint(p: float) -> str:
+  return 'clear (p<0.05)' if p < 0.05 else 'suggestive (p<0.2)' if p < 0.2 else 'not clear'
+
+
+def crashed(r: dict) -> bool:
+  return r['outcome'] in ('crash', 'fell')
+
+
+def run_key(r: dict) -> tuple | None:
+  """(file, trip, run) of a sweep result, from its id (<trip>-<variant>-<run>[-tag]), to pair it with the other variants'."""
+  mark = f"-{r['variant']}-"
+  if mark not in r['id']:
+    return None
+  trip, rest = r['id'].rsplit(mark, 1)
+  return r.get('_file'), trip, rest.split('-')[0]
+
+
+def paired(by: dict, out=print):
+  """Each variant against the reference one ('base', else the first), trip for trip and run for run."""
+  ref = 'base' if 'base' in by else sorted(by)[0]
+  ref_runs = {run_key(r): r for r in by[ref] if run_key(r)}
+  for name, group in sorted(by.items()):
+    if name == ref:
+      continue
+    pairs = [(ref_runs[run_key(r)], r) for r in group if run_key(r) in ref_runs]
+    if not pairs:
+      continue
+    out(f"  {name} vs {ref}, {len(pairs)} paired runs:")
+    for label, f, better in (('arrived', lambda r: r['outcome'] == 'arrived', True), ('safe', safe, True),
+                             ('crash', crashed, False)):
+      gain = sum(f(b) and not f(a) for a, b in pairs)
+      loss = sum(f(a) and not f(b) for a, b in pairs)
+      if not better:
+        gain, loss = loss, gain
+      out(f"    {label:9s} better in {gain}, worse in {loss}: {hint(sign_p(gain, loss))}")
+    diffs = [b.get('oncoming_max', 0) - a.get('oncoming_max', 0) for a, b in pairs if 'oncoming_max' in a and 'oncoming_max' in b]
+    if diffs:
+      less, more = sum(d < -0.5 for d in diffs), sum(d > 0.5 for d in diffs)
+      out(f"    oncoming  longest stretch {mean_range(diffs)} s on average; shorter in {less}, longer in {more}: "
+          f"{hint(sign_p(less, more))}")
 
 
 def landings(turns: list[dict]) -> str:
@@ -971,12 +1216,32 @@ def cmd_sweep(args):
   drive(args, roads, trips)
 
 
+def new_trace(trace_dir: str, tid: str) -> str:
+  """A trace path no earlier run has used (a trip id run again into the same results file gets -2, -3, ...)."""
+  path, k = os.path.join(trace_dir, f"{tid}.jsonl"), 2
+  while os.path.exists(path):
+    path, k = os.path.join(trace_dir, f"{tid}-{k}.jsonl"), k + 1
+  return path
+
+
+TRIP_OVERHEAD = 11.0  # s per trip to place the car, settle and engage (median over the results so far)
+TRIP_SPEED = 6.0  # m/s from a standstill over a trip's straight-line length, in town (with the time turns and stops take)
+
+
+def trip_minutes(spec: tuple, args) -> float:
+  """A rough time for a trip, for the sweep's estimate (short trips' failures end sooner)."""
+  x, y, _, _, dx, dy = spec
+  drive_s = 1.3 * math.hypot(dx - x, dy - y) / TRIP_SPEED
+  return (TRIP_OVERHEAD + min(drive_s, SHORT_TIMEOUT if getattr(args, 'short', False) else 1e9)) / 60
+
+
 def drive(args, roads, trips):
   out = args.out or os.path.join(OUT_DIR, f"{args.name or time.strftime('%m%d-%H%M')}.jsonl")
-  os.makedirs(os.path.join(os.path.dirname(out), "traces"), exist_ok=True)
+  trace_dir = os.path.join(os.path.dirname(out), "traces", os.path.splitext(os.path.basename(out))[0])
+  os.makedirs(trace_dir, exist_ok=True)
   rig = Rig()
   rig.wait(2)
-  print(f"e2e: {len(trips)} trips -> {out}", flush=True)
+  print(f"e2e: {len(trips)} trips -> {out}, about {sum(trip_minutes(spec, args) for _, spec, *_ in trips):.0f} min", flush=True)
   status_path = os.path.join(os.path.dirname(out), "status.json")
   counts: Counter = Counter()
   for k, (tid, spec, lane, tune, variant) in enumerate(trips):
@@ -988,8 +1253,9 @@ def drive(args, roads, trips):
         broken = rig.health()
         if broken:
           rig.recover(broken)
-        rec = Trip(rig, roads, tid, spec, args, os.path.join(os.path.dirname(out), "traces", f"{tid}.jsonl"), lane,
-                   tune, variant).run()
+        trace = new_trace(trace_dir, tid)
+        rec = Trip(rig, roads, tid, spec, args, trace, lane, tune, variant).run()
+        rec['trace'] = trace
       except (OSError, Infra) as e:
         rec = {'id': tid, 'spec': spec_str(spec), 'mode': args.mode, 'outcome': 'infra', 'detail': str(e)}
         try:
@@ -1032,6 +1298,8 @@ def cmd_summary(args):
     by_mode[r.get('mode', '?')]['safe'] += safe(r)
   for mode, c in by_mode.items():
     print(f"  {mode}: " + ", ".join(f"{k} {v}" for k, v in c.most_common()))
+    n = sum(v for k, v in c.items() if k not in ('clean', 'safe'))
+    print(f"    arrived {rate(c['arrived'], n)}, safe {rate(c['safe'], n)}, crashed {rate(c['crash'] + c['fell'], n)} (95% ranges)")
   ms = [m for r in rs for m in r.get('maneuvers', []) if m.get('real')]
   kinds = defaultdict(Counter)
   for m in ms:
@@ -1134,6 +1402,115 @@ def cmd_sweepsum(args):
            mean('exit'), f"{np.mean(ratio):.2f}" if ratio else '-']
     print(" ".join(f"{str(v):>{w}s}" if k else f"{str(v):{w}s}" for k, (v, (_, w)) in enumerate(zip(row, cols, strict=True)))
           + "  " + json.dumps(group[0].get('tune')))
+  print("95% ranges:")
+  for name, group in sorted(by.items()):
+    n = len(group)
+    onc = [r['oncoming_max'] for r in group if 'oncoming_max' in r]
+    print(f"  {name:16s} arrived {rate(sum(r['outcome'] == 'arrived' for r in group), n)}, safe {rate(sum(safe(r) for r in group), n)}, "
+          f"crashed {rate(sum(crashed(r) for r in group), n)}, longest oncoming {mean_range(onc)} s")
+  if len(by) > 1:
+    print("paired:")
+    paired(by)
+
+
+TURN_AT = re.compile(r"at \((-?[\d.]+),\s*(-?[\d.]+)\)")  # a trips file's note of where its turn is
+
+
+def turn_of(maneuvers: list[dict], at: tuple | None = None) -> dict | None:
+  """A trip's turn: the sharpest real maneuver within 30 m of `at` (the trips file's note), else its first real one of 45
+  deg or more, else its first real one."""
+  real = [m for m in maneuvers if m.get('real') and m.get('angle') is not None and m.get('bearing') is not None]
+  if at is not None:
+    near = [m for m in real if math.hypot(m['x'] - at[0], m['y'] - at[1]) < 30]
+    return max(near, key=lambda m: abs(m['angle'])) if near else None
+  return next((m for m in real if abs(m['angle']) >= 45), real[0] if real else None)
+
+
+EXIT_NOTE = re.compile(r"exit heading (\d+)")  # overturn-turns.txt's notes: the game heading out of the turn
+
+
+def noted_turn(maneuvers: list[dict], at: tuple, comment: str) -> dict | None:
+  """The turn a trips file's note describes, from any maneuver in the results through it (its trip's own route may go
+  round it): a real one within 15 m, on the noted side and out the noted way."""
+  side = LEFT if 'left' in comment else RIGHT if 'right' in comment else None
+  exit_note = EXIT_NOTE.search(comment)
+  best = None
+  for m in maneuvers:
+    if m.get('bearing') is None and exit_note:
+      m = {**m, 'bearing': (-float(exit_note[1])) % 360}
+    d = math.hypot(m['x'] - at[0], m['y'] - at[1])
+    if not m.get('real') or m.get('bearing') is None or m.get('angle') is None or d > 15:
+      continue
+    if side and m['type'] not in side:
+      continue
+    if exit_note and abs(angle_diff(m['bearing'], (-float(exit_note[1])) % 360)) > 30:
+      continue
+    if best is None or d < best[0]:
+      best = (d, m)
+  return best and best[1]
+
+
+def cmd_shorten(args):
+  """Prints short trips for the turns of trip files' trips (their routes from earlier results with the same spec), or
+  for every turn on the routes of --results files; a line each, with what was found, for a trips file."""
+  roads = Map()
+  routes, known = {}, []
+  for r in load_results([]):
+    if (r.get('route') or {}).get('maneuvers'):
+      routes[r['spec']] = r['route']['maneuvers']  # the last run's
+      known += r['route']['maneuvers']
+    known += r.get('maneuvers', [])
+  turns = []  # (name, maneuver, lane, source)
+  for path in args.trips or []:
+    for line in open(path):
+      parts = line.split('#')[0].split()
+      if len(parts) != 2:
+        continue
+      spec, lane = parse_spec(parts[1])
+      comment = line.partition('#')[2]
+      note = TURN_AT.search(comment)
+      at = note and (float(note[1]), float(note[2]))
+      ms = routes.get(spec_str(spec))
+      if ms is None:
+        try:  # no run of it yet: the router's route, if it's up
+          ms = plan(spec[0], spec[1], spec[3], spec[4], spec[5])['maneuvers']
+        except (OSError, ValueError, KeyError):
+          ms = []
+      m = turn_of(ms, at)
+      if m is None and at:
+        m = noted_turn(known, at, comment)
+      if m is None:
+        print(f"# {parts[0]}: no route in the results with its turn ({parts[1]})", file=sys.stderr)
+        continue
+      turns.append((f"S{parts[0]}", m, lane, os.path.basename(path)))
+  for r in load_results(args.results) if args.results else []:
+    for k, m in enumerate((r.get('route') or {}).get('maneuvers', [])):
+      if turn_maneuver(m) and m.get('bearing') is not None:
+        turns.append((f"S{r['id']}-m{k}", m, None, r['id']))
+  seen, specs = set(), {}
+  print(f"# short trips (e2e.py shorten): start {SHORT_BEFORE:.0f} m before the turn at a road node, destination "
+        f"{SHORT_AFTER:.0f} m past it; run with --short")
+  for name, m, lane, source in turns:
+    if name in seen:
+      continue
+    seen.add(name)
+    b_out = m['bearing']
+    spec, info = roads.short_trip(m['x'], m['y'], (b_out - m['angle']) % 360, b_out, names_in=(m.get('in') or {}).get('names'),
+                                  names_out=(m.get('out') or {}).get('names'))
+    if spec is None:
+      print(f"# {name}: {info}", file=sys.stderr)
+      continue
+    if lane is None:
+      lane = 0 if m['type'] in LEFT else 9
+    if (spec, lane) in specs:
+      print(f"# {name}: the same as {specs[(spec, lane)]}", file=sys.stderr)
+      continue
+    specs[(spec, lane)] = name
+    x, y, z, h, dx, dy = spec
+    notes = ''.join(f"; {n}" for n in info['notes'])
+    print(f"{name} {x},{y},{z},{h},{lane}>{dx},{dy}    # {m['kind']} {m['angle']:+.0f} at ({m['x']:.0f},{m['y']:.0f}), "
+          f"{info['street']} ({info['lanes']} lanes) -> {info['street_out']}, {info['before']} m before, {info['after']} m after, "
+          f"from {source}{notes}")
 
 
 def tag_miss(m: dict) -> list[str]:
@@ -1181,13 +1558,14 @@ def main():
   r.add_argument('--lane', type=int, default=9, help='start lane from the left (clamped: 9 is the rightmost)')
   r.add_argument('--traffic', type=int, default=0)
   r.add_argument('--tune', help="nav's turn parameters for every trip, a JSON file ({} is the defaults)")
+  r.add_argument('--short', action='store_true', help=f"short trips: a missed maneuver ends the trip, {SHORT_TIMEOUT:.0f} s timeout")
   sw = sub.add_parser('sweep')
   sw.add_argument('--variants', required=True, help='{"name": {param: value, ...}, ...}')
   for a, kw in (('--mode', {'choices': ['city', 'map'], 'default': 'city'}), ('--n', {'type': int, 'default': 10}),
                 ('--seed', {'type': int, 'default': 1}), ('--trip', {'action': 'append'}), ('--replay', {'action': 'append'}),
                 ('--trips', {}), ('--reps', {'type': int, 'default': 1}), ('--tag', {'default': ''}), ('--out', {}),
                 ('--name', {}), ('--car', {'default': MODEL3}), ('--lane', {'type': int, 'default': 9}),
-                ('--traffic', {'type': int, 'default': 0})):
+                ('--traffic', {'type': int, 'default': 0}), ('--short', {'action': 'store_true'})):
     sw.add_argument(a, **kw)
   ss = sub.add_parser('sweepsum')
   ss.add_argument('files', nargs='*')
@@ -1196,11 +1574,15 @@ def main():
   pk.add_argument('--mode', choices=['city', 'map'], default='city')
   pk.add_argument('--n', type=int, default=10)
   pk.add_argument('--seed', type=int, default=1)
+  sh = sub.add_parser('shorten')
+  sh.add_argument('--trips', action='append', help='a trips file (repeatable)')
+  sh.add_argument('--results', action='append', help='a results file: every turn on its routes')
   sm = sub.add_parser('summary')
   sm.add_argument('files', nargs='*')
   sm.add_argument('--backfill', action='store_true', help="read turns' landing lanes from the traces of older results")
   args = p.parse_args()
-  {'run': cmd_run, 'sweep': cmd_sweep, 'sweepsum': cmd_sweepsum, 'pick': cmd_pick, 'summary': cmd_summary}[args.command](args)
+  {'run': cmd_run, 'sweep': cmd_sweep, 'sweepsum': cmd_sweepsum, 'pick': cmd_pick, 'summary': cmd_summary,
+   'shorten': cmd_shorten}[args.command](args)
 
 
 if __name__ == '__main__':
