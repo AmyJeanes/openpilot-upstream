@@ -261,6 +261,25 @@ def test_turn_done_at_its_way_out_without_repulse():
   assert d.nav.cue == "keepRight"
 
 
+
+def test_exit_cue_stacked_within_the_turn():
+  # exit_cue_at: the keepRight starts halfway round, stacked on the turn while its blinker is on, then plain past it
+  route = route_to_turn(40.0, "left")
+  d = Drive((0, 1), v=5.0)
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(exit_cue_at=0.5)
+  for k in range(60):
+    d.step(route, k * 0.25)
+  assert d.nav.signaled == "left" and "+keepRight" not in d.desires
+  for k, h in enumerate(np.linspace(0, 85, 40)):
+    d.clock.t += 0.1
+    state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": 0.5, "lane": [0, 1], "routeEnd": 200.0,
+             "route": [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]}
+    d.nav.update(state, True, d.indicator, {"left": 1.0})
+    if h < 40:
+      assert d.nav.desire != "+keepRight"
+  assert "+keepRight" in d.desires and d.nav.signaled is None and d.desires[-1] == "keepRight"
+
 def test_junction_entry():
   from openpilot.tools.sim.bridge.gta5.gta5_nav import junction_entry
   assert junction_entry(100.0, [30.0, 85.0], [100.0]) == (85.0, "stop line")

@@ -166,6 +166,9 @@ class Tune:
     "signal_min": SIGNAL_MIN,  # m
     "signal_max": SIGNAL_DIST,  # m
     "signal_entry_offset": 0.0,  # m past the junction's entry (negative before it)
+    # m before the junction's entry the time mode signals by whatever the speed (0: off); the route's turn point is
+    # the junction's centre, and too close to a right turn's corner the model goes straight on
+    "signal_min_entry": 0.0,
     "repulse_every": PULSE_EVERY,  # s
     "repulse_until_turned": TURN_STARTED,  # deg
     "repulse_after_stop_until": STOP_REPEAT_TURNED,  # deg
@@ -186,6 +189,10 @@ class Tune:
     "turn_release_m": HOLD_RELEASE_M,  # m
     "release_accel": HOLD_RELEASE_ACCEL,  # m/s^2
     "exit_cue_right": True,  # keepRight out of a right turn too, which can end across the new road's centre line
+    "exit_cue_left": True,
+    # share of a turn's angle come round by which its keepRight starts, stacked on the turn while its blinker is on (1:
+    # only once out of it; 0: with the turn's signal)
+    "exit_cue_at": 1.0,
     # keepRight while the plugin reads the car in the oncoming lanes outside a junction, where the route's reading
     # disagrees and nav has no lane to change back from
     "oncoming_keep": True,
@@ -446,6 +453,7 @@ class Nav:
     self.cue: str | None = None  # the keep desire held against swinging round past a turn's way out
     self.cue_until = 0.0
     self.cue_hold = False  # held its time even once the car is straight
+    self.cue_staged = False  # the keepRight started within the turn (exit_cue_at), stacked on it
     self.recover: str | None = None  # keepRight out of the oncoming lanes (oncoming_keep)
     self.recover_t = 0.0
     self.oncoming_since: float | None = None
@@ -540,11 +548,20 @@ class Nav:
       out = along > self.turn.dist - TURN_WINDOW / 2 and off < EXIT_DONE
       done = out or along > self.turn.dist + TURN_PAST and off < TURN_PAST_HEADING and abs(yaw_rate) < DONE_YAW_RATE
       turning = yaw_rate if self.turn.side == "left" else -yaw_rate
+      cued = t.exit_cue_right if self.turn.side == "right" else t.exit_cue_left
+      if EXIT_CUE and cued and t.exit_cue_at < 1.0 and not self.cue_staged and not out:
+        angle = max(abs(wrap(self.turn.exit_heading - self.signal_heading)), 1.0)
+        if t.exit_cue_at <= 0.0 or 1.0 - off / angle >= t.exit_cue_at:
+          self.cue, self.cue_until, self.cue_hold, self.cue_staged = "keepRight", float("inf"), True, True
+          if DEBUG:
+            print(f"nav: keepRight stacked on the {self.turn.side} turn, {100 * (1.0 - off / angle):.0f}% round")
+      if out and self.cue_staged and self.cue_until == float("inf"):
+        self.cue_until = now + EXIT_CUE_FOR
       if out and EXIT_CUE and self.turn.side == "right" and t.exit_cue_right:
         self.cue, self.cue_until, self.cue_hold = "keepRight", now + EXIT_CUE_FOR, True
         if DEBUG:
           print("nav: keepRight out of the right turn")
-      if out and EXIT_CUE and self.turn.side == "left" and turning > EXIT_CUE_YAW:
+      if out and EXIT_CUE and self.turn.side == "left" and t.exit_cue_left and turning > EXIT_CUE_YAW:
         self.cue, self.cue_until, self.cue_hold = "keepRight", now + EXIT_CUE_FOR, False
         if DEBUG:
           print(f"nav: keepRight as the car comes round past the left turn ({turning:.2f} rad/s)")
@@ -630,6 +647,9 @@ class Nav:
     if self.turn_point is not None:
       self.taken.append(self.turn_point)  # the rest of it can look like a turn ahead
     self.cooldown_until, self.turned_at, self.turn_point = now + COOLDOWN, self.driven, None
+    if self.cue_staged and self.cue_until == float("inf"):
+      self.cue = None
+    self.cue_staged = False
 
   def _next_turn(self, route: np.ndarray) -> Turn | None:
     """The first turn ahead not left to the route."""
@@ -725,7 +745,8 @@ class Nav:
         return False
     else:
       window = max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
-      if not (turn.dist < t.signal_min or (turn.dist < window and slow)):
+      early = t.signal_min_entry > 0 and self.entry < t.signal_min_entry
+      if not (turn.dist < t.signal_min or ((early or turn.dist < window) and slow)):
         return False
     if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
       return False  # into the turn bay first
@@ -864,6 +885,8 @@ class Nav:
         self.keep_stopped, self.keep_gap_until = False, now + KEEP_GAP
     if now < self.keep_gap_until and want.startswith("keep"):
       want = ""
+    if want.startswith("keep") and self.cue_staged and self.signaled is not None:
+      want = "+" + want  # given alongside the turn the blinker asks for (openpilot's NavDesire stacking)
     if want != self.desire:
       self.desire = want
       self.set_desire(want)
