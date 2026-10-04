@@ -130,7 +130,7 @@ HEVC (`fcamera.hevc`, `ecamera.hevc`), `frame_info.safetensors` and `localizer.s
 the map placed at Los Angeles), which the commaai/torchtitan and openpilot.distill loaders read; and `gta5.npz` with the
 game state, nav's and the AI driver's inputs, and modeld's outputs per frame, with the desire input it was given.
 `SEND_RAW_PRED=1` on terminal 1 adds modeld's raw output vector, its vision features included. libx265 encodes on the
-CPU (about 1.3 cores per camera); the video is about 30 MB a minute per camera. `GTA5_RECORD_MOUNT=<forward>,<up>` is the
+CPU (about 1.2 cores per camera, with the system ffmpeg); the video is about 75 MB a minute per camera. `GTA5_RECORD_MOUNT=<forward>,<up>` is the
 camera's offset from the car's origin, which the poses are moved to (1,0.6 by default, the plugin's mount on the test
 car). `python -m openpilot.tools.sim.bridge.gta5.gta5_record finalize <segment>` remakes a segment's safetensors from its
 `gta5.npz`, and `replay` makes a synthetic segment from a `GTA5_LOG`, for testing loaders.

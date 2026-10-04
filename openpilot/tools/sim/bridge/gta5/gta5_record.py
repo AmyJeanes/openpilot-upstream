@@ -29,6 +29,8 @@ import numpy as np
 
 RECORD = os.getenv("GTA5_RECORD")
 ENCODER = os.getenv("GTA5_RECORD_ENCODER", "libx265")  # or hevc_nvenc
+# the system's: openpilot's venv puts an ffmpeg without libx265 first on PATH
+FFMPEG = os.getenv("GTA5_RECORD_FFMPEG", "/usr/bin/ffmpeg" if os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
 CRF = int(os.getenv("GTA5_RECORD_CRF", "21"))
 # the camera's mount on the car, m forward of and above the car's origin, which the game's pose is for
 MOUNT = tuple(float(v) for v in os.getenv("GTA5_RECORD_MOUNT", "1.0,0.6").split(","))
@@ -86,7 +88,7 @@ def encoder_args(path: Path, width: int, height: int, stride: int, y_height: int
            if ENCODER == "hevc_nvenc" else
            ["-c:v", "libx265", "-preset", "ultrafast", "-crf", str(CRF), "-x265-params",
             f"bframes=0:keyint={KEYINT}:min-keyint={KEYINT}:scenecut=0:pools=4:info=0:log-level=error"])
-  return ["nice", "-n", "10", "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
+  return ["nice", "-n", "10", FFMPEG,"-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
           "-s", f"{stride}x{y_height}", "-r", "20", "-i", "pipe:0", "-vf", f"crop={width}:{height}:0:0", "-fps_mode", "passthrough",
           *codec, "-f", "hevc", str(path)]
 
@@ -94,6 +96,7 @@ def encoder_args(path: Path, width: int, height: int, stride: int, y_height: int
 class Video:
   """One camera's encoder, fed from a queue by its own thread, so a slow encoder never holds up the camera thread."""
   def __init__(self, path: Path, width: int, height: int, stride: int, y_height: int, uv_height: int):
+    self.path = path
     self.frame_bytes = stride * (y_height + uv_height)
     self.proc = subprocess.Popen(encoder_args(path, width, height, stride, y_height), stdin=subprocess.PIPE,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -109,6 +112,8 @@ class Video:
     self.thread.start()
 
   def add(self, frame: bytes) -> bool:
+    if not self.thread.is_alive():
+      return False
     try:
       self.queue.put_nowait(frame)
     except queue.Full:
@@ -122,19 +127,30 @@ class Video:
     while (frame := self.queue.get()) is not None:
       try:
         stdin.write(memoryview(frame)[:self.frame_bytes])
-      except (BrokenPipeError, OSError) as e:
+      except (BrokenPipeError, OSError, ValueError) as e:
         self.error = str(e)
         break
     try:
       stdin.close()
-    except OSError:
+    except (OSError, ValueError):
       pass
-    _, err = self.proc.communicate()
+    # communicate() would flush the stdin closed above
+    err = self.proc.stderr.read() if self.proc.stderr else b""
+    self.proc.wait()
     if self.proc.returncode:
       self.error = f"ffmpeg exited {self.proc.returncode}: {err.decode(errors='replace').strip()[-300:]}"
+    if self.error:
+      print(f"gta5: recording: {self.path} failed: {self.error}", flush=True)
 
   def finish(self):
-    self.queue.put(None)
+    """Never blocks the camera thread: with the queue full, its newest frames go, which keeps the video's frames the
+    segment's first ones."""
+    with self.queue.mutex:
+      if len(self.queue.queue) >= QUEUE_FRAMES:
+        self.queue.queue.pop()
+        self.frames -= 1
+      self.queue.queue.append(None)
+      self.queue.not_empty.notify()
 
   def wait(self):
     self.thread.join()
@@ -178,6 +194,7 @@ class Recorder:
     self.lock = threading.Lock()
     self.model: dict[int, dict] = {}  # road frame id -> what modeld made of it
     self.stopped = False
+    self.failed = False
     if world is not None:
       threading.Thread(target=self._model_loop, daemon=True).start()
     print(f"gta5: recording to {self.data}", flush=True)
@@ -195,18 +212,24 @@ class Recorder:
     frame_id = self.road_id
     self.road_id += 1
     self._wrap_up()
+    if self.failed:
+      self._end()
+      return
     ok = frame is not None and state is not None and state.get("inVehicle") and not state.get("paused") and "pos" in state
     seg = self.segment
     if seg is not None and (not ok or seg.broken or len(seg.rows) >= SEGMENT_FRAMES or t - self.last_t > GAP or
                             state.get("resets") != self.last_resets):
       self._end()
       seg = None
-    if not ok:
+    if not ok or (seg is not None and t == self.last_t):  # camerad sometimes sends a game frame twice; the loaders need new times
       return
     if seg is None:
       seg = self.segment = self._start(frame_id)
     if not seg.road.add(frame):
       seg.broken = "road encoder behind"
+      if not seg.road.thread.is_alive():  # it failed: don't start another each frame
+        self.failed = True
+        print("gta5: recording stopped: the encoder failed", flush=True)
       return
     self.wide_for = seg
     self.last_t, self.last_resets = t, state.get("resets")
@@ -285,6 +308,7 @@ class Recorder:
                      "errors": [e for e in (seg.road.error, seg.wide.error) if e] or None,
                      "model_frames": sum(m is not None for m in model)})
     np.savez(seg.path / "gta5.npz", **out)
+    print(f"gta5: recorded {seg.path.name}: {len(rows)} frames" + (f", ended: {seg.broken}" if seg.broken else ""), flush=True)
     (seg.path / "routes.json").write_text(json.dumps({"routes": seg.routes, "lane_lines": seg.lane_lines}, default=json_default))
     (seg.path / "gta5.json").write_text(json.dumps(seg.info, indent=1))
     # the frame index means reading the whole video back: done apart from the bridge's process
