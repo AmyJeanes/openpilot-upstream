@@ -11,10 +11,11 @@ Each minute of driving becomes <folder>/data/<hex name>/ with:
   frame with the desire input it was given (rebuilt as modeld's DesireHelper builds it), plus its raw output vector
   when modeld runs with SEND_RAW_PRED=1. localizer and frame_info are made from it, so `finalize` can remake them;
 - routes.json: nav's routes and the lane line it aims for, when on a map route;
-- gta5.json: the segment's settings and counts.
+- gta5.json: the segment's settings and counts, the camera's mount (from the plugin's state when it reports one, else
+  GTA5_RECORD_MOUNT) and the scene at its start: the car, weather, time and traffic density.
 
-A segment ends early at a gap in the frames, a teleport or leaving the car. Encoding is libx265 on the CPU, niced: about
-1.3 cores per camera."""
+A segment ends early at a gap in the frames, a teleport, leaving the car or the camera's mount changing. Encoding is
+libx265 on the CPU, niced: about 1.3 cores per camera."""
 import json
 import os
 import queue
@@ -32,8 +33,10 @@ ENCODER = os.getenv("GTA5_RECORD_ENCODER", "libx265")  # or hevc_nvenc
 # the system's: openpilot's venv puts an ffmpeg without libx265 first on PATH
 FFMPEG = os.getenv("GTA5_RECORD_FFMPEG", "/usr/bin/ffmpeg" if os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
 CRF = int(os.getenv("GTA5_RECORD_CRF", "21"))
-# the camera's mount on the car, m forward of and above the car's origin, which the game's pose is for
+# the camera's mount on the car, m forward of and above the car's origin, which the game's pose is for, when the plugin's
+# state has none
 MOUNT = tuple(float(v) for v in os.getenv("GTA5_RECORD_MOUNT", "1.0,0.6").split(","))
+SCENE_KEYS = ("vehicle", "world", "density")  # the plugin's state kept in gta5.json as the segment's scene
 ANCHOR = (34.0522, -118.2437, 0.0)  # Los Angeles: the game's x east, y north and z up, from here
 SEGMENT_FRAMES = 1200  # 60 s at 20 Hz, as comma's segments
 GAP = 0.5  # s between game frames that ends a segment
@@ -58,6 +61,21 @@ FRAME_COLUMNS = ("frame_id", "t", "x", "y", "z", "heading", "pitch", "roll", "gr
 MODEL_COLUMNS = ("time", "frame_id_extra", "execution_time", "lane_change_state", "lane_change_direction", "action_curvature",
                  "action_accel", "left_blinker", "right_blinker", "v_ego", "lat_active", "nav")
 INDICATORS = {None: 0, "left": 1, "right": 2}
+
+
+def state_mount(state: dict) -> tuple | None:
+  """The camera's mount the plugin reports: m forward, up and right of the car's origin, and deg pitch up and yaw left."""
+  m = state.get("mount")
+  if not isinstance(m, dict) or "y" not in m or "z" not in m:
+    return None
+  return tuple(round(float(m.get(k, 0.0)), 4) for k in ("y", "z", "x", "pitch", "yaw"))
+
+
+def full_mount(info: dict) -> tuple:
+  """A segment's mount as forward, up, right, pitch, yaw: gta5.json's mount, with mount_detail's right and angles."""
+  fwd, up = tuple(info.get("mount", MOUNT))[:2]
+  d = info.get("mount_detail") or {}
+  return (fwd, up, d.get("x", 0.0), d.get("pitch", 0.0), d.get("yaw", 0.0))
 
 
 def save_safetensors(path: Path, tensors: dict[str, np.ndarray], metadata: dict[str, str] | None = None) -> None:
@@ -167,6 +185,7 @@ class Segment:
     self.routes: list[dict] = []
     self.lane_lines: list[dict] = []
     self.expert_labels: list[str] = []
+    self.mount = None  # the plugin's report of it, which a change of ends the segment
     self.broken = ""
     self.done_at = 0.0  # when it stopped taking frames
 
@@ -216,15 +235,16 @@ class Recorder:
       self._end()
       return
     ok = frame is not None and state is not None and state.get("inVehicle") and not state.get("paused") and "pos" in state
+    ok = ok and not (state.get("mount") or {}).get("pending")  # the dashcam mount is found a moment after a new car
     seg = self.segment
     if seg is not None and (not ok or seg.broken or len(seg.rows) >= SEGMENT_FRAMES or t - self.last_t > GAP or
-                            state.get("resets") != self.last_resets):
+                            state.get("resets") != self.last_resets or state_mount(state) != seg.mount):
       self._end()
       seg = None
     if not ok or (seg is not None and t == self.last_t):  # camerad sometimes sends a game frame twice; the loaders need new times
       return
     if seg is None:
-      seg = self.segment = self._start(frame_id)
+      seg = self.segment = self._start(frame_id, state)
     if not seg.road.add(frame):
       seg.broken = "road encoder behind"
       if not seg.road.thread.is_alive():  # it failed: don't start another each frame
@@ -235,13 +255,22 @@ class Recorder:
     self.last_t, self.last_resets = t, state.get("resets")
     seg.rows.append(self._row(frame_id, t, state, len(seg.rows)))
 
-  def _start(self, frame_id: int) -> Segment:
+  def _start(self, frame_id: int, state: dict) -> Segment:
     name = f"{int(self.started.timestamp()):08x}{self.segment_count:04x}"
+    mount = state_mount(state)
     info = {"route": self.route_name, "segment": self.segment_count, "first_frame_id": frame_id, "synthetic": self.synthetic,
-            "anchor": ANCHOR, "mount": MOUNT, "encoder": ENCODER, "crf": CRF, "started": datetime.now().isoformat(timespec="seconds")}
+            "anchor": ANCHOR, "mount": mount[:2] if mount else MOUNT, "encoder": ENCODER, "crf": CRF,
+            "started": datetime.now().isoformat(timespec="seconds")}
+    if mount:
+      info["mount_detail"] = state["mount"]
+    scene = {k: state[k] for k in SCENE_KEYS if k in state}
+    if scene:
+      info["scene"] = scene
     self.segment_count += 1
     self.last_route = self.last_lane_line = None
-    return Segment(self.data / name, info, self.size)
+    seg = Segment(self.data / name, info, self.size)
+    seg.mount = mount
+    return seg
 
   def _row(self, frame_id: int, t: float, state: dict, index: int) -> list[float]:
     w = self.world
@@ -418,15 +447,17 @@ def columns(npz, name: str = "frame") -> dict[str, np.ndarray]:
 
 
 def device_poses(f: dict[str, np.ndarray], mount: tuple = MOUNT) -> tuple[np.ndarray, np.ndarray]:
-  """The camera's position (NED, m from the map's origin) and ned_from_device rotations, from the game's car poses.
-  Device axes: x forward, y right, z down. The game's heading is counterclockwise from north, its grade nose up and its
-  bank right side down."""
+  """The camera's position (NED, m from the map's origin) and ned_from_device rotations, from the game's car poses and
+  the mount: m forward, up, and optionally right, deg pitch up and yaw left. Device axes: x forward, y right, z down.
+  The game's heading is counterclockwise from north, its grade nose up and its bank right side down."""
   from openpilot.common.transformations.orientation import rot_from_euler
+  fwd, up, right, pitch, yaw = (tuple(mount) + (0.0, 0.0, 0.0))[:5]
   grade, bank = f["grade"], f["bank"]
   roll = np.arcsin(np.clip(np.sin(bank) / np.cos(grade), -1, 1))  # bank is the right axis' drop, roll the angle about x
-  ned_from_device = rot_from_euler(np.stack([roll, grade, -np.radians(f["heading"])], axis=1))
+  ned_from_car = rot_from_euler(np.stack([roll, grade, -np.radians(f["heading"])], axis=1))
   car_ned = np.stack([f["y"], f["x"], -f["z"]], axis=1)
-  return car_ned + ned_from_device @ np.array([mount[0], 0.0, -mount[1]]), ned_from_device
+  ned_from_device = ned_from_car @ rot_from_euler([0.0, np.radians(pitch), -np.radians(yaw)])
+  return car_ned + ned_from_car @ np.array([fwd, right, -up]), ned_from_device
 
 
 def localizer(npz, info: dict) -> dict[str, np.ndarray]:
@@ -436,7 +467,7 @@ def localizer(npz, info: dict) -> dict[str, np.ndarray]:
   f = columns(npz)
   local = LocalCoord.from_geodetic(list(info.get("anchor", ANCHOR)))
   ecef_from_ned = local.ned2ecef_matrix
-  pos_ned, ned_from_device = device_poses(f, tuple(info.get("mount", MOUNT)))
+  pos_ned, ned_from_device = device_poses(f, full_mount(info))
   ecef_from_device = ecef_from_ned @ ned_from_device
   # the game's rotation velocity is in the car's axes (x right, y forward, z up)
   omega = np.stack([f["rot_vel_y"], f["rot_vel_x"], -f["rot_vel_z"]], axis=1)
