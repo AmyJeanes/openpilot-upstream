@@ -317,7 +317,7 @@ def test_unturned_turn_given_up_past_its_point():
   for cancel in (0.0, 10.0):
     d = Drive((0, 1), v=5.0)
     d.nav.tune = nav_mod.Tune("")
-    d.nav.tune.values.update(unturned_cancel=cancel, left_signal_max_entry=0.0)
+    d.nav.tune.values.update(unturned_cancel=cancel, unturned_keep_pulses=False, left_signal_max_entry=0.0)
     y, pulses = 0.0, []
     while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
       d.step(route, y, {"routeEnd": 300.0 - y})
@@ -328,6 +328,20 @@ def test_unturned_turn_given_up_past_its_point():
     if cancel:
       assert len(set(pulses)) <= 1
   assert 9.0 < gone[10.0] < 12.0 and gone[0.0] > 30.0, gone
+
+
+def test_unturned_cancel_can_keep_pulses():
+  route = route_to_turn(40.0, "left")
+  d = Drive((0, 1), v=5.0)
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(unturned_cancel=25.0, unturned_keep_pulses=True, left_signal_max_entry=0.0)
+  y, pulses = 0.0, []
+  while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
+    d.step(route, y, {"routeEnd": 300.0 - y})
+    if d.nav.signaled is not None and y > 40.0:
+      pulses.append(d.nav.repeat_t)
+    y += d.v * 0.05
+  assert 24.0 < y - 40.0 < 27.0 and len(set(pulses)) > 1, (y, pulses)
 
 
 def test_junction_entry():
