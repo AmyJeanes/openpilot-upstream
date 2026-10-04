@@ -1009,7 +1009,8 @@ std::string VehicleState(double now) {
         "," + colour(2) + "," + colour(3) + "],\"dirt\":" + Num(GET_VEHICLE_DIRT_LEVEL(g_veh.handle)) + ",\"swaps\":" + std::to_string(g_swap.swaps) +
         ",\"loading\":" + (g_swap.step ? "true" : "false");
   if (!g_swap.error.empty()) out += ",\"error\":\"" + g_swap.error + "\"";
-  return out + "}";
+  out += "}";
+  return out;
 }
 
 // "mount":{mode, source, pending (the dashcam place still to find), x, y, z (m right, forward and up of the car's

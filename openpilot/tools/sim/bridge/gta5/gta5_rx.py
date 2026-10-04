@@ -86,6 +86,7 @@ class Receiver:
     self.seq = 0
     self.snap_path: str | None = None
     self.mismatched = 0
+    self.bad_headers = 0
     self.burst_path = ""
     self.burst_left = 0
 
@@ -124,7 +125,15 @@ class Receiver:
 
   def on_frame(self, msg: memoryview) -> None:
     head_len = struct.unpack_from("<I", msg, 0)[0]
-    head = json.loads(bytes(msg[4:4 + head_len]))
+    try:
+      head = json.loads(bytes(msg[4:4 + head_len]))
+    except ValueError as e:  # a plugin bug in one header shouldn't take the camera down
+      self.bad_headers += 1
+      if self.bad_headers % 100 == 1:
+        at = getattr(e, "pos", 0)
+        near = bytes(msg[4 + max(at - 120, 0):4 + min(at + 60, head_len)])
+        print(f"gta5: skipped a frame with a bad header ({self.bad_headers} so far): {e}: {near!r}", flush=True)
+      return
     if (head["width"], head["height"]) != (W, H):
       raise ValueError(f"unsupported frame size {head['width']}x{head['height']}")
     slot = self.seq % SLOTS
