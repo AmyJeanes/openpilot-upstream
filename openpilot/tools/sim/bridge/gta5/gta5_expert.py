@@ -6,7 +6,7 @@ watches that file (gta5_cmd.py expert on|off|route writes it; changes from befor
   {"on": true, "speed": 12, "style": 1076369579, "ability": 1, "aggr": 0, "task": "longrange", "limits": true,
    "need_route": false, "dest": null, "ahead_min": 60, "ahead_max": 120, "past": 25, "targets": "junction",
    "retarget_every": 0, "ramp": 0, "lead": 2, "launch": null, "decel": 0, "turn_speed": 6, "arrive": "task",
-   "stop_before": 15, "speed_step": 0.5}
+   "stop_before": 15, "speed_step": 0.5, "hold_after": 3}
 While on, openpilot is kept disengaged and nav's cues wait. On our map's route (GTA5_ROUTER) the plugin's AI driver is
 given a target 60-120 m ahead, just past the next junction or maneuver, so its own short pathfinding can only take the
 route's way through it (targets=smooth: ahead_max on, moved only once ahead_min is left, at most every retarget_every
@@ -19,7 +19,9 @@ lead of about 3, as the AI settles 1-2 m/s under its cap. `dest` ignores a route
 trip's. Off the map's routes the AI drives to the game's waypoint, or wanders. Each game state appends a JSON line to
 the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target,
 the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can be
-filtered later. The engage key stops the AI and expert mode."""
+filtered later. The engage key stops the AI and expert mode; so does arriving, hold_after s after
+stopping, and the control file is set off. With expert mode off, the bridge turns off a plugin AI driver left on
+(always without GTA5_EXPERT, else once the bridge starts or while openpilot is engaged)."""
 import json
 import math
 import os
@@ -33,7 +35,7 @@ POLL_EVERY = 0.5  # s
 DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "aggr": 0.0, "task": "longrange", "limits": True,
             "need_route": False, "dest": None, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0, "targets": "junction",
             "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "launch": None, "decel": 0.0, "turn_speed": 6.0,
-            "arrive": "task", "stop_before": 15.0, "speed_step": 0.5}
+            "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0}
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
 LIMIT_LOOKAHEAD = 300.0  # m, lower speed limits ahead slowed for
@@ -138,6 +140,8 @@ class Expert:
     self.next_cancel = 0.0
     self.log = None
     self.warned = False
+    self.seen_ai = False  # a state with the plugin's AI driver in it, since the bridge started
+    self.next_guard = 0.0
     self._reset()
     if self.path is not None:
       print(f"gta5: expert mode watches {self.path}", flush=True)
@@ -159,6 +163,7 @@ class Expert:
     self.next_indicator = 0.0
     self.aborts: int | None = None
     self.arrived = False
+    self.arrived_t = 0.0
     self.collisions0 = 0  # the plugin counts frames in contact since the car was entered
     self.cmd, self.cmd_t = 0.0, 0.0  # the ramped speed, and when it was worked out
     self.target_t = 0.0
@@ -221,6 +226,7 @@ class Expert:
     if not self.on:
       if self.active:
         self._stop("off")
+      self._guard(state.get("ai") or {}, engaged, now)
       return False
     if "ai" not in state:
       if not self.warned:
@@ -262,6 +268,12 @@ class Expert:
       self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings(self._start_speed(v))})
     if route is not self.route:
       self._new_route(route)
+    if self.arrived and self.game_t - self.arrived_t > float(self.cfg["hold_after"]):
+      # the car is given back, so a left-on AI can't drive the next run
+      self.on = False
+      self._stop("arrived")
+      self._write_control({"on": False})
+      return False
     if route is not None:
       self._follow(route, state, now)
     self._write(state, ai)
@@ -334,7 +346,7 @@ class Expert:
     gentle = c["arrive"] == "gentle"
     left = route.length - at - (float(c["stop_before"]) if gentle else 0.0)
     if self.final and left < ARRIVED and v < 0.5 and not self.arrived:
-      self.arrived = True
+      self.arrived, self.arrived_t = True, self.game_t
       print("gta5: expert arrived", flush=True)
     self._desire(route, state, now)
 
@@ -401,6 +413,35 @@ class Expert:
       self.indicator = side
       self.next_indicator = time.monotonic() + REQUEST_EVERY
       self.send({"type": "ai", "indicator": side or "off"})
+
+  def _guard(self, ai: dict, engaged: bool, now: float):
+    """With expert mode off, the plugin's AI driver mustn't drive: it outlives the bridge, and would override openpilot."""
+    if "on" not in ai:
+      return
+    first, self.seen_ai = not self.seen_ai, True
+    if not ai["on"] or now < self.next_guard:
+      return
+    if self.path is None:
+      why = "expert mode isn't enabled (GTA5_EXPERT)"
+    elif first:
+      why = "left on from before the bridge started"
+    elif engaged:
+      why = "openpilot is engaged"
+    else:
+      return  # gta5_cmd.py ai on, for a manual test
+    self.next_guard = now + REQUEST_EVERY
+    print(f"gta5: WARNING: the plugin's AI driver is on with expert mode off ({why}): turning it off", flush=True)
+    self.send({"type": "ai", "on": 0, "indicator": "off"})
+
+  def _write_control(self, cfg: dict):
+    if self.path is None:
+      return
+    try:
+      tmp = self.path.with_suffix(".tmp")
+      tmp.write_text(json.dumps(cfg) + "\n")
+      tmp.replace(self.path)
+    except OSError as e:
+      print(f"gta5: expert control file: {e}", flush=True)
 
   def _stop(self, why: str, plugin: bool = True):
     if plugin:
