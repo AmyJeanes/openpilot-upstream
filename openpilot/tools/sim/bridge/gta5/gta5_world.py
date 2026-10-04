@@ -424,7 +424,8 @@ class GTA5World(World):
       self.lane_changing = True
     elif self.lane_changing:
       self.lane_changing = False
-      self._send({"type": "indicatorOff"})
+      if not self.nav.signaling:  # a lane change still going as the blinker became the turn's
+        self._send({"type": "indicatorOff"})
     elif (lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT and simulator_state.user_torque == 0
           and not self.nav.signaling):  # a turn on the route, not a lane change
       simulator_state.user_torque = NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE

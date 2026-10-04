@@ -174,6 +174,10 @@ class Tune:
     "lane_change_early": LANE_CHANGE_EARLY,  # s
     "lane_change_fast_early": FAST_EARLY,  # s more above FAST m/s
     "lane_change_last": LANE_CHANGE_DIST,  # m before a turn
+    # m before a turn a lane change towards it still under way becomes the turn's signal (0: it's ended, though
+    # openpilot's lane change carries on into the junction until the model is done with it)
+    "lane_change_into_turn": 0.0,
+    "lane_change_min_speed": LANE_CHANGE_MIN_SPEED,  # m/s, slowing down for a lane change for a turn to finish before it
     "curve_accel": CURVE_ACCEL,  # m/s^2
     # held from signalling a turn through its arc, until the car heads within turn_release deg of its way out and is
     # straight, or is turn_release_m past it; then lifted at release_accel
@@ -425,6 +429,7 @@ class Nav:
     self.stopped = False
     self.seen: tuple[str, float] | None = None  # the turn ahead's side, and since when
     self.changing: str | None = None  # the side of nav's lane change under way
+    self.change_turn = False  # whether it's into the lanes for a turn
     self.change_shown = False
     self.change_t = 0.0  # when it started, or the last ended
     self.change_tries: dict[tuple, int] = {}  # lane changes for each turn or fork (by where it is), without progress
@@ -685,33 +690,17 @@ class Nav:
   def _signal(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, heading: float, bay: float):
     """Signals the turn once near and slow enough, from its lane; one that can't be taken from the car's lane is left."""
     t = self.tune
-    slow = v < 19 * CV.MPH_TO_MS and self.changing is None
-    if t.signal_mode == "entry" and self.min_ahead == MIN_AHEAD_MAP:
-      # at the junction's entry, as a driver does (too early, the model takes it for a lane change or turns short)
-      due = self.entry <= -t.signal_entry_offset or turn.dist < SIGNAL_LAST
-      if not (due and (slow or turn.dist < SIGNAL_LAST)):
-        return
-    else:
-      window = max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
-      if not (turn.dist < t.signal_min or (turn.dist < window and slow)):
-        return
-    if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
-      return  # into the turn bay first
-    if self.lane is not None and self.lane[0] >= 0:
-      lo, hi = turn.lanes(self.lane[1])
-      if not lo <= self.lane[0] <= hi:
-        if turn.dist > t.lane_change_last or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
-          return  # a lane change towards it may still come or finish
-        if self._sure_wrong(lo, hi):
-          self._end_change(indicator)
-          self._skip(route, turn.dist, f"{turn.side} turn")
-          return
-    if self.changing is not None:
-      if self.driven < self.bay_to and turn.dist > BAY_LAST:
-        return  # into the turn bay first
-      self._end_change(indicator)
-    if now < self.change_hold_until + PARAM_LEAD:
-      return  # openpilot is to read NavDesire cleared before the blinker comes on for the turn
+    into = t.lane_change_into_turn > 0 and self.changing == turn.side and self.change_turn
+    if into and turn.dist > t.lane_change_into_turn:
+      return
+    if into:
+      # the blinker stays on and, with NavDesire cleared, asks for the turn, which overrides the lane change
+      if DEBUG:
+        print(f"nav: lane change {turn.side} becomes the turn in {turn.dist:.0f} m")
+      self.changing, self.change_t, self.change_send_at = None, now, 0.0
+      self._set_desire(now)
+    elif not self._signal_due(turn, route, indicator, v, now, bay):
+      return
     self.turn, self.signaled, self.turn_from, self.shown = turn, turn.side, self.driven, False
     t = self.tune
     self.hold = {'side': turn.side, 'angle': turn.angle, 'exit': turn.exit_heading, 'heading': heading,
@@ -724,6 +713,37 @@ class Nav:
       entry = f"{self.entry_kind} in {self.entry:.0f} m"
       print(f"nav: signal {turn.side} in {turn.dist:.0f} m, {entry}, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
     self.send({"type": "setIndicator", "side": turn.side})
+
+  def _signal_due(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, bay: float) -> bool:
+    """Whether to signal the turn now, ending any lane change towards it, or leaving it to the route."""
+    t = self.tune
+    slow = v < 19 * CV.MPH_TO_MS and self.changing is None
+    if t.signal_mode == "entry" and self.min_ahead == MIN_AHEAD_MAP:
+      # at the junction's entry, as a driver does (too early, the model takes it for a lane change or turns short)
+      due = self.entry <= -t.signal_entry_offset or turn.dist < SIGNAL_LAST
+      if not (due and (slow or turn.dist < SIGNAL_LAST)):
+        return False
+    else:
+      window = max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
+      if not (turn.dist < t.signal_min or (turn.dist < window and slow)):
+        return False
+    if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
+      return False  # into the turn bay first
+    if self.lane is not None and self.lane[0] >= 0:
+      lo, hi = turn.lanes(self.lane[1])
+      if not lo <= self.lane[0] <= hi:
+        if turn.dist > t.lane_change_last or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
+          return False  # a lane change towards it may still come or finish
+        if self._sure_wrong(lo, hi):
+          self._end_change(indicator)
+          self._skip(route, turn.dist, f"{turn.side} turn")
+          return False
+    if self.changing is not None:
+      if self.driven < self.bay_to and turn.dist > BAY_LAST:
+        return False  # into the turn bay first
+      self._end_change(indicator)
+    # openpilot is to read NavDesire cleared before the blinker comes on for the turn
+    return now >= self.change_hold_until + PARAM_LEAD
 
   def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):
     """Into the turn bay or slip lane for the turn ahead as it opens, from the lane beside it."""
@@ -780,7 +800,7 @@ class Nav:
       self._skip(route, m.dist, f"{m.side} fork")
       self.skip_turns_to = self.driven + m.dist + FORK_TURN
       return 0.0
-    cap = max(FORK_MIN_SPEED if fork else LANE_CHANGE_MIN_SPEED, room / need) if room < need * v else 0.0
+    cap = max(FORK_MIN_SPEED if fork else self.tune.lane_change_min_speed, room / need) if room < need * v else 0.0
     early = self.tune.lane_change_early + (self.tune.lane_change_fast_early if v > FAST else 0.0)
     if (self.changing is None and room > 0 and room < (need + early) * max(v, LANE_CHANGE_MIN_SPEED)
         and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING):
@@ -788,7 +808,8 @@ class Nav:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
       what = f"{m.side} {'fork' if fork else 'turn'}"
-      self._start_change("left" if i > hi else "right", f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)")
+      self._start_change("left" if i > hi else "right", f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
+                         turn=not fork)
     return cap
 
   def _keep_fork(self, fork: Fork | None, turn: Turn | None, desire: dict[str, float], v: float, now: float):
@@ -877,8 +898,8 @@ class Nav:
       self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
     self.recover = "keepRight"
 
-  def _start_change(self, side: str, why: str):
-    self.changing, self.change_shown, self.change_t = side, False, time.monotonic()
+  def _start_change(self, side: str, why: str, turn: bool = False):
+    self.changing, self.change_shown, self.change_t, self.change_turn = side, False, time.monotonic(), turn
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
     self._set_desire(self.change_t)

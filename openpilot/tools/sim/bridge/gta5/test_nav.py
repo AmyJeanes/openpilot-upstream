@@ -152,6 +152,26 @@ def test_lane_change_param_before_blinker():
   assert off - blink_off >= 0.45
 
 
+def test_lane_change_into_turn():
+  # a lane change for a left turn still going lane_change_last before it: the blinker stays on, now for the turn
+  route = route_to_turn(120.0, "left")
+  d = Drive((0, 2), v=5.0)
+  d.nav.tune.values["lane_change_into_turn"] = 30.0
+  y, changed_at, turned_at = 0.0, None, None
+  while y < 100.0:
+    if 120.0 - y < 47.0:
+      d.lane = (1, 3)  # a lane for the turn opens on the left
+    d.step(route, y)
+    if d.nav.changing and changed_at is None:
+      changed_at = 120.0 - y
+    if d.nav.turn is not None and turned_at is None:
+      turned_at = 120.0 - y
+      assert d.indicator == "left" and d.nav.desire == ""
+    y += d.v * 0.05
+  assert changed_at is not None and turned_at is not None and 25.0 < turned_at <= 31.0
+  assert signals(d) == ["left", "left"] and not any(m["type"] == "indicatorOff" for m in d.sent)
+
+
 def test_turn_straight_after_a_turn():
   # left, then right 35 m on: the second is signalled without waiting out a cooldown
   first = route_to_turn(100.0, "left", after=0.0)
