@@ -938,23 +938,27 @@ int DrawRibbon(const std::vector<P3> &pts, float lift, int r, int g, int b, int 
 
 // a line in DASH_ON m dashes with DASH_OFF m gaps, so it reads over the route's ribbon; returns the draw calls used
 constexpr float DASH_ON = 2.0f, DASH_OFF = 1.5f;
+// Dashes by their index along the whole line, so every pass of the inner loop moves on a dash (a float phase stepped
+// by what's left of a dash can stop moving at rounding, which hung the game's script thread).
 int DrawDashed(const std::vector<P3> &pts, float lift, int r, int g, int b, int budget) {
+  constexpr double PERIOD = DASH_ON + DASH_OFF;
   int used = 0;
-  float phase = 0;  // m into the current dash and gap
+  double base = 0;  // m along the line to the segment's start
   for (size_t i = 1; i < pts.size() && used < budget; i++) {
     const P3 &a = pts[i - 1], &c = pts[i];
-    float len = std::hypot(c.x - a.x, c.y - a.y);
-    for (float s = 0; s < len && used < budget;) {
-      float left = phase < DASH_ON ? DASH_ON - phase : DASH_ON + DASH_OFF - phase, e = std::min(len, s + left);
-      if (phase < DASH_ON) {
-        float t0 = s / len, t1 = e / len;
-        DRAW_LINE(a.x + (c.x - a.x) * t0, a.y + (c.y - a.y) * t0, a.z + (c.z - a.z) * t0 + lift, a.x + (c.x - a.x) * t1,
-                  a.y + (c.y - a.y) * t1, a.z + (c.z - a.z) * t1 + lift, r, g, b, 255);
-        used++;
-      }
-      phase = std::fmod(phase + (e - s), DASH_ON + DASH_OFF);
-      s = e;
+    double len = std::hypot(double(c.x) - a.x, double(c.y) - a.y);
+    if (!(len > 1e-3) || !(len < 1e4)) {  // also NaN
+      base += std::isfinite(len) ? len : 0;
+      continue;
     }
+    for (long k = long(std::floor(base / PERIOD)), last = long(std::floor((base + len) / PERIOD)); k <= last && used < budget; k++) {
+      double t0 = std::max(0.0, (k * PERIOD - base) / len), t1 = std::min(1.0, (k * PERIOD + DASH_ON - base) / len);
+      if (t1 - t0 < 1e-4) continue;
+      DRAW_LINE(float(a.x + (c.x - a.x) * t0), float(a.y + (c.y - a.y) * t0), float(a.z + (c.z - a.z) * t0 + lift),
+                float(a.x + (c.x - a.x) * t1), float(a.y + (c.y - a.y) * t1), float(a.z + (c.z - a.z) * t1 + lift), r, g, b, 255);
+      used++;
+    }
+    base += len;
   }
   return used;
 }
@@ -1061,10 +1065,10 @@ std::vector<P3> ParsePoints(const std::string &s) {
 // While ours shows, the waypoint's own route line is hidden (the waypoint stays: the bridge, nav and the AI driver take
 // it as the destination); a new waypoint is a new blip, so it's checked again every so often
 int g_hiddenRouteBlip = 0;
-void HideWaypointRoute(double now) {
+void HideWaypointRoute(double now, bool force = false) {
   static double next = 0;
   bool hide = g_gps.on && g_gps.shown > 0;
-  if (hide && now < next) return;
+  if (!force && (now < next || (!hide && !g_hiddenRouteBlip))) return;
   next = now + 0.5;
   int blip = IS_WAYPOINT_ACTIVE() ? GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()) : 0;
   if (hide && blip && blip != g_hiddenRouteBlip) {
@@ -2143,7 +2147,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   if (g_radarHidden) DISPLAY_RADAR(TRUE);
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();
-  HideWaypointRoute(QpcSeconds());  // and gives the waypoint its own line back
+  HideWaypointRoute(QpcSeconds(), true);  // and gives the waypoint its own line back
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();
