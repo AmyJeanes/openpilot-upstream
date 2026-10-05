@@ -163,8 +163,12 @@ inline Vector3 GET_BLIP_INFO_ID_COORD(int blip) { return Invoke<Vector3>(0xFA7C7
 inline void SET_WAYPOINT_OFF() { Invoke(0xA7E4E2D361C2627F); }
 inline void SET_NEW_WAYPOINT(float x, float y) { Invoke(0xFE43368D2AA4F2FC, x, y); }
 inline BOOL GET_POS_ALONG_GPS_TYPE_ROUTE(Vector3 *result, BOOL p1, float dist, int type) { return Invoke<BOOL>(0xF3162836C28F9DA5, result, p1, dist, type); }
-// a blip's GPS route line (the waypoint's is GTA's own route), drawn or not
-inline void SET_BLIP_ROUTE(int blip, BOOL enabled) { Invoke(0x4F7D8A9BFB0B43E9, blip, enabled); }
+// blips: sprite 8 is the waypoint's; REMOVE_BLIP zeroes the handle
+inline int ADD_BLIP_FOR_COORD(float x, float y, float z) { return Invoke<int>(0x5A039BB0BCA604B6, x, y, z); }
+inline BOOL DOES_BLIP_EXIST(int blip) { return Invoke<BOOL>(0xA6DB27D19ECBB7DA, blip); }
+inline void REMOVE_BLIP(int *blip) { Invoke(0x86A652570E5F25DD, blip); }
+inline void SET_BLIP_SPRITE(int blip, int sprite) { Invoke(0xDF735600A4696DAF, blip, sprite); }
+inline void SET_BLIP_COLOUR(int blip, int colour) { Invoke(0x03D7FB09E75D6B7E, blip, colour); }
 // a script's own line on the minimap and map, straight between its points
 inline void CLEAR_GPS_CUSTOM_ROUTE() { Invoke(0xE6DE0561D9232A64); }
 inline void START_GPS_CUSTOM_ROUTE(int hudColour, BOOL displayOnFoot, BOOL followPlayer) { Invoke(0xDB34E8D56FC13B08, hudColour, displayOnFoot, followPlayer); }

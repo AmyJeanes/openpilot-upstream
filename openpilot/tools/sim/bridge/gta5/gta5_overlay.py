@@ -31,6 +31,9 @@ BEHIND = 30.0  # m of route behind the car
 MAX_POINTS = 2500  # vertices per update, nearest first by layer priority
 MAX_CHARS = 60000
 SIMPLIFY = 0.15  # m a dropped vertex may be off the line
+RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
+RIBBON_TURN = 60.0  # deg: sharper corners in the route's line are cut where a side is shorter than RIBBON_JOG
+RIBBON_JOG = 5.0  # m
 CELL = 50.0  # m: node index cells
 LIGHT = 15  # node special: a traffic light's stop line
 CAR_HEIGHT = 0.6  # paths.CAR_HEIGHT
@@ -170,15 +173,23 @@ def chain(segs: np.ndarray) -> list[np.ndarray]:
   return out
 
 
-def clip_outside(segs: np.ndarray, areas: list[np.ndarray], min_len: float = 0.3) -> np.ndarray:
-  """Segments [M, 2, 3] with their parts inside any of the convex counterclockwise polygons [K, 2] cut out (in plan)."""
+def disk(centre: np.ndarray, radius: float, n: int = 16) -> np.ndarray:
+  """A circle as a counterclockwise polygon."""
+  a = np.arange(n) * (2 * np.pi / n)
+  return centre + radius * np.column_stack([np.cos(a), np.sin(a)])
+
+
+def clip_outside(segs: np.ndarray, areas: list[np.ndarray], min_len: float = 0.3, only: list | None = None) -> np.ndarray:
+  """Segments [M, 2, 3] with their parts inside any of the convex counterclockwise polygons [K, 2] cut out (in plan);
+  with `only`, each polygon cuts just the segments its mask [M] picks."""
   if not len(segs) or not areas:
     return segs
   a, d = segs[:, 0], segs[:, 1] - segs[:, 0]
   lo_xy, hi_xy = np.minimum(segs[:, 0, :2], segs[:, 1, :2]), np.maximum(segs[:, 0, :2], segs[:, 1, :2])
   cuts: dict[int, list] = defaultdict(list)
-  for poly in areas:
-    m = np.nonzero((hi_xy >= poly.min(0)).all(1) & (lo_xy <= poly.max(0)).all(1))[0]
+  for n, poly in enumerate(areas):
+    hit = (hi_xy >= poly.min(0)).all(1) & (lo_xy <= poly.max(0)).all(1)
+    m = np.nonzero(hit & only[n] if only is not None else hit)[0]
     if not len(m):
       continue
     e = np.roll(poly, -1, axis=0) - poly
@@ -326,13 +337,16 @@ class RoadGeometry:
       return np.stack([P[sel] + r3, Q[sel] + r3], axis=1)
 
     hulls = [(i, h) for i in nodes[self.junction[nodes]].tolist() if (h := self._hull(i)) is not None]
-    areas = [h[:-1, :2] for _, h in hulls]
+    # edges and dividers are cut out of junction areas and the circles round them: the links out of a junction node, as
+    # GTA's X-shaped junctions' diagonals, cross the junction beyond its node's own hull
+    masks = [h[:-1, :2] for _, h in hulls]
+    masks += [disk(p.xy[i], float(np.hypot(*(h[:-1, :2] - p.xy[i]).T).max())) for i, h in hulls]
     if "e" in layers:
       # not from a stop line in to its junction, nor across one: they'd criss-cross its area
       inA, inB = jA | self.stop_node[A], jB | self.stop_node[B]
       sel = ~(inA & inB & (jA | jB))
       segs = np.concatenate([side(self.lo[ks][sel], sel), side(self.hi[ks][sel], sel)])
-      segs = clip_outside(segs, areas)
+      segs = clip_outside(segs, masks)
       ends = np.round(segs * 4).astype(np.int64).reshape(-1, 6)
       diff = ends[:, :3] - ends[:, 3:]
       flip = diff[np.arange(len(diff)), np.argmax(diff != 0, axis=1)] > 0  # one key for both directions of a shared edge
@@ -349,7 +363,7 @@ class RoadGeometry:
         offs.append(self.lo[ks][s] + k * self.width[ks][s])
       segs = [side(o, s) for s, o in zip(rows, offs, strict=True) if s.any()]
       if segs:
-        out += [("d", line) for line in chain(clip_outside(np.concatenate(segs), areas))]
+        out += [("d", line) for line in chain(clip_outside(np.concatenate(segs), masks))]
     if "s" in layers:
       for i in nodes.tolist():
         out += self._stops(i)
@@ -363,6 +377,32 @@ def route_z(route, along: np.ndarray, fallback: float) -> np.ndarray:
   if z is None or not len(z) or np.isnan(z).any():
     return np.full(len(along), fallback)
   return np.interp(along, route.along, z)
+
+
+def ribbon_line(pts: np.ndarray, gap: float = RIBBON_GAP, max_turn: float = RIBBON_TURN) -> np.ndarray:
+  """The route's line [N, 3] for the plugin's ribbon: points at least gap m apart, and no corner sharper than max_turn
+  deg (the corner's point is dropped while it is), so GTA's sideways jogs between lanes don't make it jagged."""
+  if len(pts) <= 2:
+    return pts
+  keep = [pts[0]]
+  for q in pts[1:-1]:
+    if np.hypot(*(q[:2] - keep[-1][:2])) >= gap:
+      keep.append(q)
+  if len(keep) > 1 and np.hypot(*(pts[-1, :2] - keep[-1][:2])) < gap:
+    keep.pop()
+  keep.append(pts[-1])
+  out = np.array(keep)
+  while len(out) > 2:
+    d = np.diff(out[:, :2], axis=0)
+    h = np.arctan2(d[:, 1], d[:, 0])
+    turn = np.degrees(np.abs((np.diff(h) + np.pi) % (2 * np.pi) - np.pi))
+    seg = np.hypot(d[:, 0], d[:, 1])
+    turn[np.minimum(seg[:-1], seg[1:]) >= RIBBON_JOG] = 0.0  # a real turn's corner, between longer stretches, stays
+    k = int(np.argmax(turn))
+    if turn[k] <= max_turn:
+      break
+    out = np.delete(out, k + 1, axis=0)
+  return out
 
 
 def encode(origin: np.ndarray, items: list[tuple[str, np.ndarray]]) -> str:
@@ -386,9 +426,12 @@ def build(snap: dict, geometry: RoadGeometry | None) -> dict:
   if route is not None and "r" in layers and len(route.points) >= 2:
     line, along = snap["carriageway"]
     for kind, lo, hi in (("b", route.at - BEHIND, route.at), ("r", route.at, route.at + 2 * RADIUS + 100.0)):
-      sel = (along >= lo) & (along <= hi)
-      if sel.sum() >= 2:
-        pts = np.column_stack([line[sel], route_z(route, along[sel], road_z)])
+      # from exactly the car's place on the route, so the two parts meet there
+      lo, hi = max(lo, float(along[0])), min(hi, float(along[-1]))
+      v = np.concatenate(([lo], along[(along > lo + RIBBON_GAP) & (along < hi - RIBBON_GAP)], [hi]))
+      if hi - lo > RIBBON_GAP:
+        xy = np.column_stack([np.interp(v, along, line[:, 0]), np.interp(v, along, line[:, 1])])
+        pts = ribbon_line(np.column_stack([xy, route_z(route, v, road_z)]))
         items += [(kind, run) for run in within(pts, pos, RADIUS)]
   lane = snap.get("lane_line")
   if lane is not None and len(lane) >= 2 and "n" in layers:

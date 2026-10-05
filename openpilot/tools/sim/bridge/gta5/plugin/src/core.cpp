@@ -907,31 +907,40 @@ void SnapToGround(std::vector<DebugLine> &lines) {
     }
 }
 
-// A band ROUTE_RIBBON m wide along a polyline, its corners mitred, lying on the road: both windings, as a DRAW_POLY
-// shows from one side only. Returns the draw calls used.
+// a triangle seen from above and below: DRAW_POLY shows from one side only
+void DrawTriangle(const P3 &a, const P3 &b, const P3 &c, int r, int g, int bl, int alpha) {
+  DRAW_POLY(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, r, g, bl, alpha);
+  DRAW_POLY(a.x, a.y, a.z, c.x, c.y, c.z, b.x, b.y, b.z, r, g, bl, alpha);
+}
+
+// A band ROUTE_RIBBON m wide along a polyline, lying on the road: a quad per segment, square to it, and a bevel filling
+// the outside of each corner (mitred corners spike at sharp turns). Returns the draw calls used.
 constexpr float ROUTE_RIBBON = 1.75f;
 int DrawRibbon(const std::vector<P3> &pts, float lift, int r, int g, int b, int budget) {
-  size_t n = pts.size();
-  if (n < 2) return 0;
-  std::vector<std::pair<float, float>> side(n);  // per point: the half-width offset to the right
-  for (size_t i = 0; i < n; i++) {
-    float nx = 0, ny = 0;
-    for (size_t k : {i ? i - 1 : i, i + 1 < n ? i : i - 1}) {  // the segments either side
-      float dx = pts[k + 1].x - pts[k].x, dy = pts[k + 1].y - pts[k].y, len = std::max(std::hypot(dx, dy), 1e-3f);
-      nx += dy / len, ny += -dx / len;
-    }
-    float len = std::max(std::hypot(nx, ny), 1e-3f);
-    side[i] = {nx / len * ROUTE_RIBBON / 2, ny / len * ROUTE_RIBBON / 2};
-  }
+  constexpr int ALPHA = 90;
+  constexpr float HALF = ROUTE_RIBBON / 2;
   int used = 0;
-  for (size_t i = 1; i < n && used + 4 <= budget; i++, used += 4) {
+  bool havePrev = false;
+  float pnx = 0, pny = 0;  // the previous segment's half-width offset to the right
+  for (size_t i = 1; i < pts.size() && used + 6 <= budget; i++) {
     const P3 &a = pts[i - 1], &c = pts[i];
-    float ax = side[i - 1].first, ay = side[i - 1].second, cx = side[i].first, cy = side[i].second;
-    P3 aL{a.x - ax, a.y - ay, a.z + lift}, aR{a.x + ax, a.y + ay, a.z + lift}, cL{c.x - cx, c.y - cy, c.z + lift}, cR{c.x + cx, c.y + cy, c.z + lift};
-    DRAW_POLY(aL.x, aL.y, aL.z, aR.x, aR.y, aR.z, cR.x, cR.y, cR.z, r, g, b, 90);
-    DRAW_POLY(aL.x, aL.y, aL.z, cR.x, cR.y, cR.z, cL.x, cL.y, cL.z, r, g, b, 90);
-    DRAW_POLY(aL.x, aL.y, aL.z, cR.x, cR.y, cR.z, aR.x, aR.y, aR.z, r, g, b, 90);
-    DRAW_POLY(aL.x, aL.y, aL.z, cL.x, cL.y, cL.z, cR.x, cR.y, cR.z, r, g, b, 90);
+    float dx = c.x - a.x, dy = c.y - a.y, len = std::hypot(dx, dy);
+    if (!(len > 0.05f)) continue;  // also NaN
+    float nx = dy / len * HALF, ny = -dx / len * HALF;
+    P3 aL{a.x - nx, a.y - ny, a.z + lift}, aR{a.x + nx, a.y + ny, a.z + lift}, cL{c.x - nx, c.y - ny, c.z + lift}, cR{c.x + nx, c.y + ny, c.z + lift};
+    DrawTriangle(aL, aR, cR, r, g, b, ALPHA);
+    DrawTriangle(aL, cR, cL, r, g, b, ALPHA);
+    used += 4;
+    if (havePrev) {
+      // the outside of the corner at a: right of the line (+ the offsets) where it turns left
+      float turn = pnx * ny - pny * nx, s = turn > 0 ? 1.0f : -1.0f;
+      if (std::fabs(turn) > 1e-4f) {
+        P3 o{a.x, a.y, a.z + lift}, p{a.x + s * pnx, a.y + s * pny, a.z + lift}, q{a.x + s * nx, a.y + s * ny, a.z + lift};
+        DrawTriangle(o, p, q, r, g, b, ALPHA);
+        used += 2;
+      }
+    }
+    pnx = nx, pny = ny, havePrev = true;
   }
   return used;
 }
@@ -1024,6 +1033,7 @@ std::string DebugState(double now) {
 struct GpsRoute {
   bool on = false;
   int colour = 21, max = 100, radar = 16, map = 16;  // max: GTA's own limit on points isn't documented
+  bool take = true;  // the map's waypoint off the map meanwhile (TakeWaypoint)
   std::vector<P3> pts;
   int shown = 0;  // points given to the game
 } g_gps;
@@ -1062,27 +1072,70 @@ std::vector<P3> ParsePoints(const std::string &s) {
   return out;
 }
 
-// While ours shows, the waypoint's own route line is hidden (the waypoint stays: the bridge, nav and the AI driver take
-// it as the destination); a new waypoint is a new blip, so it's checked again every so often
-int g_hiddenRouteBlip = 0;
-void HideWaypointRoute(double now, bool force = false) {
+// While our route shows, the map's waypoint is taken off the map (in Enhanced nothing else hides GTA's own route line to
+// it: SET_BLIP_ROUTE on its blip doesn't) and held here, reported in the state as the waypoint still, and given back
+// with gpsroute off; a blip of our own marks it meanwhile. Within WAYPOINT_DONE m it's dropped, as GTA clears its own.
+struct HeldWaypoint {
+  bool held = false;
+  float x = 0, y = 0, z = 0;
+  int marker = 0;  // our blip
+} g_waypoint;
+constexpr float WAYPOINT_DONE = 20.0f;  // m
+
+void RemoveWaypointMarker() {
+  if (g_waypoint.marker && DOES_BLIP_EXIST(g_waypoint.marker)) REMOVE_BLIP(&g_waypoint.marker);
+  g_waypoint.marker = 0;
+}
+
+void ReleaseWaypoint(bool restore) {
+  if (!g_waypoint.held) return;
+  g_waypoint.held = false;
+  RemoveWaypointMarker();
+  if (restore) SET_NEW_WAYPOINT(g_waypoint.x, g_waypoint.y);
+  Log(std::string("waypoint ") + (restore ? "given back" : "reached") + " at " + Num(g_waypoint.x) + "," + Num(g_waypoint.y));
+}
+
+void TakeWaypoint(double now) {
   static double next = 0;
-  bool hide = g_gps.on && g_gps.shown > 0;
-  if (!force && (now < next || (!hide && !g_hiddenRouteBlip))) return;
-  next = now + 0.5;
-  int blip = IS_WAYPOINT_ACTIVE() ? GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()) : 0;
-  if (hide && blip && blip != g_hiddenRouteBlip) {
-    SET_BLIP_ROUTE(blip, FALSE);
-    g_hiddenRouteBlip = blip;
-  } else if (!hide && g_hiddenRouteBlip) {
-    if (blip == g_hiddenRouteBlip) SET_BLIP_ROUTE(blip, TRUE);
-    g_hiddenRouteBlip = 0;
+  if (now < next) return;
+  next = now + 0.25;
+  bool keep = g_gps.on && g_gps.take;
+  if (!keep) {
+    ReleaseWaypoint(true);
+    return;
   }
+  if (g_waypoint.held && g_veh.handle && std::hypot(g_m.pos.x - g_waypoint.x, g_m.pos.y - g_waypoint.y) < WAYPOINT_DONE) {
+    ReleaseWaypoint(false);
+    return;
+  }
+  // a new one set on the map replaces it; taken only once our route shows, which needs the bridge's router
+  if (g_gps.shown <= 0 || !IS_WAYPOINT_ACTIVE()) return;
+  Vector3 w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()));
+  SET_WAYPOINT_OFF();
+  RemoveWaypointMarker();
+  g_waypoint = {true, w.x, w.y, w.z, ADD_BLIP_FOR_COORD(w.x, w.y, w.z)};
+  if (g_waypoint.marker) {
+    SET_BLIP_SPRITE(g_waypoint.marker, 8);  // the waypoint's own sprite
+    SET_BLIP_COLOUR(g_waypoint.marker, 27);  // purple
+  }
+  Log("waypoint taken at " + Num(w.x) + "," + Num(w.y) + " while our route shows");
+}
+
+// the map's waypoint, or the one held while our route shows
+bool WaypointAt(Vector3 &w) {
+  if (g_waypoint.held) {
+    w = Vector3{};
+    w.x = g_waypoint.x, w.y = g_waypoint.y, w.z = g_waypoint.z;
+    return true;
+  }
+  if (!IS_WAYPOINT_ACTIVE()) return false;
+  w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()));
+  return true;
 }
 
 std::string GpsState() {
   return "\"gpsRoute\":{\"on\":" + std::string(g_gps.on ? "true" : "false") + ",\"points\":" + std::to_string(g_gps.shown) + ",\"max\":" +
-         std::to_string(g_gps.max) + "}";
+         std::to_string(g_gps.max) + ",\"waypointHeld\":" + (g_waypoint.held ? "true" : "false") + "}";
 }
 
 // GTA's own GPS directions to a point, while asked for (gtadirs command), to compare with our router's
@@ -1131,8 +1184,9 @@ std::string Route(double now) {
   if (now < next) return route;
   next = now + 0.2;
   route.clear();
-  if (!IS_WAYPOINT_ACTIVE()) return route;
-  Vector3 w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()));
+  Vector3 w{};
+  if (!WaypointAt(w)) return route;
+  if (g_waypoint.held) return route = "\"waypoint\":[" + Num(w.x) + "," + Num(w.y) + "]";  // no GTA route to it meanwhile
   Vector3 last{};
   for (float d = 0; d <= 500.0f; d += 5.0f) {
     Vector3 p{};
@@ -1638,13 +1692,15 @@ void StepAi(Ped ped, Vehicle v, double now) {
   SET_VEHICLE_INDICATOR_LIGHTS(v, 1, g_indicator == 1);
   SET_VEHICLE_INDICATOR_LIGHTS(v, 0, g_indicator == 2);
 
-  bool wander = g_ai.task == "wander" || (!g_ai.hasTarget && !IS_WAYPOINT_ACTIVE());
+  Vector3 w{};
+  bool hasWaypoint = WaypointAt(w);
+  bool wander = g_ai.task == "wander" || (!g_ai.hasTarget && !hasWaypoint);
   g_ai.mode = wander ? "wander" : g_ai.hasTarget ? "target" : "waypoint";
   Vector3 target = g_ai.target;
   if (g_ai.mode == "waypoint") {
     if (now - g_ai.waypointAt > 1.0) {
       // the road node nearest the waypoint, whose blip has no height
-      Vector3 w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID())), node{};
+      Vector3 node{};
       float heading = 0;
       g_ai.waypoint = GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(w.x, w.y, w.z, &node, &heading, 1, 3.0f, 0.0f) ? node : w;
       g_ai.waypointAt = now;
@@ -1810,10 +1866,12 @@ void HandleMessage(const Message &m, double now) {
     g_debug.recording = MsgBool(m, "rec");
     g_debug.t = now;
   } else if (type == "gpsroute") {
-    // our route on the game's map: on, colour (HUD colour), max (points), radar and map (line widths)
+    // our route on the game's map: on, colour (HUD colour), max (points), radar and map (line widths), take (the map's
+    // waypoint held off the map meanwhile, as GTA's own route line to it can't be hidden; take=0 leaves both lines)
     g_gps.on = MsgBool(m, "on", g_gps.on);
     g_gps.colour = static_cast<int>(MsgNum(m, "colour", g_gps.colour));
     g_gps.max = std::clamp(static_cast<int>(MsgNum(m, "max", g_gps.max)), 2, 2000);
+    g_gps.take = MsgBool(m, "take", g_gps.take);
     g_gps.radar = static_cast<int>(MsgNum(m, "radar", g_gps.radar));
     g_gps.map = static_cast<int>(MsgNum(m, "map", g_gps.map));
     if (!g_gps.on) g_gps.pts.clear();
@@ -1893,6 +1951,7 @@ void HandleMessage(const Message &m, double now) {
     SET_DRIVE_TASK_CRUISE_SPEED(g_lead.driver, std::max(v, 0.01f));
     SET_VEHICLE_HANDBRAKE(g_lead.veh, v < 0.5f);
   } else if (type == "waypoint") {
+    ReleaseWaypoint(false);  // a held one is replaced or cleared too
     if (MsgBool(m, "off")) SET_WAYPOINT_OFF();
     else SET_NEW_WAYPOINT(static_cast<float>(MsgNum(m, "x")), static_cast<float>(MsgNum(m, "y")));
   } else if (type == "ai") {
@@ -2117,7 +2176,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   }
   // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
   if (view < 0) DrawDebug(now);
-  HideWaypointRoute(now);
+  TakeWaypoint(now);
   if (connected) {
     // police chases after a scrape with traffic would end any drive
     SET_MAX_WANTED_LEVEL(0);
@@ -2147,7 +2206,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   if (g_radarHidden) DISPLAY_RADAR(TRUE);
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();
-  HideWaypointRoute(QpcSeconds(), true);  // and gives the waypoint its own line back
+  ReleaseWaypoint(true);  // and gives the map its waypoint back
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();

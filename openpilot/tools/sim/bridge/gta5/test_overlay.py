@@ -56,6 +56,12 @@ def test_simplify_and_hull():
   assert len(hull) == 4 and not any((hull == [1, 1]).all(1))
 
 
+def test_ribbon_line_drops_jogs_keeps_turns():
+  pts = np.array([[0, 0, 0], [0, 20, 0], [0, 20.5, 0], [2.5, 21, 0], [2.5, 40, 0], [2.5, 60, 0], [30, 60, 0]], float)
+  out = ov.ribbon_line(pts)
+  assert out[:, :2].tolist() == [[0, 0], [2.5, 21], [2.5, 40], [2.5, 60], [30, 60]]
+
+
 def test_within_splits_at_the_radius():
   line = np.column_stack([np.linspace(-300, 300, 61), np.zeros(61), np.zeros(61)])
   runs = ov.within(line, np.zeros(2), 150.0)

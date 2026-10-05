@@ -31,8 +31,9 @@
                                                 the map debug overlay in the world, from the player's camera (gta5_overlay.py;
                                                 F7 toggles it); off while recording unless force=1; ground=1 puts the lines
                                                 on the game's ground rather than the map's heights; debug off
-  gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16]
-                                                our route on the game's minimap and map as a custom GPS route; gpsroute off
+  gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16 take=1]
+                                                our route on the minimap and map as a custom GPS route, the map's waypoint held
+                                                off it meanwhile (take=0 leaves it); gpsroute off
   gta5_cmd.py gtadirs <x> <y> <z>               GTA's own GPS directions from the car to a point (its next turn and the
                                                 distance to it), printed from the state; gtadirs off stops asking
   gta5_cmd.py state [/tmp/gta5state.json]       save and print the plugin's next state

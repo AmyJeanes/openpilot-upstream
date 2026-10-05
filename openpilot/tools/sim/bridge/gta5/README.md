@@ -121,7 +121,9 @@ problems while driving (`gta5_overlay.py`): lane edges green, dividers cyan, sto
 (signs), junction areas blue, the route a 1.75 m translucent red band on the road (darker behind the car), nav's lane
 plan a dashed white line 0.25 m up (2 m on, 1.5 m off) so it reads over the route, the next turn a white cylinder and
 where its signal comes on an amber cone, all within 150 m and lifted 0.1 m off the road. Lane edges and dividers stop at
-junctions (from the stop line in, and inside junction areas). Lines are DRAW_LINE's, 1 px wide. The bridge sends
+junctions (from the stop line in, and inside junction areas and the circles round them). The route's band is a quad per
+segment with bevelled corners, along the route's line thinned to 1 m and cleared of short sideways jogs. Lines are
+DRAW_LINE's, 1 px wide. The bridge sends
 them every 0.5 s while the plugin's debug is on (`GTA5_OVERLAY=0` stops it); they come from GTA's roads with
 `GTA5_MAP`/`GTA5_ROUTER`. `layers=` picks some of edges, dividers, stops, junctions, route, nav, points and fill
 (translucent junction areas); `ground=1` puts the lines on the game's ground rather than at the map's heights, which
@@ -130,9 +132,12 @@ hides height errors in the map. The plugin draws them only on the player's frame
 
 `gta5_cmd.py gpsroute on` (or `gps_route=1` in gta5op.ini) shows our route on the minimap and pause map as GTA's own
 purple GPS line (a custom GPS route, `colour=` a HUD colour, `max=` points, 100 by default as GTA's limit isn't
-documented; a longer route is sent in parts as the car goes). It works without the overlay. While it shows, the game
-waypoint's own route line is hidden (the waypoint stays, as the destination), and comes back with `gpsroute off`; the
-plugin's GTA GPS route points may then be empty, which matters only without `GTA5_ROUTER`. `gta5_cmd.py gtadirs x y z` prints GTA's own GPS directions from the car to a
+documented; a longer route is sent in parts as the car goes). It works without the overlay. GTA's own route line to the
+map's waypoint can't be hidden in Enhanced (SET_BLIP_ROUTE on the waypoint doesn't), so while ours shows the plugin
+takes the waypoint off the map and holds it, marked by a purple blip of its own and still reported as the waypoint (the
+bridge, nav and the AI driver go on using it); a new waypoint set on the map replaces it, `gta5_cmd.py waypoint off=1`
+clears it, it's dropped within 20 m as GTA drops its own, and `gpsroute off` gives it back. `take=0` leaves the waypoint
+alone (both lines show; `colour=` tells them apart). `gta5_cmd.py gtadirs x y z` prints GTA's own GPS directions from the car to a
 point (its next turn and the distance to it), and `compare_dirs.py <trips>` compares them with our router's at e2e trips'
 starts (it places the car, so run it only with nothing else driving).
 
