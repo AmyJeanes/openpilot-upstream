@@ -16,7 +16,7 @@
   gta5_cmd.py mount dashcam [drop=0.08 back=0.06] [jitter=1] [dx= dy= dz= pitch= yaw=]
                                                 the camera at the top of the windscreen (comma: a comma device's place, the
                                                 default); jitter=1 moves it a little at random, jitter=0 not at all
-  gta5_cmd.py randomise [seed] [model_share=0.6] [mount=dashcam|comma|keep] [jitter=0] [vehicle=0] [world=0] [traffic=0]
+  gta5_cmd.py randomise [seed] [model_share=0.6] [mount=mixed|dashcam|comma|keep] [comma_share=0.5] [jitter=0] [vehicle=0] [world=0] [traffic=0]
              [dry=1]                            pick a drive's weather, time, traffic, car, colours and mount (gta5_scene.py),
                                                 print them as a JSON line and set them; waits for the car swap
   gta5_cmd.py camera yaw=5 pitch=0              rotate the camera on its mount (degrees)
@@ -156,9 +156,9 @@ def randomise(argv: list[str]) -> None:
   seeded = bool(argv) and "=" not in argv[0]
   seed = int(argv[0]) if seeded else random.randrange(1 << 31)
   opts = options(argv[1:] if seeded else argv)
-  choice = gta5_scene.pick(seed, model_share=float(opts.get("model_share", 0.6)), mount=str(opts.get("mount", "dashcam")),
+  choice = gta5_scene.pick(seed, model_share=float(opts.get("model_share", 0.6)), mount=str(opts.get("mount", "mixed")),
                            jitter=bool(opts.get("jitter", 1)), vehicle=bool(opts.get("vehicle", 1)), world=bool(opts.get("world", 1)),
-                           traffic=bool(opts.get("traffic", 1)))
+                           traffic=bool(opts.get("traffic", 1)), comma_share=float(opts.get("comma_share", 0.5)))
   print("randomise " + json.dumps(choice), flush=True)
   if opts.get("dry"):
     return

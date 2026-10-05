@@ -182,8 +182,8 @@ def pick_mount(rng: random.Random, mode: str = "dashcam", jitter: bool = True) -
   return out
 
 
-def pick(seed: int, model_share: float = 0.6, mount: str = "dashcam", jitter: bool = True, vehicle: bool = True,
-         world: bool = True, traffic: bool = True) -> dict:
+def pick(seed: int, model_share: float = 0.6, mount: str = "mixed", jitter: bool = True, vehicle: bool = True,
+         world: bool = True, traffic: bool = True, comma_share: float = 0.5) -> dict:
   """A drive's scene, the same for the same seed and options; parts turned off are left as they are."""
   rng = random.Random(seed)
   hour, minute = pick_time(rng)
@@ -196,6 +196,9 @@ def pick(seed: int, model_share: float = 0.6, mount: str = "dashcam", jitter: bo
     choice["traffic"] = pick_traffic(rng, hour)
   if vehicle:
     choice["vehicle"] = {"car": car, **pick_colours(rng, car)}
+  if mount == "mixed":
+    # the comma mount is where openpilot's test car carries its camera; on other cars it can sit in the glass
+    mount = "comma" if vehicle and car == "model3" and rng.random() < comma_share else "dashcam"
   if mount in ("dashcam", "comma"):
     choice["mount"] = pick_mount(rng, mount, jitter)
   return choice
