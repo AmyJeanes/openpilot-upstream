@@ -1,4 +1,5 @@
 import math
+import os
 import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
@@ -20,6 +21,9 @@ CRUISE_DISABLED_CHAR = '–'
 
 SET_SPEED_PERSISTENCE = 2.5  # seconds
 
+# the driving model's name, from the GTA5 sim's services script; unset shows nothing
+MODEL_LABEL = os.getenv("GTA5_MODEL_LABEL", "").strip()
+
 
 @dataclass(frozen=True)
 class FontSizes:
@@ -27,6 +31,7 @@ class FontSizes:
   speed_unit: int = 66
   max_speed: int = 36
   set_speed: int = 112
+  model_label: int = 16
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,9 @@ class HudRenderer(Widget):
     if self.is_cruise_set:
       self._draw_set_speed(rect)
 
+    if MODEL_LABEL and self._can_draw_top_icons:
+      self._draw_model_label(rect)
+
     self._draw_model_source(rect)
 
     self._draw_steering_wheel(rect)
@@ -301,6 +309,20 @@ class HudRenderer(Widget):
       0,
       max_color,
     )
+
+  def _draw_model_label(self, rect: rl.Rectangle) -> None:
+    """Draw the driving model's name under the MAX indicator, above the steering wheel."""
+    label_rect = rl.Rectangle(rect.x + 12, rect.y + 150, 138, 22)
+    rl.draw_rectangle_rounded(label_rect, 1.0, 10, rl.Color(0, 0, 0, 110))
+
+    max_width = label_rect.width - 12
+    text, n = MODEL_LABEL, len(MODEL_LABEL)
+    while n > 1 and measure_text_cached(self._font_medium, text, FONT_SIZES.model_label).x > max_width:
+      n -= 1
+      text = MODEL_LABEL[:n] + ".."  # the UI fonts have no ellipsis glyph
+    text_size = measure_text_cached(self._font_medium, text, FONT_SIZES.model_label)
+    pos = rl.Vector2(label_rect.x + (label_rect.width - text_size.x) / 2, label_rect.y + (label_rect.height - text_size.y) / 2)
+    rl.draw_text_ex(self._font_medium, text, pos, FONT_SIZES.model_label, 0, rl.Color(200, 200, 200, 190))
 
   def _draw_current_speed(self, rect: rl.Rectangle) -> None:
     """Draw the current vehicle speed and unit."""

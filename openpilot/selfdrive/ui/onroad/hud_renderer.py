@@ -1,3 +1,4 @@
+import os
 import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
@@ -12,6 +13,9 @@ from openpilot.system.ui.widgets import Widget
 SET_SPEED_NA = 255
 KM_TO_MILE = 0.621371
 CRUISE_DISABLED_CHAR = '–'
+
+# the driving model's name, from the GTA5 sim's services script; unset shows nothing
+MODEL_LABEL = os.getenv("GTA5_MODEL_LABEL", "").strip()
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,7 @@ class FontSizes:
   speed_unit: int = 66
   max_speed: int = 40
   set_speed: int = 90
+  model_label: int = 36
 
 
 @dataclass(frozen=True)
@@ -115,6 +120,9 @@ class HudRenderer(Widget):
     if self.is_cruise_available:
       self._draw_set_speed(rect)
 
+    if MODEL_LABEL:
+      self._draw_model_label(rect)
+
     self._draw_current_speed(rect)
 
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
@@ -166,6 +174,22 @@ class HudRenderer(Widget):
       0,
       set_speed_color,
     )
+
+  def _draw_model_label(self, rect: rl.Rectangle) -> None:
+    """Draw the driving model's name under the MAX box, at the box's width."""
+    width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
+    x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - width) // 2
+    label_rect = rl.Rectangle(x, rect.y + 45 + UI_CONFIG.set_speed_height + 12, width, 56)
+    rl.draw_rectangle_rounded(label_rect, 1.0, 10, rl.Color(0, 0, 0, 110))
+
+    max_width = label_rect.width - 24
+    text, n = MODEL_LABEL, len(MODEL_LABEL)
+    while n > 1 and measure_text_cached(self._font_medium, text, FONT_SIZES.model_label).x > max_width:
+      n -= 1
+      text = MODEL_LABEL[:n] + ".."  # the UI fonts have no ellipsis glyph
+    text_size = measure_text_cached(self._font_medium, text, FONT_SIZES.model_label)
+    pos = rl.Vector2(label_rect.x + (label_rect.width - text_size.x) / 2, label_rect.y + (label_rect.height - text_size.y) / 2)
+    rl.draw_text_ex(self._font_medium, text, pos, FONT_SIZES.model_label, 0, rl.Color(200, 200, 200, 190))
 
   def _draw_current_speed(self, rect: rl.Rectangle) -> None:
     """Draw the current vehicle speed and unit."""
