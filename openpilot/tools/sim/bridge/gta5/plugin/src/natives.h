@@ -163,6 +163,8 @@ inline Vector3 GET_BLIP_INFO_ID_COORD(int blip) { return Invoke<Vector3>(0xFA7C7
 inline void SET_WAYPOINT_OFF() { Invoke(0xA7E4E2D361C2627F); }
 inline void SET_NEW_WAYPOINT(float x, float y) { Invoke(0xFE43368D2AA4F2FC, x, y); }
 inline BOOL GET_POS_ALONG_GPS_TYPE_ROUTE(Vector3 *result, BOOL p1, float dist, int type) { return Invoke<BOOL>(0xF3162836C28F9DA5, result, p1, dist, type); }
+// a blip's GPS route line (the waypoint's is GTA's own route), drawn or not
+inline void SET_BLIP_ROUTE(int blip, BOOL enabled) { Invoke(0x4F7D8A9BFB0B43E9, blip, enabled); }
 // a script's own line on the minimap and map, straight between its points
 inline void CLEAR_GPS_CUSTOM_ROUTE() { Invoke(0xE6DE0561D9232A64); }
 inline void START_GPS_CUSTOM_ROUTE(int hudColour, BOOL displayOnFoot, BOOL followPlayer) { Invoke(0xDB34E8D56FC13B08, hudColour, displayOnFoot, followPlayer); }

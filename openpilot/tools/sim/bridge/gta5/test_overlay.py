@@ -62,6 +62,14 @@ def test_within_splits_at_the_radius():
   assert len(runs) == 1 and runs[0][0, 0] == -160 and runs[0][-1, 0] == 160
 
 
+def test_clip_outside_cuts_out_areas():
+  square = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], float)  # counterclockwise
+  segs = np.array([[[-5, 5, 1], [15, 5, 3]], [[-5, 20, 0], [15, 20, 0]], [[2, 2, 0], [8, 8, 0]]], float)
+  out = ov.clip_outside(segs, [square])
+  assert len(out) == 3  # the crossing one in two pieces, the one outside whole, the one inside gone
+  np.testing.assert_allclose(out[1:], [[[-5, 5, 1], [0, 5, 1.5]], [[10, 5, 2.5], [15, 5, 3]]])
+
+
 def test_gps_route_sends_when_it_changes_or_the_plugin_lost_it():
   pts = np.column_stack([np.zeros(200), np.arange(200) * 5.0])
   route = Route(pts, [])
@@ -146,6 +154,16 @@ def test_overlay_at_places(paths, place):
   assert {"e", "d", "r"} <= kinds, kinds
   if place == "L7":  # the route turns left at its junction
     assert {"j", "m", "g"} <= kinds, kinds
+  # no lane edges or dividers inside junction areas
+  areas = [line[:-1, :2] for k, line in items if k == "j"]
+  for k, line in items:
+    if k in "ed":
+      mids = (line[1:, :2] + line[:-1, :2]) / 2
+      for poly in areas:
+        e = np.roll(poly, -1, axis=0) - poly
+        rel = mids[:, None] - poly[None]
+        inside = ((e[None, :, 0] * rel[..., 1] - e[None, :, 1] * rel[..., 0]) > 0.2).all(1)
+        assert not inside.any(), (k, mids[inside][:3])
   assert len(msg["g"]) <= ov.MAX_CHARS and msg["n"] <= ov.MAX_POINTS
   assert stats["ms"] < 250
   x, y, z, _ = PLACES[place]

@@ -857,7 +857,7 @@ constexpr int DEBUG_MAX_SEGMENTS = 6000;  // drawn per frame
 
 char DebugLayer(char kind) { return kind == 'l' ? 's' : kind == 'b' ? 'r' : kind == 'g' ? 'm' : kind; }
 
-// the map preview's colours (gta5_train maprender.preview)
+// the map preview's colours (gta5_train maprender.preview), but nav's plan, which runs on the route
 void DebugColour(char kind, int &r, int &g, int &b) {
   switch (kind) {
     case 'e': r = 0, g = 255, b = 0; break;
@@ -867,7 +867,7 @@ void DebugColour(char kind, int &r, int &g, int &b) {
     case 'j': r = 40, g = 110, b = 255; break;
     case 'r': r = 255, g = 25, b = 25; break;
     case 'b': r = 140, g = 15, b = 15; break;
-    case 'n': r = 255, g = 0, b = 255; break;
+    case 'n': r = 255, g = 255, b = 255; break;  // dashed over the route's ribbon
     case 'g': r = 255, g = 190, b = 0; break;
     default: r = 255, g = 255, b = 255;
   }
@@ -907,6 +907,58 @@ void SnapToGround(std::vector<DebugLine> &lines) {
     }
 }
 
+// A band ROUTE_RIBBON m wide along a polyline, its corners mitred, lying on the road: both windings, as a DRAW_POLY
+// shows from one side only. Returns the draw calls used.
+constexpr float ROUTE_RIBBON = 1.75f;
+int DrawRibbon(const std::vector<P3> &pts, float lift, int r, int g, int b, int budget) {
+  size_t n = pts.size();
+  if (n < 2) return 0;
+  std::vector<std::pair<float, float>> side(n);  // per point: the half-width offset to the right
+  for (size_t i = 0; i < n; i++) {
+    float nx = 0, ny = 0;
+    for (size_t k : {i ? i - 1 : i, i + 1 < n ? i : i - 1}) {  // the segments either side
+      float dx = pts[k + 1].x - pts[k].x, dy = pts[k + 1].y - pts[k].y, len = std::max(std::hypot(dx, dy), 1e-3f);
+      nx += dy / len, ny += -dx / len;
+    }
+    float len = std::max(std::hypot(nx, ny), 1e-3f);
+    side[i] = {nx / len * ROUTE_RIBBON / 2, ny / len * ROUTE_RIBBON / 2};
+  }
+  int used = 0;
+  for (size_t i = 1; i < n && used + 4 <= budget; i++, used += 4) {
+    const P3 &a = pts[i - 1], &c = pts[i];
+    float ax = side[i - 1].first, ay = side[i - 1].second, cx = side[i].first, cy = side[i].second;
+    P3 aL{a.x - ax, a.y - ay, a.z + lift}, aR{a.x + ax, a.y + ay, a.z + lift}, cL{c.x - cx, c.y - cy, c.z + lift}, cR{c.x + cx, c.y + cy, c.z + lift};
+    DRAW_POLY(aL.x, aL.y, aL.z, aR.x, aR.y, aR.z, cR.x, cR.y, cR.z, r, g, b, 90);
+    DRAW_POLY(aL.x, aL.y, aL.z, cR.x, cR.y, cR.z, cL.x, cL.y, cL.z, r, g, b, 90);
+    DRAW_POLY(aL.x, aL.y, aL.z, cR.x, cR.y, cR.z, aR.x, aR.y, aR.z, r, g, b, 90);
+    DRAW_POLY(aL.x, aL.y, aL.z, cL.x, cL.y, cL.z, cR.x, cR.y, cR.z, r, g, b, 90);
+  }
+  return used;
+}
+
+// a line in DASH_ON m dashes with DASH_OFF m gaps, so it reads over the route's ribbon; returns the draw calls used
+constexpr float DASH_ON = 2.0f, DASH_OFF = 1.5f;
+int DrawDashed(const std::vector<P3> &pts, float lift, int r, int g, int b, int budget) {
+  int used = 0;
+  float phase = 0;  // m into the current dash and gap
+  for (size_t i = 1; i < pts.size() && used < budget; i++) {
+    const P3 &a = pts[i - 1], &c = pts[i];
+    float len = std::hypot(c.x - a.x, c.y - a.y);
+    for (float s = 0; s < len && used < budget;) {
+      float left = phase < DASH_ON ? DASH_ON - phase : DASH_ON + DASH_OFF - phase, e = std::min(len, s + left);
+      if (phase < DASH_ON) {
+        float t0 = s / len, t1 = e / len;
+        DRAW_LINE(a.x + (c.x - a.x) * t0, a.y + (c.y - a.y) * t0, a.z + (c.z - a.z) * t0 + lift, a.x + (c.x - a.x) * t1,
+                  a.y + (c.y - a.y) * t1, a.z + (c.z - a.z) * t1 + lift, r, g, b, 255);
+        used++;
+      }
+      phase = std::fmod(phase + (e - s), DASH_ON + DASH_OFF);
+      s = e;
+    }
+  }
+  return used;
+}
+
 void DrawDebug(double now) {
   const DebugOverlay &d = g_debug;
   if (!d.on) return;
@@ -941,6 +993,14 @@ void DrawDebug(double now) {
       }
     }
     if (!has(DebugLayer(l.kind))) continue;
+    if (l.kind == 'r' || l.kind == 'b') {
+      budget -= DrawRibbon(l.pts, lift, r, g, b, budget);
+      continue;
+    }
+    if (l.kind == 'n') {
+      budget -= DrawDashed(l.pts, lift + 0.15f, r, g, b, budget);
+      continue;
+    }
     for (size_t i = 1; i < l.pts.size() && budget > 0; i++, budget--) {
       const P3 &a = l.pts[i - 1], &c = l.pts[i];
       DRAW_LINE(a.x, a.y, a.z + lift, c.x, c.y, c.z + lift, r, g, b, 255);
@@ -996,6 +1056,24 @@ std::vector<P3> ParsePoints(const std::string &s) {
     out.push_back({v[0], v[1], v[2]});
   }
   return out;
+}
+
+// While ours shows, the waypoint's own route line is hidden (the waypoint stays: the bridge, nav and the AI driver take
+// it as the destination); a new waypoint is a new blip, so it's checked again every so often
+int g_hiddenRouteBlip = 0;
+void HideWaypointRoute(double now) {
+  static double next = 0;
+  bool hide = g_gps.on && g_gps.shown > 0;
+  if (hide && now < next) return;
+  next = now + 0.5;
+  int blip = IS_WAYPOINT_ACTIVE() ? GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()) : 0;
+  if (hide && blip && blip != g_hiddenRouteBlip) {
+    SET_BLIP_ROUTE(blip, FALSE);
+    g_hiddenRouteBlip = blip;
+  } else if (!hide && g_hiddenRouteBlip) {
+    if (blip == g_hiddenRouteBlip) SET_BLIP_ROUTE(blip, TRUE);
+    g_hiddenRouteBlip = 0;
+  }
 }
 
 std::string GpsState() {
@@ -2035,6 +2113,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   }
   // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
   if (view < 0) DrawDebug(now);
+  HideWaypointRoute(now);
   if (connected) {
     // police chases after a scrape with traffic would end any drive
     SET_MAX_WANTED_LEVEL(0);
@@ -2064,6 +2143,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   if (g_radarHidden) DISPLAY_RADAR(TRUE);
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();
+  HideWaypointRoute(QpcSeconds());  // and gives the waypoint its own line back
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();

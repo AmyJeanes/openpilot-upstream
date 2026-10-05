@@ -6,6 +6,7 @@ lane dividers, stop lines (lights, signs), junction areas, the route along the l
 next turn with where its signal comes on. The road pieces follow gta5_train's maprender (its lane bands, dividers left
 out at junctions, junction areas as hulls at the junction nodes where roads cross, stop lines across the lanes into
 their junction, the route as its carriageway_line), drawn at their own heights rather than filtered to the car's level.
+Lane edges and dividers are also cut out of junction areas, and edges left out from a stop line in to its junction.
 
 GPS route: while the plugin's gpsroute is on, our route ahead, decimated to the points GTA's custom GPS route takes,
 whenever the route changes or the car nears the end of what was sent.
@@ -169,6 +170,42 @@ def chain(segs: np.ndarray) -> list[np.ndarray]:
   return out
 
 
+def clip_outside(segs: np.ndarray, areas: list[np.ndarray], min_len: float = 0.3) -> np.ndarray:
+  """Segments [M, 2, 3] with their parts inside any of the convex counterclockwise polygons [K, 2] cut out (in plan)."""
+  if not len(segs) or not areas:
+    return segs
+  a, d = segs[:, 0], segs[:, 1] - segs[:, 0]
+  lo_xy, hi_xy = np.minimum(segs[:, 0, :2], segs[:, 1, :2]), np.maximum(segs[:, 0, :2], segs[:, 1, :2])
+  cuts: dict[int, list] = defaultdict(list)
+  for poly in areas:
+    m = np.nonzero((hi_xy >= poly.min(0)).all(1) & (lo_xy <= poly.max(0)).all(1))[0]
+    if not len(m):
+      continue
+    e = np.roll(poly, -1, axis=0) - poly
+    rel = a[m, None, :2] - poly[None]
+    num = e[None, :, 0] * rel[..., 1] - e[None, :, 1] * rel[..., 0]  # >= 0 inside each edge (left of it)
+    den = e[None, :, 0] * d[m, None, 1] - e[None, :, 1] * d[m, None, 0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+      t = -num / den
+    enter = np.maximum(np.where(den > 1e-12, t, -np.inf).max(1), 0.0)
+    leave = np.minimum(np.where(den < -1e-12, t, np.inf).min(1), 1.0)
+    never = ((np.abs(den) <= 1e-12) & (num < 0)).any(1)
+    for k, t0, t1, no in zip(m, enter, leave, never, strict=True):
+      if not no and t1 > t0:
+        cuts[int(k)].append((t0, t1))
+  if not cuts:
+    return segs
+  out = [segs[k] for k in range(len(segs)) if k not in cuts]
+  for k, spans in cuts.items():
+    length = float(np.linalg.norm(d[k, :2]))
+    t = 0.0
+    for t0, t1 in sorted(spans) + [(1.0, 1.0)]:
+      if (t0 - t) * length >= min_len:
+        out.append(np.array([a[k] + d[k] * t, a[k] + d[k] * t0]))
+      t = max(t, t1)
+  return np.array(out).reshape(-1, 2, 3)
+
+
 def within(line: np.ndarray, pos: np.ndarray, radius: float) -> list[np.ndarray]:
   """The runs of a polyline [N, 3] with points within radius of pos (2D), each with one point beyond at its ends."""
   if len(line) < 2:
@@ -221,6 +258,7 @@ class RoadGeometry:
     for k, (i, j) in enumerate(zip(self.A.tolist(), self.B.tolist(), strict=True)):
       self.node_bands[i].append(k)
       self.node_bands[j].append(k)
+    self.stop_node = np.array([paths.stop_line(i) for i in range(len(xy))], bool)
     self.junction = np.zeros(len(xy), bool)
     for i, ks in self.node_bands.items():
       if paths.junction(i):
@@ -287,9 +325,14 @@ class RoadGeometry:
       r3 = np.column_stack([R[sel], np.zeros(sel.sum())]) * off[:, None]
       return np.stack([P[sel] + r3, Q[sel] + r3], axis=1)
 
+    hulls = [(i, h) for i in nodes[self.junction[nodes]].tolist() if (h := self._hull(i)) is not None]
+    areas = [h[:-1, :2] for _, h in hulls]
     if "e" in layers:
-      sel = ~(jA & jB)  # links inside a junction would criss-cross its area
+      # not from a stop line in to its junction, nor across one: they'd criss-cross its area
+      inA, inB = jA | self.stop_node[A], jB | self.stop_node[B]
+      sel = ~(inA & inB & (jA | jB))
       segs = np.concatenate([side(self.lo[ks][sel], sel), side(self.hi[ks][sel], sel)])
+      segs = clip_outside(segs, areas)
       ends = np.round(segs * 4).astype(np.int64).reshape(-1, 6)
       diff = ends[:, :3] - ends[:, 3:]
       flip = diff[np.arange(len(diff)), np.argmax(diff != 0, axis=1)] > 0  # one key for both directions of a shared edge
@@ -306,15 +349,12 @@ class RoadGeometry:
         offs.append(self.lo[ks][s] + k * self.width[ks][s])
       segs = [side(o, s) for s, o in zip(rows, offs, strict=True) if s.any()]
       if segs:
-        out += [("d", line) for line in chain(np.concatenate(segs))]
+        out += [("d", line) for line in chain(clip_outside(np.concatenate(segs), areas))]
     if "s" in layers:
       for i in nodes.tolist():
         out += self._stops(i)
     if "j" in layers or "f" in layers:
-      for i in nodes[self.junction[nodes]].tolist():
-        hull = self._hull(i)
-        if hull is not None:
-          out.append(("j", hull))
+      out += [("j", h) for _, h in hulls]
     return out
 
 

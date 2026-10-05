@@ -118,8 +118,10 @@ instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
 problems while driving (`gta5_overlay.py`): lane edges green, dividers cyan, stop lines yellow (lights) and orange
-(signs), junction areas blue, the route red (darker behind the car), nav's lane plan magenta, the next turn a white
-cylinder and where its signal comes on an amber cone, all within 150 m and lifted 0.1 m off the road. The bridge sends
+(signs), junction areas blue, the route a 1.75 m translucent red band on the road (darker behind the car), nav's lane
+plan a dashed white line 0.25 m up (2 m on, 1.5 m off) so it reads over the route, the next turn a white cylinder and
+where its signal comes on an amber cone, all within 150 m and lifted 0.1 m off the road. Lane edges and dividers stop at
+junctions (from the stop line in, and inside junction areas). Lines are DRAW_LINE's, 1 px wide. The bridge sends
 them every 0.5 s while the plugin's debug is on (`GTA5_OVERLAY=0` stops it); they come from GTA's roads with
 `GTA5_MAP`/`GTA5_ROUTER`. `layers=` picks some of edges, dividers, stops, junctions, route, nav, points and fill
 (translucent junction areas); `ground=1` puts the lines on the game's ground rather than at the map's heights, which
@@ -128,8 +130,9 @@ hides height errors in the map. The plugin draws them only on the player's frame
 
 `gta5_cmd.py gpsroute on` (or `gps_route=1` in gta5op.ini) shows our route on the minimap and pause map as GTA's own
 purple GPS line (a custom GPS route, `colour=` a HUD colour, `max=` points, 100 by default as GTA's limit isn't
-documented; a longer route is sent in parts as the car goes). It works without the overlay. A waypoint set on the game's
-map still shows GTA's own route as well. `gta5_cmd.py gtadirs x y z` prints GTA's own GPS directions from the car to a
+documented; a longer route is sent in parts as the car goes). It works without the overlay. While it shows, the game
+waypoint's own route line is hidden (the waypoint stays, as the destination), and comes back with `gpsroute off`; the
+plugin's GTA GPS route points may then be empty, which matters only without `GTA5_ROUTER`. `gta5_cmd.py gtadirs x y z` prints GTA's own GPS directions from the car to a
 point (its next turn and the distance to it), and `compare_dirs.py <trips>` compares them with our router's at e2e trips'
 starts (it places the car, so run it only with nothing else driving).
 
