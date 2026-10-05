@@ -44,6 +44,12 @@ link) and the forks in it.
 `map_view.py roads.json --state <file>` shows the map alone, with a state from a file.
 
 ## The map
+- Street names are the nodes' street, on links whose two nodes share it. GTA's links between two streets' nodes, as
+  through a junction, have none; a router charges for every change of name, so it would favour streets with no names.
+  A run of such links up to 100 m long going straight on (within 30 degrees) from the same street at both ends takes
+  its name, except the links at a stop line (named on into the junction, Valhalla charges about 40 s more for going
+  straight through it) and freeway links (named, Valhalla sends city trips round slower freeway detours: with a lane
+  per link, our city streets carry far more junction and turn costs than real ones).
 - Ways carry the lanes each way (`lanes:forward` / `lanes:backward`, `oneway`) and street names. Road classes are
   guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
   and alleys (nodes switched off for traffic, or without GPS), track off-road. GTA splits a road's lanes into separate

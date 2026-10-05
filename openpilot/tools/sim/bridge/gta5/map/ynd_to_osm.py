@@ -34,6 +34,8 @@ LIMITS = {
 CITY_Y = 1300.0  # m: Los Santos is south of this
 BLIP = 60.0  # m: a change of limit shorter than this along a road is dropped
 FOLLOWS = 60.0  # deg: a link follows on from another if it turns less than this
+STRAIGHT = 30.0  # deg: a link goes straight on from another if it turns less than this
+NAME_RUN = 100.0  # m: unnamed links up to this long between two stretches of a street are that street
 RAMP = 1500.0  # m: a ramp or connector is no longer than this
 LANES_APART = 20.0  # m: GTA draws a freeway's lanes as links side by side, joined by lane changes
 OVERPASS_DZ = 4.0  # m: roads crossing with this much height between them are on different levels
@@ -439,6 +441,60 @@ def minimap_classes(nodes, rows, minimap):
   return roads
 
 
+def street_runs(nodes, rows, length):
+  """Names for the unnamed links on a street's way through a junction: GTA's links between two streets' nodes have
+  neither name, and a router charges for every change of name, so it would favour streets with no names at all. A run
+  of unnamed links up to NAME_RUN long going straight on (within STRAIGHT) from the same street at both ends takes its
+  name, except for:
+  - links at a stop line: named on into the junction, Valhalla 3.9 charges about 40 s more for going straight through
+    it (Palomino Ave at South Rockford Dr);
+  - freeway links: named, freeways lose the name changes that offset the turn and junction costs Valhalla charges on
+    our lane-level city streets, and it sends city trips round slower freeway detours (up to 2x as long).
+  `rows` is [(a, b, class, name)]; ramps keep no name. Returns {row index: name}."""
+  def keeps_none(r):
+    a, b, cls, _ = rows[r]
+    return cls in ('motorway', 'trunk') or any(nodes[k]['f'][1] >> 3 in (TRAFFIC_LIGHT, STOP_JUNCTION) for k in (a, b))
+
+  at = defaultdict(list)
+  for r, (a, b, cls, _) in enumerate(rows):
+    if not cls.endswith('_link'):
+      at[a].append(r)
+      at[b].append(r)
+
+  def far(r, n):
+    return rows[r][1] if rows[r][0] == n else rows[r][0]
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def ahead(r, n):  # the row straight on from row r through its node n
+    h = heading(far(r, n), n)
+    turn, q = min(((abs(wrap(heading(n, far(q, n)) - h)), q) for q in at[n] if q != r), default=(180.0, None))
+    return q if turn < STRAIGHT else None
+
+  out = {}
+  for r, (a, b, cls, name) in enumerate(rows):
+    if name or cls.endswith('_link') or r in out:
+      continue
+    run, total, ends = {r}, length[r], []
+    for n in (a, b):
+      q, m, end = r, n, None
+      while total <= NAME_RUN:
+        nxt = ahead(q, m)
+        if nxt is None or nxt in run:
+          break
+        if rows[nxt][3]:
+          end = rows[nxt][3]
+          break
+        run.add(nxt)
+        total += length[nxt]
+        q, m = nxt, far(nxt, m)
+      ends.append(end)
+    if total <= NAME_RUN and ends[0] and ends[0] == ends[1]:
+      out.update({q: ends[0] for q in run if not keeps_none(q)})
+  return out
+
+
 def write_sidecar(path, nodes, used, ways):
   """The roads as arrays for the bridge's map matching (game metres): nodes x, y, z and the links between them.
   `ways` is [(way id, a, b, fwd lanes, back lanes, class, limit, name)]."""
@@ -771,6 +827,10 @@ def main():
       info[r][5] = 'unclassified'
       drawn.add(info[r][0])
     print(f"{len(roads)} minor links the minimap draws as roads ({sum(length[r] for r in roads) / 1000:.1f} km) as unclassified")
+  names = street_runs(nodes, [(a, b, cls, name) for _, a, b, _, _, cls, _, name, _ in info], length)
+  for r, name in names.items():
+    info[r][7] = name
+  print(f"{len(names)} unnamed links through junctions named for their street")
 
   # stop lines and GTA's turn flags are for the junction ahead of them
   stops = [k for k in used if nodes[k]['f'][1] >> 3 in (TRAFFIC_LIGHT, STOP_JUNCTION) and not junction(k)]
