@@ -85,6 +85,7 @@ class Receiver:
     self.conn: socket.socket | None = None
     self.seq = 0
     self.snap_path: str | None = None
+    self.state_path: str | None = None
     self.mismatched = 0
     self.bad_headers = 0
     self.burst_path = ""
@@ -118,6 +119,8 @@ class Receiver:
             continue
           if cmd.get("type") == "snap":
             self.snap_path = cmd.get("path", "/tmp/gta5")
+          elif cmd.get("type") == "state":
+            self.state_path = cmd.get("path", "/tmp/gta5state.json")
           elif cmd.get("type") == "burst":
             self.burst_path, self.burst_left = cmd.get("path", "/tmp/gta5burst"), int(cmd.get("count", 40))
           else:
@@ -134,6 +137,10 @@ class Receiver:
         near = bytes(msg[4 + max(at - 120, 0):4 + min(at + 60, head_len)])
         print(f"gta5: skipped a frame with a bad header ({self.bad_headers} so far): {e}: {near!r}", flush=True)
       return
+    if self.state_path:  # the next frame's state alone, without its pictures as snap saves them
+      with open(self.state_path, "w") as f:
+        json.dump(head["state"], f, indent=1)
+      self.state_path = None
     if (head["width"], head["height"]) != (W, H):
       raise ValueError(f"unsupported frame size {head['width']}x{head['height']}")
     slot = self.seq % SLOTS

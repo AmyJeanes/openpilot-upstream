@@ -163,6 +163,16 @@ inline Vector3 GET_BLIP_INFO_ID_COORD(int blip) { return Invoke<Vector3>(0xFA7C7
 inline void SET_WAYPOINT_OFF() { Invoke(0xA7E4E2D361C2627F); }
 inline void SET_NEW_WAYPOINT(float x, float y) { Invoke(0xFE43368D2AA4F2FC, x, y); }
 inline BOOL GET_POS_ALONG_GPS_TYPE_ROUTE(Vector3 *result, BOOL p1, float dist, int type) { return Invoke<BOOL>(0xF3162836C28F9DA5, result, p1, dist, type); }
+// a script's own line on the minimap and map, straight between its points
+inline void CLEAR_GPS_CUSTOM_ROUTE() { Invoke(0xE6DE0561D9232A64); }
+inline void START_GPS_CUSTOM_ROUTE(int hudColour, BOOL displayOnFoot, BOOL followPlayer) { Invoke(0xDB34E8D56FC13B08, hudColour, displayOnFoot, followPlayer); }
+inline void ADD_POINT_TO_GPS_CUSTOM_ROUTE(float x, float y, float z) { Invoke(0x311438A071DD9B1A, x, y, z); }
+inline void SET_GPS_CUSTOM_ROUTE_RENDER(BOOL on, int radarThickness, int mapThickness) { Invoke(0x900086F371220B6F, on, radarThickness, mapThickness); }
+// GTA's own GPS directions from the player to a point: direction (3 left, 4 right, 5 straight, 6/7 sharp left/right; 1
+// still working it out) and the distance to the next junction in decimetres, written to 8-byte slots
+inline int GENERATE_DIRECTIONS_TO_COORD(float x, float y, float z, BOOL p3, uint64_t *direction, uint64_t *p5, uint64_t *dist) {
+  return Invoke<int>(0xF90125F1F79ECDF8, x, y, z, p3, direction, p5, dist);
+}
 
 // camera and HUD
 inline Cam CREATE_CAM(const char *name, BOOL p1) { return Invoke<Cam>(0xC3981DCE61D9E13F, name, p1); }
@@ -183,6 +193,19 @@ inline void THEFEED_HIDE_THIS_FRAME() { Invoke(0x25F87B30C382FCA7); }
 inline void CLEAR_PRINTS() { Invoke(0xCC33FA791322B9D9); }
 // screen coordinates 0-1, the rectangle's center and size
 inline void DRAW_RECT(float x, float y, float w, float h, int r, int g, int b, int a, BOOL p8) { Invoke(0x3A618A217E5154F0, x, y, w, h, r, g, b, a, p8); }
+// in the world, for one frame: a depth-tested line, a one-sided triangle (seen from where its corners go counterclockwise)
+inline void DRAW_LINE(float x1, float y1, float z1, float x2, float y2, float z2, int r, int g, int b, int a) {
+  Invoke(0x6B7256074AE34680, x1, y1, z1, x2, y2, z2, r, g, b, a);
+}
+inline void DRAW_POLY(float x1, float y1, float z1, float x2, float y2, float z2, float x3, float y3, float z3, int r, int g, int b, int a) {
+  Invoke(0xAC26716048436851, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g, b, a);
+}
+inline void DRAW_MARKER(int type, float x, float y, float z, float dirX, float dirY, float dirZ, float rotX, float rotY, float rotZ, float scaleX,
+                        float scaleY, float scaleZ, int r, int g, int b, int a, BOOL bob, BOOL faceCamera, int rotOrder, BOOL rotate,
+                        const char *dict, const char *name, BOOL invert) {
+  Invoke(0x28477EC23D892089, type, x, y, z, dirX, dirY, dirZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, r, g, b, a, bob, faceCamera, rotOrder,
+         rotate, dict, name, invert);
+}
 inline void SET_TEXT_FONT(int font) { Invoke(0x66E0276CC5F6B9DA, font); }
 inline void SET_TEXT_SCALE(float scale, float size) { Invoke(0x07C837F9A01C34C9, scale, size); }
 inline void SET_TEXT_COLOUR(int r, int g, int b, int a) { Invoke(0xBE6B23FFA53FB442, r, g, b, a); }

@@ -27,6 +27,15 @@
   gta5_cmd.py expert route L1 [speed=12 ...]    put the car at an e2e trip's start (a name in ~/gta5test/e2e/*.txt, or
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
   gta5_cmd.py expert status                     the control file
+  gta5_cmd.py debug on [layers=edges,dividers,stops,junctions,route,nav,points,fill|all] [force=1] [ground=1] [lift=0.1]
+                                                the map debug overlay in the world, from the player's camera (gta5_overlay.py;
+                                                F7 toggles it); off while recording unless force=1; ground=1 puts the lines
+                                                on the game's ground rather than the map's heights; debug off
+  gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16]
+                                                our route on the game's minimap and map as a custom GPS route; gpsroute off
+  gta5_cmd.py gtadirs <x> <y> <z>               GTA's own GPS directions from the car to a point (its next turn and the
+                                                distance to it), printed from the state; gtadirs off stops asking
+  gta5_cmd.py state [/tmp/gta5state.json]       save and print the plugin's next state
   expert options (gta5_expert.py): speed style ability aggr task ramp lead launch decel turn_speed arrive=gentle stop_before
   targets=smooth ahead_min ahead_max past retarget_every limits=0"""
 import glob
@@ -39,7 +48,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from openpilot.tools.sim.bridge.gta5 import gta5_scene
+from openpilot.tools.sim.bridge.gta5 import gta5_overlay, gta5_scene
 from openpilot.tools.sim.bridge.gta5.gta5_expert import CONTROL, control_path
 from openpilot.tools.sim.bridge.gta5.gta5_rx import DEBUG_PORT
 
@@ -47,6 +56,10 @@ TRIPS = os.getenv("GTA5_TRIPS", os.path.expanduser("~/gta5test/e2e/*.txt"))
 MAP_VIEW = f"http://localhost:{os.getenv('GTA5_MAP_PORT', '8793')}"
 SETUP_WAIT = 6.0  # s: the plugin places the car about 3.5 s after the setup command
 SWAP_WAIT = 3.0  # s: a car swap waits for its model to load, well under a second for a car already streamed
+STATE_FILE = "/tmp/gta5state.json"
+# GENERATE_DIRECTIONS_TO_COORD's direction (alloc8or's native DB)
+GTA_DIRECTIONS = {0: "announce", 1: "calculating", 2: "proceed", 3: "left", 4: "right", 5: "straight", 6: "sharp left",
+                  7: "sharp right", 8: "recalculating"}
 
 
 def parse(value: str):
@@ -167,11 +180,83 @@ def randomise(argv: list[str]) -> None:
     time.sleep(float(opts.get("wait", SWAP_WAIT)))  # a setup sent during the swap would place the old car
 
 
+def on_off(argv: list[str]) -> int:
+  if not argv or argv[0] not in ("on", "off"):
+    sys.exit(__doc__)
+  return int(argv[0] == "on")
+
+
+def debug(argv: list[str]) -> None:
+  cmd = {"type": "debug", "on": on_off(argv), **options(argv[1:])}
+  if "layers" in cmd:
+    names = str(cmd["layers"])
+    letters = set(gta5_overlay.LAYERS.values())
+    cmd["layers"] = "".join(letters) if names == "all" else \
+      "".join(gta5_overlay.LAYERS.get(n, n if n in letters else "") for n in names.split(","))
+  print(json.dumps(cmd))
+  send(cmd)
+
+
+def gpsroute(argv: list[str]) -> None:
+  cmd = {"type": "gpsroute", "on": on_off(argv), **options(argv[1:])}
+  print(json.dumps(cmd))
+  send(cmd)
+
+
+def read_state(path: str = STATE_FILE, wait: float = 2.0) -> dict | None:
+  """The plugin's state with its next frame, through the bridge's receiver."""
+  try:
+    os.remove(path)
+  except FileNotFoundError:
+    pass
+  send({"type": "state", "path": path})
+  end = time.monotonic() + wait
+  while time.monotonic() < end:
+    if os.path.exists(path):
+      time.sleep(0.05)  # written whole by then
+      with open(path) as f:
+        return json.load(f)
+    time.sleep(0.05)
+  return None
+
+
+def state(argv: list[str]) -> None:
+  got = read_state(argv[0] if argv else STATE_FILE)
+  print(json.dumps(got, indent=1) if got is not None else "no state: is the bridge running and the game connected?")
+
+
+def gtadirs(argv: list[str]) -> None:
+  if argv and argv[0] == "off":
+    send({"type": "gtadirs", "on": 0})
+    return
+  if len(argv) < 3:
+    sys.exit(__doc__)
+  x, y, z = (float(v) for v in argv[:3])
+  send({"type": "gtadirs", "on": 1, "x": x, "y": y, "z": z})
+  print(json.dumps(wait_directions(x, y)))
+
+
+def wait_directions(x: float, y: float, wait: float = 5.0) -> dict | None:
+  """GTA's directions to (x, y) from the state, once its route is worked out (directions 0 and 1 mean it isn't yet)."""
+  end, got = time.monotonic() + wait, None
+  time.sleep(0.5)
+  while time.monotonic() < end:
+    s = read_state() or {}
+    d = s.get("gtaDirs")
+    if d and abs(d["to"][0] - x) < 0.5 and abs(d["to"][1] - y) < 0.5:
+      got = {**d, "name": GTA_DIRECTIONS.get(d.get("direction"), "?")}
+      if d.get("direction") not in (0, 1):
+        return got
+    time.sleep(0.25)
+  return got
+
+
 def main(argv: list[str]) -> None:
   if not argv:
     print(__doc__)
     sys.exit(1)
-  sub = {"expert": expert, "vehicle": vehicle, "mount": mount, "randomise": randomise}.get(argv[0])
+  sub = {"expert": expert, "vehicle": vehicle, "mount": mount, "randomise": randomise, "debug": debug, "gpsroute": gpsroute,
+         "gtadirs": gtadirs, "state": state}.get(argv[0])
   if sub is not None:
     sub(argv[1:])
     return

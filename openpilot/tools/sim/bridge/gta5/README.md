@@ -51,6 +51,7 @@ openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that
 | Up / down arrow | Cruise speed up / down (hold to repeat); the phone is blocked while connected |
 | Shift + up / down arrow | Cruise speed to the next multiple of 5 up / down |
 | Left / right arrow | Left / right blinker: a lane change at 20 mph or more, below that the next turn (it cancels once taken) |
+| F7 | Map debug overlay on / off (`key_debug` in gta5op.ini) |
 
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
@@ -113,6 +114,29 @@ and no turning to take it stops, so a turn is signalled only within 50 m of one.
 
 With a map of the game's roads built ([map/README.md](map/README.md)), nav can route over it with a standard router
 instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a map view of the car and its route.
+
+### Map debug overlay and GPS route
+`gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
+problems while driving (`gta5_overlay.py`): lane edges green, dividers cyan, stop lines yellow (lights) and orange
+(signs), junction areas blue, the route red (darker behind the car), nav's lane plan magenta, the next turn a white
+cylinder and where its signal comes on an amber cone, all within 150 m and lifted 0.1 m off the road. The bridge sends
+them every 0.5 s while the plugin's debug is on (`GTA5_OVERLAY=0` stops it); they come from GTA's roads with
+`GTA5_MAP`/`GTA5_ROUTER`. `layers=` picks some of edges, dividers, stops, junctions, route, nav, points and fill
+(translucent junction areas); `ground=1` puts the lines on the game's ground rather than at the map's heights, which
+hides height errors in the map. The plugin draws them only on the player's frames, never on the openpilot camera's
+(they're the ones with the capture marker), and not at all while the bridge records unless `force=1`.
+
+`gta5_cmd.py gpsroute on` (or `gps_route=1` in gta5op.ini) shows our route on the minimap and pause map as GTA's own
+purple GPS line (a custom GPS route, `colour=` a HUD colour, `max=` points, 100 by default as GTA's limit isn't
+documented; a longer route is sent in parts as the car goes). It works without the overlay. A waypoint set on the game's
+map still shows GTA's own route as well. `gta5_cmd.py gtadirs x y z` prints GTA's own GPS directions from the car to a
+point (its next turn and the distance to it), and `compare_dirs.py <trips>` compares them with our router's at e2e trips'
+starts (it places the car, so run it only with nothing else driving).
+
+Checking that none of it reaches openpilot: with interleaving on, turn the overlay on with `force=1` and gpsroute on,
+check the lines sit on the road from the player's camera at a few known places (the L7 X junction, a freeway: X1),
+then `gta5_cmd.py snap /tmp/dbg` and record a minute (`GTA5_RECORD`) and look through the road and wide frames: no
+coloured lines, markers, minimap or GPS line may show in any of them.
 
 ## AI expert driver
 The game's own traffic AI can drive the car, as expert driving to record. `gta5_cmd.py ai on` tasks the player as the

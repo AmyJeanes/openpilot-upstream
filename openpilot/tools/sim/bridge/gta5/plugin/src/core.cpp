@@ -52,6 +52,8 @@ struct Config {
   int keyRight = VK_RIGHT;
   int keySpeedUp = VK_UP;
   int keySpeedDown = VK_DOWN;
+  int keyDebug = VK_F7;    // the map debug overlay on and off
+  bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
   bool presentHook = true;  // when interleaving, take frames from the game's presents and keep them off screen
@@ -289,6 +291,8 @@ void ReadConfig() {
   c.keyRight = key("key_right", c.keyRight);
   c.keySpeedUp = key("key_speed_up", c.keySpeedUp);
   c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
+  c.keyDebug = key("key_debug", c.keyDebug);
+  c.gpsRoute = num("gps_route", 0) != 0;
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
   c.presentHook = num("present_hook", 1) != 0;
@@ -825,6 +829,204 @@ void DrawSpeed(double now) {
   DrawText("SET " + set, 0.985f, 0.795f, 0.55f, 200, 200, 200);
 }
 
+// *** map debug overlay, GPS route, GTA's directions ***
+
+struct P3 {
+  float x, y, z;
+};
+
+struct DebugLine {
+  char kind;  // gta5_overlay.py's: e edge, d divider, l/s stop line (light/sign), j junction, r/b route (ahead/behind),
+              // n nav's lane plan, m next turn, g where its signal comes on
+  std::vector<P3> pts;
+};
+
+// The map around the car from the bridge, drawn into the world every player frame while on (debug command, key_debug)
+struct DebugOverlay {
+  bool on = false, force = false, ground = false;
+  std::string layers = "edsjrnm";  // e d s j r n m as above (s both stop lines, r both route parts, m both points), f fills
+  float lift = 0.1f;               // m above the road
+  std::vector<DebugLine> lines;
+  int vertices = 0;
+  bool recording = false;  // the bridge is recording: drawn only when forced
+  double t = -1e9;         // when the lines came
+} g_debug;
+std::atomic<int> g_debugPresses{0};
+constexpr double DEBUG_STALE = 3.0;    // s without new lines: the bridge stopped sending them
+constexpr int DEBUG_MAX_SEGMENTS = 6000;  // drawn per frame
+
+char DebugLayer(char kind) { return kind == 'l' ? 's' : kind == 'b' ? 'r' : kind == 'g' ? 'm' : kind; }
+
+// the map preview's colours (gta5_train maprender.preview)
+void DebugColour(char kind, int &r, int &g, int &b) {
+  switch (kind) {
+    case 'e': r = 0, g = 255, b = 0; break;
+    case 'd': r = 0, g = 255, b = 255; break;
+    case 'l': r = 255, g = 230, b = 0; break;
+    case 's': r = 255, g = 140, b = 0; break;
+    case 'j': r = 40, g = 110, b = 255; break;
+    case 'r': r = 255, g = 25, b = 25; break;
+    case 'b': r = 140, g = 15, b = 15; break;
+    case 'n': r = 255, g = 0, b = 255; break;
+    case 'g': r = 255, g = 190, b = 0; break;
+    default: r = 255, g = 255, b = 255;
+  }
+}
+
+// gta5_overlay.py's polylines: a kind letter, then decimetres from the origin, each point after the first as the change
+// from the one before; polylines separated by ';'
+void ParseDebugGeo(const std::string &s, float ox, float oy, float oz, std::vector<DebugLine> &out, int &vertices) {
+  out.clear();
+  vertices = 0;
+  const char *c = s.c_str(), *end = c + s.size();
+  while (c < end) {
+    DebugLine line{*c++, {}};
+    long acc[3] = {0, 0, 0};
+    for (int n = 0; c < end && *c != ';'; n++) {
+      char *next = nullptr;
+      long v = strtol(c, &next, 10);
+      if (next == c) break;
+      c = next;
+      acc[n % 3] += v;
+      if (n % 3 == 2) line.pts.push_back({ox + acc[0] * 0.1f, oy + acc[1] * 0.1f, oz + acc[2] * 0.1f});
+      if (c < end && *c == ',') c++;
+    }
+    while (c < end && *c != ';') c++;
+    if (c < end) c++;
+    vertices += static_cast<int>(line.pts.size());
+    if (!line.pts.empty()) out.push_back(std::move(line));
+  }
+}
+
+// onto the game's ground under each point, where it's near the map's height
+void SnapToGround(std::vector<DebugLine> &lines) {
+  for (DebugLine &l : lines)
+    for (P3 &p : l.pts) {
+      float z = 0;
+      if (GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + 1.5f, &z, FALSE, FALSE) && std::fabs(z - p.z) < 3.0f) p.z = z;
+    }
+}
+
+void DrawDebug(double now) {
+  const DebugOverlay &d = g_debug;
+  if (!d.on) return;
+  bool stale = now - d.t > DEBUG_STALE, held = d.recording && !d.force;
+  std::string status = "MAP DEBUG " + d.layers + (stale ? " (no map from the bridge)" : held ? " (off while recording)" : " " + std::to_string(d.vertices) + " pts");
+  DrawText(status, 0.985f, 0.70f, 0.35f, 255, 255, 255);
+  if (stale || held) return;
+  auto has = [&](char layer) { return d.layers.find(layer) != std::string::npos; };
+  bool fill = has('f');
+  int budget = DEBUG_MAX_SEGMENTS;
+  float lift = d.lift;
+  for (const DebugLine &l : d.lines) {
+    int r, g, b;
+    DebugColour(l.kind, r, g, b);
+    const P3 &p0 = l.pts[0];
+    if (l.kind == 'm' || l.kind == 'g') {
+      if (!has('m')) continue;
+      float top = l.kind == 'm' ? 6.0f : 3.5f;
+      DRAW_LINE(p0.x, p0.y, p0.z + lift, p0.x, p0.y, p0.z + top, r, g, b, 255);
+      if (l.kind == 'm')
+        DRAW_MARKER(1, p0.x, p0.y, p0.z + lift, 0, 0, 0, 0, 0, 0, 1.5f, 1.5f, 1.2f, r, g, b, 140, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+      else
+        DRAW_MARKER(0, p0.x, p0.y, p0.z + top, 0, 0, 0, 0, 0, 0, 1.0f, 1.0f, 1.0f, r, g, b, 200, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+      continue;
+    }
+    if (l.kind == 'j' && fill && l.pts.size() >= 4) {
+      // a fan from the first corner of the hull, both windings so it shows from above and below
+      for (size_t i = 2; i + 1 < l.pts.size() && budget > 0; i++, budget -= 2) {
+        const P3 &a = l.pts[i - 1], &c = l.pts[i];
+        DRAW_POLY(p0.x, p0.y, p0.z + lift, a.x, a.y, a.z + lift, c.x, c.y, c.z + lift, r, g, b, 60);
+        DRAW_POLY(p0.x, p0.y, p0.z + lift, c.x, c.y, c.z + lift, a.x, a.y, a.z + lift, r, g, b, 60);
+      }
+    }
+    if (!has(DebugLayer(l.kind))) continue;
+    for (size_t i = 1; i < l.pts.size() && budget > 0; i++, budget--) {
+      const P3 &a = l.pts[i - 1], &c = l.pts[i];
+      DRAW_LINE(a.x, a.y, a.z + lift, c.x, c.y, c.z + lift, r, g, b, 255);
+    }
+  }
+}
+
+std::string DebugState(double now) {
+  const DebugOverlay &d = g_debug;
+  return "\"debug\":{\"on\":" + std::string(d.on ? "true" : "false") + ",\"layers\":\"" + d.layers + "\",\"force\":" + (d.force ? "true" : "false") +
+         ",\"ground\":" + (d.ground ? "true" : "false") + ",\"lines\":" + std::to_string(d.lines.size()) + ",\"vertices\":" + std::to_string(d.vertices) +
+         ",\"age\":" + Num(std::min(now - d.t, 1e6)) + "}";
+}
+
+// our route as a custom GPS route on the minimap and map (gpsroute command, gps_route in the ini), from the bridge's
+// points; HUD colour 21 is purple, as GTA's own route
+struct GpsRoute {
+  bool on = false;
+  int colour = 21, max = 100, radar = 16, map = 16;  // max: GTA's own limit on points isn't documented
+  std::vector<P3> pts;
+  int shown = 0;  // points given to the game
+} g_gps;
+
+void ShowGpsRoute() {
+  if (g_gps.shown) {
+    CLEAR_GPS_CUSTOM_ROUTE();
+    SET_GPS_CUSTOM_ROUTE_RENDER(FALSE, g_gps.radar, g_gps.map);
+    g_gps.shown = 0;
+  }
+  if (!g_gps.on || g_gps.pts.size() < 2) return;
+  START_GPS_CUSTOM_ROUTE(g_gps.colour, FALSE, TRUE);
+  int n = std::min(static_cast<int>(g_gps.pts.size()), g_gps.max);
+  for (int i = 0; i < n; i++) ADD_POINT_TO_GPS_CUSTOM_ROUTE(g_gps.pts[i].x, g_gps.pts[i].y, g_gps.pts[i].z);
+  SET_GPS_CUSTOM_ROUTE_RENDER(TRUE, g_gps.radar, g_gps.map);
+  g_gps.shown = n;
+}
+
+// "x,y,z;x,y,z;..." in metres
+std::vector<P3> ParsePoints(const std::string &s) {
+  std::vector<P3> out;
+  const char *c = s.c_str(), *end = c + s.size();
+  while (c < end) {
+    float v[3];
+    int n = 0;
+    for (; n < 3 && c < end; n++) {
+      char *next = nullptr;
+      v[n] = strtof(c, &next);
+      if (next == c) break;
+      c = next;
+      if (c < end && (*c == ',' || *c == ';')) c++;
+    }
+    if (n < 3) break;
+    out.push_back({v[0], v[1], v[2]});
+  }
+  return out;
+}
+
+std::string GpsState() {
+  return "\"gpsRoute\":{\"on\":" + std::string(g_gps.on ? "true" : "false") + ",\"points\":" + std::to_string(g_gps.shown) + ",\"max\":" +
+         std::to_string(g_gps.max) + "}";
+}
+
+// GTA's own GPS directions to a point, while asked for (gtadirs command), to compare with our router's
+struct GtaDirections {
+  bool on = false;
+  float x = 0, y = 0, z = 0;
+  int direction = -1, result = 0;
+  float p5 = 0, dist = 0;  // dist: decimetres to the next junction, as the game gives it
+  double next = 0;
+} g_dirs;
+
+std::string DirectionsState(double now) {
+  GtaDirections &d = g_dirs;
+  if (!d.on) return "";
+  if (now >= d.next) {
+    d.next = now + 0.25;
+    uint64_t dir = 0, p5 = 0, dist = 0;
+    d.result = GENERATE_DIRECTIONS_TO_COORD(d.x, d.y, d.z, FALSE, &dir, &p5, &dist);
+    d.direction = static_cast<int32_t>(static_cast<uint32_t>(dir));
+    std::memcpy(&d.p5, &p5, sizeof(float));
+    std::memcpy(&d.dist, &dist, sizeof(float));
+  }
+  return "\"gtaDirs\":{\"to\":[" + Num(d.x) + "," + Num(d.y) + "," + Num(d.z) + "],\"direction\":" + std::to_string(d.direction) + ",\"dist\":" +
+         Num(d.dist / 10.0f) + ",\"rawDist\":" + Num(d.dist) + ",\"p5\":" + Num(d.p5) + ",\"result\":" + std::to_string(d.result) + "}";
+}
+
 // the street the car is on, which the bridge guesses a speed limit from
 std::string Street(double now) {
   static std::string street;
@@ -1041,7 +1243,8 @@ void Publish(double now, bool inVehicle) {
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle), VehicleState(now), MountState()})
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now),
+                                    GpsState(), DirectionsState(now)})
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
@@ -1505,6 +1708,46 @@ void HandleMessage(const Message &m, double now) {
     g_cfg.wideDelay = static_cast<float>(MsgNum(m, "wide_delay", g_cfg.wideDelay));
     Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag) +
         (g_cfg.splitViews ? ", split views" : ""));
+  } else if (type == "debug") {
+    // the map debug overlay: on, layers (gta5_overlay.py's letters), force (also while recording), ground (on the
+    // game's ground), lift (m above the road)
+    g_debug.on = MsgBool(m, "on", g_debug.on);
+    std::string layers = MsgStr(m, "layers");
+    if (!layers.empty()) g_debug.layers = layers;
+    g_debug.force = MsgBool(m, "force", g_debug.force);
+    g_debug.ground = MsgBool(m, "ground", g_debug.ground);
+    g_debug.lift = std::clamp(static_cast<float>(MsgNum(m, "lift", g_debug.lift)), -1.0f, 3.0f);
+    if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
+    Log("debug " + std::string(g_debug.on ? "on" : "off") + ", layers " + g_debug.layers + (g_debug.force ? ", forced" : "") +
+        (g_debug.ground ? ", on the ground" : ""));
+  } else if (type == "debugGeo") {
+    if (!g_debug.on) return;
+    ParseDebugGeo(MsgStr(m, "g"), static_cast<float>(MsgNum(m, "ox")), static_cast<float>(MsgNum(m, "oy")), static_cast<float>(MsgNum(m, "oz")),
+                  g_debug.lines, g_debug.vertices);
+    if (g_debug.ground) SnapToGround(g_debug.lines);
+    g_debug.recording = MsgBool(m, "rec");
+    g_debug.t = now;
+  } else if (type == "gpsroute") {
+    // our route on the game's map: on, colour (HUD colour), max (points), radar and map (line widths)
+    g_gps.on = MsgBool(m, "on", g_gps.on);
+    g_gps.colour = static_cast<int>(MsgNum(m, "colour", g_gps.colour));
+    g_gps.max = std::clamp(static_cast<int>(MsgNum(m, "max", g_gps.max)), 2, 2000);
+    g_gps.radar = static_cast<int>(MsgNum(m, "radar", g_gps.radar));
+    g_gps.map = static_cast<int>(MsgNum(m, "map", g_gps.map));
+    if (!g_gps.on) g_gps.pts.clear();
+    ShowGpsRoute();
+    Log("gps route " + std::string(g_gps.on ? "on" : "off") + ", colour " + std::to_string(g_gps.colour) + ", max " + std::to_string(g_gps.max));
+  } else if (type == "gpsPoints") {
+    if (!g_gps.on) return;
+    g_gps.pts = ParsePoints(MsgStr(m, "p"));
+    ShowGpsRoute();
+  } else if (type == "gtadirs") {
+    g_dirs.on = MsgBool(m, "on", true);
+    g_dirs.x = static_cast<float>(MsgNum(m, "x", g_dirs.x));
+    g_dirs.y = static_cast<float>(MsgNum(m, "y", g_dirs.y));
+    g_dirs.z = static_cast<float>(MsgNum(m, "z", g_dirs.z));
+    g_dirs.next = 0;
+    g_dirs.direction = -1;
   } else if (type == "reset") {
     // restarts one part of the openpilot camera pipeline (hook, capture or camera), each recreated next tick
     std::string part = MsgStr(m, "part");
@@ -1702,6 +1945,7 @@ extern "C" __declspec(dllexport) void CoreInit(const CoreHost *host) {
   shv::api = *host->api;
   g_dir = host->dir;
   ReadConfig();
+  g_gps.on = g_cfg.gpsRoute;
   Log("init: bridge " + (g_cfg.bridge.empty() ? std::string("from ") + BRIDGE_FILE : g_cfg.bridge) + ", vfov " + Num(g_cfg.vfov) +
       ", lens " + (g_cfg.lens ? "on" : "off"));
   g_link.Start(BridgeAddress, Log);
@@ -1784,6 +2028,13 @@ extern "C" __declspec(dllexport) void CoreTick() {
   lastOp = view >= 0;
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0) DrawSpeed(now);
+  if (g_debugPresses.exchange(0) % 2) {
+    g_debug.on = !g_debug.on;
+    if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
+    Log(std::string("debug ") + (g_debug.on ? "on" : "off") + " (key)");
+  }
+  // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
+  if (view < 0) DrawDebug(now);
   if (connected) {
     // police chases after a scrape with traffic would end any drive
     SET_MAX_WANTED_LEVEL(0);
@@ -1811,6 +2062,8 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   RemoveLead();
   script_hook::Uninstall();
   if (g_radarHidden) DISPLAY_RADAR(TRUE);
+  g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
+  ShowGpsRoute();
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
   g_link.Stop();
@@ -1821,4 +2074,5 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   if (static_cast<int>(key) == g_cfg.keyEngage) (g_aiOn ? g_aiAbortPresses : g_engagePresses)++;
   else if (static_cast<int>(key) == g_cfg.keyLeft) g_leftPresses++;
   else if (static_cast<int>(key) == g_cfg.keyRight) g_rightPresses++;
+  else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
 }

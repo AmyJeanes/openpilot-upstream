@@ -455,6 +455,7 @@ class Nav:
     self.change_send_at = 0.0  # when to put the blinker on for it, once openpilot has read NavDesire; 0 once on
     self.change_hold_until = 0.0  # NavDesire stays a lane change until then, after the blinker went off
     self.turn_point: np.ndarray | None = None  # where the signaled turn is
+    self.signaled_at: np.ndarray | None = None  # where the car was on the route when it signaled it
     self.turned_at = -1e9  # self.driven when the last turn was done
     self.min_ahead = MIN_AHEAD
     self.bay_to = 0.0  # self.driven to which the car is changing into, or is in, a turn bay
@@ -741,12 +742,43 @@ class Nav:
                  'speed': t.turn_hold_speed or turn.speed(t), 'entry_at': self.driven + self.entry, 'entry_v': None,
                  'end_at': self.driven + turn.dist + t.turn_release_m, 'arc': [], 'released': None}
     self.turn_point = self._point(route, turn.dist)
+    self.signaled_at = route[0].copy()
     self.signal_heading, self.repeat_t = heading, now
     if DEBUG:
       lane = f"lane {self.lane} at {self.lane_frac}"
       entry = f"{self.entry_kind} in {self.entry:.0f} m"
       print(f"nav: signal {turn.side} in {turn.dist:.0f} m, {entry}, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
     self.send({"type": "setIndicator", "side": turn.side})
+
+  def _signal_window(self, v: float, bay: float) -> float:
+    """m before the turn the time mode signals from, once slow enough."""
+    t = self.tune
+    return max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
+
+  def signal_from(self, turn: Turn, entry: float, v: float, bay: float) -> float:
+    """m along the route where _signal_due's distances first allow the turn's signal (it also waits to be slow enough
+    and in the turn's lanes), the junction's entry `entry` m along."""
+    t = self.tune
+    if t.signal_mode == "entry" and self.min_ahead == MIN_AHEAD_MAP:
+      return min(entry + t.signal_entry_offset, turn.dist - SIGNAL_LAST)
+    at = turn.dist - self._signal_window(v, bay)
+    if t.signal_min_entry > 0:
+      at = min(at, entry - t.signal_min_entry)
+    if turn.side == "left" and t.left_signal_max_entry > 0:
+      at = max(at, min(entry - t.left_signal_max_entry, turn.dist - SIGNAL_LAST))
+    return at
+
+  def turn_points(self, route: np.ndarray, state: dict) -> tuple[np.ndarray, np.ndarray | None] | None:
+    """For the map overlay: where the turn nav signals next is and where its signal comes on by distance; once
+    signalled, where the car was when it did."""
+    if self.turn is not None and self.turn_point is not None:
+      return self.turn_point, self.signaled_at
+    turn = self._next_turn(route)
+    if turn is None:
+      return None
+    bay = self._bay(self._forks(state.get("forks"), route, turn), turn)
+    entry, _ = junction_entry(turn.dist, state.get("stops") or [], state.get("junctions") or [])
+    return self._point(route, turn.dist), self._point(route, max(self.signal_from(turn, entry, self.v, bay), 0.0))
 
   def _signal_due(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, bay: float) -> bool:
     """Whether to signal the turn now, ending any lane change towards it, or leaving it to the route."""
@@ -758,7 +790,7 @@ class Nav:
       if not (due and (slow or turn.dist < SIGNAL_LAST)):
         return False
     else:
-      window = max(t.signal_min, min(t.signal_max, v * t.signal_time), bay + BAY_SIGNAL)
+      window = self._signal_window(v, bay)
       early = t.signal_min_entry > 0 and self.entry < t.signal_min_entry
       if not (turn.dist < t.signal_min or ((early or turn.dist < window) and slow)):
         return False

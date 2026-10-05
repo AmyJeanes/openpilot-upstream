@@ -18,6 +18,7 @@ from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
+from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
@@ -130,6 +131,8 @@ class GTA5World(World):
     self.cap = 0.0
     self.gps_route: list = []
     self.recorder = Recorder(RECORD, self) if RECORD else None
+    self.overlay = Overlay()  # the plugin map debug overlay, while it asks for it
+    self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
     if self.map_view:
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
 
@@ -298,6 +301,8 @@ class GTA5World(World):
       if known:
         simulator_state.speed_limit = limits[0][1]
       simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
+    for msg in self._overlay(state, v):
+      self._send(msg)
     if self.expert.update(state, self.route, self.simulator_state.is_engaged):
       # the game's AI drives (gta5_expert.py): openpilot stays disengaged, and nav and pull-away wait
       simulator_state.cruise_cap = self.cap = 0.0
@@ -357,6 +362,11 @@ class GTA5World(World):
       lane = plugin
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
+
+  def _overlay(self, state: dict, v: float) -> list[dict]:
+    paths = self.navigator.router.paths if self.navigator is not None else None
+    out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), self.nav, self.recorder is not None)
+    return out + self.gps.update(state, self.route)
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
