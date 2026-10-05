@@ -37,6 +37,12 @@ FOLLOWS = 60.0  # deg: a link follows on from another if it turns less than this
 RAMP = 1500.0  # m: a ramp or connector is no longer than this
 LANES_APART = 20.0  # m: GTA draws a freeway's lanes as links side by side, joined by lane changes
 OVERPASS_DZ = 4.0  # m: roads crossing with this much height between them are on different levels
+MINIMAP_ROAD = 180  # grey of the ordinary roads in GTA's minimap art (99 is dirt tracks and alleys)
+MINIMAP_CELL = 2.0  # m
+DRAWN = 0.5  # of a minor link's length away from major roads, on a road the minimap draws: it's a road
+MAJOR_NEAR = 15.0  # m: the minimap's road this near a major link is that road
+MIN_AWAY = 10.0  # m of a link away from major roads to judge it by; shorter, it's a road if it joins one
+SWITCHED_OFF, NO_GPS, OFFROAD = 128, 1, 8  # GTA's node flags (f2, f2, f0)
 
 
 def node_ok(n):
@@ -334,6 +340,105 @@ def ramps(nodes, ways, length, streets):
   return out
 
 
+def grow(mask, diagonal=False):
+  """The cells set in `mask` and their neighbours, also the diagonal ones with `diagonal`."""
+  out = mask.copy()
+  out[1:] |= mask[:-1]
+  out[:-1] |= mask[1:]
+  out[:, 1:] |= mask[:, :-1]
+  out[:, :-1] |= mask[:, 1:]
+  if diagonal:
+    out[1:, 1:] |= mask[:-1, :-1]
+    out[:-1, :-1] |= mask[1:, 1:]
+    out[1:, :-1] |= mask[:-1, 1:]
+    out[:-1, 1:] |= mask[1:, :-1]
+  return out
+
+
+def minimap_roads(path):
+  """The ordinary roads GTA's minimap draws (ynddump's minimap.jsonl: triangles in game metres) as a raster of
+  MINIMAP_CELL cells: (cells within about a cell of a road, x0, y1), the cell at row (y1 - y) // MINIMAP_CELL and
+  column (x - x0) // MINIMAP_CELL."""
+  import numpy as np
+  with open(path) as f:
+    tris = np.concatenate([np.array(d['xy'], dtype=np.float64).reshape(-1, 3, 2) for d in map(json.loads, f)
+                           if d['grey'] == MINIMAP_ROAD])
+  c = MINIMAP_CELL
+  x0, y1 = tris[..., 0].min() - 2 * c, tris[..., 1].max() + 2 * c
+  mask = np.zeros((int((y1 - tris[..., 1].min()) / c) + 3, int((tris[..., 0].max() - x0) / c) + 3), dtype=bool)
+  for t in tris:
+    edge = np.roll(t, -1, axis=0) - t
+    area, length = edge[0, 0] * edge[1, 1] - edge[0, 1] * edge[1, 0], np.hypot(edge[:, 0], edge[:, 1])
+    if abs(area) < 1e-6:
+      continue
+    c0, c1 = int((t[:, 0].min() - x0) / c), int((t[:, 0].max() - x0) / c)
+    r0, r1 = int((y1 - t[:, 1].max()) / c), int((y1 - t[:, 1].min()) / c)
+    x = (x0 + (np.arange(c0, c1 + 1) + 0.5) * c)[None, :, None]
+    y = (y1 - (np.arange(r0, r1 + 1) + 0.5) * c)[:, None, None]
+    inside = (edge[:, 0] * (y - t[:, 1]) - edge[:, 1] * (x - t[:, 0])) / length * np.sign(area)  # m in from each edge
+    mask[r0:r1 + 1, c0:c1 + 1] |= (inside >= -c / 2).all(axis=2)  # cells the triangle touches
+  return grow(mask), x0, y1
+
+
+def minimap_classes(nodes, rows, minimap):
+  """The minor links GTA lets its GPS use (switched off for traffic, or off-road) that its minimap draws as ordinary
+  roads: the port's streets, quarry and oil-field roads, country roads. Most of each one's length away from major roads
+  (where the drawn road is theirs) lies on a drawn road, or, close by major roads all along, most of it does and it joins
+  such a link; and links up to GAP long between two of them. Links without GPS (runways, the golf course, the prison,
+  Fort Zancudo) and those drawn as dirt tracks stay minor. `rows` is [(a, b, class)], `minimap` minimap_roads'; returns
+  the indices of the rows that are roads."""
+  import numpy as np
+  mask, x0, y1 = minimap
+  c = MINIMAP_CELL
+
+  def samples(sel, step):  # points about every step along the rows, which row each is on, the rows' lengths
+    p0 = np.array([(nodes[rows[r][0]]['x'], nodes[rows[r][0]]['y']) for r in sel]).reshape(-1, 2)
+    p1 = np.array([(nodes[rows[r][1]]['x'], nodes[rows[r][1]]['y']) for r in sel]).reshape(-1, 2)
+    length = np.hypot(*(p1 - p0).T)
+    n = np.maximum(1, np.ceil(length / step)).astype(int)
+    i = np.repeat(np.arange(len(sel)), n)
+    t = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 0.5) / n[i]
+    return p0[i] + (p1[i] - p0[i]) * t[:, None], i, length
+
+  def cells(p):
+    return (np.clip(((y1 - p[:, 1]) / c).astype(int), 0, mask.shape[0] - 1),
+            np.clip(((p[:, 0] - x0) / c).astype(int), 0, mask.shape[1] - 1))
+
+  near = np.zeros_like(mask)
+  near[cells(samples([r for r, (_, _, cls) in enumerate(rows) if cls not in ('service', 'track')], c / 2)[0])] = True
+  for k in range(round(MAJOR_NEAR / c)):  # about a disc: straight and diagonal steps in turn
+    near = grow(near, diagonal=k % 2 == 1)
+  minor = [r for r, (a, b, cls) in enumerate(rows) if cls in ('service', 'track') and
+           not (nodes[a]['f'][2] | nodes[b]['f'][2]) & NO_GPS]
+  pts, i, length = samples(minor, c)
+  drawn, away = mask[cells(pts)], ~near[cells(pts)]
+  n = np.bincount(i, minlength=len(minor))
+  n_away, n_drawn, n_drawn_away = (np.bincount(i, v, minlength=len(minor)) for v in (away, drawn, drawn & away))
+  roads, by_major = set(), set()
+  for k, r in enumerate(minor):
+    if n_away[k] / n[k] * length[k] >= MIN_AWAY:
+      if n_drawn_away[k] > DRAWN * n_away[k]:
+        roads.add(r)
+    elif n_drawn[k] > DRAWN * n[k]:
+      by_major.add(r)
+  at = defaultdict(set)  # node -> its rows that are roads
+  for r in roads:
+    at[rows[r][0]].add(r)
+    at[rows[r][1]].add(r)
+  gaps = [r for k, r in enumerate(minor) if length[k] <= GAP]
+  joined = True
+  while joined:  # where a road leaves a major one, as along a chain of short links, and short gaps between roads
+    joined = False
+    for r in [*by_major, *gaps]:
+      ends = at[rows[r][0]], at[rows[r][1]]
+      if r not in roads and ((ends[0] or ends[1]) if r in by_major else (ends[0] and ends[1])):
+        roads.add(r)
+        at[rows[r][0]].add(r)
+        at[rows[r][1]].add(r)
+        joined = True
+  return roads
+
+
 def write_sidecar(path, nodes, used, ways):
   """The roads as arrays for the bridge's map matching (game metres): nodes x, y, z and the links between them.
   `ways` is [(way id, a, b, fwd lanes, back lanes, class, limit, name)]."""
@@ -342,7 +447,7 @@ def write_sidecar(path, nodes, used, ways):
   xyz = np.array([(nodes[k]['x'], nodes[k]['y'], nodes[k]['z']) for k in used], dtype=np.float32)
   segs = np.array([(index[a], index[b]) for _, a, b, *_ in ways], dtype=np.int32)
   d = xyz[segs[:, 1]] - xyz[segs[:, 0]]
-  classes = list(LIMITS) + ['motorway_link', 'trunk_link']
+  classes = list(LIMITS) + ['motorway_link', 'trunk_link', 'unclassified']
   names = sorted({w[7] for w in ways if w[7]})
   name_index = {n: i for i, n in enumerate(names)}
   cross = overpasses(xyz, segs)
@@ -603,6 +708,7 @@ def main():
   p.add_argument('dump', help="ynddump's paths.jsonl")
   p.add_argument('out', help='.osm or .osm.pbf')
   p.add_argument('--sidecar', help="the roads as arrays for the bridge's map matching (.npz)")
+  p.add_argument('--minimap', help="ynddump's minimap.jsonl: minor links GTA's minimap draws as roads become roads")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -658,6 +764,13 @@ def main():
     info[i][5] = tag
     if dest:
       destination[info[i][0]] = dest
+  drawn = set()  # way ids
+  if args.minimap:  # keeping their limits
+    roads = minimap_classes(nodes, [(a, b, cls) for _, a, b, _, _, cls, *_ in info], minimap_roads(args.minimap))
+    for r in roads:
+      info[r][5] = 'unclassified'
+      drawn.add(info[r][0])
+    print(f"{len(roads)} minor links the minimap draws as roads ({sum(length[r] for r in roads) / 1000:.1f} km) as unclassified")
 
   # stop lines and GTA's turn flags are for the junction ahead of them
   stops = [k for k in used if nodes[k]['f'][1] >> 3 in (TRAFFIC_LIGHT, STOP_JUNCTION) and not junction(k)]
@@ -698,6 +811,12 @@ def main():
       tags['name'] = name
     if wid in destination:
       tags['destination'] = destination[wid]
+    fa, fb = nodes[a]['f'], nodes[b]['f']
+    for k, bit, tag in ((2, SWITCHED_OFF, 'gta:switched_off'), (2, NO_GPS, 'gta:no_gps'), (0, OFFROAD, 'gta:offroad')):
+      if (fa[k] | fb[k]) & bit:
+        tags[tag] = 'yes'
+    if wid in drawn and 'gta:offroad' in tags:
+      tags['surface'] = 'unpaved'
     if lf[1] & 2:
       tags['gta:narrow'] = 'yes'
     if lf[2] & 1:

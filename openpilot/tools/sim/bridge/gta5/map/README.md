@@ -13,11 +13,13 @@ The map is the game's data, so it isn't in the repository; build it from your co
    reads the game's files:
    ```powershell
    git clone https://github.com/dexyfex/CodeWalker C:\src\CodeWalker
-   dotnet run -c Release --project ynddump -p:CodeWalker=C:\src\CodeWalker -- "<game folder>" paths.jsonl
+   dotnet run -c Release --project ynddump -p:CodeWalker=C:\src\CodeWalker -- "<game folder>" paths.jsonl minimap.jsonl
    ```
+   The optional `minimap.jsonl` is the road art of the game's radar and pause map (its road layer's triangles, about
+   2 MB), for `--minimap`.
 2. Convert it, in a Python environment with `osmium` and `pyvalhalla` (`uv venv ~/gta5map/.venv && uv pip install osmium pyvalhalla numpy`):
    ```bash
-   python ynd_to_osm.py paths.jsonl ~/gta5map/gta5.osm.pbf --sidecar ~/gta5map/nodes.npz  # the map
+   python ynd_to_osm.py paths.jsonl ~/gta5map/gta5.osm.pbf --sidecar ~/gta5map/nodes.npz --minimap minimap.jsonl  # the map
    python osm_to_roads.py ~/gta5map/gta5.osm.pbf ~/gta5map/roads.json  # the map view's roads
    valhalla_build_config --mjolnir-tile-dir ~/gta5map/tiles --mjolnir-tile-extract ~/gta5map/tiles.tar \
      --mjolnir-timezone '' --mjolnir-admin '' > ~/gta5map/valhalla.json
@@ -47,6 +49,12 @@ link) and the forks in it.
   and alleys (nodes switched off for traffic, or without GPS), track off-road. GTA splits a road's lanes into separate
   links before a junction; its turn lanes and bays (one-way links at its slip lane and left turn only nodes) take the
   class (up to primary) and name of the road they split off, so the router doesn't avoid them as minor roads.
+- GTA also switches off many real roads for traffic, or marks them off-road: the port's streets, quarry and oil-field
+  roads, country roads. With `--minimap`, a minor link GTA's GPS may use is `unclassified` (keeping its limit) where the
+  game's map draws it as an ordinary road: most of its length more than 15 m from a major road is within about 2 m of a
+  drawn road, or, close to major roads all along, most of it is drawn and it joins such a link, or it's a link up to
+  40 m long between two. Off-road ones also get `surface=unpaved`. Links without GPS (runways, the golf course, the
+  prison, Fort Zancudo) stay service, and the ones the map draws as dirt tracks stay service or track.
 - Ramps are `motorway_link` (`trunk_link` off a highway), so the router gives exits ("Take the exit on the right toward
   Popular St"). GTA doesn't mark them: a ramp is a run of one-way links that branches off a freeway and, within 1.5 km,
   reaches an ordinary road or joins another freeway. Runs that come back into the road they left (within 20 m of it and
@@ -76,7 +84,7 @@ link) and the forks in it.
   reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav's own
   stop list follows it (`paths.py`, `GTA5_STOP_DIRECTION=1`).
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
-  turn only lane.
+  turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /
   `no_straight_on` restrictions at the junction ahead of the node (as found for stop lines), to each way out turning
   more than 45 degrees that way, measured across the junction's node and up to 20 m on (a divided road's far side), and

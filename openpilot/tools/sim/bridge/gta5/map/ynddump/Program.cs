@@ -1,17 +1,20 @@
 // Dumps GTA V's path nodes (.ynd) and their street names from the game's archives as JSON lines, one node ("n"), link ("l")
-// or street ("s") each: ynddump <game folder> <out.jsonl>. It only reads the game's files.
+// or street ("s") each: ynddump <game folder> <out.jsonl> [<minimap.jsonl>]. With a third file, also GTA's minimap road
+// art (ynd_to_osm.py --minimap). It only reads the game's files.
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 using CodeWalker.GameFiles;
 
-if (args.Length != 2)
+if (args.Length is < 2 or > 3)
 {
-  Console.Error.WriteLine("usage: ynddump <game folder> <out.jsonl>");
+  Console.Error.WriteLine("usage: ynddump <game folder> <out.jsonl> [<minimap.jsonl>]");
   return 1;
 }
-var (game, outPath) = (args[0], args[1]);
+var (game, outPath, minimapPath) = (args[0], args[1], args.Length > 2 ? args[2] : null);
 GTA5Keys.LoadFromPath(game, true, null);
 var rpf = new RpfManager();
 rpf.Init(game, true, s => { }, e => Console.Error.WriteLine(e));
@@ -62,4 +65,48 @@ foreach (var r in rpf.AllRpfs)
 foreach (var (h, name) in names.OrderBy(k => k.Key))
   w.WriteLine($"{{\"t\":\"s\",\"h\":{h},\"name\":{System.Text.Json.JsonSerializer.Serialize(name)}}}");
 Console.Error.WriteLine($"{nn} nodes, {nl} links, {names.Count} of {streets.Count} street names -> {outPath}");
+if (minimapPath == null)
+  return 0;
+
+// The minimap's roads are flat-coloured vector meshes in world x, y, with the draw layer as z. Their layer's grey
+// triangles, one line per geometry and grey: 180 roads, 99 dirt tracks and alleys, 220 rail.
+const float RoadLayer = 11.9f;
+var minimap = new Regex(@"minimap[.]rpf.minimap_[0-9_]+[.]ydd$", RegexOptions.IgnoreCase);
+var ydds = new Dictionary<string, RpfFileEntry>();
+foreach (var r in rpf.AllRpfs)
+  foreach (var e in r.AllEntries)
+    if (e is RpfFileEntry fe && minimap.IsMatch(e.Path))
+      ydds[e.NameLower] = fe;
+using var mw = new StreamWriter(minimapPath);
+int nt = 0;
+foreach (var (_, fe) in ydds.OrderBy(k => k.Key))
+{
+  var y = rpf.GetFile<YddFile>(fe);
+  foreach (var dr in y?.Drawables ?? [])
+    foreach (var model in dr.AllModels ?? [])
+      foreach (var g in model.Geometries ?? [])
+      {
+        var (vd, idx) = (g.VertexData, g.IndexBuffer?.Indices);
+        if (vd == null || idx == null)
+          continue;
+        var byGrey = new SortedDictionary<int, StringBuilder>();
+        for (int t = 0; t + 2 < idx.Length; t += 3)
+        {
+          var c = vd.GetColour(idx[t], 4);  // a triangle is its first vertex's colour
+          if (vd.GetVector3(idx[t], 0).Z < RoadLayer || c.R != c.G || c.G != c.B)
+            continue;
+          if (!byGrey.TryGetValue(c.R, out var sb))
+            byGrey[c.R] = sb = new StringBuilder();
+          for (int k = 0; k < 3; k++)
+          {
+            var p = vd.GetVector3(idx[t + k], 0);
+            sb.Append(sb.Length > 0 ? "," : "").Append(p.X.ToString("F1", inv)).Append(',').Append(p.Y.ToString("F1", inv));
+          }
+          nt++;
+        }
+        foreach (var (grey, sb) in byGrey)
+          mw.WriteLine($"{{\"grey\":{grey},\"xy\":[{sb}]}}");
+      }
+}
+Console.Error.WriteLine($"{nt} minimap road triangles from {ydds.Count} files -> {minimapPath}");
 return 0;
