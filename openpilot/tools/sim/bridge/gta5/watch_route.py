@@ -122,10 +122,20 @@ def draw_next(d, r: rl.Rectangle):
   n = max(nx.lanes_in, 1)
   lo, hi = nx.target
   lane_w = min(28.0, (r.width - 16) / n / 2)
+  use = [i for i in range(n) if lo - 1e-3 <= (i + 0.5) / n <= hi + 1e-3]
   for i in range(n):
-    on = lo - 1e-3 <= (i + 0.5) / n <= hi + 1e-3
-    rl.draw_rectangle_rec(rl.Rectangle(r.x + 8 + i * lane_w, y, lane_w - 3, 22), color if on else EMPTY)
-  text(f"lanes {nx.lanes_in} -> {nx.lanes_out}, target {lo:.2f}–{hi:.2f}", r.x + 16 + n * lane_w, y + 1, 18)
+    rl.draw_rectangle_rec(rl.Rectangle(r.x + 8 + i * lane_w, y, lane_w - 3, 22), color if i in use else EMPTY)
+  text(f"be in {lanes_text(use, n)}", r.x + 16 + n * lane_w, y + 1, 18)
+  text(f"road: {nx.lanes_in} lanes, {nx.lanes_out} after (lanes left to right)", r.x + 8, y + 28, 14, DIM)
+
+
+def lanes_text(use: list[int], n: int) -> str:
+  if not use or len(use) == n:
+    return "any lane" if n > 1 else "the lane"
+  if n == 2 or len(use) == 1 and use[0] in (0, n - 1):
+    side = "left" if use[0] == 0 else "right"
+    return f"the {side} lane" if len(use) == 1 else f"the {len(use)} {side} lanes"
+  return f"lane {use[0] + 1} of {n}" if len(use) == 1 else f"lanes {use[0] + 1}-{use[-1] + 1} of {n}"
 
 
 def draw(vec: np.ndarray, age: float | None, w: int, h: int):
