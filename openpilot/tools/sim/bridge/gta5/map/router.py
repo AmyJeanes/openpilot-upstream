@@ -267,7 +267,9 @@ class Route:
     return lanes.lane_line(self.at, keys) if lanes is not None else None
 
   def _section_here(self) -> Section | None:
-    sec = self.section(self.seg)
+    """The lanes at the car, as they are there: a turn bay only once open, so nav never changes towards one before."""
+    lanes = self.lanes
+    sec = lanes.opened_at(self.at, self.seg) if lanes is not None and 0 <= self.seg < len(lanes.sections) else None
     return sec if sec is not None and sec.lanes else None
 
   def lane(self) -> list[int] | None:

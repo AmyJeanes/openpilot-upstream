@@ -1,0 +1,56 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Left-hand traffic (drive_on_right=False): a right turn bay opening between our two lanes and two oncoming lanes 60 m before a junction, the forward lanes through|through|right -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='-0.002694946' lon='0.000000000'/>
+  <node id='2' version='1' lat='-0.000538989' lon='0.000000000'/>
+  <node id='3' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='4' version='1' lat='0.000000000' lon='0.001796631'/>
+  <node id='5' version='1' lat='0.000000000' lon='-0.001796631'/>
+  <node id='6' version='1' lat='0.001796631' lon='0.000000000'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="14"/>
+  </way>
+  <way id='2' version='1'>
+    <nd ref='2'/>
+    <nd ref='3'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="5"/>
+    <tag k="lanes:forward" v="3"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="17.5"/>
+    <tag k="turn:lanes:forward" v="through|through|right"/>
+  </way>
+  <way id='3' version='1'>
+    <nd ref='3'/>
+    <nd ref='4'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="14"/>
+  </way>
+  <way id='4' version='1'>
+    <nd ref='3'/>
+    <nd ref='5'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="14"/>
+  </way>
+  <way id='5' version='1'>
+    <nd ref='3'/>
+    <nd ref='6'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="14"/>
+  </way>
+</osm>

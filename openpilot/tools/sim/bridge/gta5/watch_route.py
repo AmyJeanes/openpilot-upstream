@@ -201,7 +201,7 @@ def draw_slot(state: int, r: rl.Rectangle):
 
 def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
   """Route input v2's lane slots: the road here and the road out of the next maneuver, as the driver sees them, left to
-  right, with the kerb they are counted from marked; how far on to be in a target lane."""
+  right, with the kerb they are counted from marked; from and by where to move into a target lane."""
   rl.draw_rectangle_rec(r, PANEL)
   text("Lane slots (v2 preview, not yet model input)", r.x + 8, r.y + 6, 14, DIM)
   stale = age is None or age > 1.0
@@ -211,7 +211,7 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
     s = "no lane slots file" if vec is None else "stale" if stale else "no route"
     text(s, r.x + 8, r.y + 44, 22, DIM)
     return
-  here, out, dist = slots_mod.decode(vec)
+  here, out, start, end = slots_mod.decode(vec)
   right = vec[slots_mod.SIDE] > 0
   label_w, bw, gap, bh = 82, 34.0, 4.0, 28.0
   x0 = r.x + 8 + label_w
@@ -232,10 +232,15 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
   rl.draw_line_ex(rl.Vector2(kerb_x, y0), rl.Vector2(kerb_x, y1), 3, RIGHT)
   text("kerb", kerb_x - (text_w("kerb", 12) if right else 0), y1 + 1, 12, RIGHT)
   info_x = x0 + strip + 14
-  if dist is not None:
+  if start is not None:
     # the slots don't know the car's lane, so this says what the route needs, not whether the car complies
-    s = f"be in lit lane within {dist:.0f} m" if dist > 0 else "keep to lit lane"
-    text(s, info_x, rows[0][0] + 5, 16, TARGET)
+    y = rows[0][0]
+    if end > 0:
+      text(f"move into lit lane from {start:.0f} m" if start > 0 else "move into lit lane now", info_x, y - 2, 14,
+           DIM if start > 0 else TARGET)
+      text(f"be in by {end:.0f} m", info_x, y + 14, 14, TARGET)
+    else:
+      text("keep to lit lane", info_x, y + 5, 16, TARGET)
   elif (here == slots_mod.ALLOWED).sum() > 1:
     text("any allowed lane", info_x, rows[0][0] + 5, 16, DIM)
   if nxt is not None and not (out < 0).all():

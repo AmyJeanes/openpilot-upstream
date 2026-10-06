@@ -65,7 +65,7 @@ def test_lane_slots_preview():
   slots = w.lane_slots[1]
   w._write_lane_slots({"vEgo": 10.0})
   assert w.lane_slots[1] is slots  # once per route
-  assert writes[-1][ls.SIDE] == -1.0 and ls.describe(writes[-1][:ls.LANE_SLOTS_LEN]) == 'here aTo..... out ao...... by 50 m'
+  assert writes[-1][ls.SIDE] == -1.0 and ls.describe(writes[-1][:ls.LANE_SLOTS_LEN]) == 'here aTo..... out ao...... | from 0 by 50 m'
   r.off = world_mod.OFF_ROUTE_INPUT + 1.0
   w._write_lane_slots({"vEgo": 10.0})
   assert len(writes) == 3 and not writes[-1].any()

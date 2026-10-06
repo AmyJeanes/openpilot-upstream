@@ -27,7 +27,7 @@ def checks(tags: dict, length: float | None = None) -> set[str]:
 
 def test_fixtures_are_clean():
   for name in sorted(os.listdir(FIXTURES)):
-    issues = validate(os.path.join(FIXTURES, name), drive_on_right=name != 'lht.osm')
+    issues = validate(os.path.join(FIXTURES, name), drive_on_right=not name.startswith('lht'))
     assert issues == [], (name, issues)
 
 

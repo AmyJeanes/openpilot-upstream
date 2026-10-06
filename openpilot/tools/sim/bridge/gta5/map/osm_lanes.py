@@ -684,6 +684,35 @@ class RouteLanes:
       return _blend(self.tapers[k1 + 1][1], sec, (self.along[k1 + 1] - s) / TAPER_M)
     return sec
 
+  def opening(self, k: int) -> tuple[float, int, bool] | None:
+    """Where lanes begin on the way segment k is on, as its lane count rises: (m along where they are fully there, how
+    many, whether on the left of ours); None where none begin. Fully there at the end of their taper, or half way
+    along a way shorter than one."""
+    sec = self.sections[k] if 0 <= k < len(self.sections) else None
+    if sec is None or not self.tapers:
+      return None
+    k0, k1 = k, k
+    while k0 > 0 and self.sections[k0 - 1] is sec:
+      k0 -= 1
+    while k1 + 1 < len(self.sections) and self.sections[k1 + 1] is sec:
+      k1 += 1
+    if k0 not in self.tapers or self.tapers[k0][0].lanes >= sec.lanes:
+      return None
+    run = self.along[k1 + 1] - self.along[k0]
+    return float(self.along[k0] + (TAPER_M if run > TAPER_M else run / 2)), sec.lanes - self.tapers[k0][0].lanes, _opens_left(sec)
+
+  def opened_at(self, s: float, k: int | None = None) -> Section | None:
+    """section_at's cross-section with only the lanes fully there: those still widening from nothing are left out, so a
+    turn bay isn't a lane until it has opened."""
+    k = self.segment(s) if k is None else k
+    sec = self.section_at(s, k)
+    opening = self.opening(k)
+    if sec is None or opening is None or s >= opening[0]:
+      return sec
+    _, extra, left = opening
+    lo = sec.first if left else sec.first + sec.lanes - extra
+    return Section(sec.spans[:lo] + sec.spans[lo + extra:], sec.edges)
+
   def arrows_near(self, s: float, before: float = 30.0, after: float = 5.0) -> list[frozenset[str]] | None:
     """The turn arrows of the lanes into the junction at a maneuver s m along: those ending nearest it, from `before`
     m before it to `after` past; None for none."""
@@ -768,12 +797,17 @@ def _taperable(a: Section, b: Section) -> bool:
   return a.back == b.back and a.lanes != b.lanes and min(a.lanes, b.lanes) > 0
 
 
+def _opens_left(many: Section) -> bool:
+  """Whether the lanes a road gains begin on the left of ours: where its leftmost lane's arrows only turn left."""
+  return bool(many.turns[0]) and many.turns[0] <= LEFTS
+
+
 def _blend(few: Section, many: Section, t: float) -> Section:
   """`many`'s lanes, t (0-1) of the way from `few`'s: its extra lanes of ours (on the side its arrows turn to, else the
   outer side, right of ours) at no width at t = 0."""
   t = min(max(t, 0.0), 1.0)
   extra = many.lanes - few.lanes
-  left = bool(many.turns[0]) and many.turns[0] <= LEFTS
+  left = _opens_left(many)
   fo, mo = few.ours, many.ours
   edge = fo[0].left if left else fo[-1].right
   zero = [Span(s.lane, edge, edge, 1) for s in (mo[:extra] if left else mo[-extra:])]

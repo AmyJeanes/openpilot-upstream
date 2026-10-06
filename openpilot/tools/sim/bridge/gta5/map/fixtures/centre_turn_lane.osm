@@ -1,0 +1,37 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- A two-way road with a shared centre turn lane (lanes:both_ways=1, turn:lanes:both_ways=left) between two lanes each way, 300 m up to a junction -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='-0.002694946' lon='0.000000000'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='3' version='1' lat='0.000000000' lon='-0.001796631'/>
+  <node id='4' version='1' lat='0.000000000' lon='0.001796631'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="secondary"/>
+    <tag k="lanes" v="5"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="lanes:both_ways" v="1"/>
+    <tag k="turn:lanes:both_ways" v="left"/>
+    <tag k="width" v="17.5"/>
+  </way>
+  <way id='2' version='1'>
+    <nd ref='2'/>
+    <nd ref='3'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="14"/>
+  </way>
+  <way id='3' version='1'>
+    <nd ref='2'/>
+    <nd ref='4'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="14"/>
+  </way>
+</osm>
