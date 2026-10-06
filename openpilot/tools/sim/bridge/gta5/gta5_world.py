@@ -94,6 +94,7 @@ def speed_limit(street: str) -> float:
 
 class GTA5World(World):
   sets_blinkers = True
+  sets_torque = True
 
   def __init__(self, simulator_state: SimulatorState, q: Queue, port: int):
     super().__init__(dual_camera=True)
@@ -266,6 +267,7 @@ class GTA5World(World):
       fresh = time.monotonic() - self.last_frame_time < 0.5
     if state is None or not fresh or not state.get("inVehicle"):
       simulator_state.valid = False
+      simulator_state.user_torque = 0
       return
 
     v = state["vEgo"]
@@ -306,9 +308,9 @@ class GTA5World(World):
     if steering and not self.steering and self.simulator_state.is_engaged:
       self.q.put(control_cmd_gen("cruise_cancel"))
     self.steering = steering
-    simulator_state.user_torque = 0  # but for the lane change nudge
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
-    self._update_indicator(simulator_state, state.get("indicator"), state["heading"], state["yawRate"])
+    # set once per step, held until the next: the car thread could read any value set in between
+    simulator_state.user_torque = self._update_indicator(state.get("indicator"), state["heading"], state["yawRate"])
     desire = self.sm['modelV2'].meta.desireState
     turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
              "keepRight": desire[log.Desire.keepRight]} if len(desire) > log.Desire.keepRight else {}
@@ -460,21 +462,21 @@ class GTA5World(World):
     simulator_state.left_blinker = self.indicator == "left" and not gap
     simulator_state.right_blinker = self.indicator == "right" and not gap
 
-  def _update_indicator(self, simulator_state: SimulatorState, indicator: str | None, heading: float, yaw_rate: float):
+  def _update_indicator(self, indicator: str | None, heading: float, yaw_rate: float) -> float:
     """The plugin's indicator is the blinker stalk: nudge the wheel to start the lane change, and cancel the indicator
-    once it is done, as a car's stalk would."""
+    once it is done, as a car's stalk would. Returns the driver's steering torque: the nudge, else 0."""
     now = time.monotonic()
     if indicator != self.indicator:
       self.indicator, self.indicator_t, self.lane_changing = indicator, now, False
       self.indicator_heading = heading
     if indicator is None:
-      return
+      return 0.0
     # a turn: cancel once the car has come round and straightened out
     turned = abs((heading - self.indicator_heading + 180) % 360 - 180)
     if turned > TURN_CANCEL_DEG and abs(yaw_rate) < TURN_CANCEL_YAW_RATE:
       self._send({"type": "indicatorOff"})
       self.indicator_heading = heading  # once, until the plugin's indicator goes off
-      return
+      return 0.0
     lane_change = self.sm['modelV2'].meta.laneChangeState
     if lane_change == LaneChangeState.laneChangeStarting:
       self.lane_changing = True
@@ -482,9 +484,10 @@ class GTA5World(World):
       self.lane_changing = False
       if not self.nav.signaling:  # a lane change still going as the blinker became the turn's
         self._send({"type": "indicatorOff"})
-    elif (lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT and simulator_state.user_torque == 0
+    elif (lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT
           and not self.nav.signaling):  # a turn on the route, not a lane change
-      simulator_state.user_torque = NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE
+      return NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE
+    return 0.0
 
   def read_cameras(self):
     pass

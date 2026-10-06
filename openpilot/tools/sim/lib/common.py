@@ -67,6 +67,7 @@ class SimulatorState:
 
 class World(ABC):
   sets_blinkers = False  # read_sensors sets the blinkers every step, rather than the bridge clearing them for key presses
+  sets_torque = False  # read_sensors sets the driver's steering torque every step, rather than the bridge's keys
 
   def __init__(self, dual_camera):
     self.dual_camera = dual_camera

@@ -171,7 +171,9 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
 
       self.simulator_state.user_brake = brake_manual
       self.simulator_state.user_gas = throttle_manual
-      self.simulator_state.user_torque = steer_manual * -10000
+      # the car thread samples this at its own phase, and steeringPressed needs most samples pressed: don't reset a world's
+      if not self.world.sets_torque:
+        self.simulator_state.user_torque = steer_manual * -10000
 
       steer_manual = steer_manual * -40
 
