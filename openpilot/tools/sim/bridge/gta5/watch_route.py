@@ -213,10 +213,10 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
     return
   here, out, dist = slots_mod.decode(vec)
   right = vec[slots_mod.SIDE] > 0
-  label_w, bw, gap, bh = 74, 34.0, 4.0, 28.0
+  label_w, bw, gap, bh = 82, 34.0, 4.0, 28.0
   x0 = r.x + 8 + label_w
   strip = slots_mod.SLOTS * (bw + gap) - gap
-  rows = ((r.y + 28, "here", here), (r.y + 28 + bh + 10, "road out", out))
+  rows = ((r.y + 28, "this road", here), (r.y + 28 + bh + 10, "next road", out))
   for y, label, states in rows:
     text(label, r.x + 8, y + 5, 16, TEXT)
     if (states < 0).all():
@@ -233,12 +233,12 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
   text("kerb", kerb_x - (text_w("kerb", 12) if right else 0), y1 + 1, 12, RIGHT)
   info_x = x0 + strip + 14
   if dist is not None:
-    s = f"be in by {dist:.0f} m" if dist >= 0 else f"{-dist:.0f} m past be-in point"
+    s = f"move into lit lane in {dist:.0f} m" if dist >= 0 else f"lit lane {-dist:.0f} m overdue"
     text(s, info_x, rows[0][0] + 5, 16, TARGET)
   elif (here == slots_mod.ALLOWED).sum() > 1:
     text("any lane", info_x, rows[0][0] + 5, 16, DIM)
   if nxt is not None and not (out < 0).all():
-    text(f"after {'LEFT' if nxt.side == 'L' else 'RIGHT'} in {nxt.dist:.0f} m", info_x, rows[1][0] + 5, 16, LEFT if nxt.side == "L" else RIGHT)
+    text(f"after {'LEFT' if nxt.side == 'L' else 'RIGHT'} turn in {nxt.dist:.0f} m", info_x, rows[1][0] + 5, 16, LEFT if nxt.side == "L" else RIGHT)
   legend_x = r.x + r.width - 8
   for name, state in (("target", slots_mod.TARGET), ("allowed", slots_mod.ALLOWED), ("oncoming", slots_mod.ONCOMING)):
     legend_x -= text_w(name, 12)
