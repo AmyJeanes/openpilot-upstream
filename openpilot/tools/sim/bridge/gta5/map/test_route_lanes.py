@@ -1,0 +1,198 @@
+"""Lanes along a route (osm_lanes.py RouteLanes, Section, turn_targets, the route-to-way matching), the PBF reader
+(osm_pbf.py) and nav's target lanes from turn arrows, on small hand-made maps. No pytest needed: `python
+test_route_lanes.py` runs them all (they need only numpy, as the bridge's environment)."""
+import os
+import struct
+import tempfile
+import zlib
+
+import numpy as np
+
+from openpilot.tools.sim.bridge.gta5.gta5_nav import Through, Turn, aim, lane_plan, parse_arrows, throughs
+from openpilot.tools.sim.bridge.gta5.map import osm_pbf
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, turn_targets, ways_from_nodes, \
+  ways_from_trace
+from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
+
+# a junction at (0, 0): a one-way road north into it, two lanes, widening to three 30 m before it (a left turn bay);
+# a one-way road west out of it, and two-way roads east and north
+NODES = {1: (0.0, -100.0), 2: (0.0, -30.0), 3: (0.0, 0.0), 4: (-100.0, 0.0), 5: (100.0, 0.0), 6: (0.0, 100.0)}
+WAYS = {
+  10: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '7'}, [1, 2]),
+  11: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '3', 'width': '10.5', 'turn:lanes': 'left|through|through;right'}, [2, 3]),
+  12: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '7'}, [3, 4]),
+  13: ({'highway': 'primary', 'lanes': '2', 'width': '7'}, [3, 5]),
+  14: ({'highway': 'primary', 'lanes': '2', 'width': '7'}, [3, 6]),
+}
+
+
+def junction_map() -> OsmLanes:
+  ids = np.array(sorted(NODES), np.int64)
+  data = OsmData(ids, np.array([NODES[i][1] for i in ids]), np.array([NODES[i][0] for i in ids]), {}, dict(WAYS), {})
+  return OsmLanes(data, lambda lat, lon: (lon, lat))
+
+
+def left_turn_route() -> np.ndarray:
+  return np.array([NODES[1], NODES[2], NODES[3], NODES[4]])
+
+
+def test_section():
+  sec = Section.of(WayLanes.from_tags({'highway': 'primary', 'lanes': '3', 'lanes:forward': '2', 'lanes:backward': '1',
+                                       'width': '12.5', 'width:lanes:forward': '3.5|3.5', 'width:lanes:backward': '3.5'}))
+  assert (sec.lanes, sec.back, sec.lo, sec.hi, sec.two_way) == (2, 1, -1, 1, True)
+  left = sec.ours[0].left  # a 2 m median between the directions
+  assert abs(left - (sec.spans[0].right + 2.0)) < 1e-6
+  assert abs(sec.offset(0) - (left + 1.75)) < 1e-6 and abs(sec.offset(0.5) - (left + 3.5)) < 1e-6
+  assert abs(sec.frac(left + 1.75)) < 1e-6 and abs(sec.frac(left + 7.0) - 1.5) < 1e-6
+  assert sec.lane(left + 4.0) == 1 and sec.lane(left - 3.0) == -1 and sec.lane(left + 50.0) == 1
+  assert sec.offset(-1) == sec.spans[0].centre  # the oncoming lane's own centre
+  single = Section.of(WayLanes.from_tags({'highway': 'service', 'lanes': '1', 'width': '4'}))
+  assert (single.lanes, single.lo, single.hi, single.two_way) == (1, 0, 0, True)
+
+
+def test_turn_targets():
+  turns = [frozenset({'left'}), frozenset({'through'}), frozenset({'through', 'right'})]
+  assert turn_targets(turns, 'left') == [0] and turn_targets(turns, 'right') == [2] and turn_targets(turns, 'through') == [1, 2]
+  assert turn_targets(turns, 'left', fork=True) == []  # forks and exits take slight_* arrows
+  assert turn_targets([frozenset({'slight_left'}), frozenset({'through'})], 'left', fork=True) == [0]
+  assert turn_targets([frozenset(), frozenset()], 'left') == []  # no arrows: nothing said
+
+
+def test_ways_from_nodes():
+  osm = junction_map()
+  assert osm.tagged
+  assert ways_from_nodes(left_turn_route(), osm) == [(10, True, 0, 1), (11, True, 1, 2), (12, True, 2, 3)]
+  # starting and ending part way along ways, against the north road's direction
+  pts = np.array([(0.0, 60.0), NODES[3], (0.0, -10.0)])
+  assert ways_from_nodes(pts, osm) == [(14, False, 0, 1), (11, False, 1, 2)]
+
+
+def test_ways_from_trace():
+  osm = junction_map()
+  pts = np.array([(0.0, 90.0), (0.0, 40.0), NODES[3], (50.0, 0.0), NODES[5]])
+  edges = [{'way_id': 14, 'begin_shape_index': 0, 'end_shape_index': 2}, {'way_id': 13, 'begin_shape_index': 2, 'end_shape_index': 4}]
+  assert ways_from_trace(edges, pts, osm) == [(14, False, 0, 2), (13, True, 2, 4)]
+
+
+def test_route_lanes():
+  osm = junction_map()
+  pts = left_turn_route()
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert [s.lanes for s in lanes.sections] == [2, 3, 2]
+  assert lanes.arrows == [(100.0, lanes.sections[1].turns)] and lanes.arrows_near(100.0) == lanes.sections[1].turns
+  assert list(lanes.junctions) == [100.0]
+  assert len(lanes.corners) == 1 and abs(lanes.corners[0][0] - 100.0) < 2 and abs(lanes.corners[0][1] - 90.0) < 1
+  # the bay widens from nothing on the left over TAPER_M from where the way's lane count rises
+  assert 1 in lanes.tapers
+  start = lanes.section_at(70.0, 1)
+  assert start.lanes == 3 and start.ours[0].right - start.ours[0].left < 0.01
+  assert abs(start.ours[1].left - lanes.sections[0].ours[0].left) < 0.01  # the old lanes go on where they were
+  assert abs(lanes.section_at(85.0, 1).ours[0].right - lanes.section_at(85.0, 1).ours[0].left - 1.75) < 0.01
+  assert lanes.section_at(10.0, 0) is lanes.sections[0]
+  assert 3.3 < lanes.section_at(99.0, 1).ours[0].right - lanes.section_at(99.0, 1).ours[0].left < 3.5
+  # the leftmost lane: into the bay as it opens, then through the corner on a fillet, into the left lane out
+  line = lanes.lane_line(0.0, [(0.0, 0.0)])
+  before = line[line[:, 1] < -45.0]
+  assert np.allclose(before[:, 0], -1.75, atol=0.05)
+  bay = line[(line[:, 1] > -28.0) & (line[:, 1] < -20.0)]
+  assert np.all(np.diff(bay[:, 0]) <= 0.01) and bay[-1, 0] < -2.5  # drifting over with the bay
+  after = line[line[:, 0] < -30.0]
+  assert len(after) and np.allclose(after[:, 1], -1.75, atol=0.05)
+  corner = line[(line[:, 1] > -25.0) & (line[:, 0] > -25.0)]
+  assert np.hypot(*corner.T).min() > 2.5  # cuts the corner rather than running to the junction's node
+  arc = line[line[:, 1] > -20.0]
+  d = np.diff(arc, axis=0)
+  turn = np.degrees(np.abs(np.diff(np.unwrap(np.arctan2(d[:, 1], d[:, 0])))))
+  assert turn.max() < 15.0  # smooth
+  # from inside the corner, the rest of the fillet
+  mid = lanes.lane_line(95.0, [(0.0, 0.0)])
+  assert np.hypot(*(mid[0] - line[np.argmin(np.abs(np.hypot(*(line - mid[0]).T)))])) < 0.6
+
+
+def test_route_lanes_bend_has_no_fillet():
+  # a road bending through a node that isn't a junction keeps its own lane line
+  osm = junction_map()
+  pts = np.array([(0.0, -100.0), (0.0, -30.0), (0.0, 0.0), (-100.0, 0.0)])
+  lanes = RouteLanes(pts, [Section.of(osm.lanes(10))] * 3)
+  assert lanes.corners == []
+
+
+def test_nav_targets_from_arrows():
+  arrows = parse_arrows([[100.0, ['left', 'through', 'right;through']]])
+  turn = Turn(110.0, 'left', 90.0)
+  aim(turn, arrows)
+  assert turn.targets == (0, 0, 3) and turn.lanes(3) == (0, 0)
+  right = Turn(110.0, 'right', -90.0)
+  aim(right, arrows)
+  assert right.lanes(3) == (2, 2) and right.lanes(4) == (3, 3)  # counted from its side where the lanes differ
+  none = Turn(200.0, 'left', 90.0)
+  aim(none, arrows)
+  assert none.targets is None and none.lanes(3) == (0, 0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
+  ahead = throughs(route, parse_arrows([[100.0, ['left', 'through', 'through']]]), [])
+  assert len(ahead) == 1 and isinstance(ahead[0], Through) and ahead[0].lanes(3) == (1, 2)
+  keys = lane_plan(route, [], (0, 3), lambda d, after: 3, 10.0, arrows=[[100.0, ['left', 'through', 'through']]])
+  assert keys[-1][1] == 1.0 and keys[-1][0] <= 100.0  # out of the left only lane before the junction
+  assert lane_plan(route, [], (0, 3), lambda d, after: 3, 10.0) == [(0.0, 0.0)]
+
+
+def pbf_bytes() -> bytes:
+  """A tiny PBF, encoded by hand: three nodes (one tagged), a way and a relation."""
+  def v(n):
+    out = b''
+    while True:
+      out += bytes([(n & 0x7f) | (0x80 if n > 0x7f else 0)])
+      n >>= 7
+      if not n:
+        return out
+
+  def zz(n):
+    return (n << 1) ^ (n >> 63)
+
+  def ld(f, b):
+    return v(f << 3 | 2) + v(len(b)) + b
+
+  def vi(f, n):
+    return v(f << 3) + v(n)
+
+  def packed(xs):
+    return b''.join(v(x) for x in xs)
+
+  def deltas(xs):
+    return packed(zz(b - a) for a, b in zip([0, *xs], xs, strict=False))
+
+  strings = ['', 'highway', 'primary', 'ele', '12.5', 'type', 'connectivity', 'from', 'to']
+  table = ld(1, b''.join(ld(1, s.encode()) for s in strings))
+  ids, lats, lons = [5, 7, 1000000000000], [10, -20, 30], [-40, 50, 60]
+  dense = ld(1, deltas(ids)) + ld(8, deltas(lats)) + ld(9, deltas(lons)) + ld(10, packed([0, 3, 4, 0, 0]))
+  way = vi(1, 99) + ld(2, packed([1])) + ld(3, packed([2])) + ld(8, deltas([5, 7, 1000000000000]))
+  rel = vi(1, 3) + ld(2, packed([5])) + ld(3, packed([6])) + ld(8, packed([7, 8])) + ld(9, deltas([99, 99])) + ld(10, packed([1, 1]))
+  block = table + ld(2, ld(2, dense)) + ld(2, ld(3, way)) + ld(2, ld(4, rel))
+  out = b''
+  for kind, raw in ((b'OSMHeader', b''), (b'OSMData', block)):
+    blob = vi(2, len(raw)) + ld(3, zlib.compress(raw))
+    head = ld(1, kind) + vi(3, len(blob))
+    out += struct.pack('>I', len(head)) + head + blob
+  return out
+
+
+def test_pbf():
+  with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, 'tiny.osm.pbf')
+    with open(path, 'wb') as f:
+      f.write(pbf_bytes())
+    data = osm_pbf.read(path)
+    assert data.node_ids.tolist() == [5, 7, 1000000000000]
+    assert np.allclose(data.lat, [1e-6, -2e-6, 3e-6]) and np.allclose(data.lon, [-4e-6, 5e-6, 6e-6])
+    assert data.node_tags == {7: {'ele': '12.5'}}
+    assert data.ways == {99: ({'highway': 'primary'}, [5, 7, 1000000000000])}
+    assert data.relations == {3: ({'type': 'connectivity'}, [('w', 99, 'from'), ('w', 99, 'to')])}
+    assert osm_pbf.read(path, relations=('restriction',)).relations == {}
+    assert data.index([7, 8]).tolist() == [1, -1]
+
+
+if __name__ == '__main__':
+  for name, test in list(globals().items()):
+    if name.startswith('test_'):
+      test()
+      print(f'{name} ok')

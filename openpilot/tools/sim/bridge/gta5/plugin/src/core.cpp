@@ -927,8 +927,9 @@ struct P3 {
 };
 
 struct DebugLine {
-  char kind;  // gta5_overlay.py's: e edge, d divider, l/s stop line (light/sign), j junction, r/b route (ahead/behind),
-              // n nav's lane plan, m next turn, g where its signal comes on
+  char kind;  // gta5_overlay.py's: e edge, d/w lane divider (dashed/solid), c/y centre line (solid/dashed), l/s stop
+              // line (light/sign), j junction, r/b route (ahead/behind), n nav's lane plan, m next turn, g where its
+              // signal comes on
   std::vector<P3> pts;
 };
 
@@ -946,13 +947,18 @@ std::atomic<int> g_debugPresses{0};
 constexpr double DEBUG_STALE = 3.0;    // s without new lines: the bridge stopped sending them
 constexpr int DEBUG_MAX_SEGMENTS = 6000;  // drawn per frame
 
-char DebugLayer(char kind) { return kind == 'l' ? 's' : kind == 'b' ? 'r' : kind == 'g' ? 'm' : kind; }
+char DebugLayer(char kind) {
+  return kind == 'l' ? 's' : kind == 'b' ? 'r' : kind == 'g' ? 'm' : kind == 'w' || kind == 'c' || kind == 'y' ? 'd' : kind;
+}
 
 // the map preview's colours (gta5_train maprender.preview), but nav's plan, which runs on the route
 void DebugColour(char kind, int &r, int &g, int &b) {
   switch (kind) {
     case 'e': r = 0, g = 255, b = 0; break;
-    case 'd': r = 0, g = 255, b = 255; break;
+    case 'd':
+    case 'w': r = 255, g = 255, b = 255; break;
+    case 'c':
+    case 'y': r = 255, g = 200, b = 0; break;
     case 'l': r = 255, g = 230, b = 0; break;
     case 's': r = 255, g = 140, b = 0; break;
     case 'j': r = 40, g = 110, b = 255; break;
@@ -1101,8 +1107,8 @@ void DrawDebug(double now) {
       budget -= DrawRibbon(l.pts, lift, r, g, b, budget);
       continue;
     }
-    if (l.kind == 'n') {
-      budget -= DrawDashed(l.pts, lift + 0.15f, r, g, b, budget);
+    if (l.kind == 'n' || l.kind == 'd' || l.kind == 'y') {
+      budget -= DrawDashed(l.pts, l.kind == 'n' ? lift + 0.15f : lift, r, g, b, budget);
       continue;
     }
     for (size_t i = 1; i < l.pts.size() && budget > 0; i++, budget--) {

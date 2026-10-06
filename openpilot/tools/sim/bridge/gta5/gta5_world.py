@@ -23,7 +23,9 @@ from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
+from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths
 from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
@@ -350,6 +352,18 @@ class GTA5World(World):
       self.navigator.router.paths = paths
     except (OSError, ValueError, KeyError) as e:
       print(f"gta5: no road heights or lanes for routes: {e}")
+      return
+    osm = os.path.join(os.path.dirname(path), "gta5.osm.pbf")
+    try:
+      lanes = OsmLanes.load(osm, to_game) if os.path.exists(osm) else None
+    except (OSError, ValueError, KeyError) as e:
+      print(f"gta5: no lanes from {osm}: {e}")
+      lanes = None
+    if lanes is not None and lanes.tagged:
+      self.navigator.router.osm = lanes
+      print(f"gta5: lanes from the map's tags ({osm})")
+    else:
+      print("gta5: the map has no lane tags: lanes from GTA's links")
 
   def _map_route(self, state: dict, bearing: float) -> dict:
     """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
@@ -398,7 +412,8 @@ class GTA5World(World):
 
   def _overlay(self, state: dict, v: float) -> list[dict]:
     paths = self.navigator.router.paths if self.navigator is not None else None
-    out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), self.nav, self.recorder is not None)
+    osm = self.navigator.router.osm if self.navigator is not None else None
+    out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), self.nav, self.recorder is not None, osm)
     return out + self.gps.update(state, self.route)
 
   def _update_map(self, state: dict, bearing: float, v: float):
@@ -427,7 +442,7 @@ class GTA5World(World):
     if r is self.lane_line[0] and now < self.lane_line[1]:
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
-    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune))
+    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

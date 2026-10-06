@@ -1,6 +1,7 @@
 """The map debug overlay's encoder and the GPS route (gta5_overlay.py). The map tests use GTA's roads from
-GTA5_MAP/paths.jsonl (default ~/gta5map) and are skipped without them; `python test_overlay.py` prints the overlay's
-size and time per update at test places."""
+GTA5_MAP/paths.jsonl (default ~/gta5map), and the lines of a lane-tagged map from GTA5_LANES_MAP/gta5.osm.pbf (default
+~/gta5map_lanes), and are skipped without them; `python test_overlay.py` prints the overlay's size and time per update
+at test places."""
 import os
 import time
 
@@ -9,10 +10,13 @@ import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay as ov
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav
+from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths, wrap
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
 PATHS = os.path.join(os.path.expanduser(os.getenv("GTA5_MAP", "~/gta5map")), "paths.jsonl")
+LANES = os.path.join(os.path.expanduser(os.getenv("GTA5_LANES_MAP", "~/gta5map_lanes")), "gta5.osm.pbf")
 # x, y, z, heading: e2e trips' starts (~/gta5test/e2e): L7 before its X-shaped dual carriageway junction, X1 on a freeway
 PLACES = {"L7": (-512.5, -914.1, 24.5, 152.0), "X1": (-379.7, -650.6, 36.2, 0.0)}
 
@@ -105,7 +109,14 @@ def paths():
   return p
 
 
-def drive_route(paths: Paths, place: str, length: float = 700.0, turn_after: float = 80.0) -> Route:
+@pytest.fixture(scope="module")
+def osm():
+  if not os.path.exists(LANES):
+    pytest.skip(f"no {LANES}")
+  return OsmLanes.load(LANES, to_game)
+
+
+def drive_route(paths: Paths, place: str, length: float = 700.0, turn_after: float = 80.0, osm=None) -> Route:
   """A route from a place along GTA's roads, straight on but for a left turn at the first junction past turn_after m."""
   x, y, z, heading = PLACES[place]
   snapped = paths.snap(np.array([x, y]), z, heading)
@@ -128,21 +139,21 @@ def drive_route(paths: Paths, place: str, length: float = 700.0, turn_after: flo
     done += float(np.hypot(*(paths.xy[j] - paths.xy[i])))
     nodes.append(j)
     pts.append(paths.xy[j])
-  route = Route(np.array(pts, float), [], paths)
+  route = Route(np.array(pts, float), [], paths, osm=osm)
   route.locate(np.array([x, y]), z, heading)
   return route
 
 
-def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None) -> tuple[dict, dict]:
+def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, osm=None) -> tuple[dict, dict]:
   overlay = overlay or ov.Overlay()
-  route = drive_route(paths, place)
+  route = drive_route(paths, place, osm=osm)
   x, y, z, heading = PLACES[place]
   state = {"pos": [x, y, z + ov.CAR_HEIGHT], "heading": heading, "vEgo": 10.0, **route.info(1000.0),
            "route": route.ahead(1000.0, 5.0).round(1).tolist()}
   nav = Nav(lambda m: None, lambda d: None)
   nav.v = 10.0
-  snap = {"pos": state["pos"], "layers": ov.DEFAULT_LAYERS + "f", "route": route, "paths": paths, "recording": False,
-          "lane_line": None}
+  snap = {"pos": state["pos"], "layers": ov.DEFAULT_LAYERS + "f", "route": route, "paths": paths, "osm": osm,
+          "recording": False, "lane_line": None}
   points = nav.turn_points(np.array(state["route"]), state)
   if points is not None:
     snap["turn"], snap["signal"] = points
@@ -150,20 +161,19 @@ def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None) 
   return msg, dict(overlay.stats)
 
 
-@pytest.mark.parametrize("place", sorted(PLACES))
-def test_overlay_at_places(paths, place):
+def check_overlay(paths, place, osm=None) -> set:
   overlay = ov.Overlay()
-  overlay_update(paths, place, overlay)  # builds the road geometry
-  msg, stats = overlay_update(paths, place, overlay)
+  overlay_update(paths, place, overlay, osm)  # builds the road geometry
+  msg, stats = overlay_update(paths, place, overlay, osm)
   items = decode(msg)
   kinds = {k for k, _ in items}
-  assert {"e", "d", "r"} <= kinds, kinds
+  assert {"e", "r"} <= kinds and kinds & set("dwcy"), kinds
   if place == "L7":  # the route turns left at its junction
     assert {"j", "m", "g"} <= kinds, kinds
   # no lane edges or dividers inside junction areas
   areas = [line[:-1, :2] for k, line in items if k == "j"]
   for k, line in items:
-    if k in "ed":
+    if k in "edwcy":
       mids = (line[1:, :2] + line[:-1, :2]) / 2
       for poly in areas:
         e = np.roll(poly, -1, axis=0) - poly
@@ -176,6 +186,18 @@ def test_overlay_at_places(paths, place):
   near = np.concatenate([line for _, line in items])
   assert np.hypot(near[:, 0] - x, near[:, 1] - y).min() < 15  # the car's own road
   assert np.abs(near[:, 2] - z).max() < ov.LEVEL + 1
+  return kinds
+
+
+@pytest.mark.parametrize("place", sorted(PLACES))
+def test_overlay_at_places(paths, place):
+  check_overlay(paths, place)
+
+
+@pytest.mark.parametrize("place", sorted(PLACES))
+def test_overlay_lines_from_lane_tags(paths, osm, place):
+  kinds = check_overlay(paths, place, osm)
+  assert "d" in kinds and kinds & set("cy" if place == "L7" else "dw"), kinds  # L7: a two-way road, X1 a freeway
 
 
 if __name__ == "__main__":

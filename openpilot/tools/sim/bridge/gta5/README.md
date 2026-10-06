@@ -67,11 +67,13 @@ expecting the turn. It slows gently (0.6 m/s^2, done 25 m before the turn), and 
 the model stops short of it. A turn straight after another is signalled as soon as the first is done.
 Near the waypoint it slows to a stop there and disengages.
 
-Before a turn the car changes into the leftmost lane for a left turn or the rightmost for a right, and it moves back
-over if it drifts into the oncoming lanes. Lane changes are planned back from the last place one may start (30 m before
+Before a turn the car changes into the lanes the map's turn arrows (`turn:lanes`) allow it from, else the leftmost lane
+for a left turn or the rightmost for a right; going straight on through a junction it moves out of lanes whose arrows
+only turn; and it moves back over if it drifts into the oncoming lanes. Lane changes are planned back from the last place one may start (30 m before
 a turn), about 8 s each, and when there isn't room left the set speed comes down for it; a turn the car still isn't in
 the lane for is left for the route to come round again, as the model won't take it from the wrong lane anyway. The car's
-lane comes from GTA's roads along our route (map/README.md), else from the plugin's guess at the road it's on, and the
+lane comes from the road's lanes along our route (map/README.md: the map's lane tags, or GTA's links on a map without
+them), else from the plugin's guess at the road it's on, and the
 bridge asks for the lane change through openpilot's `NavDesire` param, which makes the blinker mean a lane change at
 any speed rather than the turn it means below 19 mph: it is set 0.4 s before the blinker comes on and kept 0.5 s after
 it goes off, as openpilot reads it every 0.2 s (and afresh as a blinker comes on); no lane change starts while the car

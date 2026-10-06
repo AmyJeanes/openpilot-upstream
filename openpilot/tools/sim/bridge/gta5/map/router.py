@@ -9,6 +9,8 @@ import urllib.request
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, OsmLanes, RouteLanes, Section, Span, \
+  ways_from_nodes
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, SLIP_LANE, Link, Paths, wrap
 
 SERVICE_PENALTY, SERVICE_FACTOR = 120, 4.0  # s onto a service road, and its cost over a road's
@@ -47,6 +49,15 @@ def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float
   return out
 
 
+def link_section(link: Link) -> Section:
+  """A GTA link's lanes as a cross-section (its two directions laid out alike), for a map without lane tags."""
+  w = link.width
+  ours = [Span(Lane(FORWARD, w), link.inner + k * w, link.inner + (k + 1) * w, 1) for k in range(link.lanes)]
+  oncoming = [Span(Lane(BACKWARD, w), -(link.inner + (k + 1) * w), -(link.inner + k * w), -1) for k in reversed(range(link.back))]
+  spans = oncoming + ours
+  return Section(spans, (min(s.left for s in spans), max(s.right for s in spans)))
+
+
 class Fork:
   def __init__(self, along: float, side: str, lanes: int, lanes_in: int, keep: bool, other: int = 0, slip: bool = False):
     self.along = along  # m along the route
@@ -61,8 +72,10 @@ class Fork:
 
 class Route:
   """A route's points (game metres), and where along it the car is. With GTA's road data, also the road's height and
-  lanes along it, and the roads that fork off it; with the map's speed limits, those."""
-  def __init__(self, points: np.ndarray, maneuvers: list[dict], paths: Paths | None = None, limits: np.ndarray | None = None):
+  the roads that fork off it; with the map's speed limits, those. Its lanes come from the map's lane tags (osm_lanes.py),
+  or where the map has none, from GTA's own layout of each link (paths.Link)."""
+  def __init__(self, points: np.ndarray, maneuvers: list[dict], paths: Paths | None = None, limits: np.ndarray | None = None,
+               osm: OsmLanes | None = None):
     self.points = points
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.maneuvers = maneuvers
@@ -81,7 +94,26 @@ class Route:
     if paths is not None and n >= 2:
       self._add_paths(paths)
     self.limit_list = [round(float(v), 2) for v in self.limits]
-    self.lane_counts = [link.lanes if link is not None else 0 for link in self.links]
+    self._lanes: RouteLanes | None = None
+    self._lanes_of: list | None = None  # the links a RouteLanes from GTA's layout was made from
+    self.osm_lanes = osm is not None and osm.tagged and n >= 2
+    if self.osm_lanes:
+      self._lanes = RouteLanes.from_osm(points, ways_from_nodes(points, osm), osm)
+    self.lane_counts = [sec.lanes if (sec := self.section(k)) is not None else 0 for k in range(max(n - 1, 0))]
+
+  @property
+  def lanes(self) -> RouteLanes | None:
+    """The lanes along it: from the map's tags, else (GTA only, until every map has them) from GTA's links."""
+    if not self.osm_lanes and self._lanes_of is not self.links and len(self.points) >= 2:
+      self._lanes = RouteLanes(self.points, [link_section(link) if link is not None and link.lanes else None
+                                             for link in self.links], junctions=self.junctions)
+      self._lanes_of = self.links
+    return self._lanes
+
+  def section(self, k: int) -> Section | None:
+    """The road's cross-section along segment k, None where it's unknown."""
+    lanes = self.lanes
+    return lanes.sections[k] if lanes is not None and 0 <= k < len(lanes.sections) else None
 
   def _add_paths(self, paths: Paths):
     pts = self.points
@@ -223,67 +255,39 @@ class Route:
     for j in ks:
       if abs(self.along[j] - self.at - ahead) > LANES_NEAR:
         break
-      link = self.links[j]
-      if link is not None and link.lanes:
-        return link.lanes
+      sec = self.section(j)
+      if sec is not None and sec.lanes:
+        return sec.lanes
     return 0
 
   def lane_line(self, keys: list[tuple[float, float]]) -> np.ndarray | None:
-    """The route on from the car (rest()'s points, and one at each of keys) moved off the road's line into the lanes
-    keys gives ([(m on, lane from the left)], a ramp between each two), by each link's own lanes; across links without
-    them, as inside junctions, the offset runs evenly between the known ones."""
-    first = int(np.searchsorted(self.along, self.at, side='right'))
-    if first >= len(self.points) or not keys:
-      return None
-    pts = self.rest()
-    s = np.concatenate(([0.0], self.along[first:] - self.at))
-    links = [self.links[k] for k in range(first - 1, len(self.points) - 1)]
-    kx = np.array([d for d, _ in keys], dtype=float)
-    kx = kx + np.arange(len(kx)) * 1e-3  # a step where two keys share a place
-    ky = np.array([lane for _, lane in keys], dtype=float)
-    s2 = np.unique(np.concatenate((s, kx[(kx > 0) & (kx < s[-1])])))
-    xy = np.stack([np.interp(s2, s, pts[:, 0]), np.interp(s2, s, pts[:, 1])], axis=1)
-    lane = np.interp(s2, kx, ky)
-    seg = np.clip(np.searchsorted(s, (s2[:-1] + s2[1:]) / 2, side='right') - 1, 0, len(links) - 1)
-    offs = np.full(len(s2), np.nan)
-    for i, j in enumerate(seg):
-      link = links[j]
-      if link is None or not link.lanes:
-        continue
-      for v in (i, i + 1):  # the segment's ends, averaged with the next's at a shared point
-        off = link.inner + (min(max(lane[v], -link.back), link.lanes - 1) + 0.5) * link.width
-        offs[v] = off if np.isnan(offs[v]) else (offs[v] + off) / 2
-    known = ~np.isnan(offs)
-    if not known.any():
-      return None
-    offs = np.interp(s2, s2[known], offs[known])
-    d = np.diff(xy, axis=0)
-    normals = np.stack([d[:, 1], -d[:, 0]], axis=1) / np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-6)[:, None]  # to the right
-    vn = np.concatenate((normals[:1], normals[:-1] + normals[1:], normals[-1:]))
-    vn /= np.maximum(np.hypot(vn[:, 0], vn[:, 1]), 1e-6)[:, None]
-    # out further at a corner, so the segments either side stay their offset from the road's line
-    out = np.concatenate((normals[:1], normals))
-    vn /= np.maximum(np.einsum('ij,ij->i', vn, out), 0.5)[:, None]
-    return xy + vn * offs[:, None]
+    """The route on from the car moved into the lanes keys gives ([(m on, lane from the left)], a ramp between each
+    two), by each segment's own lanes (RouteLanes.lane_line: evenly across segments without, fillets through corners)."""
+    lanes = self.lanes
+    return lanes.lane_line(self.at, keys) if lanes is not None else None
+
+  def _section_here(self) -> Section | None:
+    sec = self.section(self.seg)
+    return sec if sec is not None and sec.lanes else None
 
   def lane(self) -> list[int] | None:
     """The car's lane, as the plugin reports it: [i from the left, of n], i negative in the oncoming lanes. None where
-    the car isn't heading along the route's link, as where the link jogs sideways between roads' lines."""
-    link = self.links[self.seg] if self.seg < len(self.links) else None
-    if link is None or not link.lanes or self.misaligned > LANE_ALIGN:
+    the car isn't heading along the route's way, as where GTA's links jog sideways between roads' lines."""
+    sec = self._section_here()
+    if sec is None or self.misaligned > LANE_ALIGN:
       return None
-    return [link.lane(self.right), link.lanes]
+    return [sec.lane(self.right), sec.lanes]
 
   def lane_frac(self) -> float | None:
     """The car's lane as lane() gives it, but between lanes as it moves across: 0.0 the middle of the leftmost."""
-    link = self.links[self.seg] if self.seg < len(self.links) else None
-    if link is None or not link.lanes or self.misaligned > LANE_ALIGN:
+    sec = self._section_here()
+    if sec is None or self.misaligned > LANE_ALIGN:
       return None
-    return round((self.right - link.inner) / link.width - 0.5, 2)
+    return round(sec.frac(self.right), 2)
 
   def two_way(self) -> bool | None:
-    link = self.links[self.seg] if self.seg < len(self.links) else None
-    return None if link is None else link.back > 0
+    sec = self.section(self.seg)
+    return None if sec is None else sec.two_way
 
   def changes(self, values, distance: float) -> list[list[float]]:
     """[[m ahead, value], ...] where a per-segment value changes within `distance` m, from the car's segment on."""
@@ -308,14 +312,22 @@ class Route:
       "laneCounts": self.changes(self.lane_counts, distance),
       "stops": [round(a - self.at, 1) for a in self.stops if -JUNCTION_BEHIND < a - self.at < distance],
       "junctions": [round(a - self.at, 1) for a in self.junctions if -JUNCTION_BEHIND < a - self.at < distance],
+      "laneArrows": self.lane_arrows(distance),
     }
+
+  def lane_arrows(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
+    """The turn arrows of the lanes into each junction within `distance` m: [[m ahead to where they end, each lane's
+    from the left, ';'-separated]]."""
+    arrows = self.lanes.arrows if self.lanes is not None else []
+    return [[round(e - self.at, 1), [";".join(sorted(t)) for t in turns]] for e, turns in arrows if -behind < e - self.at < distance]
 
 
 class Router:
-  def __init__(self, url: str, timeout: float = 2.0, paths: Paths | None = None):
+  def __init__(self, url: str, timeout: float = 2.0, paths: Paths | None = None, osm: OsmLanes | None = None):
     self.url = url.rstrip('/')
     self.timeout = timeout
     self.paths = paths
+    self.osm = osm  # the map's lanes, where it tags them
 
   def _post(self, action: str, request: dict) -> dict:
     req = urllib.request.Request(f"{self.url}/{action}", data=json.dumps(request).encode(), headers={'Content-Type': 'application/json'})
@@ -357,7 +369,7 @@ class Router:
       points.insert(0, tuple(snapped[0]))
       maneuvers = [{**m, 'begin_shape_index': m['begin_shape_index'] + 1} for m in maneuvers]
       limits = np.concatenate((limits[:1], limits))
-    return Route(np.array(points, dtype=float), maneuvers, self.paths, limits)
+    return Route(np.array(points, dtype=float), maneuvers, self.paths, limits, self.osm)
 
   def _limits(self, shape: str, n: int) -> np.ndarray:
     """The map's speed limit (m/s, 0 where it has none) along each segment of a route's shape."""

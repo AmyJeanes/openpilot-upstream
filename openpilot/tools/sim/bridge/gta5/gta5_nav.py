@@ -9,6 +9,7 @@ import time
 import numpy as np
 
 from openpilot.common.constants import CV
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import turn_targets
 
 DEBUG = bool(os.getenv("GTA5_DEBUG"))
 TURN_ANGLE = 50.0  # deg of heading change along TURN_WINDOW m of route that makes a turn, not a bend
@@ -147,6 +148,10 @@ ENTRY_PAST = 3.0  # m past the turn's point, a junction node of it
 ENTRY_MIN = 5.0  # m before the turn: nearer, the junction nodes say nothing more than the turn
 ENTRY_DEFAULT = 15.0  # m before the turn
 LEFT_SIGNAL_AFTER_CHANGE = 8.0  # s after a lane change towards a left turn its signal isn't held for the stop line
+# The map's turn arrows (turn:lanes) say which lanes a turn or fork is taken from: those of the lanes into its junction,
+# ending this near the turn's point (in the junction)
+ARROWS_BEFORE, ARROWS_AFTER = 30.0, 5.0  # m
+THROUGH_TURN = 20.0  # deg at most the route turns through a junction it goes straight on through
 
 
 def wrap(deg: float) -> float:
@@ -267,12 +272,39 @@ class Tune:
 TUNE = Tune("")  # the defaults
 
 
+def remap(targets: tuple[int, int, int], n: int, left: bool) -> tuple[int, int]:
+  """Target lanes lo-hi of m lanes as lanes of n, counted from the left (else from the right) where they differ."""
+  lo, hi, m = targets
+  if not left:
+    lo, hi = lo + n - m, hi + n - m
+  return min(max(lo, 0), n - 1), min(max(hi, 0), n - 1)
+
+
+def parse_arrows(arrows) -> list[tuple[float, list[frozenset[str]]]]:
+  """Route.info's laneArrows: [(m ahead to where they end, each lane's arrows from the left)]."""
+  return [(float(d), [frozenset(a.split(";")) - {""} for a in lanes]) for d, lanes in arrows or []]
+
+
+def arrows_at(arrows: list, dist: float) -> list[frozenset[str]] | None:
+  """The arrows of the lanes into the junction of a turn or fork `dist` m on (parse_arrows'), None for none."""
+  near = [(abs(d - dist), lanes) for d, lanes in arrows if dist - ARROWS_BEFORE <= d <= dist + ARROWS_AFTER]
+  return min(near, key=lambda n: n[0])[1] if near else None
+
+
+def aim(m, arrows: list):
+  """A turn or fork's target lanes from the map's turn arrows, where its junction has them."""
+  lanes = arrows_at(arrows, m.dist)
+  found = turn_targets(lanes, m.side, isinstance(m, Fork)) if lanes else []
+  m.targets = (min(found), max(found), len(lanes)) if found else None
+
+
 class Turn:
   def __init__(self, dist: float, side: str, exit_heading: float, angle: float = 90.0):
     self.dist = dist  # m along the route to the turn
     self.side = side  # "left" or "right"
     self.exit_heading = exit_heading  # game heading (deg counterclockwise from north) after the turn
     self.angle = angle  # deg turned
+    self.targets: tuple[int, int, int] | None = None  # lanes lo-hi of n the map's arrows allow it from
 
   def speed(self, tune: Tune | None = None) -> float:
     t = tune or TUNE
@@ -282,7 +314,9 @@ class Turn:
     return float(np.interp(self.angle, [TURN_ANGLE, 90.0], [t.turn_speed_soft, square]))
 
   def lanes(self, n: int) -> tuple[int, int]:
-    """The lanes (from the left) of n to take it from."""
+    """The lanes (from the left) of n to take it from: those the map's arrows allow, else the outside lane."""
+    if self.targets is not None:
+      return remap(self.targets, n, self.side == "left")
     return (0, 0) if self.side == "left" else (n - 1, n - 1)
 
 
@@ -297,8 +331,11 @@ class Fork:
     main = other > 0 and lanes > other and lanes >= lanes_in - other
     self.keep = keep and not main
     self.slip = slip  # the other branch opens a slip lane or turn bay
+    self.targets: tuple[int, int, int] | None = None  # lanes lo-hi of n the map's arrows allow it from
 
   def lanes(self, n: int) -> tuple[int, int]:
+    if self.targets is not None:
+      return remap(self.targets, n, self.side == "left")
     ours = min(self.ours, self.lanes_in - self.other) if 0 < self.other < self.lanes_in else self.ours
     if self.other and ours >= 3:
       ours -= 1  # and not the lane beside the other branch on a wide road, which drifts into it
@@ -306,6 +343,34 @@ class Fork:
       return 0, n - 1  # every lane goes the route's way
     ours = max(1, min(ours, n))
     return (0, ours - 1) if self.side == "left" else (n - ours, n - 1)
+
+
+class Through:
+  """Straight on through a junction where some of the lanes into it only turn: the lanes that go on."""
+  def __init__(self, dist: float, targets: tuple[int, int, int]):
+    self.dist = dist  # m along the route to the end of the lanes' arrows
+    self.side = "through"
+    self.targets = targets
+
+  def lanes(self, n: int) -> tuple[int, int]:
+    return remap(self.targets, n, self.targets[0] == 0)
+
+
+def throughs(route: np.ndarray, arrows: list, moves: list) -> list[Through]:
+  """The junctions the route goes straight on through (no turn or fork near) where the arrows leave some lanes out."""
+  out = []
+  along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T)))) if len(route) >= 2 else np.zeros(1)
+  for d, lanes in arrows:
+    if d <= 0 or any(d - ARROWS_AFTER <= m.dist <= d + ARROWS_BEFORE for m in moves) or d + 25.0 > along[-1] or d < 15.0:
+      continue
+    found = turn_targets(lanes, "through")
+    if not found or len(found) == len(lanes):
+      continue
+    p = [np.array([np.interp(v, along, route[:, 0]), np.interp(v, along, route[:, 1])]) for v in (d - 15.0, d, d + 25.0)]
+    h_in, h_out = (math.degrees(math.atan2(*(b - a)[::-1])) for a, b in ((p[0], p[1]), (p[1], p[2])))
+    if abs(wrap(h_out - h_in)) <= THROUGH_TURN:
+      out.append(Through(d, (min(found), max(found), len(lanes))))
+  return out
 
 
 def headings(route: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -378,18 +443,24 @@ def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> 
   return math.sqrt(speed ** 2 + 2 * decel * max(0.0, dist - v * SLOW_LAG))
 
 
-def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None) -> list[tuple[float, float]]:
+def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
+              arrows: list | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
-  in, by where nav's changes for it must have ended, and arrives from a turn in its side's outside lane. lanes_at(m,
+  in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
+  turn, by where nav's changes for it must have ended, and arrives from a turn in its side's outside lane. lanes_at(m,
   after) is the lanes the car's way just before (after: past) a point."""
   t = tune or TUNE
-  ahead: list[Turn | Fork] = []
+  arrows = parse_arrows(arrows)
+  ahead: list[Turn | Fork | Through] = []
   turn = find_turn(route, MIN_AHEAD_MAP)
   while turn is not None:
     ahead.append(turn)
     turn = find_turn(route, turn.dist + TURN_HOLDS)
   ahead += [Fork(d, side, *rest) for d, side, *rest in forks if d > 0]
+  for m in ahead:
+    aim(m, arrows)
+  ahead += throughs(route, arrows, ahead)
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
   keys = [(0.0, float(cur))]
@@ -413,6 +484,9 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
     if isinstance(m, Turn):
       new = 0 if m.side == "left" else max(lanes_at(m.dist, True) - 1, 0)
       free = m.dist + TURN_HOLDS
+    elif isinstance(m, Through):
+      new = min(cur, max(lanes_at(m.dist, True) - 1, 0))
+      free = m.dist
     else:
       new = max(cur - max(n - m.ours, 0), 0) if m.side == "right" else cur  # numbered from the branch's own left lane
       free = m.dist
@@ -618,7 +692,12 @@ class Nav:
     if turn is not None and now - self.seen[1] < CONFIRM:
       turn = None
     forks = self._forks(state.get("forks"), route, turn)
-    caps = [self._change_lane(forks + ([turn] if turn is not None else []), route, v, now)]
+    arrows = parse_arrows(state.get("laneArrows"))
+    moves: list = forks + ([turn] if turn is not None else [])
+    for m in moves:
+      aim(m, arrows)
+    ahead = moves + [m for m in throughs(route, arrows, moves) if turn is None or m.dist < turn.dist]
+    caps = [self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now)]
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, state.get("stops") or [], state.get("junctions") or [])
     if turn is not None and turn.dist < t.slow_from:
@@ -915,7 +994,7 @@ class Nav:
       return self._change_for(m, lo, hi, route, v, now)
     return 0.0
 
-  def _change_for(self, m: Turn | Fork, lo: int, hi: int, route: np.ndarray, v: float, now: float) -> float:
+  def _change_for(self, m: Turn | Fork | Through, lo: int, hi: int, route: np.ndarray, v: float, now: float) -> float:
     i, n = self.lane
     changes = lo - i if i < lo else i - hi
     fork = isinstance(m, Fork)
@@ -939,9 +1018,9 @@ class Nav:
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
-      what = f"{m.side} {'fork' if fork else 'turn'}"
+      what = "way straight on" if isinstance(m, Through) else f"{m.side} {'fork' if fork else 'turn'}"
       self._start_change("left" if i > hi else "right", f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
-                         turn=not fork)
+                         turn=isinstance(m, Turn))
     return cap
 
   def _keep_fork(self, fork: Fork | None, turn: Turn | None, desire: dict[str, float], v: float, now: float):

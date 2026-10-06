@@ -4,6 +4,7 @@
 MapView.update() sets what /state reports: {"t": seconds, "car": {"x", "y", "bearing"}, "routes": {name: [[x, y], ...]},
 "waypoint": [x, y], "text": "..."}, in the same metres as roads.json, bearing in degrees clockwise from north.
 A destination picked on the page (POST /destination {"x", "y"}, or {} to clear) waits in take_destination().
+lanes.json beside roads.json (osm_to_roads.py --lanes), where there is one, gives the lines painted on the roads.
 """
 import argparse
 import gzip
@@ -18,7 +19,8 @@ PAGE = os.path.join(os.path.dirname(__file__), 'view.html')
 
 class MapView:
   def __init__(self, roads: str, port: int, host: str = '0.0.0.0'):
-    self.roads_path, self.roads_mtime, self.roads = roads, 0.0, b''
+    self.files = {'/roads.json': roads, '/lanes.json': os.path.join(os.path.dirname(roads), 'lanes.json')}
+    self.cache: dict[str, tuple[float, bytes]] = {}
     self.state = b'{}'
     self.destination: tuple | None = None  # ([x, y] or None,) until taken
     view = self
@@ -29,8 +31,12 @@ class MapView:
         if path == '/':
           with open(PAGE, 'rb') as f:
             self._reply(f.read(), 'text/html; charset=utf-8')
-        elif path == '/roads.json':
-          self._reply(view.read_roads(), 'application/json', gzipped=True)
+        elif path in view.files:
+          body = view.read(path)
+          if body is None:
+            self.send_error(404)
+          else:
+            self._reply(body, 'application/json', gzipped=True)
         elif path == '/state':
           self._reply(view.state, 'application/json')
         else:
@@ -65,12 +71,16 @@ class MapView:
     self.server.daemon_threads = True
     threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-  def read_roads(self) -> bytes:
-    mtime = os.path.getmtime(self.roads_path)  # picks up a rebuilt map
-    if mtime != self.roads_mtime:
-      with open(self.roads_path, 'rb') as f:
-        self.roads, self.roads_mtime = gzip.compress(f.read(), 6), mtime
-    return self.roads
+  def read(self, name: str) -> bytes | None:
+    """A map file, gzipped; None where there isn't one."""
+    path = self.files[name]
+    if not os.path.exists(path):
+      return None
+    mtime = os.path.getmtime(path)  # picks up a rebuilt map
+    if name not in self.cache or self.cache[name][0] != mtime:
+      with open(path, 'rb') as f:
+        self.cache[name] = (mtime, gzip.compress(f.read(), 6))
+    return self.cache[name][1]
 
   def take_destination(self) -> tuple | None:
     d, self.destination = self.destination, None

@@ -30,7 +30,8 @@
 <button id="pick">Navigate here</button>
 <div id="legend"><i style="background:#3d8bfd"></i>route<i style="background:#ff5fd2"></i>game GPS</div>
 <script>
-// Draws roads.json (polylines in metres, x east, y north) with the car and routes from /state, polled.
+// Draws roads.json (polylines in metres, x east, y north, each road's middle and width) with the car and routes from
+// /state, polled; zoomed in, also lanes.json's lines painted on them (osm_to_roads.py --lanes), where the map has them.
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const info = document.getElementById('info');
@@ -39,7 +40,11 @@ const STYLE = {  // per road class: colour, minimum width in px
   tertiary: ['#858d96', 1.2], unclassified: ['#6f767e', 1], residential: ['#6f767e', 1], service: ['#4d535a', 0.8],
   track: ['#5b4a36', 0.8],
 };
-const LANE_WIDTH = 5.4;  // m per lane, as GTA's roads are
+const LANE_WIDTH = 5.4;  // m per lane, for a roads.json without widths
+// lanes.json's kinds: colour, m of dash and gap (none: solid), width in m
+const MARKS = { edge: ['#c8c8c8', null, 0.2], dashed: ['#f4f4f4', [3, 6], 0.15], solid: ['#f4f4f4', null, 0.15],
+  centre: ['#f2c200', null, 0.15], centre_dashed: ['#f2c200', [3, 6], 0.15] };
+const MARKS_FROM = 1.5;  // px/m: zoomed in this far the lines are drawn
 const CAR_LENGTH = 4.7;  // m
 const MAX_FPS = 30;  // the GPU is shared with the game and openpilot's model, which mustn't fall behind
 const CELL = 400;  // m: roads are kept in cells of this size, and only those on screen drawn
@@ -51,7 +56,7 @@ const RATE_OVER = 0.3;  // s of updates its speed and turn rate come from
 const CORRECT = 0.25;  // s: a new update's difference fades this fast
 const SNAP = 30;  // m: further out than this is a teleport, not a correction
 const ROT_EASE = 0.15;  // s: the map turns towards the car's heading (or north) this smoothly
-let cells = new Map(), layerKeys = [], state = null, located = false, drawQueued = false;
+let cells = new Map(), layerKeys = [], markKinds = [], state = null, located = false, drawQueued = false;
 let samples = [], rate = 1, car = null;  // rate: server seconds per browser second; car: where it's drawn now
 let offset = { x: 0, y: 0, bearing: 0 }, lastDraw = 0;
 let view = { x: 0, y: 0, scale: 0.5, rot: 0 };  // centre in metres, px per metre, radians
@@ -171,11 +176,23 @@ function draw() {
   ctx.lineCap = near ? 'round' : 'butt';
   ctx.lineJoin = near ? 'round' : 'bevel';
   const visible = visibleCells();
+  const marked = view.scale >= MARKS_FROM && markKinds.length;
   for (const l of layerKeys) {
     if (view.scale < (MIN_SCALE[l.cls] || 0)) continue;
-    ctx.strokeStyle = l.colour;
-    ctx.lineWidth = Math.max(l.lanes * LANE_WIDTH, l.minPx * devicePixelRatio / s);
+    ctx.strokeStyle = marked ? (l.cls === 'motorway' || l.cls === 'trunk' ? '#4a4740' : '#3b3f45') : l.colour;
+    ctx.lineWidth = Math.max(l.width, l.minPx * devicePixelRatio / s);
     for (const cell of visible) { const p = cell.paths.get(l.key); if (p) ctx.stroke(p); }
+  }
+  if (marked) {
+    for (const kind of markKinds) {
+      const [colour, dash, width] = MARKS[kind] || MARKS.solid;
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = Math.max(width, devicePixelRatio / s);
+      ctx.setLineDash(dash || []);
+      for (const cell of visible) { const p = cell.marks.get(kind); if (p) ctx.stroke(p); }
+    }
+    ctx.setLineDash([]);
+    ctx.lineCap = near ? 'round' : 'butt';
   }
   if (view.scale > 0.8) {
     ctx.fillStyle = '#d04040';
@@ -218,7 +235,7 @@ function draw() {
 
 function cellAt(x, y) {
   const key = Math.floor(x / CELL) + ',' + Math.floor(y / CELL);
-  if (!cells.has(key)) cells.set(key, { paths: new Map(), signals: [] });
+  if (!cells.has(key)) cells.set(key, { paths: new Map(), marks: new Map(), signals: [] });
   return cells.get(key);
 }
 
@@ -226,9 +243,10 @@ async function loadRoads() {
   const roads = await (await fetch('roads.json')).json();
   const kinds = new Map();
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const w of roads.ways) {
-    const cls = roads.classes[w[0]], lanes = Math.min(w[1], 6), key = cls + ':' + lanes;
-    if (!kinds.has(key)) kinds.set(key, { key, cls, lanes, order: w[0] });
+  roads.ways.forEach((w, n) => {
+    const cls = roads.classes[w[0]], lanes = Math.min(w[1], 6);
+    const width = roads.widths ? Math.round(roads.widths[n] * 2) / 2 : lanes * LANE_WIDTH, key = cls + ':' + width;
+    if (!kinds.has(key)) kinds.set(key, { key, cls, width, order: w[0] });
     // each segment goes in the cell of its first point
     let path = null, cell = null;
     for (let i = 3; i + 3 < w.length; i += 2) {
@@ -245,16 +263,42 @@ async function loadRoads() {
       minX = Math.min(minX, w[i]); maxX = Math.max(maxX, w[i]);
       minY = Math.min(minY, w[i + 1]); maxY = Math.max(maxY, w[i + 1]);
     }
-  }
+  });
   for (const [x, y] of roads.signals) cellAt(x, y).signals.push([x, y]);
   // minor roads first, so main roads draw over them
-  layerKeys = [...kinds.values()].sort((a, b) => b.order - a.order || a.lanes - b.lanes)
+  layerKeys = [...kinds.values()].sort((a, b) => b.order - a.order || a.width - b.width)
     .map(k => ({ ...k, colour: (STYLE[k.cls] || STYLE.residential)[0], minPx: (STYLE[k.cls] || STYLE.residential)[1] }));
   if (!located) {
     view.x = (minX + maxX) / 2; view.y = (minY + maxY) / 2;
     view.scale = Math.min(innerWidth / (maxX - minX), innerHeight / (maxY - minY)) * 0.9;
   }
   info.textContent = `${roads.ways.length} roads`;
+  requestDraw();
+  loadMarks();
+}
+
+async function loadMarks() {
+  // the lines painted on the roads, where the map has lane tags: none otherwise
+  const r = await fetch('lanes.json');
+  if (!r.ok) return;
+  const lanes = await r.json();
+  const seen = new Set();
+  for (const l of lanes.lines) {
+    const kind = lanes.kinds[l[0]];
+    seen.add(kind);
+    let path = null, cell = null;
+    for (let i = 1; i + 3 < l.length; i += 2) {
+      const c = cellAt(l[i], l[i + 1]);
+      if (c !== cell) {
+        cell = c;
+        if (!cell.marks.has(kind)) cell.marks.set(kind, new Path2D());
+        path = cell.marks.get(kind);
+        path.moveTo(l[i], l[i + 1]);
+      }
+      path.lineTo(l[i + 2], l[i + 3]);
+    }
+  }
+  markKinds = lanes.kinds.filter(k => seen.has(k));
   requestDraw();
 }
 

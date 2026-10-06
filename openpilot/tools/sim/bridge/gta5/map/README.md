@@ -20,7 +20,7 @@ The map is the game's data, so it isn't in the repository; build it from your co
 2. Convert it, in a Python environment with `osmium` and `pyvalhalla` (`uv venv ~/gta5map/.venv && uv pip install osmium pyvalhalla numpy`):
    ```bash
    python ynd_to_osm.py paths.jsonl ~/gta5map/gta5.osm.pbf --sidecar ~/gta5map/nodes.npz --minimap minimap.jsonl  # the map
-   python osm_to_roads.py ~/gta5map/gta5.osm.pbf ~/gta5map/roads.json  # the map view's roads
+   python osm_to_roads.py ~/gta5map/gta5.osm.pbf ~/gta5map/roads.json --lanes ~/gta5map/lanes.json  # the map view's roads
    valhalla_build_config --mjolnir-tile-dir ~/gta5map/tiles --mjolnir-tile-extract ~/gta5map/tiles.tar \
      --mjolnir-timezone '' --mjolnir-admin '' > ~/gta5map/valhalla.json
    valhalla_build_tiles -c ~/gta5map/valhalla.json ~/gta5map/gta5.osm.pbf
@@ -29,7 +29,8 @@ The map is the game's data, so it isn't in the repository; build it from your co
 3. Check its lanes: `validate_lanes.py ~/gta5map/gta5.osm.pbf` checks the lane tags (also on a real OSM extract, with
    `--left` where traffic drives on the left), and `lane_parity.py paths.jsonl ~/gta5map/gta5.osm.pbf` that
    `osm_lanes.py` reads them back to GTA's own lane layout. `test_osm_lanes.py` and `test_validate_lanes.py` run on the
-   hand-written `fixtures/` (`python test_osm_lanes.py`).
+   hand-written `fixtures/` (`python test_osm_lanes.py`); `test_route_lanes.py` on small maps made in the test, in the
+   bridge's own environment.
 
 ## Using it
 ```bash
@@ -42,9 +43,19 @@ Without `GTA5_ROUTER`, nav follows the game's GPS as before. A waypoint set on t
 The route sets off the way the car faces, and when the car leaves it nav routes again from where the car is.
 With ynddump's `paths.jsonl` in `GTA5_MAP` too, the bridge reads GTA's own roads (`paths.py`): a route starts from the
 road at the car's height and heading (from that road's next node, so not on a road passing over or under it), the car
-counts as off the route on another level or heading the other way, and nav gets the lanes along the route (as
-CodeWalker lays them out: 5.5 m wide, 4 m on narrow roads, out from the link by its offset, or centred on a one-way
-link) and the forks in it.
+counts as off the route on another level or heading the other way, and nav gets the forks along the route, its stop
+lines and junctions.
+The lanes along a route come from the map's lane tags, where `GTA5_MAP/gta5.osm.pbf` has them (`osm_lanes.py`,
+`RouteLanes`, read with `osm_pbf.py`, which needs no pyosmium): the route's ways (each shape point is a map node; a real
+map's would come from Valhalla's `trace_attributes`, `ways_from_trace`), each one's cross-section in the route's
+direction, a lane widening from nothing over 30 m where a way's lane count rises (falls) at a node no other road
+joins, the turn arrows into each junction, from which nav takes the lanes for each turn, and the line through the lanes
+nav plans, on fillets from the lane in to the lane out through turns at junctions. A map without lane tags (only lane
+counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
+on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map. The
+map view draws the roads at their width and, from `lanes.json` (`osm_to_roads.py --lanes`) zoomed in, their lines:
+edges, white dashed lines between lanes one way (solid where `change:lanes` forbids crossing), the yellow line between
+the directions; and the plugin's debug overlay the same lines, from the map's tags.
 `map_view.py roads.json --state <file>` shows the map alone, with a state from a file.
 
 ## The map
