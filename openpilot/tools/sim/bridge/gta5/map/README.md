@@ -110,6 +110,12 @@ the directions; and the plugin's debug overlay the same lines, from the map's ta
   clockwise from north, a to b), `length`, `road_class` (into `classes`), `maxspeed_mph`, `name` (into `names`, -1 for
   none); and where links cross more than 4 m apart in height, as at overpasses, `overpass_links`, `overpass_xy` and
   `overpass_z` (each link's height there).
+- Where a link crosses over another (more than 4 m above it, with no node in common), it and the links beside it at
+  its height within 15 m (GTA draws a bridge's lanes as links side by side) are `bridge=yes` with a `layer` one above
+  what they cross: freeway interchanges stack up to `layer=5`. Without the ground's height, roads under others stay on
+  the ground (no `tunnel`).
+- GTA's pedestrian crossings are links of their own between its crossing nodes, joined to no road: they're
+  `highway=footway` + `footway=crossing` + `crossing=marked`, and drawn as zebra crossings.
 - Traffic lights are `highway=traffic_signals` on the stop line node, stop junctions `highway=stop`. GTA's don't say
   which way they face: a stop line is for the junction ahead of it within 30 m (GTA's are 12-24 m before it), or 50 m
   if that's nearer than the one behind; where a road has junctions about as near both ways, the one with more stop

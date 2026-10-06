@@ -40,6 +40,8 @@ NAME_RUN = 100.0  # m: unnamed links up to this long between two stretches of a 
 RAMP = 1500.0  # m: a ramp or connector is no longer than this
 LANES_APART = 20.0  # m: GTA draws a freeway's lanes as links side by side, joined by lane changes
 OVERPASS_DZ = 4.0  # m: roads crossing with this much height between them are on different levels
+MAX_LAYER = 5  # OSM's highest layer
+BRIDGE_REACH = 15.0  # m round where roads cross over each other: links this near at either's height are part of it
 MINIMAP_ROAD = 180  # grey of the ordinary roads in GTA's minimap art (99 is dirt tracks and alleys)
 MINIMAP_CELL = 2.0  # m
 DRAWN = 0.5  # of a minor link's length away from major roads, on a road the minimap draws: it's a road
@@ -241,6 +243,40 @@ def overpasses(xyz, segs):
       found.add((int(min(i[k], j[k])), int(max(i[k], j[k])), round(float(x), 1), round(float(y), 1),
                  round(float(zi[k] if i[k] < j[k] else zj[k]), 1), round(float(zj[k] if i[k] < j[k] else zi[k]), 1)))
   return sorted(found)
+
+
+def levels(nodes, links) -> dict[int, int]:
+  """OSM layers from GTA's heights: a link crossing over another without a node in common (overpasses) is a layer
+  above it, a level up for each road it's stacked over, as a freeway interchange's; the rest stay on the ground. `links`
+  is [(a, b)]; returns {link index: layer} for those above ground."""
+  import numpy as np
+  used = sorted({k for link in links for k in link})
+  index = {k: i for i, k in enumerate(used)}
+  xyz = np.array([(nodes[k]['x'], nodes[k]['y'], nodes[k]['z']) for k in used], dtype=np.float64).reshape(-1, 3)
+  segs = np.array([(index[a], index[b]) for a, b in links], dtype=np.int64).reshape(-1, 2)
+  cross = overpasses(xyz, segs)
+  p0, p1 = xyz[segs[:, 0]], xyz[segs[:, 1]]
+
+  def deck(x, y, z):  # the links at a crossing's upper height near it: the bridge's other lanes, as GTA draws them
+    a, d = p0[:, :2], (p1 - p0)[:, :2]
+    t = np.clip(np.einsum('ij,ij->i', np.array([x, y]) - a, d) / np.maximum(np.einsum('ij,ij->i', d, d), 1e-9), 0, 1)
+    near = np.hypot(*(a + d * t[:, None] - [x, y]).T) < BRIDGE_REACH
+    return np.flatnonzero(near & (np.abs(p0[:, 2] + (p1 - p0)[:, 2] * t - z) < OVERPASS_DZ / 2))
+  above = []  # (upper, lower)
+  for i, j, x, y, zi, zj in cross:
+    up, low, z_up, z_low = (i, j, zi, zj) if zi > zj else (j, i, zj, zi)
+    lows = deck(x, y, z_low)
+    above += [(u, lw) for u in {up, *deck(x, y, z_up).tolist()} for lw in {low, *lows.tolist()}]
+  layer: dict[int, int] = {}
+  for _ in range(MAX_LAYER):
+    changed = False
+    for up, low in above:
+      if layer.get(up, 0) < min(layer.get(low, 0) + 1, MAX_LAYER):
+        layer[up] = min(layer.get(low, 0) + 1, MAX_LAYER)
+        changed = True
+    if not changed:
+      break
+  return layer
 
 
 def ramps(nodes, ways, length, streets):
@@ -1015,13 +1051,17 @@ def main():
   print(f"{len(stops)} stop lines: {len(faced)} facing their junction ({len(flip)} ways turned round), {either} either way, " +
         f"{none} with no junction ahead left out")
 
-  ways = [(wid, a, b, bool(back)) for wid, a, b, _, back, *_ in info]
+  # GTA's pedestrian crossings are links of their own between crossing nodes, joined to no road
+  crossings = {wid for wid, a, b, *_ in info if nodes[a]['f'][1] >> 3 == nodes[b]['f'][1] >> 3 == PED_CROSSING}
+  ways = [(wid, a, b, bool(back)) for wid, a, b, _, back, *_ in info if wid not in crossings]
   restrictions = [('no_u_turn', *r) for r in no_u_turns(nodes, ways)]
   u_turns = len(restrictions)
   turns, skipped, dead_ends = turn_restrictions(nodes, ways, toward, flags)
   restrictions += turns
   arrows_at, approaches, bent = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions)
   print(f"{approaches} approaches to junctions with turn arrows, on {len(arrows_at)} ways ({bent} bending into theirs left out)")
+  layer_of = {ways[i][0]: v for i, v in levels(nodes, [(a, b) for _, a, b, _ in ways]).items()}
+  print(f"{len(layer_of)} ways over others as bridges (up to layer {max(layer_of.values(), default=0)})")
 
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:
@@ -1030,11 +1070,17 @@ def main():
     w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat),
                                        tags={**node_tags(n, stop.get(k, 'both')), 'ele': f"{n['z']:.1f}"}))
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
+    if wid in crossings:
+      w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)],
+                                       tags={'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
+      continue
     tags = {'highway': cls, **lane_tags(fwd, back, lf), **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:
       tags['destination'] = destination[wid]
+    if wid in layer_of:
+      tags['bridge'], tags['layer'] = 'yes', str(layer_of[wid])
     fa, fb = nodes[a]['f'], nodes[b]['f']
     for k, bit, tag in ((2, SWITCHED_OFF, 'gta:switched_off'), (2, NO_GPS, 'gta:no_gps'), (0, OFFROAD, 'gta:offroad')):
       if (fa[k] | fb[k]) & bit:
