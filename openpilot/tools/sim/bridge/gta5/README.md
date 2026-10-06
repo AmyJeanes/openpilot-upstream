@@ -114,6 +114,9 @@ and no turning to take it stops, so a turn is signalled only within 50 m of one.
 
 With a map of the game's roads built ([map/README.md](map/README.md)), nav can route over it with a standard router
 instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a map view of the car and its route.
+On that route the bridge also writes a route input for route-conditioned driving models (`gta5_route_input.py`, trained
+by gta5-train `--route`) to shared memory, which modeld feeds only to a model with a `route` input; it is zero off the
+route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without it.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map

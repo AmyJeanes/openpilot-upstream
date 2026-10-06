@@ -14,12 +14,14 @@ from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
 from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
+from openpilot.selfdrive.modeld.route_input import RouteInputWriter
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
+from openpilot.tools.sim.bridge.gta5.gta5_route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths
@@ -39,6 +41,9 @@ LANE_LINE_EVERY = 0.5  # s
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
 ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
 ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugin's guess at the road it's on
+# the route input of a route-conditioned driving model (gta5_route_input.py); modeld reads it only if its model has one
+ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the model, to A/B one model with and without
+OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
@@ -133,6 +138,8 @@ class GTA5World(World):
     self.dest_from_game = False
     self.game_waypoint: np.ndarray | None = None
     self.route: Route | None = None
+    self.route_writer = RouteInputWriter(ROUTE_LEN) if ROUTE_INPUT else None
+    self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput)
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
     self.cap = 0.0
     self.gps_route: list = []
@@ -362,6 +369,7 @@ class GTA5World(World):
     route = self.navigator.update(pos, bearing, self.dest, time.monotonic(), state["pos"][2])
     self.routes += route is not None and route is not self.route
     self.route = route
+    self._write_route_input(state)
     state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": []}
     if self.route is None:
       return state
@@ -374,6 +382,17 @@ class GTA5World(World):
       lane = plugin
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
+
+  def _write_route_input(self, state: dict):
+    """The driving model's route input for the route and the car's place on it; zero off it."""
+    if self.route_writer is None:
+      return
+    if self.route is None or self.route.off > OFF_ROUTE_INPUT:
+      self.route_writer.write(np.zeros(ROUTE_LEN, np.float32))
+      return
+    if self.route_input is None or self.route_input[0] is not self.route:
+      self.route_input = (self.route, RouteInput(self.route))  # once per route, a few ms
+    self.route_writer.write(self.route_input[1].encode(self.route.at, state["heading"]))
 
   def _overlay(self, state: dict, v: float) -> list[dict]:
     paths = self.navigator.router.paths if self.navigator is not None else None

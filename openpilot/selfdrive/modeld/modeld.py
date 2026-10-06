@@ -40,6 +40,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, 
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
+from openpilot.selfdrive.modeld.route_input import RouteInputReader
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, LOCAL_BIG_PKL, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob, wait_for_chestnut
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -206,6 +207,8 @@ class ModelState:
     self.prev_desire[:] = inputs['desire_pulse']
     self.npy['traffic_convention'][:] = inputs['traffic_convention']
     self.npy['action_t'][:] = inputs['action_t']
+    if 'route' in self.npy:  # a route-conditioned model (gta5-train --route); zero is no route
+      self.npy['route'][:] = inputs.get('route', 0.)
 
     self.input_device.copy_from(self.input_host)
     self.input_queues['new_img'] = self.run_warp(**self.warp_inputs)
@@ -335,6 +338,7 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  route_reader = RouteInputReader(math.prod(model.input_shapes['route'][0])) if 'route' in model.input_shapes else None
   last_frames_t = time.monotonic()
 
   while True:
@@ -434,6 +438,8 @@ def main(demo=False):
       'traffic_convention': traffic_convention,
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
+    if route_reader is not None:
+      inputs['route'] = route_reader.read()
 
     mt1 = time.perf_counter()
     try:
