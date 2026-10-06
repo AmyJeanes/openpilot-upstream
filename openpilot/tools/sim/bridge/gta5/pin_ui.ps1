@@ -1,4 +1,4 @@
-# Keeps openpilot's UI window (a WSLg window titled "UI") above the game. -Loop keeps pinning it, as when the UI restarts.
+# Keeps openpilot's UI window (a WSLg window titled "UI") and the route input viewer ("Route input") above the game. -Loop keeps pinning it, as when the UI restarts.
 param([switch]$Loop)
 
 Add-Type @"
@@ -20,7 +20,7 @@ function Pin {
     $sb = New-Object Text.StringBuilder 256
     [void][PinUi]::GetWindowText($h, $sb, 256)
     # WSLg titles its windows "<title> (<distro>)", prefixed with "[WARN:...]" in some modes
-    if ([PinUi]::IsWindowVisible($h) -and $sb.ToString() -match '^(\[[^\]]*\] )?UI \(') { $script:windows += $h }
+    if ([PinUi]::IsWindowVisible($h) -and $sb.ToString() -match '^(\[[^\]]*\] )?(UI|Route input) \(') { $script:windows += $h }
     $true
   }, [IntPtr]::Zero) | Out-Null
   foreach ($h in $script:windows) {
@@ -28,7 +28,7 @@ function Pin {
     if (-not $topmost) {
       # HWND_TOPMOST, without moving, resizing or activating it
       [void][PinUi]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x13)
-      Write-Output "pinned the openpilot UI"
+      Write-Output "pinned a window"
     }
   }
 }
