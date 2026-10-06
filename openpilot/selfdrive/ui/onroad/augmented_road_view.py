@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pyray as rl
 from openpilot.cereal import log
@@ -27,6 +28,8 @@ BORDER_COLORS = {
 
 WIDE_CAM_MAX_SPEED = 5.0  # m/s (11 mph)
 ROAD_CAM_MIN_SPEED = 10.0  # m/s (22 mph)
+# the simulator bench shows the wide camera at low speed without experimental mode, to see junctions
+WIDE_CAM_ALWAYS = os.getenv("GTA5_WIDE_CAM") == "1"
 INF_POINT = np.array([1000.0, 0.0, 0.0])
 
 
@@ -110,7 +113,7 @@ class AugmentedRoadView(CameraView):
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, UI_BORDER_SIZE, border_color)
 
   def _switch_stream_if_needed(self, sm):
-    if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
+    if (sm['selfdriveState'].experimentalMode or WIDE_CAM_ALWAYS) and WIDE_CAM in self.available_streams:
       v_ego = sm['carState'].vEgo
       if v_ego < WIDE_CAM_MAX_SPEED:
         target = WIDE_CAM
