@@ -120,6 +120,9 @@ On that route the bridge also writes a route input for route-conditioned driving
 by gta5-train `--route`) to shared memory, which modeld feeds only to a model with a `route` input; it is zero off the
 route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without it.
 `OPENPILOT_PREFIX=gta5 GALLIUM_DRIVER=d3d12 python openpilot/tools/sim/bridge/gta5/watch_route.py` (in the venv) shows that input live.
+Below it, it previews route input v2's lane slots (`gta5_lane_slots.py`: the road here and the road out of the next
+maneuver, counted from the kerb, with the lanes the route needs), which the bridge writes to a shared-memory file of
+their own (`GTA5_LANE_SLOTS=0` turns that off); they aren't the model's input yet.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map

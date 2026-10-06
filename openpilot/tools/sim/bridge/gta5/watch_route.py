@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shows the route input the driving model gets (gta5_route_input.py), live from the bridge's shared memory: the NAV
-bins, the route's heading ahead as a path, the next maneuver and the next stop line."""
+bins, the route's heading ahead as a path, the next maneuver and the next stop line; and below, a preview of route
+input v2's lane slots (gta5_lane_slots.py), which the bridge writes to a file of their own."""
 import time
 
 import numpy as np
@@ -9,6 +10,7 @@ import pyray as rl
 from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
+from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as slots_mod
 from openpilot.tools.sim.bridge.gta5.gta5_route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, ROUTE_LEN, decode
 
 FPS = 10
@@ -24,6 +26,10 @@ OTHER = rl.Color(160, 160, 170, 255)
 STOP = rl.Color(255, 70, 70, 255)
 GOOD = rl.Color(60, 200, 110, 255)
 DIR_COLORS = (OTHER, LEFT, RIGHT)
+TARGET = rl.Color(40, 210, 200, 255)
+ONCOMING_FILL = rl.Color(70, 64, 66, 255)
+HATCH = rl.Color(200, 70, 70, 255)
+LANES_H = 112  # px: the lane slots panel
 
 
 def text(s: str, x: float, y: float, size: int, color=TEXT, weight=FontWeight.MEDIUM):
@@ -138,7 +144,7 @@ def lanes_text(use: list[int], n: int) -> str:
   return f"lane {use[0] + 1} of {n}" if len(use) == 1 else f"lanes {use[0] + 1}-{use[-1] + 1} of {n}"
 
 
-def draw(vec: np.ndarray, age: float | None, w: int, h: int):
+def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray | None = None, lanes_age: float | None = None):
   rl.clear_background(BG)
   d = decode(vec)
   m = 10
@@ -149,6 +155,8 @@ def draw(vec: np.ndarray, age: float | None, w: int, h: int):
   present = "PRESENT" if d.present else "no route"
   text(present, m + text_w("Route input", 18, FontWeight.BOLD) + 14, 9, 16, GOOD if d.present else DIM)
 
+  draw_lanes(lanes, lanes_age, d.next, rl.Rectangle(m, h - m - LANES_H, w - 2 * m, LANES_H))
+  h -= LANES_H + m  # the route input above it
   top = 36
   side = min(w * 0.4, h - top - m)
   x0 = m + side + m
@@ -169,21 +177,94 @@ def draw(vec: np.ndarray, age: float | None, w: int, h: int):
     text(why, (w - text_w(why, 18)) / 2, h / 2 + 40, 18, DIM)
 
 
+def draw_slot(state: int, r: rl.Rectangle):
+  """One lane: oncoming hatched, allowed outlined, target filled, each with its direction; a dot for no lane."""
+  cx = r.x + r.width / 2
+  if state == slots_mod.ONCOMING:
+    rl.draw_rectangle_rec(r, ONCOMING_FILL)
+    for c in range(6, int(r.width + r.height), 8):  # "/" hatching, clipped to the box by hand
+      u0, u1 = max(0.0, c - r.height), min(r.width, float(c))
+      rl.draw_line_ex(rl.Vector2(r.x + u0, r.y + c - u0), rl.Vector2(r.x + u1, r.y + c - u1), 2, HATCH)
+    y = r.y + r.height / 2
+    rl.draw_triangle(rl.Vector2(cx - 5, y - 4), rl.Vector2(cx, y + 4), rl.Vector2(cx + 5, y - 4), TEXT)
+  elif state in (slots_mod.ALLOWED, slots_mod.TARGET):
+    target = state == slots_mod.TARGET
+    if target:
+      rl.draw_rectangle_rec(r, TARGET)
+    else:
+      rl.draw_rectangle_lines_ex(r, 2, TEXT)
+    y = r.y + r.height / 2
+    rl.draw_triangle(rl.Vector2(cx, y - 5), rl.Vector2(cx - 5, y + 4), rl.Vector2(cx + 5, y + 4), BG if target else DIM)
+  else:
+    rl.draw_circle_v(rl.Vector2(cx, r.y + r.height / 2), 2, EMPTY)
+
+
+def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
+  """Route input v2's lane slots: the road here and the road out of the next maneuver, as the driver sees them, left to
+  right, with the kerb they are counted from marked; how far on to be in a target lane."""
+  rl.draw_rectangle_rec(r, PANEL)
+  text("Lane slots (v2 preview, not yet model input)", r.x + 8, r.y + 6, 14, DIM)
+  stale = age is None or age > 1.0
+  status = "no lane slots file" if age is None else f"{age:.1f} s old" if age < 10 else f"{age:.0f} s old"
+  text(status, r.x + r.width - 8 - text_w(status, 14), r.y + 6, 14, STOP if stale else DIM)
+  if vec is None or not vec[slots_mod.SIDE]:
+    s = "no lane slots file" if vec is None else "stale" if stale else "no route"
+    text(s, r.x + 8, r.y + 44, 22, DIM)
+    return
+  here, out, dist = slots_mod.decode(vec)
+  right = vec[slots_mod.SIDE] > 0
+  label_w, bw, gap, bh = 74, 34.0, 4.0, 28.0
+  x0 = r.x + 8 + label_w
+  strip = slots_mod.SLOTS * (bw + gap) - gap
+  rows = ((r.y + 28, "here", here), (r.y + 28 + bh + 10, "road out", out))
+  for y, label, states in rows:
+    text(label, r.x + 8, y + 5, 16, TEXT)
+    if (states < 0).all():
+      text("no lane data", x0 + 8, y + 5, 16, DIM)
+      continue
+    for k, state in enumerate(states):
+      col = slots_mod.SLOTS - 1 - k if right else k  # slot 0 is the kerb lane
+      draw_slot(int(state), rl.Rectangle(x0 + col * (bw + gap), y, bw, bh))
+  if (here < 0).all() and (out < 0).all():
+    return
+  kerb_x = x0 + strip + gap / 2 + 1 if right else x0 - gap / 2 - 1
+  y0, y1 = rows[0][0] - 3, rows[1][0] + bh + 3
+  rl.draw_line_ex(rl.Vector2(kerb_x, y0), rl.Vector2(kerb_x, y1), 3, RIGHT)
+  text("kerb", kerb_x - (text_w("kerb", 12) if right else 0), y1 + 1, 12, RIGHT)
+  info_x = x0 + strip + 14
+  if dist is not None:
+    s = f"be in by {dist:.0f} m" if dist >= 0 else f"{-dist:.0f} m past be-in point"
+    text(s, info_x, rows[0][0] + 5, 16, TARGET)
+  elif (here == slots_mod.ALLOWED).sum() > 1:
+    text("any lane", info_x, rows[0][0] + 5, 16, DIM)
+  if nxt is not None and not (out < 0).all():
+    text(f"after {'LEFT' if nxt.side == 'L' else 'RIGHT'} in {nxt.dist:.0f} m", info_x, rows[1][0] + 5, 16, LEFT if nxt.side == "L" else RIGHT)
+  legend_x = r.x + r.width - 8
+  for name, state in (("target", slots_mod.TARGET), ("allowed", slots_mod.ALLOWED), ("oncoming", slots_mod.ONCOMING)):
+    legend_x -= text_w(name, 12)
+    text(name, legend_x, y1 - 1, 12, DIM)
+    legend_x -= 22
+    draw_slot(state, rl.Rectangle(legend_x, y1 - 3, 18, 16))
+    legend_x -= 10
+
+
 def input_age(reader: RouteInputReader) -> float | None:
   return None if reader.mm is None else max(time.monotonic() - HEADER.unpack_from(reader.mm)[2], 0.0)
 
 
 if __name__ == "__main__":
   gui_app._width = gui_app._scaled_width = 640
-  gui_app._height = gui_app._scaled_height = 360
+  gui_app._height = gui_app._scaled_height = 360 + LANES_H + 10
   gui_app._scale = 1.0
   gui_app.init_window("Route input", fps=FPS)
   rl.set_window_state(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE)
   rl.set_target_fps(0)  # raylib's frame limiter busy-waits the end of each frame: sleep instead
   reader = RouteInputReader(ROUTE_LEN)
+  lanes_reader = RouteInputReader(slots_mod.PREVIEW_LEN, slots_mod.lane_slots_path())
   due = time.monotonic()
   for _ in gui_app.render():
-    vec = reader.read()
-    draw(vec, input_age(reader), rl.get_screen_width(), rl.get_screen_height())
+    vec, lanes = reader.read(), lanes_reader.read()
+    lanes_age = input_age(lanes_reader)
+    draw(vec, input_age(reader), rl.get_screen_width(), rl.get_screen_height(), lanes if lanes_age is not None else None, lanes_age)
     due = max(due + 1 / FPS, time.monotonic())
     time.sleep(max(due - time.monotonic(), 0.0))

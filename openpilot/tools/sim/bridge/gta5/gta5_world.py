@@ -18,6 +18,7 @@ from openpilot.selfdrive.modeld.route_input import RouteInputWriter
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
+from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import PREVIEW_LEN, LaneSlots, lane_slots_path, preview
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
@@ -46,6 +47,8 @@ ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugi
 # the route input of a route-conditioned driving model (gta5_route_input.py); modeld reads it only if its model has one
 ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the model, to A/B one model with and without
 OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
+# route input v2's lane slots (gta5_lane_slots.py), to their own file for watch_route.py's preview, not the model
+LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
@@ -143,6 +146,8 @@ class GTA5World(World):
     self.route: Route | None = None
     self.route_writer = RouteInputWriter(ROUTE_LEN) if ROUTE_INPUT else None
     self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput)
+    self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
+    self.lane_slots: tuple | None = None  # (the Route it encodes, its LaneSlots)
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
     self.cap = 0.0
     self.gps_route: list = []
@@ -386,6 +391,7 @@ class GTA5World(World):
     self.routes += route is not None and route is not self.route
     self.route = route
     self._write_route_input(state)
+    self._write_lane_slots(state)
     state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": []}
     if self.route is None:
       return state
@@ -409,6 +415,21 @@ class GTA5World(World):
     if self.route_input is None or self.route_input[0] is not self.route:
       self.route_input = (self.route, RouteInput(self.route))  # once per route, a few ms
     self.route_writer.write(self.route_input[1].encode(self.route.at, state["heading"]))
+
+  def _write_lane_slots(self, state: dict):
+    """Route input v2's lane slots for the preview; zero off the route."""
+    if self.lanes_writer is None:
+      return
+    route = self.route if self.route is not None and self.route.off <= OFF_ROUTE_INPUT else None
+    try:
+      if route is not None and (self.lane_slots is None or self.lane_slots[0] is not route):
+        osm = self.navigator.router.osm
+        self.lane_slots = (route, LaneSlots(route, osm.drive_on_right if osm is not None else True))  # once per route
+      vec = preview(self.lane_slots[1] if route is not None else None, route.at if route is not None else 0.0, state["vEgo"])
+    except Exception as e:  # only a preview: it mustn't stop the bridge
+      print(f"gta5: lane slots: {e!r}")
+      self.lane_slots, vec = (route, None), preview(None, 0.0, 0.0)
+    self.lanes_writer.write(vec)
 
   def _overlay(self, state: dict, v: float) -> list[dict]:
     paths = self.navigator.router.paths if self.navigator is not None else None
