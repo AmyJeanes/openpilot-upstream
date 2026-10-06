@@ -132,12 +132,12 @@ def draw_next(d, r: rl.Rectangle):
   for i in range(n):
     rl.draw_rectangle_rec(rl.Rectangle(r.x + 8 + i * lane_w, y, lane_w - 3, 22), color if i in use else EMPTY)
   text(f"be in {lanes_text(use, n)}", r.x + 16 + n * lane_w, y + 1, 18)
-  text(f"road: {nx.lanes_in} lanes, {nx.lanes_out} after (lanes left to right)", r.x + 8, y + 28, 14, DIM)
+  text(f"road: {nx.lanes_in} lanes our way, {nx.lanes_out} after (left to right)", r.x + 8, y + 28, 14, DIM)
 
 
 def lanes_text(use: list[int], n: int) -> str:
   if not use or len(use) == n:
-    return "any lane" if n > 1 else "the lane"
+    return "any lane our way" if n > 1 else "the only lane our way"
   if n == 2 or len(use) == 1 and use[0] in (0, n - 1):
     side = "left" if use[0] == 0 else "right"
     return f"the {side} lane" if len(use) == 1 else f"the {len(use)} {side} lanes"
@@ -237,7 +237,7 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
     s = f"be in lit lane within {dist:.0f} m" if dist > 0 else "keep to lit lane"
     text(s, info_x, rows[0][0] + 5, 16, TARGET)
   elif (here == slots_mod.ALLOWED).sum() > 1:
-    text("any lane", info_x, rows[0][0] + 5, 16, DIM)
+    text("any allowed lane", info_x, rows[0][0] + 5, 16, DIM)
   if nxt is not None and not (out < 0).all():
     text(f"after {'LEFT' if nxt.side == 'L' else 'RIGHT'} turn in {nxt.dist:.0f} m", info_x, rows[1][0] + 5, 16, LEFT if nxt.side == "L" else RIGHT)
   legend_x = r.x + r.width - 8
