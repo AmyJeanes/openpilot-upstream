@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Left-hand traffic (drive_on_right=False): two lanes forward on the left of the line, one back on its right; the right turn is from the inner lane -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='0.000000000' lon='-0.000898315'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='3' version='1' lat='0.000000000' lon='0.000898315'/>
+  <node id='4' version='1' lat='-0.000898315' lon='0.000000000'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="3"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="1"/>
+    <tag k="width" v="10.5"/>
+    <tag k="placement:forward" v="right_of:2"/>
+    <tag k="placement:backward" v="right_of:1"/>
+    <tag k="turn:lanes:forward" v="through|right"/>
+  </way>
+  <way id='2' version='1'>
+    <nd ref='2'/>
+    <nd ref='3'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="2"/>
+    <tag k="width" v="7"/>
+  </way>
+  <way id='3' version='1'>
+    <nd ref='2'/>
+    <nd ref='4'/>
+    <tag k="highway" v="residential"/>
+    <tag k="lanes" v="2"/>
+    <tag k="width" v="6"/>
+  </way>
+</osm>

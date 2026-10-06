@@ -26,6 +26,10 @@ The map is the game's data, so it isn't in the repository; build it from your co
    valhalla_build_tiles -c ~/gta5map/valhalla.json ~/gta5map/gta5.osm.pbf
    ```
    (run from the repository root with `PYTHONPATH=.`, as `python openpilot/tools/sim/bridge/gta5/map/ynd_to_osm.py ...`).
+3. Check its lanes: `validate_lanes.py ~/gta5map/gta5.osm.pbf` checks the lane tags (also on a real OSM extract, with
+   `--left` where traffic drives on the left), and `lane_parity.py paths.jsonl ~/gta5map/gta5.osm.pbf` that
+   `osm_lanes.py` reads them back to GTA's own lane layout. `test_osm_lanes.py` and `test_validate_lanes.py` run on the
+   hand-written `fixtures/` (`python test_osm_lanes.py`).
 
 ## Using it
 ```bash
@@ -50,8 +54,22 @@ link) and the forks in it.
   its name, except the links at a stop line (named on into the junction, Valhalla charges about 40 s more for going
   straight through it) and freeway links (named, Valhalla sends city trips round slower freeway detours: with a lane
   per link, our city streets carry far more junction and turn costs than real ones).
-- Ways carry the lanes each way (`lanes:forward` / `lanes:backward`, `oneway`) and street names. Road classes are
-  guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
+- Ways carry their lanes in standard OSM tags, as a real road's would be mapped, and `osm_lanes.py` reads them (any
+  OSM map, not only ours) into each way's cross-section, its painted lines and its lanes' centre lines:
+  - `lanes`, `lanes:forward` / `lanes:backward`, `oneway`, and `width` (kerb to kerb: GTA's lanes are 5.5 m, 4 m on
+    narrow links). The way's line is the boundary between the directions, the middle of the road unless the counts
+    differ (`placement:forward` / `placement:backward=left_of:1`); a one-way link's lanes are centred on it.
+  - GTA's gap between the directions, up to a lane wide, is a median: `width` includes it, `width:lanes:forward` /
+    `:backward` give the lanes, and what's left is centred between them (`divider=double_solid_line`).
+  - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
+    no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
+  - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it
+    less those the restrictions forbid: every lane the same way at a forced turn, else the outer lanes also turn (GTA's
+    cars turn from the outermost) and the others go through, or half each way at a T. On every way from 30 m before
+    the junction (Valhalla reads them from the way into it), not on one-lane approaches other than GTA's left turn
+    only lanes, and not where the road bends into the junction, which leaves which way is through moot.
+  - One link (offset -2/14 lane) has lanes overlapping that OSM can't describe: its kerbs are kept.
+- Road classes are guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
   and alleys (nodes switched off for traffic, or without GPS), track off-road. GTA splits a road's lanes into separate
   links before a junction; its turn lanes and bays (one-way links at its slip lane and left turn only nodes) take the
   class (up to primary) and name of the road they split off, so the router doesn't avoid them as minor roads.

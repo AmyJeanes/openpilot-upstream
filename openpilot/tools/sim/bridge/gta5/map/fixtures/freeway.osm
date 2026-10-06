@@ -1,0 +1,37 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- A freeway's lanes as one way (GTA draws them as parallel links), its line down the middle of lane 2, with an exit lane on the right before the off-ramp -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='0.000000000' lon='-0.001796631'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='3' version='1' lat='0.000000000' lon='0.001796631'/>
+  <node id='4' version='1' lat='-0.000494073' lon='0.001347473'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="motorway"/>
+    <tag k="oneway" v="yes"/>
+    <tag k="lanes" v="4"/>
+    <tag k="width" v="14.8"/>
+    <tag k="placement" v="middle_of:2"/>
+    <tag k="turn:lanes" v="through|through|through|slight_right"/>
+    <tag k="change:lanes" v="yes|yes|not_right|not_left"/>
+    <tag k="destination:lanes" v="Los Santos|Los Santos|Los Santos|Airport"/>
+  </way>
+  <way id='2' version='1'>
+    <nd ref='2'/>
+    <nd ref='3'/>
+    <tag k="highway" v="motorway"/>
+    <tag k="oneway" v="yes"/>
+    <tag k="lanes" v="3"/>
+    <tag k="width" v="11.1"/>
+  </way>
+  <way id='3' version='1'>
+    <nd ref='2'/>
+    <nd ref='4'/>
+    <tag k="highway" v="motorway_link"/>
+    <tag k="oneway" v="yes"/>
+    <tag k="lanes" v="1"/>
+    <tag k="width" v="3.7"/>
+    <tag k="destination" v="Airport"/>
+  </way>
+</osm>

@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- A single-track road: both directions share its one lane, unmarked (GTA's offset -0.5 lane) -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000898315'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="service"/>
+    <tag k="lanes" v="1"/>
+    <tag k="width" v="5.5"/>
+    <tag k="lane_markings" v="no"/>
+  </way>
+</osm>

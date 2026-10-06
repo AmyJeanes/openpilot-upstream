@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- A median between the directions: what width leaves after width:lanes, centred (GTA offset > 0); with unequal counts the line is midway between the two placements -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000898315'/>
+  <node id='3' version='1' lat='0.000449158' lon='0.000000000'/>
+  <node id='4' version='1' lat='0.000449158' lon='0.000898315'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="4"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="2"/>
+    <tag k="width" v="24"/>
+    <tag k="width:lanes:forward" v="5.5|5.5"/>
+    <tag k="width:lanes:backward" v="5.5|5.5"/>
+    <tag k="divider" v="double_solid_line"/>
+  </way>
+  <way id='2' version='1'>
+    <nd ref='3'/>
+    <nd ref='4'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="3"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="1"/>
+    <tag k="width" v="18.5"/>
+    <tag k="width:lanes:forward" v="5.5|5.5"/>
+    <tag k="width:lanes:backward" v="5.5"/>
+    <tag k="divider" v="double_solid_line"/>
+    <tag k="placement:forward" v="left_of:1"/>
+    <tag k="placement:backward" v="left_of:1"/>
+  </way>
+</osm>

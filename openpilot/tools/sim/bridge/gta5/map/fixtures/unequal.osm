@@ -1,0 +1,17 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Two lanes one way and one the other, the line between the directions rather than mid-road -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000898315'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="3"/>
+    <tag k="lanes:forward" v="2"/>
+    <tag k="lanes:backward" v="1"/>
+    <tag k="width" v="16.5"/>
+    <tag k="placement:forward" v="left_of:1"/>
+    <tag k="placement:backward" v="left_of:1"/>
+  </way>
+</osm>

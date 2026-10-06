@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- A two-way road, one lane each way, its line between the directions (GTA offset 0) -->
+<osm version='0.6' generator='hand'>
+  <node id='1' version='1' lat='0.000000000' lon='0.000000000'/>
+  <node id='2' version='1' lat='0.000000000' lon='0.000898315'/>
+  <way id='1' version='1'>
+    <nd ref='1'/>
+    <nd ref='2'/>
+    <tag k="highway" v="residential"/>
+    <tag k="lanes" v="2"/>
+    <tag k="lanes:forward" v="1"/>
+    <tag k="lanes:backward" v="1"/>
+    <tag k="width" v="11"/>
+  </way>
+</osm>
