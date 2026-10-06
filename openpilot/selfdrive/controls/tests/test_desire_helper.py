@@ -62,3 +62,36 @@ class TestTurnDesireRefresh(OpenpilotTestCase):
     self.drive(1.0, yaw_rate=math.radians(40.0))
     self.drive(1.0, blinker=False)
     assert len(self.drive(3.0)) == 1
+
+
+class TestTurnDesireFlush(OpenpilotTestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.DH = DesireHelper()
+    self.DH.turn_flush = True
+
+  def flushes(self, seconds, v_ego=5.0, left=True, right=False):
+    CS = car.CarState.new_message(vEgo=v_ego, leftBlinker=left, rightBlinker=right)
+    count = 0
+    for _ in range(round(seconds / DT_MDL)):
+      self.DH.update(CS, True, 0.0)
+      count += self.DH.flush
+    return count
+
+  def test_off(self):
+    self.DH.turn_flush = False
+    self.flushes(3.0)
+    assert self.flushes(3.0, left=False) == 0
+
+  def test_once_as_the_turn_ends(self):
+    assert self.flushes(3.0) == 0
+    assert self.flushes(3.0, left=False) == 1
+
+  def test_not_for_a_lane_change(self):
+    self.flushes(3.0, v_ego=25.0)  # a blinker above the turn speed asks for a lane change
+    assert self.flushes(3.0, v_ego=25.0, left=False) == 0
+
+  def test_not_while_the_blinker_stays_on(self):
+    self.flushes(3.0)
+    assert self.flushes(3.0, v_ego=25.0) == 0
