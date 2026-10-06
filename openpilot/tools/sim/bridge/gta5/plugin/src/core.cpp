@@ -1483,6 +1483,17 @@ void Publish(double now, bool inVehicle) {
 
 // *** commands from the bridge ***
 
+// test cars take no damage, so a scrape can't bend a wheel or weaken the engine for the rest of a trip; contacts still
+// count (HAS_ENTITY_COLLIDED_WITH_ANYTHING)
+void ProtectFromDamage(Vehicle v) {
+  SET_ENTITY_INVINCIBLE(v, TRUE);
+  SET_VEHICLE_CAN_BE_VISIBLY_DAMAGED(v, FALSE);
+  SET_VEHICLE_CAN_BREAK(v, FALSE);
+  SET_VEHICLE_TYRES_CAN_BURST(v, FALSE);
+  SET_VEHICLE_WHEELS_CAN_BREAK(v, FALSE);
+  SET_VEHICLE_ENGINE_CAN_DEGRADE(v, FALSE);
+}
+
 void StepSetup(Ped ped, double now) {
   Setup &s = g_setup;
   if (s.step == 1) {
@@ -1504,6 +1515,7 @@ void StepSetup(Ped ped, double now) {
     }
     SET_PED_INTO_VEHICLE(ped, v, -1);
     SET_VEHICLE_ENGINE_ON(v, TRUE, TRUE, FALSE);
+    ProtectFromDamage(v);
     s.step = std::isnan(s.x) ? 0 : 2;
     s.t = now;
   }
@@ -1605,6 +1617,7 @@ void StepSwap(Ped ped, double now) {
   SET_VEHICLE_ENGINE_ON(v, TRUE, TRUE, FALSE);
   if (speed > 1.0f) SET_VEHICLE_FORWARD_SPEED(v, speed);
   ApplyColours(v, s.colours);
+  ProtectFromDamage(v);
   // the AI driver's task was for the old car: give it again for this one
   g_ai.tasked = false;
   g_ai.taskedKey.clear();
@@ -2161,7 +2174,10 @@ void HandleMessage(const Message &m, double now) {
     if (m.count("hour")) SET_CLOCK_TIME(static_cast<int>(MsgNum(m, "hour")), 0, 0);
     std::string weather = MsgStr(m, "weather");
     if (!weather.empty()) SET_WEATHER_TYPE_NOW_PERSIST(weather.c_str());
-    if (m.count("fix") && g_veh.handle) SET_VEHICLE_FIXED(g_veh.handle);
+    if (m.count("fix") && g_veh.handle) {
+      SET_VEHICLE_FIXED(g_veh.handle);
+      ProtectFromDamage(g_veh.handle);
+    }
     g_setup = s;
   }
 }

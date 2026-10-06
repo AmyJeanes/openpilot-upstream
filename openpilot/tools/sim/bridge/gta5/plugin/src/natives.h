@@ -89,6 +89,12 @@ inline void SET_VEHICLE_INDICATOR_LIGHTS(Vehicle v, int turnSignal, BOOL on) { I
 // holds the steering at a fraction of full lock (left positive) for this frame
 inline void SET_VEHICLE_STEER_BIAS(Vehicle v, float bias) { Invoke(0x42A8EC77D5150CBE, v, bias); }
 inline void SET_VEHICLE_FIXED(Vehicle v) { Invoke(0x115722B1B9C14C1C, v); }
+inline void SET_ENTITY_INVINCIBLE(Entity e, BOOL on) { Invoke(0x3882114BDE571AD4, e, on); }
+inline void SET_VEHICLE_CAN_BE_VISIBLY_DAMAGED(Vehicle v, BOOL on) { Invoke(0x4C7028F78FFD3681, v, on); }
+inline void SET_VEHICLE_CAN_BREAK(Vehicle v, BOOL on) { Invoke(0xC5F0A8EBD3F361CE, v, on); }
+inline void SET_VEHICLE_TYRES_CAN_BURST(Vehicle v, BOOL on) { Invoke(0xEB9DC3C7D8596C46, v, on); }
+inline void SET_VEHICLE_WHEELS_CAN_BREAK(Vehicle v, BOOL on) { Invoke(0x29B18B4FD460CA8F, v, on); }
+inline void SET_VEHICLE_ENGINE_CAN_DEGRADE(Vehicle v, BOOL on) { Invoke(0x983765856F2564F9, v, on); }
 inline BOOL HAS_ENTITY_COLLIDED_WITH_ANYTHING(Entity e) { return Invoke<BOOL>(0x8BAD02F0368D9E14, e); }
 inline float GET_VEHICLE_BODY_HEALTH(Vehicle v) { return Invoke<float>(0xF271147EB7B40F12, v); }
 inline void SET_VEHICLE_MOD_KIT(Vehicle v, int kit) { Invoke(0x1F2AA07F00B3217A, v, kit); }
