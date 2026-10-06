@@ -233,7 +233,8 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
   text("kerb", kerb_x - (text_w("kerb", 12) if right else 0), y1 + 1, 12, RIGHT)
   info_x = x0 + strip + 14
   if dist is not None:
-    s = f"move into lit lane in {dist:.0f} m" if dist >= 0 else f"lit lane {-dist:.0f} m overdue"
+    # the slots don't know the car's lane, so this says what the route needs, not whether the car complies
+    s = f"be in lit lane within {dist:.0f} m" if dist >= 0 else "keep to lit lane"
     text(s, info_x, rows[0][0] + 5, 16, TARGET)
   elif (here == slots_mod.ALLOWED).sum() > 1:
     text("any lane", info_x, rows[0][0] + 5, 16, DIM)
