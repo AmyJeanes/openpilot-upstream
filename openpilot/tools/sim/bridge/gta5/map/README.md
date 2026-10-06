@@ -55,7 +55,12 @@ counts, as before) gives them from GTA's own links instead (`paths.Link`: as Cod
 on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map. The
 map view draws the roads at their width and, from `lanes.json` (`osm_to_roads.py --lanes`) zoomed in, their lines:
 edges, white dashed lines between lanes one way (solid where `change:lanes` forbids crossing), the yellow line between
-the directions; and the plugin's debug overlay the same lines, from the map's tags.
+the directions; and the plugin's debug overlay the same lines, from the map's tags. Zoomed in, junctions are drawn as
+real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
+neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it, stop lines across
+the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
+and `footway=crossing` crossings striped across the road. Roads are drawn a layer at a time (`layer`, `bridge`,
+`tunnel`): bridges over what they cross, with a dark casing, tunnels faded.
 `map_view.py roads.json --state <file>` shows the map alone, with a state from a file.
 
 ## The map

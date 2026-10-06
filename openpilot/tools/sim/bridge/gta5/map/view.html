@@ -41,9 +41,13 @@ const STYLE = {  // per road class: colour, minimum width in px
   track: ['#5b4a36', 0.8],
 };
 const LANE_WIDTH = 5.4;  // m per lane, for a roads.json without widths
-// lanes.json's kinds: colour, m of dash and gap (none: solid), width in m
+// lanes.json's kinds: colour, m of dash and gap (none: solid), width in m, line ends (default by zoom)
 const MARKS = { edge: ['#c8c8c8', null, 0.2], dashed: ['#f4f4f4', [3, 6], 0.15], solid: ['#f4f4f4', null, 0.15],
-  centre: ['#f2c200', null, 0.15], centre_dashed: ['#f2c200', [3, 6], 0.15] };
+  centre: ['#f2c200', null, 0.15], centre_dashed: ['#f2c200', [3, 6], 0.15], stop: ['#f4f4f4', null, 0.45, 'butt'],
+  give_way: ['#f4f4f4', [0.6, 0.6], 0.3, 'butt'], crossing: ['#d8d8d8', [0.5, 0.6], 3, 'butt'] };  // a crossing's stripes
+const BRIDGE_CASING = '#08090a', CASING = 0.8;  // m each side of a bridge
+const TUNNEL_ALPHA = 0.45;
+const SEAM = 0.25;  // m
 const MARKS_FROM = 1.5;  // px/m: zoomed in this far the lines are drawn
 const CAR_LENGTH = 4.7;  // m
 const MAX_FPS = 30;  // the GPU is shared with the game and openpilot's model, which mustn't fall behind
@@ -56,7 +60,7 @@ const RATE_OVER = 0.3;  // s of updates its speed and turn rate come from
 const CORRECT = 0.25;  // s: a new update's difference fades this fast
 const SNAP = 30;  // m: further out than this is a teleport, not a correction
 const ROT_EASE = 0.15;  // s: the map turns towards the car's heading (or north) this smoothly
-let cells = new Map(), layerKeys = [], markKinds = [], state = null, located = false, drawQueued = false;
+let cells = new Map(), layerKeys = [], layers = [0], markKinds = [], state = null, located = false, drawQueued = false;
 let samples = [], rate = 1, car = null;  // rate: server seconds per browser second; car: where it's drawn now
 let offset = { x: 0, y: 0, bearing: 0 }, lastDraw = 0;
 let view = { x: 0, y: 0, scale: 0.5, rot: 0 };  // centre in metres, px per metre, radians
@@ -173,27 +177,50 @@ function draw() {
   ctx.setTransform(s * c, s * n, s * n, -s * c,
     canvas.width / 2 - s * (c * view.x + n * view.y), canvas.height / 2 - s * (n * view.x - c * view.y));
   const near = view.scale > 1;
-  ctx.lineCap = near ? 'round' : 'butt';
   ctx.lineJoin = near ? 'round' : 'bevel';
   const visible = visibleCells();
+  // zoomed in: roads flat-ended at their junctions' mouths, the junctions' areas, and the lines painted on them, each
+  // layer over the one below (bridges with a dark casing, tunnels faded); further out, the roads whole
   const marked = view.scale >= MARKS_FROM && markKinds.length;
-  for (const l of layerKeys) {
-    if (view.scale < (MIN_SCALE[l.cls] || 0)) continue;
-    ctx.strokeStyle = marked ? (l.cls === 'motorway' || l.cls === 'trunk' ? '#4a4740' : '#3b3f45') : l.colour;
-    ctx.lineWidth = Math.max(l.width, l.minPx * devicePixelRatio / s);
-    for (const cell of visible) { const p = cell.paths.get(l.key); if (p) ctx.stroke(p); }
-  }
-  if (marked) {
+  for (const layer of layers) {
+    const keys = layerKeys.filter(l => l.layer === layer);
+    keys.forEach((l, i) => {
+      if (view.scale < (MIN_SCALE[l.cls] || 0)) return;
+      const colour = marked ? (l.cls === 'motorway' || l.cls === 'trunk' ? '#4a4740' : '#3b3f45') : l.colour;
+      const width = Math.max(l.width, l.minPx * devicePixelRatio / s);
+      const which = marked ? 'cut' : 'paths';
+      ctx.lineCap = marked ? 'butt' : near ? 'round' : 'butt';
+      if (l.structure === 1 && marked) {
+        ctx.strokeStyle = BRIDGE_CASING;
+        ctx.lineWidth = width + 2 * CASING;
+        for (const cell of visible) { const p = cell[which].get(l.key); if (p) ctx.stroke(p); }
+      }
+      ctx.globalAlpha = l.structure === 2 ? TUNNEL_ALPHA : 1;
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = width;
+      for (const cell of visible) { const p = cell[which].get(l.key); if (p) ctx.stroke(p); }
+      if (marked && (i + 1 === keys.length || keys[i + 1].order !== l.order)) {
+        ctx.fillStyle = colour;
+        ctx.lineWidth = SEAM;  // over the seams where a flat road end meets its junction
+        const area = layer + '|' + l.order;
+        for (const cell of visible) { const p = cell.areas.get(area); if (p) { ctx.fill(p); ctx.stroke(p); } }
+      }
+      ctx.globalAlpha = 1;
+    });
+    if (!marked) continue;
+    ctx.globalAlpha = layer < 0 ? TUNNEL_ALPHA : 1;
     for (const kind of markKinds) {
-      const [colour, dash, width] = MARKS[kind] || MARKS.solid;
+      const [colour, dash, width, cap] = MARKS[kind] || MARKS.solid;
       ctx.strokeStyle = colour;
       ctx.lineWidth = Math.max(width, devicePixelRatio / s);
+      ctx.lineCap = cap || (near ? 'round' : 'butt');
       ctx.setLineDash(dash || []);
-      for (const cell of visible) { const p = cell.marks.get(kind); if (p) ctx.stroke(p); }
+      for (const cell of visible) { const p = cell.marks.get(layer + '|' + kind); if (p) ctx.stroke(p); }
     }
     ctx.setLineDash([]);
-    ctx.lineCap = near ? 'round' : 'butt';
+    ctx.globalAlpha = 1;
   }
+  ctx.lineCap = near ? 'round' : 'butt';
   if (view.scale > 0.8) {
     ctx.fillStyle = '#d04040';
     const r = Math.max(1.2, 2.5 / view.scale);
@@ -235,8 +262,40 @@ function draw() {
 
 function cellAt(x, y) {
   const key = Math.floor(x / CELL) + ',' + Math.floor(y / CELL);
-  if (!cells.has(key)) cells.set(key, { paths: new Map(), marks: new Map(), signals: [] });
+  if (!cells.has(key)) cells.set(key, { paths: new Map(), cut: new Map(), areas: new Map(), marks: new Map(), signals: [] });
   return cells.get(key);
+}
+
+function addLine(store, key, pts) {
+  // a polyline [x0, y0, x1, y1, ...] into the cells' paths under key, each segment in the cell of its first point
+  let path = null, cell = null;
+  for (let i = 0; i + 3 < pts.length; i += 2) {
+    const c = cellAt(pts[i], pts[i + 1]);
+    if (c !== cell) {
+      cell = c;
+      if (!cell[store].has(key)) cell[store].set(key, new Path2D());
+      path = cell[store].get(key);
+      path.moveTo(pts[i], pts[i + 1]);
+    }
+    path.lineTo(pts[i + 2], pts[i + 3]);
+  }
+}
+
+function trimmed(pts, t0, t1) {
+  // a polyline cut back t0 m from its start and t1 m from its end; null where nothing is left
+  const along = [0];
+  for (let i = 2; i < pts.length; i += 2) along.push(along[along.length - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]));
+  const total = along[along.length - 1];
+  if (t0 + t1 >= total - 0.05) return null;
+  const at = s => {
+    let k = 1;
+    while (k < along.length - 1 && along[k] < s) k++;
+    const f = (s - along[k - 1]) / Math.max(along[k] - along[k - 1], 1e-9);
+    return [pts[2 * k - 2] + f * (pts[2 * k] - pts[2 * k - 2]), pts[2 * k - 1] + f * (pts[2 * k + 1] - pts[2 * k - 1])];
+  };
+  const out = at(t0);
+  for (let k = 0; k < along.length; k++) if (along[k] > t0 && along[k] < total - t1) out.push(pts[2 * k], pts[2 * k + 1]);
+  return out.concat(at(total - t1));
 }
 
 async function loadRoads() {
@@ -245,29 +304,37 @@ async function loadRoads() {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   roads.ways.forEach((w, n) => {
     const cls = roads.classes[w[0]], lanes = Math.min(w[1], 6);
-    const width = roads.widths ? Math.round(roads.widths[n] * 2) / 2 : lanes * LANE_WIDTH, key = cls + ':' + width;
-    if (!kinds.has(key)) kinds.set(key, { key, cls, width, order: w[0] });
-    // each segment goes in the cell of its first point
-    let path = null, cell = null;
-    for (let i = 3; i + 3 < w.length; i += 2) {
-      const c = cellAt(w[i], w[i + 1]);
-      if (c !== cell) {
-        cell = c;
-        if (!cell.paths.has(key)) cell.paths.set(key, new Path2D());
-        path = cell.paths.get(key);
-        path.moveTo(w[i], w[i + 1]);
-      }
-      path.lineTo(w[i + 2], w[i + 3]);
-    }
-    for (let i = 3; i < w.length; i += 2) {
-      minX = Math.min(minX, w[i]); maxX = Math.max(maxX, w[i]);
-      minY = Math.min(minY, w[i + 1]); maxY = Math.max(maxY, w[i + 1]);
+    const width = roads.widths ? Math.round(roads.widths[n] * 2) / 2 : lanes * LANE_WIDTH;
+    const layer = roads.levels ? roads.levels[2 * n] : 0, structure = roads.levels ? roads.levels[2 * n + 1] : 0;
+    const key = layer + '|' + cls + ':' + width + ':' + structure;
+    if (!kinds.has(key)) kinds.set(key, { key, cls, width, layer, structure, order: w[0] });
+    const pts = w.slice(3);
+    addLine('paths', key, pts);
+    // zoomed in, trimmed back to its junctions' mouths; a way inside a junction is left to its area
+    const cut = roads.trims ? (roads.trims[2 * n] < 0 ? null : trimmed(pts, roads.trims[2 * n], roads.trims[2 * n + 1])) : pts;
+    if (cut) addLine('cut', key, cut);
+    for (let i = 0; i < pts.length; i += 2) {
+      minX = Math.min(minX, pts[i]); maxX = Math.max(maxX, pts[i]);
+      minY = Math.min(minY, pts[i + 1]); maxY = Math.max(maxY, pts[i + 1]);
     }
   });
+  // junction areas: the triangles from each one's centre to its edges, all turned counterclockwise so that where its
+  // outline folds back on itself they add up rather than cancel out
+  for (const j of roads.junctions || []) {
+    const [order, layer, cx, cy] = j, cell = cellAt(cx, cy), key = layer + '|' + order;
+    if (!cell.areas.has(key)) cell.areas.set(key, new Path2D());
+    const path = cell.areas.get(key), n = (j.length - 4) / 2;
+    for (let i = 0; i < n; i++) {
+      let [ax, ay, bx, by] = [j[4 + 2 * i], j[5 + 2 * i], j[4 + 2 * ((i + 1) % n)], j[5 + 2 * ((i + 1) % n)]];
+      if ((ax - cx) * (by - cy) - (ay - cy) * (bx - cx) < 0) [ax, ay, bx, by] = [bx, by, ax, ay];
+      path.moveTo(cx, cy); path.lineTo(ax, ay); path.lineTo(bx, by); path.closePath();
+    }
+  }
   for (const [x, y] of roads.signals) cellAt(x, y).signals.push([x, y]);
-  // minor roads first, so main roads draw over them
-  layerKeys = [...kinds.values()].sort((a, b) => b.order - a.order || a.width - b.width)
+  // lower layers first; in each, minor roads first, so main roads draw over them
+  layerKeys = [...kinds.values()].sort((a, b) => a.layer - b.layer || b.order - a.order || a.width - b.width)
     .map(k => ({ ...k, colour: (STYLE[k.cls] || STYLE.residential)[0], minPx: (STYLE[k.cls] || STYLE.residential)[1] }));
+  layers = [...new Set(layerKeys.map(k => k.layer))].sort((a, b) => a - b);
   if (!located) {
     view.x = (minX + maxX) / 2; view.y = (minY + maxY) / 2;
     view.scale = Math.min(innerWidth / (maxX - minX), innerHeight / (maxY - minY)) * 0.9;
@@ -283,21 +350,11 @@ async function loadMarks() {
   if (!r.ok) return;
   const lanes = await r.json();
   const seen = new Set();
-  for (const l of lanes.lines) {
+  lanes.lines.forEach((l, n) => {
     const kind = lanes.kinds[l[0]];
     seen.add(kind);
-    let path = null, cell = null;
-    for (let i = 1; i + 3 < l.length; i += 2) {
-      const c = cellAt(l[i], l[i + 1]);
-      if (c !== cell) {
-        cell = c;
-        if (!cell.marks.has(kind)) cell.marks.set(kind, new Path2D());
-        path = cell.marks.get(kind);
-        path.moveTo(l[i], l[i + 1]);
-      }
-      path.lineTo(l[i + 2], l[i + 3]);
-    }
-  }
+    addLine('marks', (lanes.layers ? lanes.layers[n] : 0) + '|' + kind, l.slice(1));
+  });
   markKinds = lanes.kinds.filter(k => seen.has(k));
   requestDraw();
 }
