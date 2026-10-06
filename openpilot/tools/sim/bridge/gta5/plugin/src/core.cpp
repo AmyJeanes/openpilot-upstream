@@ -41,7 +41,7 @@ struct Config {
   bool lens = true;
   float mountHeight = 1.22f;   // above the ground, as the sim's calibration assumes
   float mountForward = NAN;    // from the vehicle origin; NAN = a quarter of the way to the front
-  float curvGain = 1.55f;  // initial path curvature (1/m) per unit of steer bias, learned per car while driving
+  float curvGain = 3.4f;  // initial low-speed path curvature (1/m) per unit of steer bias, learned per car while driving
   float latKi = 1.0f;     // 1/s, integral on the yaw rate error, in units of the feed-forward
   // with no throttle the game slows a car hard, about -(coastAccel + coastPerSpeed * v); steertest with throttle=0 measures it
   float coastAccel = 3.1f;     // m/s^2
@@ -56,6 +56,9 @@ struct Config {
   bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
+  // > 0: the plugin holds the game to this many frames a second; a multiple of 20 puts openpilot frames a whole number of
+  // game frames apart, where 90 FPS alternates 4 and 5 (44 and 56 ms), which the model sees as the speed jumping 11%
+  float tickHz = 0;
   bool presentHook = true;  // when interleaving, take frames from the game's presents and keep them off screen
   // with the present hook, a render for each openpilot camera, at these vertical fields of view: about the road lens's
   // own pixel scale, and enough to fill the wide lens
@@ -160,14 +163,38 @@ struct Control {
   float steerOut = 0, throttleOut = 0, brakeOut = 0;
 } g_ctl;
 
-// The path curvature per unit of steer bias: the bias sets a wheel angle, which sets the curvature whatever the speed, by
-// an amount that differs between cars with their steering lock and wheelbase. A least-squares fit of the measured
-// curvature against the bias applied a moment before, forgetting over several seconds.
+// The path curvature per unit of steer bias. The game turns the wheels less the faster the car goes: steertest on the
+// Model 3 gives this fraction of the low-speed gain, linear in the bias and the same at small lateral accelerations, so
+// not tyre slip. The low-speed gain differs between cars with their steering lock and wheelbase, so it's learned while
+// driving: a least-squares fit of the measured curvature against the bias applied a moment before, times the fraction,
+// forgetting over several seconds. A single gain fitted at all speeds is off by 2x between a turn and a cruise.
+constexpr float GAIN_SPEED[] = {0.0f, 5.0f, 7.0f, 9.0f, 11.0f, 13.5f, 16.5f, 20.0f, 24.0f, 29.0f, 35.0f};  // m/s
+constexpr float GAIN_SHAPE[] = {1.0f, 0.985f, 0.87f, 0.745f, 0.65f, 0.553f, 0.465f, 0.388f, 0.338f, 0.285f, 0.25f};
+
+float GainShape(float v) {
+  constexpr int N = sizeof(GAIN_SPEED) / sizeof(GAIN_SPEED[0]);
+  v = std::fabs(v);
+  if (v >= GAIN_SPEED[N - 1]) return GAIN_SHAPE[N - 1];
+  int i = 1;
+  while (v > GAIN_SPEED[i]) i++;
+  return GAIN_SHAPE[i - 1] + (GAIN_SHAPE[i] - GAIN_SHAPE[i - 1]) * (v - GAIN_SPEED[i - 1]) / (GAIN_SPEED[i] - GAIN_SPEED[i - 1]);
+}
+
 struct CurvGain {
-  float gain = 1.55f;
+  bool schedule = true;  // false: one gain for all speeds, fitted above 5 m/s (the old way, for A/B tests)
+  float low = 3.4f;  // at low speed with the schedule, at any speed without
   double num = 0, den = 0, nextLog = 0;
+  int collisions = 0;
+  double cleanFrom = 0;  // no fitting before then: a collision's yaw has nothing to do with the steering
   std::deque<std::pair<double, float>> applied;  // time, bias
+  float At(float v) const { return schedule ? low * GainShape(v) : low; }
 } g_curvGain;
+
+void ResetCurvGain(bool schedule) {
+  g_curvGain = CurvGain{};
+  g_curvGain.schedule = schedule;
+  g_curvGain.low = schedule ? g_cfg.curvGain : 1.55f;
+}
 
 double g_latLogUntil = 0;  // logs the steering loop each frame until then
 
@@ -185,6 +212,7 @@ double g_nextOp = 0;       // when interleaving, the time of the next openpilot 
 uint64_t g_frameViews = 0;  // recent frames' camera, 4 bits each, newest lowest: 0 the player's, else the view plus one
 double g_wideAt = -1;       // when to render the wide view that completes a road view, or -1
 int g_ticks = 0, g_opCount = 0;
+double g_drawSum = 0, g_drawMax = 0;  // s the map debug overlay took to draw, over the interleave stats period
 double g_statsT = 0;
 float g_camPitch = 0, g_camYaw = 0;  // degrees, for checks against known rotations
 int g_indicator = 0;  // 0 off, 1 left, 2 right
@@ -295,6 +323,7 @@ void ReadConfig() {
   c.gpsRoute = num("gps_route", 0) != 0;
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
+  c.tickHz = std::clamp(num("tick_hz", 0), 0.0f, 240.0f);
   c.presentHook = num("present_hook", 1) != 0;
   c.splitViews = num("split_views", 0) != 0;
   c.roadVfov = num("road_vfov", c.roadVfov);
@@ -391,11 +420,40 @@ void RenderCamera(bool on) {
 // Picks the frames to render the openpilot camera in, and returns the view the frame being drawn shows (a HOOK_ view), or
 // -1 for the player's camera. Interleaved, that's one frame at each 20 Hz capture time, or with split views a road view
 // then a wide view half a period later, so the player's frames are evenly spaced; the rest are the player's camera.
+// holds the game's frame loop to tick_hz: waits in the script tick until the next frame's slot
+void PaceTick() {
+  static double next = 0;
+  if (g_cfg.tickHz <= 0) {
+    next = 0;
+    return;
+  }
+  double period = 1.0 / g_cfg.tickHz, now = QpcSeconds();
+  if (next == 0 || now > next + period) next = now;  // late: start over rather than rush frames to catch up
+  while ((now = QpcSeconds()) < next) {
+    if (next - now > 0.003) Sleep(1);
+    else YieldProcessor();
+  }
+  next += period;
+}
+
 int UpdateCameraFrame(double now, float dt, bool split) {
   int view = HOOK_BOTH;
   if (g_cfg.interleave) {
     double t = now + 0.5 * dt;
     bool op = t >= g_nextOp;
+    static int sincePaced = 0;
+    int every = static_cast<int>(std::lround(0.05 * g_cfg.tickHz));
+    if (g_cfg.tickHz > 0 && every >= 2) op = ++sincePaced >= every;  // paced: every so many frames, the same game time apart
+    if (op) sincePaced = 0;
+    // game time between openpilot frames, which is what the model sees the world move by
+    static int sinceTicks = 0, gapTicks[10] = {};
+    static double sinceGame = 0, gapSum = 0, gapSq = 0, gapMax = 0;
+    sinceTicks++, sinceGame += dt;
+    if (op) {
+      gapTicks[std::min(sinceTicks, 9)]++;
+      gapSum += sinceGame, gapSq += sinceGame * sinceGame, gapMax = std::max(gapMax, sinceGame);
+      sinceTicks = 0, sinceGame = 0;
+    }
     if (op) {
       view = split ? HOOK_ROAD : HOOK_BOTH;
       if (split) g_wideAt = t + g_cfg.wideDelay;
@@ -409,7 +467,17 @@ int UpdateCameraFrame(double now, float dt, bool split) {
     g_ticks++;
     g_opCount += view >= 0;
     if (now - g_statsT > 10) {
-      if (g_statsT) Log("interleave: " + std::to_string(g_ticks) + " ticks, " + std::to_string(g_opCount) + " openpilot frames in 10 s");
+      int n = 0;
+      std::string hist;
+      for (int i = 1; i < 10; i++) n += gapTicks[i], hist += gapTicks[i] ? " " + std::to_string(i) + ":" + std::to_string(gapTicks[i]) : "";
+      double mean = gapSum / std::max(n, 1), sd = std::sqrt(std::max(0.0, gapSq / std::max(n, 1) - mean * mean));
+      if (g_statsT)
+        Log("interleave: " + std::to_string(g_ticks) + " ticks, " + std::to_string(g_opCount) + " openpilot frames in 10 s, ticks apart" + hist +
+            ", game ms apart mean " + Num(1000 * mean) + " sd " + Num(1000 * sd) + " max " + Num(1000 * gapMax) +
+            (g_drawSum > 0 ? ", overlay draw ms per tick mean " + Num(1000 * g_drawSum / std::max(g_ticks, 1)) + " max " + Num(1000 * g_drawMax) : std::string()));
+      g_drawSum = g_drawMax = 0;
+      std::fill(std::begin(gapTicks), std::end(gapTicks), 0);
+      gapSum = gapSq = gapMax = 0;
       g_ticks = g_opCount = 0;
       g_statsT = now;
     }
@@ -565,8 +633,7 @@ void OnVehicleChanged(Vehicle v) {
   ReleaseCamera();
   g_veh = VehicleInfo{};
   g_veh.handle = v;
-  g_curvGain = CurvGain{};
-  g_curvGain.gain = g_cfg.curvGain;
+  ResetCurvGain(g_curvGain.schedule);
   int resets = g_m.resets;
   g_m = Motion{};
   g_m.resets = resets + 1;
@@ -691,16 +758,40 @@ float ThrottleFor(float drive) {
 void UpdateCurvGain(float dt, double now) {
   CurvGain &g = g_curvGain;
   constexpr double LAG = 0.15, TAU = 8.0;  // the game's steering response lag, s; forgetting time, s
-  while (g.applied.size() > 1 && g.applied[1].first <= now - LAG) g.applied.pop_front();
-  if (g.applied.empty() || g.applied.front().first > now - LAG || g_m.v < 5.0f || g_user.steer != 0) return;
-  double bias = g.applied.front().second, a = std::min(1.0, dt / TAU);
-  g.num += a * (g_m.yawRate / g_m.v * bias - g.num);
-  g.den += a * (bias * bias - g.den);
-  // highway steering is a bias of a few thousandths
-  if (g.den > 0.001 * 0.001) g.gain = static_cast<float>(std::clamp(g.num / g.den, 0.3, 6.0));
+  constexpr double STEADY = 0.3;  // s the bias must have held still before LAG: the wheels slew, at low speed for longer
+  constexpr double PRIOR = 0.01 * 0.01;  // weight of curv_gain, as a steady bias of 0.01 would have
+  double keep = g.schedule ? LAG + STEADY : LAG;
+  while (g.applied.size() > 1 && g.applied[1].first <= now - keep) g.applied.pop_front();
+  if (g.schedule && g_m.collisions != g.collisions) {
+    g.collisions = g_m.collisions;
+    g.cleanFrom = now + 1.0;
+  }
+  if (g.applied.empty() || g.applied.front().first > now - keep || g_m.v < (g.schedule ? 4.0f : 5.0f) || g_user.steer != 0) return;
+  double a = std::min(1.0, dt / TAU), k = g_m.yawRate / g_m.v;
+  if (!g.schedule) {
+    double bias = g.applied.front().second;
+    g.num += a * (k * bias - g.num);
+    g.den += a * (bias * bias - g.den);
+    // highway steering is a bias of a few thousandths
+    if (g.den > 0.001 * 0.001) g.low = static_cast<float>(std::clamp(g.num / g.den, 0.3, 6.0));
+  } else {
+    float lo = 1e9f, hi = -1e9f, bias = 0;
+    for (const auto &[t, b] : g.applied) {
+      if (t > now - LAG) break;
+      lo = std::min(lo, b), hi = std::max(hi, b), bias = b;
+    }
+    double x = bias * GainShape(g_m.v), predicted = g.low * x;
+    // a curvature near the steering lock (about 0.3 1/m on the Model 3) no longer grows with the bias; and one far from
+    // the prediction is the car sliding or bumping, not the steering
+    bool clean = now >= g.cleanFrom && hi - lo < 0.01 && std::fabs(predicted) < 0.25 && std::fabs(k - predicted) < 0.02 + 0.5 * std::fabs(predicted);
+    if (!clean) return;
+    g.num += a * (k * x - g.num);
+    g.den += a * (x * x - g.den);
+    g.low = static_cast<float>(std::clamp((g.num + PRIOR * g_cfg.curvGain) / (g.den + PRIOR), 1.0, 8.0));
+  }
   if (now >= g.nextLog) {
     g.nextLog = now + 10;
-    Log("curvature gain " + Num(g.gain));
+    Log("curvature gain " + Num(g.At(g_m.v)) + (g.schedule ? " at " + Num(g_m.v) + " m/s, low-speed " + Num(g.low) : std::string(", unscheduled")));
   }
 }
 
@@ -730,12 +821,12 @@ void ApplyControls(float dt, double now) {
   g_ctl.wasLive = true;
   float speed = g_m.v;
 
-  // lateral: the game's steer bias sets a path curvature roughly proportional to it, so feed forward the bias for the
-  // curvature, and integrate the yaw rate error
+  // lateral: the game's steer bias sets a path curvature proportional to it, so feed forward the bias for the curvature,
+  // and integrate the yaw rate error
   float v = std::max(speed, 3.0f);
   float yawTarget = g_ctl.curvature * v;
   UpdateCurvGain(dt, now);
-  float gain = g_curvGain.gain;
+  float gain = g_curvGain.At(speed);
   g_ctl.latI = std::clamp(g_ctl.latI + g_cfg.latKi * (yawTarget - g_m.yawRate) / (gain * v) * dt, -0.05f, 0.05f);
   if (speed < 3.0f) g_ctl.latI *= std::max(0.0f, 1.0f - dt);
   float steer = std::clamp(g_ctl.curvature / gain + g_ctl.latI + 0.15f * g_user.steer, -0.3f, 0.3f);
@@ -786,7 +877,7 @@ void ApplyControls(float dt, double now) {
 // an angle through openpilot's own learned vehicle model. Below walking pace that's undefined, so the commanded steering.
 float SteerCurvature() {
   if (g_m.v > 2.0f) return g_m.yawRate / g_m.v;
-  return g_ctl.wasLive ? g_ctl.steerOut * g_curvGain.gain : 0.0f;
+  return g_ctl.wasLive ? g_ctl.steerOut * g_curvGain.At(g_m.v) : 0.0f;
 }
 
 void SetIndicator(int indicator) {
@@ -1375,7 +1466,8 @@ void Publish(double now, bool inVehicle) {
       << ",\"indicator\":" << (g_indicator == 1 ? "\"left\"" : g_indicator == 2 ? "\"right\"" : "null")
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
-      << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.gain) << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
+      << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.At(g_m.v)) << ",\"curvGainLow\":" << Num(g_curvGain.low)
+      << ",\"gainSchedule\":" << (g_curvGain.schedule ? "true" : "false") << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
@@ -1844,8 +1936,9 @@ void HandleMessage(const Message &m, double now) {
     g_cfg.presentHook = MsgBool(m, "hook", g_cfg.presentHook);
     g_cfg.splitViews = MsgBool(m, "split", g_cfg.splitViews);
     g_cfg.wideDelay = static_cast<float>(MsgNum(m, "wide_delay", g_cfg.wideDelay));
+    g_cfg.tickHz = std::clamp(static_cast<float>(MsgNum(m, "tick_hz", g_cfg.tickHz)), 0.0f, 240.0f);
     Log("interleave " + std::string(g_cfg.interleave ? "on" : "off") + ", lag " + std::to_string(g_cfg.interleaveLag) +
-        (g_cfg.splitViews ? ", split views" : ""));
+        (g_cfg.splitViews ? ", split views" : "") + (g_cfg.tickHz > 0 ? ", " + Num(g_cfg.tickHz) + " frames a second" : std::string()));
   } else if (type == "debug") {
     // the map debug overlay: on, layers (gta5_overlay.py's letters), force (also while recording), ground (on the
     // game's ground), lift (m above the road)
@@ -1927,6 +2020,10 @@ void HandleMessage(const Message &m, double now) {
     g_latLogUntil = now + MsgNum(m, "secs", 10);
   } else if (type == "indicator") {
     (MsgStr(m, "side") == "right" ? g_rightPresses : g_leftPresses)++;  // as if the indicator key were pressed
+  } else if (type == "steergain") {
+    // schedule=0 goes back to one gain for all speeds (for A/B tests); either way the fit starts over
+    ResetCurvGain(MsgBool(m, "schedule", true));
+    Log(std::string("steering gain ") + (g_curvGain.schedule ? "scheduled by speed" : "unscheduled") + ", from " + Num(g_curvGain.low));
   } else if (type == "steertest") {
     g_test.bias = static_cast<float>(MsgNum(m, "bias", 0.1));
     g_test.throttle = static_cast<float>(MsgNum(m, "throttle", 0.3));
@@ -2093,6 +2190,7 @@ extern "C" __declspec(dllexport) void CoreInit(const CoreHost *host) {
 }
 
 extern "C" __declspec(dllexport) void CoreTick() {
+  PaceTick();
   double now = QpcSeconds();
   float dt = GET_FRAME_TIME();
   for (auto &m : g_link.TakeMessages()) HandleMessage(m, now);
@@ -2175,7 +2273,12 @@ extern "C" __declspec(dllexport) void CoreTick() {
     Log(std::string("debug ") + (g_debug.on ? "on" : "off") + " (key)");
   }
   // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
-  if (view < 0) DrawDebug(now);
+  if (view < 0) {
+    double t0 = QpcSeconds();
+    DrawDebug(now);
+    double took = QpcSeconds() - t0;
+    g_drawSum += took, g_drawMax = std::max(g_drawMax, took);
+  }
   TakeWaypoint(now);
   if (connected) {
     // police chases after a scrape with traffic would end any drive

@@ -234,9 +234,12 @@ camera's picture, with the wipers below it.
 - Frames go uncompressed over TCP (about 140 MB/s at 20 Hz), which the WSL network carries easily; `gta5_rx.py` copies them
   into shared memory in its own process, so the bridge's 100 Hz threads keep the GIL.
 - Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which sets a wheel
-  angle and so a path curvature roughly proportional to it, by an amount that depends on the car: it learns that gain
-  while driving (`curv_gain` is where it starts), feeds forward the bias for the curvature, and integrates the yaw rate
-  error. Throttle comes from a measured table of the acceleration it adds over coasting, which in the game is a hard
+  angle and so a path curvature proportional to it. The game turns the wheels less as the speed rises (on the Model 3,
+  3.4 1/m per unit bias up to 5 m/s, 2.2 at 11 m/s, 1.3 at 20 m/s, measured with `steertest`), and the low-speed gain
+  depends on the car: the plugin scales a measured table of that fall by a low-speed gain it learns while driving
+  (`curv_gain` is where it starts; collisions and the steering lock stay out of the fit), feeds forward the bias for
+  the curvature, and integrates the yaw rate error. `gta5_cmd.py steergain schedule=0` goes back to one gain fitted at
+  all speeds, for comparison. Throttle comes from a measured table of the acceleration it adds over coasting, which in the game is a hard
   -3 m/s^2 or so, and the brake covers anything beyond that; a stop is held with the handbrake, as the game's brake
   reverses a stopped car.
 - The steering angle openpilot sees is the yaw rate's curvature through the car's own fixed vehicle model (carParams',
