@@ -125,7 +125,7 @@ class GTA5World(World):
     self.log = open(LOG, "a", buffering=1) if LOG else None
     self.params = Params()
     self.params.remove("NavDesire")  # a killed bridge can leave one
-    self.nav = Nav(self._send, self._set_nav_desire)
+    self.nav = Nav(self._send, self._set_nav_desire, refresh=self.params.get_bool("TurnDesireRefresh"))
     self.pull_away = PullAway(self._send)
     self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None

@@ -41,7 +41,8 @@ DONE_YAW_RATE = 0.1  # rad/s
 MISSED_BY = 40.0  # m driven past a signaled turn that didn't happen: GTA reroutes
 # The model takes a turn request as a pulse when the blinker comes on, and decides itself when the turn is done; it
 # forgets the pulse after several seconds (the big model ~6.6 s), and at a stop. Until the turn starts, after a stop, or
-# once it no longer expects the turn, the blinker drops for openpilot (not the car's lights) to ask again.
+# once it no longer expects the turn, the blinker drops for openpilot (not the car's lights) to ask again, unless
+# openpilot asks again itself (TurnDesireRefresh).
 REPEAT_GAP = 0.3  # s without the blinker
 REPEAT_EVERY = 2.0  # s at most
 REPEAT_BELOW = 0.1  # the model's probability of the turn
@@ -439,10 +440,11 @@ def junction_entry(turn_dist: float, stops: list, junctions: list) -> tuple[floa
 
 
 class Nav:
-  def __init__(self, send, set_desire, tune: Tune | None = None):
+  def __init__(self, send, set_desire, tune: Tune | None = None, refresh: bool = False):
     self.send = send  # to the plugin
     self.set_desire = set_desire  # openpilot's NavDesire
     self.tune = tune or Tune()
+    self.refresh = refresh  # openpilot asks for the turn again itself (TurnDesireRefresh): the blinker stays on
     self.was_engaged = False
     self.desire = ""  # what NavDesire is set to
     self.entry, self.entry_kind = 0.0, ""  # m to the junction entry of the turn ahead, and what it is
@@ -1080,7 +1082,7 @@ class Nav:
   @property
   def blinker_gap(self) -> bool:
     """Whether openpilot shouldn't see the blinker just now, to repeat the turn request."""
-    return time.monotonic() - self.repeat_t < REPEAT_GAP
+    return not self.refresh and time.monotonic() - self.repeat_t < REPEAT_GAP
 
   @property
   def signaling(self) -> bool:

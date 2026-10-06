@@ -307,7 +307,8 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay",
+                  "deviceMotion"])
 
   publish_state = PublishState()
   params = Params()
@@ -416,6 +417,9 @@ def main(demo=False):
       vec_desire[desire] = 1
     if 0 < stacked < ModelConstants.DESIRE_LEN:
       vec_desire[stacked] = 1
+    if DH.refresh:  # the turn's pulse again, on a rising edge
+      model.prev_desire[desire] = 0
+      cloudlog.warning(f"turn desire refresh {DH.refresh_count}, turned {math.degrees(abs(DH.turn_angle)):.0f} deg")
 
     # tracked dropped frames
     vipc_dropped_frames = max(0, meta_main.frame_id - last_vipc_frame_id - 1)
@@ -476,7 +480,8 @@ def main(demo=False):
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
+      yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # left-positive; device z points down
+      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, yaw_rate, desire_state)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
 

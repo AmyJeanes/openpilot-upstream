@@ -527,3 +527,19 @@ def test_turned_unwrapped_and_no_repulse_past_the_way_out():
     d.nav.update(state, True, d.indicator, {"left": 0.05})
     assert d.nav.turn is not None
     assert (d.nav.repeat_t != repeats) == want, (unwrapped, past_exit)
+
+
+def test_blinker_steady_when_openpilot_refreshes_the_turn():
+  # with TurnDesireRefresh openpilot asks for the turn again itself, so the blinker no longer drops to repeat it
+  route = route_to_turn(40.0, "left")
+  for refresh in (False, True):
+    d = Drive((0, 1), v=5.0)
+    d.nav.refresh = refresh
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(left_signal_max_entry=0.0)
+    y, gaps = 0.0, 0
+    while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
+      d.step(route, y, {"routeEnd": 300.0 - y})
+      gaps += d.nav.signaled is not None and d.nav.blinker_gap
+      y += d.v * 0.05
+    assert (gaps == 0) == refresh, (refresh, gaps)
