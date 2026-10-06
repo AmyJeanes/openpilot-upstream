@@ -4,7 +4,8 @@ middle, with its width kerb to kerb, how far each is trimmed back at its junctio
 (junctions.py); and with --lanes, the lines painted on them as lanes.json (osm_lanes.py, from the map's lane tags):
 kerbs, carried round the junctions' corners, white lines between lanes one way (dashed, solid where change:lanes
 forbids crossing), yellow lines between the directions, stop and give way lines, and crossings (`footway=crossing`).
-No lines are painted inside junctions, nor between a stop line and its junction.
+No lines are painted inside junctions, nor between a stop line and its junction; the moves through them from lane to
+lane (Junctions.movements: turn:lanes, connectivity, restrictions) are guides the view can show there.
 
 `--frame gta5` gives game coordinates (for ynd_to_osm's maps); otherwise metres from the file's centre.
 """
@@ -17,12 +18,13 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, OsmLanes, offset_line
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
 # lanes.json's kinds: a road's edge (kerb), white lines between lanes one way, yellow lines between the directions,
-# stop lines, give way lines, crossings
-KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way', 'crossing']
+# stop lines, give way lines, crossings, and the paths of the moves through junctions from lane to lane by their turn
+KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way', 'crossing', 'guide_left', 'guide_through',
+         'guide_right']
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
 CELL = 50.0  # m
 
@@ -89,7 +91,7 @@ def main():
   p.add_argument('--frame', choices=['gta5', 'local'], default='gta5')
   args = p.parse_args()
 
-  data = osm_pbf.read(args.osm, relations=())
+  data = osm_pbf.read(args.osm, relations=('restriction', 'connectivity'))
   if args.frame == 'gta5':
     project = to_game
   else:
@@ -191,7 +193,8 @@ def main():
   for (layer, sig), _, nodes in join(layouts):
     pts = points(nodes)
     for kind, offset, style in sig:
-      for k, off in [(0, 0.0)] if kind == EDGE else marks(style, kind == DIVIDER):
+      # a median's edges one line each, as maps paint it, rather than the divider's double line on both
+      for k, off in [(0, 0.0)] if kind == EDGE else marks('solid' if kind == MEDIAN else style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
         for piece in clip_outside(geom, near(geom, layer, kind == EDGE)):
           add(k, piece, layer)
@@ -201,6 +204,8 @@ def main():
         add(KINDS.index('edge'), piece, area_layer[n])
     for s in j.stops:
       add(KINDS.index(s.kind), s.line, area_layer[n])
+    for mv in junctions.movements(j):
+      add(KINDS.index(f'guide_{mv.kind}'), mv.path, area_layer[n])
   crossings = junctions.crossing_lines()
   for c in crossings:
     add(KINDS.index('crossing'), c, 0)

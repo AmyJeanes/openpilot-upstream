@@ -6,8 +6,8 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.junctions import MERGE_GAP, STOP_SETBACK, Junctions, clip_outside, in_fan
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+from openpilot.tools.sim.bridge.gta5.map.junctions import MERGE_GAP, STOP_SETBACK, Junctions, clip_outside, in_fan, lane_moves
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -15,11 +15,11 @@ TWO_WAY = {'highway': 'residential', 'lanes': '2', 'width': '11'}
 ONE_WAY = {'highway': 'primary', 'lanes': '2', 'oneway': 'yes', 'width': '8'}
 
 
-def make(nodes: dict, ways: dict, node_tags: dict | None = None) -> OsmLanes:
-  """A map in metres: nodes {id: (x, y)}, ways {id: (tags, [node ids])}."""
+def make(nodes: dict, ways: dict, node_tags: dict | None = None, relations: dict | None = None) -> OsmLanes:
+  """A map in metres: nodes {id: (x, y)}, ways {id: (tags, [node ids])}, relations {id: (tags, [(type, ref, role)])}."""
   ids = np.array(sorted(nodes), np.int64)
   data = OsmData(ids, np.array([nodes[i][1] for i in ids], float), np.array([nodes[i][0] for i in ids], float),
-                 node_tags or {}, dict(ways), {})
+                 node_tags or {}, dict(ways), relations or {})
   return OsmLanes(data, lambda lat, lon: (lon, lat))
 
 
@@ -29,7 +29,10 @@ def fixture(name: str) -> OsmLanes:
   nodes = {int(n.get('id')): (float(n.get('lon')) * scale, float(n.get('lat')) * scale) for n in root.iter('node')}
   ways = {int(w.get('id')): ({t.get('k'): t.get('v') for t in w.iter('tag')}, [int(nd.get('ref')) for nd in w.iter('nd')])
           for w in root.iter('way')}
-  return make(nodes, ways)
+  relations = {int(r.get('id')): ({t.get('k'): t.get('v') for t in r.iter('tag')},
+                                  [(m.get('type')[0], int(m.get('ref')), m.get('role')) for m in r.iter('member')])
+               for r in root.iter('relation')}
+  return make(nodes, ways, relations=relations)
 
 
 def only(js: Junctions):
@@ -37,14 +40,15 @@ def only(js: Junctions):
   return js.junctions[0]
 
 
-def cross(arms: dict) -> OsmLanes:
-  """A junction at (0, 0) with a way out to each (x, y): {way id: (tags, (x, y))}."""
+def cross(arms: dict, into=(), relations: dict | None = None) -> OsmLanes:
+  """A junction at node 1, (0, 0), with a way out to each (x, y): {way id: (tags, (x, y))}, those in `into` drawn
+  towards it."""
   nodes = {1: (0.0, 0.0)}
   ways = {}
   for k, (wid, (tags, end)) in enumerate(arms.items()):
     nodes[10 + k] = end
-    ways[wid] = (tags, [1, 10 + k])
-  return make(nodes, ways)
+    ways[wid] = (tags, [10 + k, 1] if wid in into else [1, 10 + k])
+  return make(nodes, ways, relations=relations)
 
 
 def test_fixture_crossroads():
@@ -152,6 +156,95 @@ def test_crossing_lines_on_the_road():
           9: ({'highway': 'footway', 'footway': 'crossing'}, [20, 21])}
   lines = Junctions(make(nodes, ways)).crossing_lines()
   assert len(lines) == 1 and np.allclose(sorted(lines[0][[0, -1], 0]), [-5.5, 5.5])
+
+
+def moves(js: Junctions, j) -> dict[tuple[int, int], list]:
+  """{(way in, way out): [(lane in, lane out, kind)]}"""
+  out: dict[tuple[int, int], list] = {}
+  for mv in js.movements(j):
+    out.setdefault((mv.into.ways[0][0], mv.out.ways[0][0]), []).append((mv.lane_in, mv.lane_out, mv.kind))
+  return out
+
+
+def check_paths(js: Junctions, j):
+  """Every move's path starts on its lane's centre arriving and ends on its lane's centre leaving, heading along them,
+  and runs smoothly (no step turning more than 25 degrees), mostly inside the junction's area or its approaches."""
+  for mv in js.movements(j):
+    p = mv.path
+    for m, lane, at, arriving in ((mv.into, mv.lane_in, p[0], True), (mv.out, mv.lane_out, p[-1], False)):
+      w, fwd = m.ways[0]
+      spans = js.osm.lanes(w).ours((BACKWARD if fwd else FORWARD) if arriving else (FORWARD if fwd else BACKWARD))
+      s = m.line.project(at)
+      u = m.line.tangent(s)
+      left = np.array([-u[1], u[0]])
+      off = float((at - m.line.at(s)) @ left)  # m left of the road looking out
+      want = spans[lane].centre if arriving else -spans[lane].centre
+      assert abs(off - want) < 0.05, (off, want)
+    d = np.diff(p, axis=0)
+    h = np.arctan2(d[:, 1], d[:, 0])
+    assert np.all(np.abs((np.diff(h) + np.pi) % (2 * np.pi) - np.pi) < np.radians(25)), mv.kind
+
+
+def test_movements_turn_bay():
+  # turn_bay.osm: from the west, lanes left|through; the bay is connected to the road north (connectivity 1:1), the
+  # right turn south is banned (no_right_turn), and the through lane goes east
+  js = Junctions(fixture('turn_bay.osm'))
+  j = only(js)
+  got = moves(js, j)
+  assert got[(2, 4)] == [(0, 0, 'left')]  # the connectivity relation's
+  assert got[(2, 3)] == [(1, 0, 'through')]
+  assert (2, 5) not in got  # restricted
+  assert all(a != b for a, b in got)  # no U-turns
+  assert all(len(ms) == 1 for ms in got.values())  # one lane in on each move
+  assert {w for w, _ in got if w != 2} == {3, 4, 5} and len(got) == 2 + 3 * 3
+  check_paths(js, j)
+
+
+def test_movements_untagged_multilane():
+  # a one-way road north into a crossroads with three lanes and no arrows: the left lane turns left too, the right one
+  # right, the middle one goes through; at a T with no way through, half go each way
+  wide = {'highway': 'primary', 'lanes': '3', 'oneway': 'yes', 'width': '10.5'}
+  osm = cross({1: (wide, (0.0, -100.0)), 2: (TWO_WAY, (-100.0, 0.0)), 3: (TWO_WAY, (100.0, 0.0)), 4: (TWO_WAY, (0.0, 100.0))},
+              into={1})
+  js = Junctions(osm)
+  j = only(js)
+  got = moves(js, j)
+  assert got[(1, 2)] == [(0, 0, 'left')] and got[(1, 3)] == [(2, 0, 'right')]
+  assert sorted(got[(1, 4)]) == [(0, 0, 'through'), (1, 0, 'through'), (2, 0, 'through')]
+  check_paths(js, j)
+  assert lane_moves([frozenset()] * 2, [(90.0, 1), (-90.0, 1)]) == [[(0, 0)], [(1, 0)]]
+
+
+def test_movements_turn_lanes_and_restrictions():
+  # arrows left|through|through;right into two-lane exits: the left lane to the left road's left lane, the through
+  # lanes in order, the right lane also right; an only_straight_on restriction leaves only the through moves
+  arrows = {**ONE_WAY, 'lanes': '3', 'width': '12', 'turn:lanes': 'left|through|through;right'}
+  arms = {1: (arrows, (0.0, -100.0)), 2: (ONE_WAY, (-100.0, 0.0)), 3: (ONE_WAY, (100.0, 0.0)), 4: (ONE_WAY, (0.0, 100.0))}
+  js = Junctions(cross(arms, into={1}))
+  j = only(js)
+  got = moves(js, j)
+  assert got[(1, 2)] == [(0, 0, 'left')]
+  assert got[(1, 4)] == [(1, 0, 'through'), (2, 1, 'through')]
+  assert got[(1, 3)] == [(2, 1, 'right')]
+  check_paths(js, j)
+  only_on = {1: ({'type': 'restriction', 'restriction': 'only_straight_on'}, [('w', 1, 'from'), ('n', 1, 'via'), ('w', 4, 'to')])}
+  js2 = Junctions(cross(arms, into={1}, relations=only_on))
+  assert set(moves(js2, only(js2))) == {(1, 4)}
+
+
+def test_movements_divided_road():
+  # a junction of two nodes (the divided road test's): every move between its roads keeps to the one-way rules of the
+  # road between its nodes, and none turns back into the carriageway it came from
+  nodes = {1: (0.0, -7.0), 2: (0.0, 7.0), 3: (-100.0, -7.0), 4: (100.0, -7.0), 5: (100.0, 7.0), 6: (-100.0, 7.0),
+           7: (0.0, -100.0), 8: (0.0, 100.0)}
+  ways = {1: (ONE_WAY, [3, 1]), 2: (ONE_WAY, [1, 4]), 3: (ONE_WAY, [5, 2]), 4: (ONE_WAY, [2, 6]),
+          5: (TWO_WAY, [7, 1]), 6: (TWO_WAY, [1, 2]), 7: (TWO_WAY, [2, 8])}
+  js = Junctions(make(nodes, ways))
+  j = only(js)
+  got = moves(js, j)
+  assert (1, 4) not in got and (3, 2) not in got  # U-turns
+  assert (1, 2) in got and (1, 7) in got and (5, 7) in got and (5, 4) in got and (3, 4) in got
+  check_paths(js, j)
 
 
 def test_clip_outside():

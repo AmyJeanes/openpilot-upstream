@@ -60,7 +60,10 @@ real maps draw them (`junctions.py`, after osm2streets): each road trimmed back 
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it, stop lines across
 the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
 and `footway=crossing` crossings striped across the road. Roads are drawn a layer at a time (`layer`, `bridge`,
-`tunnel`): bridges over what they cross, with a dark casing, tunnels faded.
+`tunnel`): bridges over what they cross, with a dark casing, tunnels faded. A median between the directions is a
+solid yellow line along each edge. "Turn paths" shows each lane's moves through the junctions (`Junctions.movements`:
+`turn:lanes` arrows matched to the ways out by angle, `type=connectivity` relations, turn restrictions, no U-turns;
+without arrows the outer lanes also turn): dashed blue left, grey through, orange right.
 `map_view.py roads.json --state <file>` shows the map alone, with a state from a file.
 
 ## The map

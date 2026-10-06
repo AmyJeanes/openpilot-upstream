@@ -24,6 +24,7 @@
 <div id="bar">
   <button id="follow" class="on">Follow</button>
   <button id="rotate">Heading up</button>
+  <button id="guides">Turn paths</button>
   <button id="clear">Clear route</button>
   <span id="info">loading roads…</span>
 </div>
@@ -44,7 +45,10 @@ const LANE_WIDTH = 5.4;  // m per lane, for a roads.json without widths
 // lanes.json's kinds: colour, m of dash and gap (none: solid), width in m, line ends (default by zoom)
 const MARKS = { edge: ['#c8c8c8', null, 0.2], dashed: ['#f4f4f4', [3, 6], 0.15], solid: ['#f4f4f4', null, 0.15],
   centre: ['#f2c200', null, 0.15], centre_dashed: ['#f2c200', [3, 6], 0.15], stop: ['#f4f4f4', null, 0.45, 'butt'],
-  give_way: ['#f4f4f4', [0.6, 0.6], 0.3, 'butt'], crossing: ['#d8d8d8', [0.5, 0.6], 3, 'butt'] };  // a crossing's stripes
+  give_way: ['#f4f4f4', [0.6, 0.6], 0.3, 'butt'], crossing: ['#d8d8d8', [0.5, 0.6], 3, 'butt'],  // a crossing's stripes
+  // the moves through junctions from lane to lane, shown with "Turn paths"
+  guide_left: ['rgba(77, 163, 255, 0.65)', [1.2, 1], 0.3], guide_through: ['rgba(214, 218, 222, 0.5)', [1.2, 1], 0.3],
+  guide_right: ['rgba(255, 169, 64, 0.65)', [1.2, 1], 0.3] };
 const BRIDGE_CASING = '#08090a', CASING = 0.8;  // m each side of a bridge
 const TUNNEL_ALPHA = 0.45;
 const SEAM = 0.25;  // m
@@ -64,7 +68,7 @@ let cells = new Map(), layerKeys = [], layers = [0], markKinds = [], state = nul
 let samples = [], rate = 1, car = null;  // rate: server seconds per browser second; car: where it's drawn now
 let offset = { x: 0, y: 0, bearing: 0 }, lastDraw = 0;
 let view = { x: 0, y: 0, scale: 0.5, rot: 0 };  // centre in metres, px per metre, radians
-let follow = true, headingUp = false;
+let follow = true, headingUp = false, guides = false;
 
 function resize() {
   canvas.width = innerWidth * devicePixelRatio;
@@ -210,6 +214,7 @@ function draw() {
     if (!marked) continue;
     ctx.globalAlpha = layer < 0 ? TUNNEL_ALPHA : 1;
     for (const kind of markKinds) {
+      if (!guides && kind.startsWith('guide_')) continue;
       const [colour, dash, width, cap] = MARKS[kind] || MARKS.solid;
       ctx.strokeStyle = colour;
       ctx.lineWidth = Math.max(width, devicePixelRatio / s);
@@ -450,6 +455,13 @@ function setHeadingUp(on) {
 }
 document.getElementById('follow').onclick = () => { setFollow(!follow); requestDraw(); };
 document.getElementById('rotate').onclick = () => { setHeadingUp(!headingUp); requestDraw(); };
+function setGuides(on) {
+  guides = on;
+  document.getElementById('guides').classList.toggle('on', on);
+  try { localStorage.setItem('guides', on ? '1' : '0'); } catch (e) { /* storage unavailable: not remembered */ }
+}
+try { setGuides(localStorage.getItem('guides') === '1'); } catch (e) { setGuides(false); }
+document.getElementById('guides').onclick = () => { setGuides(!guides); requestDraw(); };
 
 function animate() {
   // the car moves, and the map turns, MAX_FPS times a second

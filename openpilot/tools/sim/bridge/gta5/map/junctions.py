@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, offset_line, oneway_of
 
 CLUSTER_LINK = 15.0  # m: junction nodes joined by a road this short (and shorter than their widest road is wide) are one junction
 ARM_LENGTH = 60.0  # m of each road out of a junction that its geometry is worked out over
@@ -49,6 +49,12 @@ CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
+U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
+STRAIGHT = 30.0  # deg: a move turning less than this goes through
+# the deg turned (left positive) along which each turn:lanes arrow points
+ARROWS = {'through': (-STRAIGHT, STRAIGHT), 'slight_left': (10.0, 60.0), 'left': (STRAIGHT, 150.0), 'sharp_left': (110.0, U_TURN),
+          'slight_right': (-60.0, -10.0), 'right': (-150.0, -STRAIGHT), 'sharp_right': (-U_TURN, -110.0),
+          'merge_to_left': (-STRAIGHT, STRAIGHT), 'merge_to_right': (-STRAIGHT, STRAIGHT)}
 
 
 class Poly:
@@ -310,6 +316,7 @@ class Junctions:
     self.junctions: list[Junction] = []
     self.trims: dict[tuple[int, int], float] = {}
     self.inside: set[int] = set()
+    self._rules: tuple[dict, list] | None = None  # read from the map's relations when first needed
     self._build()
 
   @staticmethod
@@ -681,3 +688,177 @@ class Junctions:
     uq = _left(m.line.tangent(m.trim))
     area = np.array([q - uq * e_hi, p + right * (-e_hi), p + right * (-e_lo), q - uq * e_lo])
     j.stops.append(Stop(kind, line, m, s, area))
+
+  # *** movements ***
+
+  def movements(self, j: Junction) -> list['Movement']:
+    """Every lane-to-lane move through a junction, with its path (see Movement)."""
+    if self._rules is None:
+      self._rules = rules(self.osm.data.relations)
+    restricted, connects = self._rules
+    stop_at = {id(s.member): s.along for s in j.stops}
+    arm_of = {id(m): k for k, arm in enumerate(j.arms) for m in arm.members}
+    members = [m for arm in j.arms for m in arm.members]
+    out = []
+    for m_in in members:
+      w_in, fwd_in = m_in.ways[0]
+      lanes_in = self.osm.lanes(w_in).ours(BACKWARD if fwd_in else FORWARD)  # towards the junction
+      if not lanes_in:
+        continue
+      reach = self._reachable(j, m_in.start)
+      heading_in = -m_in.line.tangent(0.0)
+      exits = []  # (deg turned, member, its lanes out)
+      for m_out in members:
+        if arm_of[id(m_out)] == arm_of[id(m_in)] or m_out.start not in reach:
+          continue
+        w_out, fwd_out = m_out.ways[0]
+        lanes_out = self.osm.lanes(w_out).ours(FORWARD if fwd_out else BACKWARD)
+        if not lanes_out:
+          continue
+        u = m_out.line.tangent(0.0)
+        turned = math.degrees(math.atan2(_cross(heading_in, u), float(heading_in @ u)))  # left positive
+        if abs(turned) > U_TURN or forbidden(restricted, m_in, m_out):
+          continue
+        exits.append((turned, m_out, lanes_out))
+      if not exits:
+        continue
+      pairs = lane_moves([s.lane.turns for s in lanes_in], [(t, len(lo)) for t, _, lo in exits])
+      ways_in = {w for w, _ in m_in.ways}
+      for k, (turned, m_out, lanes_out) in enumerate(exits):
+        given = next((c for f, t, c in connects if f in ways_in and t == m_out.ways[0][0]), None)
+        for a, b in (given if given is not None else pairs[k]):
+          if a < len(lanes_in) and b < len(lanes_out):
+            out.append(self._movement(m_in, a, lanes_in[a], stop_at.get(id(m_in), m_in.trim), m_out, b, lanes_out[b], turned))
+    return out
+
+  def _reachable(self, j: Junction, node: int) -> set[int]:
+    """The junction's nodes a car at one of them can drive to along the roads inside it, keeping to their one-way rules."""
+    seen, stack = {node}, [node]
+    while stack:
+      n = stack.pop()
+      for w, nxt, along in self.steps.get(n, ()):
+        oneway = oneway_of(self.ways[w][0])
+        if w in j.inside and nxt not in seen and (oneway == 0 or (oneway == 1) == along):
+          seen.add(nxt)
+          stack.append(nxt)
+    return seen
+
+  @staticmethod
+  def _movement(m_in: Member, a: int, span_in, s_in: float, m_out: Member, b: int, span_out, turned: float) -> 'Movement':
+    u_in, u_out = m_in.line.tangent(s_in), m_out.line.tangent(m_out.trim)
+    p0 = m_in.line.at(s_in) + _left(u_in) * span_in.centre  # arriving, the lane's right is left of the road looking out
+    p1 = m_out.line.at(m_out.trim) - _left(u_out) * span_out.centre
+    kind = 'through' if abs(turned) <= STRAIGHT else 'left' if turned > 0 else 'right'
+    return Movement(m_in, a, m_out, b, kind, turned, lane_curve(p0, -u_in, p1, u_out))
+
+
+@dataclass
+class Movement:
+  """A move from lane `lane_in` (of those arriving on `into`, numbered from the left) to lane `lane_out` (of those
+  leaving on `out`): 'left', 'through' or 'right' (`turned` deg, left positive), and its path, the lane centre from the
+  incoming lane's stop line (or the junction's mouth) to the outgoing lane at the mouth."""
+  into: Member
+  lane_in: int
+  out: Member
+  lane_out: int
+  kind: str
+  turned: float
+  path: np.ndarray
+
+
+def rules(relations: dict) -> tuple[dict, list]:
+  """Turn restrictions {from way: [(restriction, to way)]} and connectivity [(from way, to way, [(lane in, lane out)])]
+  (lanes from 0 at the left; optional lanes, `(n)`, count; both-ways lanes, `bw`, are left out)."""
+  restricted: dict[int, list[tuple[str, int]]] = {}
+  connects = []
+  for tags, members in relations.values():
+    wf = [r for t, r, role in members if t == 'w' and role == 'from']
+    wt = [r for t, r, role in members if t == 'w' and role == 'to']
+    if len(wf) != 1 or len(wt) != 1:
+      continue
+    if tags.get('type') == 'restriction' and tags.get('restriction', '').startswith(('no_', 'only_')):
+      restricted.setdefault(wf[0], []).append((tags['restriction'], wt[0]))
+    elif tags.get('type') == 'connectivity':
+      pairs = []
+      for group in tags.get('connectivity', '').split('|'):
+        a, _, bs = group.partition(':')
+        a = a.strip('()')
+        for b in bs.split(','):
+          b = b.strip('()')
+          if a.isdigit() and b.isdigit():
+            pairs.append((int(a) - 1, int(b) - 1))
+      if pairs:
+        connects.append((wf[0], wt[0], pairs))
+  return restricted, connects
+
+
+def forbidden(restricted: dict, m_in: Member, m_out: Member) -> bool:
+  """Whether a turn restriction from a way along the road in forbids the move to a way along the road out (by any via)."""
+  outs = {w for w, _ in m_out.ways}
+  for w, _ in m_in.ways:
+    for kind, to in restricted.get(w, ()):
+      if kind.startswith('no_') and to in outs:
+        return True
+      if kind.startswith('only_') and to not in outs:
+        return True
+  return False
+
+
+def lane_moves(turns: list[frozenset[str]], exits: list[tuple[float, int]]) -> list[list[tuple[int, int]]]:
+  """For each way out ((deg turned, its lanes)), the moves [(lane in, lane out)] to it of the lanes in, given each lane's
+  turn:lanes arrows (empty for none). With arrows, a lane takes the ways out they point along, or the nearest one on
+  that side where none does. Without, the leftmost lane also turns left, the rightmost right, and the rest go through
+  (at a T, half each way). The lanes taking a way out go to its lanes in order from the side they turn to (through,
+  spread evenly)."""
+  n = len(turns)
+  straight = [k for k, (t, _) in enumerate(exits) if abs(t) <= STRAIGHT]
+  lefts = [k for k, (t, _) in enumerate(exits) if t > STRAIGHT]
+  rights = [k for k, (t, _) in enumerate(exits) if t < -STRAIGHT]
+  take: list[set[int]] = [set() for _ in range(n)]
+  if any(turns):
+    for i, ts in enumerate(turns):
+      for turn in (ts or {'through'}) & ARROWS.keys():
+        lo, hi = ARROWS[turn]
+        hit = [k for k, (t, _) in enumerate(exits) if lo <= t <= hi]
+        if not hit:
+          side = [k for k, (t, _) in enumerate(exits) if (t > 0) == (lo + hi > 0)]
+          hit = [min(side, key=lambda k: abs(exits[k][0] - (lo + hi) / 2))] if side else []
+        take[i] |= set(hit)
+  elif n == 1:
+    take[0] = set(range(len(exits)))
+  else:
+    for i in range(n):
+      take[i] |= set(straight)
+    if straight:
+      take[0] |= set(lefts)
+      take[-1] |= set(rights)
+    else:
+      half = (n + 1) // 2 if lefts and rights else n
+      for i in range(n):
+        take[i] |= set(lefts) if (i < half and lefts) or not rights else set(rights)
+  out = []
+  for k, (turned, n_out) in enumerate(exits):
+    ins = [i for i in range(n) if k in take[i]]
+    m = len(ins)
+    if turned > STRAIGHT:  # from the left
+      out.append([(i, min(q, n_out - 1)) for q, i in enumerate(ins)])
+    elif turned < -STRAIGHT:  # from the right
+      out.append([(i, max(n_out - m + q, 0)) for q, i in enumerate(ins)])
+    else:
+      out.append([(i, round(q * (n_out - 1) / (m - 1)) if m > 1 else min(i, n_out - 1)) for q, i in enumerate(ins)])
+  return out
+
+
+def lane_curve(p0, u0, p1, u1, step: float = 1.0) -> np.ndarray:
+  """A smooth path from p0 heading u0 to p1 heading u1 (unit vectors): a cubic Bezier whose handles reach 0.55 of the way
+  towards where the two headings' lines meet (close to a circular arc round a right angle), or a third of the way
+  across where they don't meet ahead."""
+  d = float(np.hypot(*(p1 - p0)))
+  ka = kb = d / 3
+  if abs(_cross(u0, u1)) > 0.05:
+    a, b = np.linalg.solve(np.array([u0, u1]).T, p1 - p0)  # p0 + a u0 = corner = p1 - b u1
+    if a > 0 and b > 0:
+      ka, kb = 0.55 * a, 0.55 * b
+  c0, c1 = p0 + u0 * ka, p1 - u1 * kb
+  t = np.linspace(0, 1, max(int(d / step), 4) + 1)[:, None]
+  return (1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * c0 + 3 * (1 - t) * t ** 2 * c1 + t ** 3 * p1
