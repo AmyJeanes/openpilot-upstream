@@ -2,7 +2,7 @@
 
 Overlay: while the plugin's map debug is on (`gta5_cmd.py debug on`, or its key), every EVERY s the map around the car,
 in world coordinates with the road's height, for the plugin to draw into the world from the player's camera: lane edges,
-lane dividers, stop lines (lights, signs), junction areas, the route along the lanes it takes, nav's lane plan, and the
+lane dividers, stop lines (lights, signs), junction areas, the route in the lanes nav plans (its lane plan line), and the
 next turn with where its signal comes on. The road pieces follow gta5_train's maprender (its lane bands, dividers left
 out at junctions, junction areas as hulls at the junction nodes where roads cross, stop lines across the lanes into
 their junction, the route as its carriageway_line), drawn at their own heights rather than filtered to the car's level.
@@ -34,6 +34,7 @@ SIMPLIFY = 0.15  # m a dropped vertex may be off the line
 RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
 RIBBON_TURN = 60.0  # deg: sharper corners in the route's line are cut where a side is shorter than RIBBON_JOG
 RIBBON_JOG = 5.0  # m
+RIBBON_LIFT = 1.0  # m above the map's road height: the map's heights can sit under the game's ground
 CELL = 50.0  # m: node index cells
 LIGHT = 15  # node special: a traffic light's stop line
 CAR_HEIGHT = 0.6  # paths.CAR_HEIGHT
@@ -423,22 +424,25 @@ def build(snap: dict, geometry: RoadGeometry | None) -> dict:
   if geometry is not None:
     items += geometry.near(pos, road_z, RADIUS, layers)
   route = snap.get("route")
+  lane = snap.get("lane_line")
+  lane = np.asarray(lane, np.float64) if lane is not None and len(lane) >= 2 else None
   if route is not None and "r" in layers and len(route.points) >= 2:
     line, along = snap["carriageway"]
     for kind, lo, hi in (("b", route.at - BEHIND, route.at), ("r", route.at, route.at + 2 * RADIUS + 100.0)):
+      if kind == "r" and lane is not None:
+        continue  # ahead it follows nav's lane plan (below), so it sits in a lane rather than between two
       # from exactly the car's place on the route, so the two parts meet there
       lo, hi = max(lo, float(along[0])), min(hi, float(along[-1]))
       v = np.concatenate(([lo], along[(along > lo + RIBBON_GAP) & (along < hi - RIBBON_GAP)], [hi]))
       if hi - lo > RIBBON_GAP:
         xy = np.column_stack([np.interp(v, along, line[:, 0]), np.interp(v, along, line[:, 1])])
-        pts = ribbon_line(np.column_stack([xy, route_z(route, v, road_z)]))
+        pts = ribbon_line(np.column_stack([xy, route_z(route, v, road_z) + RIBBON_LIFT]))
         items += [(kind, run) for run in within(pts, pos, RADIUS)]
-  lane = snap.get("lane_line")
-  if lane is not None and len(lane) >= 2 and "n" in layers:
-    lane = np.asarray(lane, np.float64)
+  if lane is not None and ("r" in layers or "n" in layers):
     s = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(lane, axis=0).T))))
     z = route_z(route, (route.at if route is not None else 0.0) + s, road_z) if route is not None else np.full(len(s), road_z)
-    items += [("n", run) for run in within(np.column_stack([lane, z]), pos, RADIUS)]
+    pts = ribbon_line(np.column_stack([lane, z + RIBBON_LIFT]))
+    items += [("r" if "r" in layers else "n", run) for run in within(pts, pos, RADIUS)]
   if "m" in layers:
     for kind, xy in (("m", snap.get("turn")), ("g", snap.get("signal"))):
       if xy is not None:
@@ -494,7 +498,7 @@ class Overlay:
     self.next = now + EVERY
     layers = str(debug.get("layers") or DEFAULT_LAYERS)
     snap = {"pos": state["pos"], "layers": layers, "route": route, "paths": paths, "recording": recording}
-    if "n" in layers:
+    if "r" in layers or "n" in layers:
       snap["lane_line"] = lane_line()
     if "m" in layers and state.get("route") and nav is not None:
       points = nav.turn_points(np.array(state["route"], dtype=float), state)
