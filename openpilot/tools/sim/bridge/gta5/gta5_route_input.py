@@ -22,6 +22,7 @@ Layout (ROUTE_LEN = 173 floats; all zero = no route, which is also what a droppe
   / 100. With router.STOP_DIRECTION off they include the far side of junctions: label with the bridge's setting.
 """
 import math
+from typing import NamedTuple
 
 import numpy as np
 
@@ -152,18 +153,47 @@ class RouteInput:
     return out
 
 
+class Next(NamedTuple):
+  side: str  # L or R
+  change: float  # deg, right positive
+  dist: float  # m
+  entry: float  # m
+  lanes_in: int
+  lanes_out: int
+  target: tuple[float, float]  # first and last target lane centres, as a fraction of the road from the left
+  lane_data: bool
+
+
+class Decoded(NamedTuple):
+  nav: np.ndarray  # [NAV_BINS, 3] bool: other, left, right
+  present: bool
+  heading: np.ndarray  # deg, right positive, at HEADING_AHEAD
+  next: Next | None
+  stop: float | None  # m
+
+
+def decode(vec: np.ndarray) -> Decoded:
+  """The route input back in plain units."""
+  vec = np.asarray(vec, np.float32)
+  nx = vec[NEXT]
+  nxt = Next("L" if nx[1] < 0 else "R", float(nx[2] * HEADING_UNIT), float(nx[3] * DIST_UNIT), float(nx[4] * DIST_UNIT),
+             round(float(nx[5] * LANES_UNIT)), round(float(nx[6] * LANES_UNIT)), (float(nx[7]), float(nx[8])), bool(nx[9])) if nx[0] else None
+  stop = float(vec[STOP.start + 1] * DIST_UNIT) if vec[STOP.start] else None
+  return Decoded(vec[:NAV_LEN].reshape(NAV_BINS, 3) > 0, bool(vec[PRESENT]), vec[HEADING] * HEADING_UNIT, nxt, stop)
+
+
 def describe(vec: np.ndarray, lo_bin: int = 20, hi_bin: int = 50) -> str:
   """One line: NAV bins lo_bin..hi_bin as characters (. none, o other, L, R; several: *), then NEXT and STOP."""
-  nav = vec[:NAV_LEN].reshape(NAV_BINS, 3)
+  d = decode(vec)
   chars = []
   for b in range(lo_bin, hi_bin):
-    lit = np.flatnonzero(nav[b])
+    lit = np.flatnonzero(d.nav[b])
     chars.append("." if not len(lit) else "*" if len(lit) > 1 else "oLR"[lit[0]])
-  nx = vec[NEXT]
-  nxt = (f"next {'L' if nx[1] < 0 else 'R'} {nx[2] * 90:+4.0f}deg at {nx[3] * 100:5.0f} m entry {nx[4] * 100:5.0f} m " +
-         f"lanes {nx[5] * 6:.0f}->{nx[6] * 6:.0f} tgt {nx[7]:.2f}-{nx[8]:.2f}") if nx[0] else "next -"
-  stop = f"stop {vec[STOP.start + 1] * 100:4.0f} m" if vec[STOP.start] else "stop -"
-  hd = " ".join(f"{v * 90:+4.0f}" for v in vec[HEADING][::3])
+  nx = d.next
+  nxt = (f"next {nx.side} {nx.change:+4.0f}deg at {nx.dist:5.0f} m entry {nx.entry:5.0f} m " +
+         f"lanes {nx.lanes_in}->{nx.lanes_out} tgt {nx.target[0]:.2f}-{nx.target[1]:.2f}") if nx else "next -"
+  stop = f"stop {d.stop:4.0f} m" if d.stop is not None else "stop -"
+  hd = " ".join(f"{v:+4.0f}" for v in d.heading[::3])
   return f"{''.join(chars)} | hdg {hd} | {nxt} | {stop}"
 
 

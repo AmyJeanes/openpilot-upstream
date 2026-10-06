@@ -117,6 +117,7 @@ instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a 
 On that route the bridge also writes a route input for route-conditioned driving models (`gta5_route_input.py`, trained
 by gta5-train `--route`) to shared memory, which modeld feeds only to a model with a `route` input; it is zero off the
 route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without it.
+`OPENPILOT_PREFIX=gta5 GALLIUM_DRIVER=d3d12 python openpilot/tools/sim/bridge/gta5/watch_route.py` (in the venv) shows that input live.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
