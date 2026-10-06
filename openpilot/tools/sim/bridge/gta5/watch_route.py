@@ -234,7 +234,7 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
   info_x = x0 + strip + 14
   if dist is not None:
     # the slots don't know the car's lane, so this says what the route needs, not whether the car complies
-    s = f"be in lit lane within {dist:.0f} m" if dist >= 0 else "keep to lit lane"
+    s = f"be in lit lane within {dist:.0f} m" if dist > 0 else "keep to lit lane"
     text(s, info_x, rows[0][0] + 5, 16, TARGET)
   elif (here == slots_mod.ALLOWED).sum() > 1:
     text("any lane", info_x, rows[0][0] + 5, 16, DIM)

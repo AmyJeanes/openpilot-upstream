@@ -11,7 +11,8 @@ stretch where change:lanes bans changing towards the target). LANES_EXIT always 
 into: those the target lanes lead to, nearest first, narrowed to the following move's lanes where its window has begun.
 
 Layout (LANE_SLOTS_LEN = 49 floats): [0:24] LANES_HERE and [24:48] LANES_EXIT, slot k at 3k (oncoming), 3k + 1
-(allowed), 3k + 2 (target); [48] TARGET_DIST m / 100, clipped -0.5..3, 0 with no target. The bridge writes it with
+(allowed), 3k + 2 (target); [48] TARGET_DIST m / 100, clipped 0..3 (0: be in it now; also 0 with no target, which the
+target slots tell apart). The bridge writes it with
 [49] the traffic side (1 right, -1 left, 0 no route) to its own shared-memory file for watch_route.py's preview, apart
 from the model's route input.
 """
@@ -228,7 +229,7 @@ class LaneSlots:
       want, centre = targets(here, move.nav)
       if start <= s and (want or centre):
         self._fill(out[LANES_HERE], here, want, centre)
-        out[TARGET_DIST] = np.clip((end - s) / DIST_UNIT, -0.5, 3.0)
+        out[TARGET_DIST] = np.clip((end - s) / DIST_UNIT, 0.0, 3.0)  # 0 once the car should be in it
         here = None
     if here is not None:
       self._fill(out[LANES_HERE], here, set(), False)

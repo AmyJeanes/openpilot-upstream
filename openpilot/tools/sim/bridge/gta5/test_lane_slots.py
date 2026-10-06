@@ -53,7 +53,7 @@ def test_left_hand_traffic_turn():
   slots = ls.LaneSlots(route(osm, nodes, [1, 2, 4], {1: RIGHT}), drive_on_right=False)
   assert rows(slots, 0.0) == ('aao.....', 'ao......', None)  # its window starts 60 m before the end at 70 m
   assert rows(slots, 20.0) == ('aTo.....', 'ao......', 50.0)  # the inner lane, the right turn's arrow
-  assert rows(slots, 85.0) == ('aTo.....', 'ao......', -15.0)  # past the end, until the junction
+  assert rows(slots, 85.0) == ('aTo.....', 'ao......', 0.0)  # past the end, until the junction: be in it now
   assert rows(slots, 105.0) == ('ao......', 'ao......', None)  # on the road out; one lane into it: no target
   assert rows(slots, 150.0)[1] == '........'  # no maneuver ahead
   vec = slots.encode(20.0)
@@ -92,7 +92,7 @@ def test_turn_bay_change_lanes():
   move = slots.moves[0]
   assert move.targets == {0} and len(move.bans) == 1 and abs(move.window(0.0)[1] - 60.0) < 0.01
   assert rows(slots, 40.0) == ('ao......', 'ao......', None)
-  assert rows(slots, 80.0) == ('aTo.....', 'ao......', -20.0)
+  assert rows(slots, 80.0) == ('aTo.....', 'ao......', 0.0)
 
 
 def test_freeway_exit():
@@ -101,11 +101,11 @@ def test_freeway_exit():
   osm, nodes = fixture('freeway.osm')
   slots = ls.LaneSlots(route(osm, nodes, [1, 2, 4], {1: EXIT_RIGHT}))
   assert slots.moves[0].fork and slots.moves[0].targets == {3}
-  assert rows(slots, 50.0, 25.0) == ('Taaa....', 'a.......', -50.0)
+  assert rows(slots, 50.0, 25.0) == ('Taaa....', 'a.......', 0.0)
   assert rows(slots, 210.0) == ('a.......', 'a.......', None)
   # going on along the freeway, out of the exit-only lane
   slots = ls.LaneSlots(route(osm, nodes, [1, 2, 3]))
-  assert rows(slots, 50.0) == ('aTTT....', '........', -50.0)
+  assert rows(slots, 50.0) == ('aTTT....', '........', 0.0)
 
 
 def test_lane_count_fork_and_window():
