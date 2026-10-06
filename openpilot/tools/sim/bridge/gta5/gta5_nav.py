@@ -54,6 +54,8 @@ EXIT_DONE = 25.0  # deg from the turn's way out: done, the blinker off, whatever
 EXIT_CUE = os.getenv("GTA5_EXIT_CUE", "1") != "0"
 EXIT_CUE_FOR = 2.0  # s at most
 EXIT_CUE_YAW = 0.15  # rad/s still turning
+EXIT_WATCH_QUEUE = 6.6  # s a pulse stays in the big model's desire queue (exit_watch)
+EXIT_WATCH_PAST = 10.0  # deg past the turn's way out
 ONCOMING_JUNCTION = 15.0  # m from a junction or stop-line node, inside which the lane reading follows GTA's diagonal links
 MIN_AHEAD = 20.0  # m: GTA's route starts with a jog from the car's lane to its road nodes, which isn't a turn
 MIN_AHEAD_MAP = 5.0  # m: our map's routes start at the car
@@ -205,6 +207,19 @@ class Tune:
     # keepRight while the plugin reads the car in the oncoming lanes outside a junction, where the route's reading
     # disagrees and nav has no lane to change back from
     "oncoming_keep": True,
+    # a turn the car is one lane beside the lanes for, at the last place a lane change for it starts, is signalled from
+    # there rather than left to the route: on the traffic-free bench the model turns across the lane, and turn bays
+    # that open late (2 lanes becoming 3) leave the car one lane off after its planned change
+    "turn_from_beside": False,
+    # after a turn is over, while its last pulse can still be in the model's queue (EXIT_WATCH_QUEUE), the counter keep
+    # desire (keepRight after a left turn, keepLeft after a right one, which two-way roads drop) whenever the car
+    # is past the turn's way out and still yawing that way: a stale pulse keeps a slow turn going round
+    "exit_watch": False,
+    # the heading turned since signalling, accumulated (not wrapped, which reads ~0 again after a full circle), for the
+    # re-pulse and unturned_cancel checks
+    "turned_unwrapped": False,
+    # no re-pulse of a turn once the car has come round past its way out (as after a stop mid-turn)
+    "no_repulse_past_exit": False,
   }
   CHECK_EVERY = 1.0  # s
 
@@ -443,6 +458,9 @@ class Nav:
     self.dest: np.ndarray | None = None  # where the waypoint was
     self.repeat_t = 0.0  # when the blinker last dropped to repeat the turn
     self.signal_heading = 0.0  # the car's heading when signaling
+    self.swept = 0.0  # deg the heading has changed since signaling, accumulated (left positive)
+    self.swept_heading = 0.0  # the heading it was last accumulated at
+    self.watch: dict | None = None  # the turn just over, while its pulse may be queued (exit_watch)
     self.stopped = False
     self.seen: tuple[str, float] | None = None  # the turn ahead's side, and since when
     self.changing: str | None = None  # the side of nav's lane change under way
@@ -545,6 +563,9 @@ class Nav:
       near = int(np.argmin(np.hypot(*(route - self.dest).T)))
       self.route_end = float(along[near] + np.hypot(*(route[near] - self.dest)))
     heading, yaw_rate = state["heading"], state["yawRate"]
+    if self.turn is not None:
+      self.swept += wrap(heading - self.swept_heading)
+      self.swept_heading = heading
     self.skipped = [p for p in self.skipped if np.hypot(*(p - pos)) < SKIP_PAST + 2 * FORK_LOOKAHEAD
                     and not self._passed(p, pos, heading)]
     self.taken = [p for p in self.taken if np.hypot(*(p - pos)) < SKIP_PAST]
@@ -578,7 +599,7 @@ class Nav:
         if DEBUG:
           print(f"nav: keepRight as the car comes round past the left turn ({turning:.2f} rad/s)")
       unturned = (t.unturned_cancel > 0 and along > self.turn.dist + t.unturned_cancel
-                  and abs(wrap(heading - self.signal_heading)) < TURN_STARTED)
+                  and self._turned(heading) < TURN_STARTED)
       if done or along > self.turn.dist + MISSED_BY or unturned:
         if DEBUG:
           print(f"nav: turn {'done' if done else 'missed'} after {along:.0f} m (car {heading:.0f})")
@@ -612,11 +633,13 @@ class Nav:
         self.stopped = True
       elif (v > 1.0 and self.shown and now - self.repeat_t > REPEAT_EVERY
             and (t.unturned_cancel <= 0 or t.unturned_keep_pulses or self.driven - self.turn_from < self.turn.dist)):
-        turned = abs(wrap(heading - self.signal_heading))
+        turned = self._turned(heading)
         fading = desire.get(self.turn.side, 1.0) < t.repulse_below_prob or now - self.repeat_t > t.repulse_every
-        if turned < t.repulse_until_turned and fading or self.stopped and turned < t.repulse_after_stop_until:
+        past = t.no_repulse_past_exit and self._past_exit() > 0
+        if not past and (turned < t.repulse_until_turned and fading or self.stopped and turned < t.repulse_after_stop_until):
           self.repeat_t = now
         self.stopped = False
+    self._exit_watch(heading, yaw_rate, now)
     caps.append(curve_cap(route, v, t))
     caps.append(limit_cap(state.get("limits") or [], v))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
@@ -658,7 +681,37 @@ class Nav:
       return 0.0
     return cap
 
+  def _turned(self, heading: float) -> float:
+    """deg the car has turned since signaling, either way: accumulated with turned_unwrapped, else wrapped."""
+    return abs(self.swept) if self.tune.turned_unwrapped else abs(wrap(heading - self.signal_heading))
+
+  def _past_exit(self) -> float:
+    """deg the car has come round past the signaled turn's way out, by the accumulated heading (< 0: short of it)."""
+    sgn = 1.0 if self.turn.side == "left" else -1.0
+    return sgn * self.swept - abs(wrap(self.turn.exit_heading - self.signal_heading))
+
+  def _exit_watch(self, heading: float, yaw_rate: float, now: float):
+    """exit_watch: the counter keep desire while the turn just over may still be queued as a pulse and the car keeps
+    coming round past its way out."""
+    w = self.watch
+    if w is None:
+      return
+    if self.turn is not None or now > w["until"]:
+      self.watch = None
+      return
+    w["past"] += w["sgn"] * wrap(heading - w["heading"])
+    w["heading"] = heading
+    if w["past"] > EXIT_WATCH_PAST and w["sgn"] * yaw_rate > EXIT_CUE_YAW:
+      if DEBUG and self.cue != w["cue"]:
+        print(f"nav: {w['cue']}, {w['past']:.0f} deg past the {w['side']} turn's way out with its pulse maybe still queued")
+      self.cue, self.cue_until, self.cue_hold = w["cue"], now + EXIT_CUE_FOR, False
+
   def _turn_over(self, now: float):
+    if self.turn is not None and self.tune.exit_watch:
+      sgn = 1.0 if self.turn.side == "left" else -1.0
+      self.watch = {"side": self.turn.side, "sgn": sgn, "cue": "keepRight" if sgn > 0 else "keepLeft",
+                    "past": sgn * wrap(self.swept_heading - self.turn.exit_heading), "heading": self.swept_heading,
+                    "until": self.repeat_t + REPEAT_GAP + EXIT_WATCH_QUEUE}
     if self.turn_point is not None:
       self.taken.append(self.turn_point)  # the rest of it can look like a turn ahead
     self.cooldown_until, self.turned_at, self.turn_point = now + COOLDOWN, self.driven, None
@@ -744,6 +797,7 @@ class Nav:
     self.turn_point = self._point(route, turn.dist)
     self.signaled_at = route[0].copy()
     self.signal_heading, self.repeat_t = heading, now
+    self.swept, self.swept_heading = 0.0, heading
     if DEBUG:
       lane = f"lane {self.lane} at {self.lane_frac}"
       entry = f"{self.entry_kind} in {self.entry:.0f} m"
@@ -806,10 +860,14 @@ class Nav:
       if not lo <= self.lane[0] <= hi:
         if turn.dist > t.lane_change_last or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
           return False  # a lane change towards it may still come or finish
-        if self._sure_wrong(lo, hi):
+        beside = t.turn_from_beside and self.lane[0] in (lo - 1, hi + 1) and (
+          self.lane_frac is None or lo - 1 - SKIP_SURE <= self.lane_frac <= hi + 1 + SKIP_SURE)
+        if self._sure_wrong(lo, hi) and not beside:
           self._end_change(indicator)
           self._skip(route, turn.dist, f"{turn.side} turn")
           return False
+        if beside and DEBUG:
+          print(f"nav: not in lane {self.lane} for the {turn.side} turn in {turn.dist:.0f} m; signalling it from beside its lanes")
     if self.changing is not None:
       if self.driven < self.bay_to and turn.dist > BAY_LAST:
         return False  # into the turn bay first

@@ -453,3 +453,77 @@ def test_lane_line_across_links_without_lanes():
   assert abs(xs[0] - 2.75) < 0.1 and abs(xs[-1]) < 0.1  # lane 1 of 2, then of 3
   assert abs(xs[2] - 1.65) < 0.1 and abs(xs[3] - 1.1) < 0.1
   assert all(a >= b - 1e-6 for a, b in zip(xs, xs[1:], strict=False))
+
+
+def test_turn_from_beside_its_lanes():
+  # turn_from_beside: one lane off the turn's lanes where it would be left to the route, it is signalled from there;
+  # two lanes off it is still left
+  route = route_to_turn(40.0)
+  for lane, beside, want in (((0, 2), False, False), ((0, 2), True, True), ((0, 3), True, False)):
+    d = Drive(lane, v=3.0)
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(turn_from_beside=beside)
+    y, turned = 0.0, False
+    while y < 38.0:
+      d.step(route, y, {"laneFrac": 0.0})  # surely in the left lane
+      turned |= d.nav.turn is not None
+      y += d.v * 0.05
+    assert turned == want and (not d.nav.skipped) == want, (lane, beside)
+
+
+def left_turn_then_on(d: Drive, after: list[tuple[float, float]], wait: float = 0.0) -> list[tuple[float, str | None]]:
+  """Signals the left turn of route_to_turn(40, "left"), drives it round to 85 deg (way out 90) at 0.5 rad/s, waits
+  `wait` s straight, then follows `after`, (heading, yaw rate) every 0.1 s; returns (heading, cue) per step."""
+  route = route_to_turn(40.0, "left")
+  for k in range(60):
+    d.step(route, k * 0.25)
+  assert d.nav.signaled == "left"
+  west = [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]
+  seq = [(float(h), 0.5) for h in np.linspace(0, 85, 40)] + [(85.0, 0.0)] * int(wait * 10) + after
+  cues = []
+  for h, yaw in seq:
+    d.clock.t += 0.1
+    state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": h, "yawRate": yaw, "lane": [0, 1], "routeEnd": 200.0, "route": west}
+    d.nav.update(state, True, d.indicator, {"left": 1.0})
+    cues.append((h, d.nav.cue))
+  return cues
+
+
+def test_exit_watch_counter_cue_past_the_way_out():
+  # exit_watch: past the left turn's way out and still coming round while its pulse may be queued: keepRight; not once
+  # the pulse has aged out of the queue, and not without the flag
+  round_on = [(85.0 + 2.9 * k, 0.5) for k in range(1, 21)]  # on to 143 deg in 2 s
+  for watch, wait, want in ((False, 0.0, False), (True, 0.0, True), (True, 8.0, False)):
+    d = Drive((0, 1), v=5.0)
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(left_signal_max_entry=0.0, exit_cue_left=False, exit_watch=watch)
+    cues = left_turn_then_on(d, round_on, wait)
+    assert d.nav.signaled is None
+    late = [c for h, c in cues[-20:] if h > 90.0 + nav_mod.EXIT_WATCH_PAST + 3.0]
+    assert late and all(c == ("keepRight" if want else None) for c in late), (watch, wait, late)
+    assert all(c is None for _, c in cues[:40])  # nothing during the turn itself
+
+
+def test_turned_unwrapped_and_no_repulse_past_the_way_out():
+  # a car come round 350 deg with the turn still signalled reads 10 deg turned wrapped, so it is pulsed again;
+  # turned_unwrapped reads 350, and no_repulse_past_exit holds it back as past the way out
+  route = route_to_turn(40.0, "left")
+  for unwrapped, past_exit, want in ((False, False, True), (True, False, False), (False, True, False)):
+    d = Drive((0, 1), v=5.0)
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(left_signal_max_entry=0.0, turned_unwrapped=unwrapped, no_repulse_past_exit=past_exit)
+    k = 0
+    while d.nav.signaled is None:
+      d.step(route, k * 0.25)
+      k += 1
+    for _ in range(10):
+      d.step(route, k * 0.25)  # the plugin shows the indicator
+    assert d.nav.turn is not None and d.nav.shown
+    d.nav.swept, d.nav.swept_heading = 350.0, 350.0
+    repeats = d.nav.repeat_t
+    d.clock.t += 3.0
+    state = {"vEgo": 5.0, "pos": [0.0, k * 0.25, 0.0], "heading": 350.0, "yawRate": 0.0, "lane": [0, 1],
+             "route": [[0.0, 0.0]] + [p for p in (route - [0.0, k * 0.25]).tolist() if p[1] > 0.0 or p[0] != 0.0]}
+    d.nav.update(state, True, d.indicator, {"left": 0.05})
+    assert d.nav.turn is not None
+    assert (d.nav.repeat_t != repeats) == want, (unwrapped, past_exit)
