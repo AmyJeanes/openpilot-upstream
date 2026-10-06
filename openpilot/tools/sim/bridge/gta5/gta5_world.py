@@ -88,6 +88,8 @@ def speed_limit(street: str) -> float:
 
 
 class GTA5World(World):
+  sets_blinkers = True
+
   def __init__(self, simulator_state: SimulatorState, q: Queue, port: int):
     super().__init__(dual_camera=True)
     self.simulator_state = simulator_state
@@ -316,14 +318,14 @@ class GTA5World(World):
     if self.expert.update(state, self.route, self.simulator_state.is_engaged):
       # the game's AI drives (gta5_expert.py): openpilot stays disengaged, and nav and pull-away wait
       simulator_state.cruise_cap = self.cap = 0.0
+      self._set_blinkers(simulator_state)
       self._update_buttons(state)
       self._update_map(state, bearing, v)
       simulator_state.valid = True
       return
     simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
     self.cap = simulator_state.cruise_cap
-    if self.nav.blinker_gap:
-      simulator_state.left_blinker = simulator_state.right_blinker = False
+    self._set_blinkers(simulator_state)
     if arrived:
       self.q.put(control_cmd_gen("cruise_cancel"))
       self.dest = None
@@ -433,6 +435,12 @@ class GTA5World(World):
           cmd = commands[key]
         self.q.put(control_cmd_gen(cmd))
 
+  def _set_blinkers(self, simulator_state: SimulatorState):
+    # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between
+    gap = self.nav.blinker_gap
+    simulator_state.left_blinker = self.indicator == "left" and not gap
+    simulator_state.right_blinker = self.indicator == "right" and not gap
+
   def _update_indicator(self, simulator_state: SimulatorState, indicator: str | None, heading: float, yaw_rate: float):
     """The plugin's indicator is the blinker stalk: nudge the wheel to start the lane change, and cancel the indicator
     once it is done, as a car's stalk would."""
@@ -440,8 +448,6 @@ class GTA5World(World):
     if indicator != self.indicator:
       self.indicator, self.indicator_t, self.lane_changing = indicator, now, False
       self.indicator_heading = heading
-    simulator_state.left_blinker = indicator == "left"
-    simulator_state.right_blinker = indicator == "right"
     if indicator is None:
       return
     # a turn: cancel once the car has come round and straightened out

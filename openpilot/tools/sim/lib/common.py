@@ -66,6 +66,8 @@ class SimulatorState:
 
 
 class World(ABC):
+  sets_blinkers = False  # read_sensors sets the blinkers every step, rather than the bridge clearing them for key presses
+
   def __init__(self, dual_camera):
     self.dual_camera = dual_camera
 

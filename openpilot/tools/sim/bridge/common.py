@@ -128,8 +128,11 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
       throttle_op = steer_op = brake_op = 0.0
 
       self.simulator_state.cruise_button = 0
-      self.simulator_state.left_blinker = False
-      self.simulator_state.right_blinker = False
+      # the car thread reads this state at its own times: clearing a blinker the world sets again later in the step
+      # would show it off for part of every step, and each blink re-sends openpilot's turn desire
+      if not self.world.sets_blinkers:
+        self.simulator_state.left_blinker = False
+        self.simulator_state.right_blinker = False
 
       throttle_manual = steer_manual = brake_manual = 0.
 
