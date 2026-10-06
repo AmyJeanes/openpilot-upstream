@@ -31,6 +31,7 @@ OP_STEER_RATIO = 15.38
 MIN_FRAME_SPACING = 0.040  # s
 DEBUG = bool(os.getenv("GTA5_DEBUG"))  # print commanded vs measured motion each second
 LOG = os.getenv("GTA5_LOG")  # a file to record the game state and the controls sent, a JSON line each, for analysis
+CAMLOG = os.getenv("GTA5_CAMLOG")  # a file to record each camera frame handed to openpilot: its seq and rx's newest
 MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map view
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
 MAP_EVERY = 0.1  # s
@@ -93,8 +94,11 @@ class GTA5World(World):
     self.q = q
 
     self.lock = threading.Lock()
+    self.new_frame = threading.Condition(self.lock)
     self.state: dict | None = None
-    self.slots: dict[str, int] = {}
+    self.slots: dict[str, tuple] = {}  # by view, the newest frame released to the camera thread: (slot, seq, state, arrived)
+    self.pair: dict[str, tuple] = {}  # the frame being handed to openpilot, road and wide from the same one
+    self.handed = -1  # its seq
     self.last_frame_time = 0.0
     self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState', 'controlsState',
                                    'carOutput'])
@@ -137,11 +141,14 @@ class GTA5World(World):
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
+    self.rx_latest = multiprocessing.Value('q', -1, lock=False)  # the newest frame's seq that rx has written
+    self.camlog = open(CAMLOG, "a", buffering=1) if CAMLOG else None
     frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
     controls_recv, self.controls = multiprocessing.Pipe(duplex=False)
     ready_recv, ready_send = multiprocessing.Pipe(duplex=False)
     self.rx = multiprocessing.Process(name="gta5 rx", daemon=True, target=rx_main,
-                                      args=(port, frames_send, controls_recv, ready_send, {n: m.name for n, m in self.shm.items()}))
+                                      args=(port, frames_send, controls_recv, ready_send, {n: m.name for n, m in self.shm.items()},
+                                            self.rx_latest))
     self.rx.start()
     error = ready_recv.recv() if ready_recv.poll(10) else "timed out"
     if error is not None:
@@ -162,21 +169,24 @@ class GTA5World(World):
     last_release = 0.0
     while True:
       try:
-        slot, views, state = self.frames.recv()
+        slot, views, state, seq = self.frames.recv()
       except (EOFError, OSError):
         return
+      arrived = time.monotonic()
       with self.lock:
-        for name in views:
-          self.slots[name] = slot
         self.state = state
-        self.last_frame_time = time.monotonic()
+        self.last_frame_time = arrived
       if self.log:
         self.log.write(json.dumps({"mono": self.last_frame_time, "state": state}) + "\n")
       # modeld discards a road frame arriving within 25 ms of the last, and counts it as a drop that invalidates camera odometry;
-      # after a late frame the 20 Hz camera thread would otherwise catch up by sending the next one immediately
+      # after a late frame the camera thread would otherwise catch up by sending the next one immediately
       wait = MIN_FRAME_SPACING - (time.monotonic() - last_release)
       if wait > 0:
         time.sleep(wait)
+      with self.new_frame:
+        for name in views:
+          self.slots[name] = (slot, seq, state, arrived)
+        self.new_frame.notify_all()
       # signal at most one pending frame, for the same reason
       if self.image_lock.get_value() == 0:
         self.image_lock.release()
@@ -456,14 +466,23 @@ class GTA5World(World):
 
   def camera_yuv(self, wide: bool) -> bytes | None:
     name = "wide" if wide else "road"
-    with self.lock:
-      slot = self.slots.get(name)
-      state, arrived = self.state, self.last_frame_time
+    with self.new_frame:
+      if not wide:
+        # each game frame once: the camera thread's wake-ups and the frames' arrival drift apart, which would hand some frames
+        # twice and skip others; and the wide view comes from the same frame as the road view, even if another arrives between
+        if self.slots.get("road", (None, -1))[1] == self.handed:
+          self.new_frame.wait(0.1)
+        self.pair = dict(self.slots)
+        self.handed = self.pair.get("road", (None, -1))[1]
+      slot, seq, state, arrived = self.pair.get(name, (None, -1, self.state, self.last_frame_time))
     frame = None
     if slot is not None:
       buf = self.shm[name].buf
       assert buf is not None
       frame = bytes(buf[slot * NV12_SIZE:(slot + 1) * NV12_SIZE])
+      if self.camlog is not None:
+        # rx reuses a slot SLOTS frames on: newest - seq >= SLOTS means this frame was written over before it was read
+        self.camlog.write(f"{time.monotonic():.4f} {name} {seq} {self.rx_latest.value}\n")
     if self.recorder is not None:
       self.recorder.add(wide, frame, state, arrived)
     return frame

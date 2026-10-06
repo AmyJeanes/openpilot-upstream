@@ -8,6 +8,9 @@ from openpilot.tools.sim.lib.common import World
 
 class GTA5Bridge(SimulatorBridge):
   TICKS_PER_FRAME = 5
+  # the game paces its 20 Hz frames by the Windows clock, which runs ~4% faster than WSL's monotonic one, so a 20 Hz limit
+  # would skip every 25th frame; the frames pace the camera thread (GTA5World.camera_yuv waits for each)
+  CAMERA_HZ = 30
 
   def __init__(self, port: int = 8791):
     super().__init__(dual_camera=True, high_quality=False)

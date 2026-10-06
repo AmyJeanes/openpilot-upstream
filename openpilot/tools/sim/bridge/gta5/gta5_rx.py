@@ -16,7 +16,7 @@ from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.tools.sim.lib.camerad import W, H
 
 VIEWS = ("road", "wide")
-SLOTS = 3  # the bridge may still be copying the previous frame while the next one is written
+SLOTS = 8  # the bridge may lag a few frames behind when its threads are busy; a slot written over while it is read mixes frames
 NV12_SIZE = get_nv12_info(W, H)[3]
 FRAME_BYTES = W * H * 3 // 2  # one view as the plugin sends it: Y rows, then interleaved UV rows, unpadded
 DEBUG_PORT = 8792
@@ -77,7 +77,8 @@ def recv_exact(sock: socket.socket, view: memoryview) -> bool:
 
 
 class Receiver:
-  def __init__(self, frames: Connection, controls: Connection, shm_names: dict[str, str]):
+  def __init__(self, frames: Connection, controls: Connection, shm_names: dict[str, str], latest=None):
+    self.latest = latest  # the newest frame's seq, for the bridge to tell a slot written over since it was announced
     self.frames = frames
     self.controls = controls
     self.shm = {name: SharedMemory(name=shm_names[name]) for name in VIEWS}
@@ -176,7 +177,9 @@ class Receiver:
     if self.burst_left:
       self.burst_left -= 1
     self.seq += 1
-    self.frames.send((slot, list(head["views"]), head["state"]))
+    if self.latest is not None:
+      self.latest.value = self.seq - 1
+    self.frames.send((slot, list(head["views"]), head["state"], self.seq - 1))
 
   def serve(self, port: int, ready: Connection) -> None:
     srv = socket.create_server(("0.0.0.0", port), reuse_port=True)
@@ -210,9 +213,9 @@ class Receiver:
         print("gta5: game disconnected", flush=True)
 
 
-def rx_main(port: int, frames: Connection, controls: Connection, ready: Connection, shm_names: dict[str, str]) -> None:
+def rx_main(port: int, frames: Connection, controls: Connection, ready: Connection, shm_names: dict[str, str], latest=None) -> None:
   try:
-    Receiver(frames, controls, shm_names).serve(port, ready)
+    Receiver(frames, controls, shm_names, latest).serve(port, ready)
   except Exception as e:
     ready.send(f"{type(e).__name__}: {e}")
     raise

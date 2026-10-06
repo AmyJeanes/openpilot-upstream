@@ -37,6 +37,7 @@ def rk_loop(function, hz, exit_event: threading.Event):
 
 class SimulatorBridge(ABC):
   TICKS_PER_FRAME = 5
+  CAMERA_HZ = 20  # the camera thread's rate limit
 
   def __init__(self, dual_camera, high_quality):
     fingerprint = os.environ.get("FINGERPRINT")
@@ -115,7 +116,7 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
     self.simulated_car_thread.start()
 
     self.simulated_camera_thread = threading.Thread(target=rk_loop, args=(functools.partial(self.simulated_sensors.send_camera_images, self.world),
-                                                                        20, self._exit_event))
+                                                                        self.CAMERA_HZ, self._exit_event))
     self.simulated_camera_thread.start()
 
     # Simulation tends to be slow in the initial steps. This prevents lagging later
