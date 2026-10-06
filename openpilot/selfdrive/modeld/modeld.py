@@ -35,7 +35,7 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
-from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper, TURNS
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, should_stop, smooth_value, get_curvature_from_plan
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
@@ -223,6 +223,14 @@ class ModelState:
     if SEND_RAW_PRED:
       outputs_dict['raw_pred'] = model_output.copy()
     return outputs_dict
+
+  def flush_desire(self, desires: tuple[int, ...]) -> None:
+    """Clears these desires from the model's history of desire pulses, leaving its frame history alone."""
+    if (queue := self.input_queues.get('state_desire_q')) is None:
+      return
+    history = queue.numpy()
+    history[..., list(desires)] = 0
+    queue.assign(Tensor(history, device=queue.device)).realize()
 
   def warmup(self) -> None:
     dummy_frames = {k: np.zeros(self.frame_copy_size, dtype=np.uint8) for k in self.vision_input_names}
@@ -420,6 +428,9 @@ def main(demo=False):
     if DH.refresh:  # the turn's pulse again, on a rising edge
       model.prev_desire[desire] = 0
       cloudlog.warning(f"turn desire refresh {DH.refresh_count}, turned {math.degrees(abs(DH.turn_angle)):.0f} deg")
+    if DH.flush:
+      model.flush_desire(TURNS)
+      cloudlog.warning(f"turn desire flushed, turned {math.degrees(abs(DH.turn_angle)):.0f} deg")
 
     # tracked dropped frames
     vipc_dropped_frames = max(0, meta_main.frame_id - last_vipc_frame_id - 1)

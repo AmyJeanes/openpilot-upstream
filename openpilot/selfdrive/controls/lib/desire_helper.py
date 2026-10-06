@@ -32,6 +32,9 @@ TURN_STARTED = math.radians(15.)  # turned since asked for: no more, as a pulse 
 TURN_STOP_STARTED = math.radians(30.)  # after a stop, asked again unless turned this far already
 TURN_STOPPED_SPEED = 0.3  # m/s
 TURN_MOVING_SPEED = 1.0  # m/s
+# The model keeps each desire pulse in its history for 6.6 s, so a turn that ends sooner is still wanted after it,
+# swinging the car on past the road out. With TurnDesireFlush, modeld clears it from that history as the blinker goes off.
+TURNS = (log.Desire.turnLeft, log.Desire.turnRight)
 
 
 class NavDesire:
@@ -73,6 +76,8 @@ class DesireHelper:
     self.stacked = log.Desire.none  # a second desire for the model, only when a navigation source stacks one
     self.nav = NavDesire()
     self.turn_refresh = self.nav.params.get_bool("TurnDesireRefresh")
+    self.turn_flush = self.nav.params.get_bool("TurnDesireFlush")
+    self.flush = False  # for modeld to clear the turn from the model's desire history
     self.refresh = False  # for modeld to give the model the turn desire's pulse again
     self.refresh_count = 0  # in the turn desire under way
     self.turn_timer = 0.0  # since the turn was last asked for
@@ -157,7 +162,8 @@ class DesireHelper:
     prev_desire = self.desire
     self.desire = lane_turn_desire(carstate, nav)
     self.refresh = False
-    if self.turn_refresh and self.desire in (log.Desire.turnLeft, log.Desire.turnRight):
+    self.flush = self.turn_flush and prev_desire in TURNS and not one_blinker
+    if self.turn_refresh and self.desire in TURNS:
       turn_prob = desire_state[self.desire] if desire_state is not None and len(desire_state) > self.desire else 1.0
       self.refresh = self.update_turn_refresh(v_ego, yaw_rate, turn_prob, self.desire != prev_desire)
     if self.desire == log.Desire.none and self.lane_change_state == LaneChangeState.laneChangeStarting:
