@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """Writes the roads of an OSM file as the map view's roads.json: polylines in metres (x east, y north), each road's
-middle, with its width kerb to kerb; and with --lanes, the lines painted on them as lanes.json (osm_lanes.py, from the
-map's lane tags): road edges, white lines between lanes one way (dashed, solid where change:lanes forbids crossing),
-yellow lines between the directions; none inside junctions (where roads cross) and only edges on the ways into them.
+middle, with its width kerb to kerb, how far each is trimmed back at its junctions, and the junctions' areas
+(junctions.py); and with --lanes, the lines painted on them as lanes.json (osm_lanes.py, from the map's lane tags):
+kerbs, carried round the junctions' corners, white lines between lanes one way (dashed, solid where change:lanes
+forbids crossing), yellow lines between the directions, stop and give way lines, and crossings (`footway=crossing`).
+No lines are painted inside junctions, nor between a stop line and its junction; the moves through them from lane to
+lane (Junctions.movements: turn:lanes, connectivity, restrictions) are guides the view can show there.
 
 `--frame gta5` gives game coordinates (for ynd_to_osm's maps); otherwise metres from the file's centre.
 """
 import argparse
 import json
-import math
 from collections import defaultdict
 
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, OsmLanes, offset_line
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
-# lanes.json's kinds: a road's edge, white lines between lanes one way, yellow lines between the directions
-KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed']
+# lanes.json's kinds: a road's edge (kerb), white lines between lanes one way, yellow lines between the directions,
+# stop lines, give way lines, crossings, and the paths of the moves through junctions from lane to lane by their turn
+KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way', 'crossing', 'guide_left', 'guide_through',
+         'guide_right']
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
-CROSS = (45.0, 135.0)  # deg between two ways at a node where roads cross
 CELL = 50.0  # m
-JUNCTION_REACH = 0.8  # of the widest road at a node where roads cross: a junction can spread over several nodes
-JUNCTION_LINK = 15.0  # m: a way this short into a node where roads cross, or between two, is inside the junction
 
 
 def join(ways):
@@ -69,50 +71,16 @@ def marks(style: str | None, divider: bool) -> list[tuple[int, float]]:
           'dashed_solid': [(dashed, -DOUBLE), (solid, DOUBLE)], 'solid_dashed': [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(style or '', [])
 
 
-def outside(line: np.ndarray, circles: list[tuple[np.ndarray, float]], min_len: float = 0.3) -> list[np.ndarray]:
-  """The parts of a polyline outside the circles [(centre, radius)]."""
-  pieces: list[list] = []
-  run: list = []
-  for a, b in zip(line[:-1], line[1:], strict=True):
-    d = b - a
-    dd = float(d @ d)
-    inside = []
-    for c, r in circles:
-      t = float((c - a) @ d) / max(dd, 1e-9)
-      h2 = (r * r - float(np.sum((a + d * t - c) ** 2))) / max(dd, 1e-9)
-      if h2 > 0 and t + math.sqrt(h2) > 0 and t - math.sqrt(h2) < 1:
-        inside.append((max(t - math.sqrt(h2), 0.0), min(t + math.sqrt(h2), 1.0)))
-    t = 0.0
-    for lo, hi in sorted(inside) + [(1.0, 1.0)]:
-      if lo > t:
-        if t > 0 or not run:
-          if run:
-            pieces.append(run)
-          run = [a + d * t]
-        run.append(a + d * lo)
-      if lo < 1.0 and run:
-        pieces.append(run)
-        run = []
-      t = max(t, hi)
-  if run:
-    pieces.append(run)
-  return [np.array(p) for p in pieces if len(p) >= 2 and np.hypot(*np.diff(np.array(p), axis=0).T).sum() >= min_len]
-
-
-def crossings(osm: OsmLanes, widths: dict[int, float]) -> dict[int, tuple[np.ndarray, float]]:
-  """The nodes where roads cross: {node: circle round it, of JUNCTION_REACH times the widest road there}."""
-  heads = defaultdict(list)
-  for wid, (_, refs) in osm.ways.items():
-    if len(refs) < 2:
-      continue
-    for i, j in ((0, 1), (-1, -2)):
-      d = osm.node_xy(refs[j]) - osm.node_xy(refs[i])
-      heads[refs[i]].append((math.degrees(math.atan2(d[1], d[0])), widths[wid]))
-  out = {}
-  for node, hs in heads.items():
-    if len(hs) >= 3 and any(CROSS[0] <= abs((a - b + 180) % 360 - 180) <= CROSS[1] for n, (a, _) in enumerate(hs) for b, _ in hs[n + 1:]):
-      out[node] = (osm.node_xy(node), JUNCTION_REACH * max(w for _, w in hs))
-  return out
+def level(tags: dict) -> tuple[int, int]:
+  """A way's layer (`layer`, else 1 on a bridge, -1 in a tunnel) and whether it's on the ground (0), a bridge (1) or in a
+  tunnel (2)."""
+  bridge = tags.get('bridge', 'no') != 'no'
+  tunnel = tags.get('tunnel', 'no') not in ('no', 'building_passage')
+  try:
+    layer = max(min(int(tags['layer']), 5), -5)
+  except (KeyError, ValueError):
+    layer = 1 if bridge else -1 if tunnel else 0
+  return layer, 1 if bridge else 2 if tunnel else 0
 
 
 def main():
@@ -123,7 +91,7 @@ def main():
   p.add_argument('--frame', choices=['gta5', 'local'], default='gta5')
   args = p.parse_args()
 
-  data = osm_pbf.read(args.osm, relations=())
+  data = osm_pbf.read(args.osm, relations=('restriction', 'connectivity'))
   if args.frame == 'gta5':
     project = to_game
   else:
@@ -136,64 +104,115 @@ def main():
   def points(nodes):
     return osm.xy[data.index(nodes)]
 
-  roads, widths, layouts = [], {}, []
-  for wid in osm.ways:
-    lo, hi = osm.lanes(wid).edges(FORWARD)
-    widths[wid] = hi - lo
-  circles = crossings(osm, widths)
-  for wid, (tags, refs) in osm.ways.items():
-    lo, hi = osm.lanes(wid).edges(FORWARD)
-    cls = tags.get('highway', '').removesuffix('_link')
-    if cls not in ROAD_CLASSES or len(refs) < 2:
-      continue
-    lanes = tags.get('lanes', '1').split(';')[0]
-    kind = (ROAD_CLASSES.index(cls), int(lanes) if lanes.isdigit() else 1, round(hi - lo, 1), round((lo + hi) / 2, 1))
-    roads.append((kind, tags.get('oneway') == 'yes', refs))
+  def drawn(tags):
+    return tags.get('highway', '').removesuffix('_link') in ROAD_CLASSES
+  junctions = Junctions(osm, drawn)
+  levels = {wid: level(tags) for wid, (tags, _) in junctions.ways.items()}
+  roads, layouts = [], []
+  for wid, (tags, refs) in junctions.ways.items():
     road = osm.lanes(wid)
-    ends = (refs[0] in circles) + (refs[-1] in circles)
-    inside = ends == 2 or ends and float(np.hypot(*np.diff(points(refs), axis=0).T).sum()) < JUNCTION_LINK
-    lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD)
-                  if not inside and (ln.kind == EDGE or road.markings and not ends))
-    layouts.append((lines, True, refs))  # lines are offsets along a way's direction: join only ways going on
+    lo, hi = road.edges(FORWARD)
+    lanes = tags.get('lanes', '1').split(';')[0]
+    kind = (ROAD_CLASSES.index(tags['highway'].removesuffix('_link')), int(lanes) if lanes.isdigit() else 1,
+            round(hi - lo, 1), round((lo + hi) / 2, 1), wid in junctions.inside, *levels[wid])
+    roads.append((kind, tags.get('oneway') == 'yes', refs))
+    if wid not in junctions.inside:
+      lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or road.markings)
+      layouts.append(((levels[wid][0], lines), True, refs))  # lines are offsets along a way's direction: join only ways going on
 
-  out_ways, out_widths = [], []
-  for (c, lanes, width, middle), oneway, nodes in join(roads):
+  def trim(a, b):  # how far the road from node a on to b is trimmed back at a
+    return round(junctions.trims.get((osm.pairs[(a, b)][0], a), 0.0), 1)
+
+  out_ways, out_widths, out_trims, out_levels = [], [], [], []
+  ends: dict[int, int] = {}  # node -> the best class of the road pieces ending there
+  for (c, lanes, width, middle, inside, layer, structure), oneway, nodes in join(roads):
     pts = points(nodes)
     pts = offset_line(pts, middle) if middle else pts
     out_ways.append([c, lanes, int(oneway)] + [round(float(v), 1) for v in pts.ravel()])
     out_widths.append(width)
+    out_trims += [-1, -1] if inside else [trim(nodes[0], nodes[1]), trim(nodes[-1], nodes[-2])]
+    out_levels += [layer, structure]
+    for n in (nodes[0], nodes[-1]):
+      ends[n] = min(ends.get(n, c), c)
+
+  def layer_at(ways):
+    return max(levels[w][0] for w in ways)
+  areas, area_layer = [], []
+  for j in junctions.junctions:
+    c = min(ROAD_CLASSES.index(junctions.ways[w][0]['highway'].removesuffix('_link')) for w in j.ways)
+    area_layer.append(layer_at(j.ways))
+    areas.append([c, area_layer[-1]] + [round(float(v), 2) for v in np.concatenate((j.centre, j.polygon.ravel()))])
+  in_junctions = {n for j in junctions.junctions for n in j.nodes}
+  for n, c in ends.items():  # where flat-ended road pieces meet outside junctions
+    if n not in in_junctions and (joint := junctions.joint(n)) is not None and len(joint) >= 3:
+      areas.append([c, layer_at({w for w, _, _ in junctions.steps[n]})] +
+                   [round(float(v), 2) for v in np.concatenate((osm.node_xy(n), joint.ravel()))])
   signals = [n for n, tags in data.node_tags.items() if tags.get('highway') == 'traffic_signals']
   out = {
     'classes': ROAD_CLASSES,
     'ways': out_ways,  # [class, lanes, oneway, x0, y0, x1, y1, ...]: the road's middle
     'widths': out_widths,  # m, kerb to kerb
+    # m each way is trimmed back from its first and last point, where it meets a junction; -1, -1 inside a junction
+    'trims': out_trims,
+    'levels': out_levels,  # each way's layer and whether it's on the ground (0), a bridge (1) or in a tunnel (2)
+    # [class (its main road's), layer, cx, cy, x0, y0, ...]: each junction's area round its centre (it can fold back on
+    # itself: fill the triangles from the centre to each edge), and where road pieces meet elsewhere
+    'junctions': areas,
     'signals': [[round(float(v), 1) for v in osm.node_xy(n)] for n in signals],
   }
   with open(args.out, 'w') as f:
     json.dump(out, f, separators=(',', ':'))
-  print(f"{len(out['ways'])} ways, {len(out['signals'])} signals -> {args.out}")
+  print(f"{len(out['ways'])} ways, {len(areas)} junctions, {len(out['signals'])} signals -> {args.out}")
 
   if not args.lanes:
     return
   if not osm.tagged:
     print(f"no lane tags in {args.osm}: no {args.lanes}")
     return
-  cells = defaultdict(list)
-  for c in circles.values():
-    cells[(int(c[0][0] // CELL), int(c[0][1] // CELL))].append(c)
-  lines = []
-  for sig, _, nodes in join(layouts):
+  # no lines inside junctions, nor from a stop line in to its junction; each area cuts only its own layer's lines
+  kerb_areas = [(j.centre, j.polygon) for j in junctions.junctions]
+  paint_areas = kerb_areas + [(s.area.mean(0), s.area) for j in junctions.junctions for s in j.stops]
+  paint_layer = area_layer + [area_layer[n] for n, j in enumerate(junctions.junctions) for _ in j.stops]
+  index: dict[tuple[int, int], list[int]] = defaultdict(list)
+  for n, (_, a) in enumerate(paint_areas):
+    lo, hi = a.min(0) // CELL, a.max(0) // CELL
+    for cx in range(int(lo[0]), int(hi[0]) + 1):
+      for cy in range(int(lo[1]), int(hi[1]) + 1):
+        index[(cx, cy)].append(n)
+
+  def near(pts, layer, kerbs_only, but=None):
+    lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
+    found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in index.get((cx, cy), ())}
+    return [paint_areas[n] for n in sorted(found) if paint_layer[n] == layer and n != but and (not kerbs_only or n < len(kerb_areas))]
+
+  lines, line_layers = [], []
+
+  def add(k, piece, layer):
+    lines.append([k] + [round(float(v), 2) for v in piece.ravel()])
+    line_layers.append(layer)
+  for (layer, sig), _, nodes in join(layouts):
     pts = points(nodes)
-    lo, hi = (pts.min(0) - CELL) // CELL, (pts.max(0) + CELL) // CELL
-    near = [c for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for c in cells.get((cx, cy), ())]
     for kind, offset, style in sig:
-      for k, off in [(0, 0.0)] if kind == EDGE else marks(style, kind == DIVIDER):
+      # a median's edges one line each, as maps paint it, rather than the divider's double line on both
+      for k, off in [(0, 0.0)] if kind == EDGE else marks('solid' if kind == MEDIAN else style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
-        for piece in outside(geom, near):
-          lines.append([k] + [round(float(v), 1) for v in piece.ravel()])
+        for piece in clip_outside(geom, near(geom, layer, kind == EDGE)):
+          add(k, piece, layer)
+  for n, j in enumerate(junctions.junctions):
+    for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
+      for piece in clip_outside(kerb, near(kerb, area_layer[n], True, but=n)):
+        add(KINDS.index('edge'), piece, area_layer[n])
+    for s in j.stops:
+      add(KINDS.index(s.kind), s.line, area_layer[n])
+    for mv in junctions.movements(j):
+      add(KINDS.index(f'guide_{mv.kind}'), mv.path, area_layer[n])
+  crossings = junctions.crossing_lines()
+  for c in crossings:
+    add(KINDS.index('crossing'), c, 0)
   with open(args.lanes, 'w') as f:
-    json.dump({'kinds': KINDS, 'lines': lines}, f, separators=(',', ':'))
-  print(f"{len(lines)} lines, {len(circles)} crossings -> {args.lanes}")
+    json.dump({'kinds': KINDS, 'lines': lines, 'layers': line_layers}, f, separators=(',', ':'))
+  stops = sum(len(j.stops) for j in junctions.junctions)
+  print(f"{len(lines)} lines, {stops} stop lines, {len(crossings)} crossings -> {args.lanes}")
 
 
 if __name__ == '__main__':
