@@ -23,6 +23,7 @@ PATHS = os.path.join(os.path.expanduser(os.getenv("GTA5_MAP", "~/gta5map")), "pa
 LANES = os.path.join(os.path.expanduser(os.getenv("GTA5_LANES_MAP", "~/gta5map_lanes")), "gta5.osm.pbf")
 # x, y, z, heading: e2e trips' starts (~/gta5test/e2e): L7 before its X-shaped dual carriageway junction, X1 on a freeway
 PLACES = {"L7": (-512.5, -914.1, 24.5, 152.0), "X1": (-379.7, -650.6, 36.2, 0.0)}
+SAME_LEVEL = 3.0  # m; GTA's stacked interchange ramps are ~5 m apart
 
 
 def decode(msg: dict) -> list[tuple[str, np.ndarray]]:
@@ -229,17 +230,18 @@ def check_overlay(paths, place, osm=None) -> set:
   assert {"e", "r"} <= kinds and kinds & set("dwcy"), kinds
   if place == "L7":  # the route turns left at its junction
     assert {"j", "m", "g"} <= kinds, kinds
-  # no lane edges or dividers inside junction areas
-  areas = [line[:-1, :2] for k, line in items if k == "j"]
+  # no lane edges or dividers inside junction areas on their own level (bridges and stacked ramps pass over them)
+  areas = [line[:-1] for k, line in items if k == "j"]
   for k, line in items:
     if k in "edwcy":
-      mids = (line[1:, :2] + line[:-1, :2]) / 2
-      for poly in areas:
+      mids = (line[1:] + line[:-1]) / 2
+      for area in areas:
+        poly = area[:, :2]
         e = np.roll(poly, -1, axis=0) - poly
-        rel = mids[:, None] - poly[None]
+        rel = mids[:, None, :2] - poly[None]
         # well inside every edge: a kerb on the area's outline lies within the outline's simplification of it
         depth = (e[None, :, 0] * rel[..., 1] - e[None, :, 1] * rel[..., 0]) / np.hypot(*e.T)[None]
-        inside = (depth > ov.AREA_SIMPLIFY + 0.2).all(1)
+        inside = (depth > ov.AREA_SIMPLIFY + 0.2).all(1) & (np.abs(mids[:, 2] - area[:, 2].mean()) < SAME_LEVEL)
         assert not inside.any(), (k, mids[inside][:3])
   assert len(msg["g"]) <= ov.MAX_CHARS and msg["n"] <= ov.MAX_POINTS
   assert stats["ms"] < 250

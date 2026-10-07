@@ -9,6 +9,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.junctions import MERGE_GAP, STOP_SETBACK, Junctions, clip_outside, in_fan, lane_moves
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
+from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PaintAreas
 
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
 TWO_WAY = {'highway': 'residential', 'lanes': '2', 'width': '11'}
@@ -245,6 +246,22 @@ def test_movements_divided_road():
   assert (1, 4) not in got and (3, 2) not in got  # U-turns
   assert (1, 2) in got and (1, 7) in got and (5, 7) in got and (5, 4) in got and (3, 4) in got
   check_paths(js, j)
+
+
+def test_bridge_from_a_junction():
+  # a bridge starting at a junction: its area, on the bridge's layer, cuts the lines of the ground roads meeting it too,
+  # but not those of a road on the ground's layer passing under it
+  bridge = {**TWO_WAY, 'bridge': 'yes', 'layer': '1'}
+  nodes = {1: (0.0, 0.0), 2: (-100.0, 0.0), 3: (0.0, -100.0), 4: (100.0, 0.0), 5: (-50.0, 2.0), 6: (50.0, 2.0)}
+  ways = {1: (TWO_WAY, [1, 2]), 2: (TWO_WAY, [1, 3]), 3: (bridge, [1, 4]), 9: (TWO_WAY, [5, 6])}
+  js = Junctions(make(nodes, ways))
+  j = only(js)
+  paint = PaintAreas(js)
+  assert paint.layer == [1]
+  line = np.array([[0.0, 0.0], [-100.0, 0.0]])
+  assert any(a is j.polygon for _, a in paint.near(line, 0, {1}))
+  assert any(a is j.polygon for _, a in paint.near(line, 1, {7}))
+  assert not any(a is j.polygon for _, a in paint.near(line, 0, {9}))
 
 
 def test_clip_outside():

@@ -291,11 +291,11 @@ def road_marks(paths, osm) -> dict:
   """What the overlay draws of a lane-tagged map, from its tags alone (osm_lanes.py, junctions.py), as the map view draws
   it (osm_to_roads.py): the lines the lane tags paint, as segments (their ends [M, 2, 3], kinds [M], and the GTA nodes
   near them [M, 2], for heights and finding them near the car), cut out of the junctions' areas and, but for kerbs, from
-  each stop line in to its junction, each area cutting only its own layer's lines; and the junctions' kerbs round their
-  corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's length, kind and GTA node
-  [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
+  each stop line in to its junction, each area cutting its own layer's lines and its roads' (PaintAreas); and the
+  junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
+  length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
   from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas
-  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, level
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, PaintAreas, level
 
   junctions = Junctions(osm, lambda tags: tags.get("highway", "").removesuffix("_link") in ROAD_CLASSES)
   # each junction's height and a GTA node at it, from its nodes (which are GTA's)
@@ -303,21 +303,7 @@ def road_marks(paths, osm) -> dict:
   for j in junctions.junctions:
     gta = [found[0] for n in j.nodes if (found := paths.nodes_at(osm.node_xy(n)))]
     at.append((float(np.mean(paths.z[gta])), gta[0]) if gta else None)
-  area_layer = [max(level(junctions.ways[w][0])[0] for w in j.ways) for j in junctions.junctions]
-  kerb_areas = [(j.centre, j.polygon) for j in junctions.junctions]
-  paint_areas = kerb_areas + [(s.area.mean(0), s.area) for j in junctions.junctions for s in j.stops]
-  paint_layer = area_layer + [area_layer[n] for n, j in enumerate(junctions.junctions) for _ in j.stops]
-  index: dict[tuple[int, int], list[int]] = defaultdict(list)
-  for n, (_, a) in enumerate(paint_areas):
-    lo, hi = a.min(0) // CELL, a.max(0) // CELL
-    for cx in range(int(lo[0]), int(hi[0]) + 1):
-      for cy in range(int(lo[1]), int(hi[1]) + 1):
-        index[(cx, cy)].append(n)
-
-  def near(pts, layer, kerbs_only, but=None):  # the areas that cut a line (osm_to_roads' rules)
-    lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
-    found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in index.get((cx, cy), ())}
-    return [paint_areas[n] for n in sorted(found) if paint_layer[n] == layer and n != but and (not kerbs_only or n < len(kerb_areas))]
+  paint = PaintAreas(junctions)
 
   ends, kinds, nodes = [], [], []
 
@@ -343,7 +329,7 @@ def road_marks(paths, osm) -> dict:
         geom = offset_polyline(pts, line.offset + off)
         if len(geom) != len(pts):
           continue
-        areas = near(geom, layer, kind == "e")
+        areas = paint.near(geom, layer, {wid}, kind == "e")
         pieces = clip_areas(geom, areas) if areas else [geom]
         for piece in pieces:
           add(kind, np.column_stack([piece, z if piece is geom else z_along(piece, geom, z)]), (a, b))
@@ -360,7 +346,7 @@ def road_marks(paths, osm) -> dict:
       continue
     z, g = at[n]
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
-      for piece in clip_areas(kerb, near(kerb, area_layer[n], True, but=n)):
+      for piece in clip_areas(kerb, paint.near(kerb, paint.layer[n], kerbs_only=True, but=n)):
         add("e", np.column_stack([piece, np.full(len(piece), z)]), (g, g))
     shape("j", simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), z, g)
     for s in j.stops:

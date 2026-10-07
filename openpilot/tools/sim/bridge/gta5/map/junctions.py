@@ -294,6 +294,11 @@ class Junction:
   def ways(self) -> set[int]:
     return {w for arm in self.arms for m in arm.members for w, _ in m.ways[:1]}
 
+  @property
+  def roads(self) -> set[int]:
+    """The ways of its roads that reach into its area: those starting short of where their road is trimmed."""
+    return {w for arm in self.arms for m in arm.members for k, (w, _) in enumerate(m.ways) if k == 0 or Junctions._along(m, k) < m.trim}
+
 
 class Junctions:
   """The junctions of a map (OsmLanes): `junctions`, and `trims` {(way, node): m}, how far each way is trimmed back from

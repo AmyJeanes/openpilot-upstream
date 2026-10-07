@@ -83,6 +83,32 @@ def level(tags: dict) -> tuple[int, int]:
   return layer, 1 if bridge else 2 if tunnel else 0
 
 
+class PaintAreas:
+  """Where no lines are painted: each junction's area and the road from each stop line in to it. An area cuts the lines
+  on its junction's layer (its roads' highest) and those of the roads meeting it on any layer, as a bridge starting
+  there: layer tags alone can't tell a road meeting a junction from one passing under it."""
+  def __init__(self, junctions: Junctions):
+    js = junctions.junctions
+    self.layer = [max(level(junctions.ways[w][0])[0] for w in j.ways) for j in js]
+    self.areas = [(j.centre, j.polygon) for j in js] + [(s.area.mean(0), s.area) for j in js for s in j.stops]
+    of = list(range(len(js))) + [n for n, j in enumerate(js) for _ in j.stops]  # each area's junction
+    self._of, self._roads = of, [j.roads for j in js]
+    self._index: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for n, (_, a) in enumerate(self.areas):
+      lo, hi = a.min(0) // CELL, a.max(0) // CELL
+      for cx in range(int(lo[0]), int(hi[0]) + 1):
+        for cy in range(int(lo[1]), int(hi[1]) + 1):
+          self._index[(cx, cy)].append(n)
+
+  def near(self, pts: np.ndarray, layer: int, ways=frozenset(), kerbs_only: bool = False, but: int | None = None) -> list:
+    """The areas [(centre, polygon)] that cut a line near points [K, 2] on a layer, along these ways; for a kerb only
+    the junctions' areas, but for junction `but`'s."""
+    lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
+    found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in self._index.get((cx, cy), ())}
+    return [self.areas[n] for n in sorted(found) if (self.layer[self._of[n]] == layer or self._roads[self._of[n]] & ways)
+            and n != but and (not kerbs_only or n < len(self.layer))]
+
+
 def main():
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument('osm')
@@ -137,11 +163,12 @@ def main():
 
   def layer_at(ways):
     return max(levels[w][0] for w in ways)
-  areas, area_layer = [], []
-  for j in junctions.junctions:
+  paint = PaintAreas(junctions)
+  area_layer = paint.layer
+  areas = []
+  for n, j in enumerate(junctions.junctions):
     c = min(ROAD_CLASSES.index(junctions.ways[w][0]['highway'].removesuffix('_link')) for w in j.ways)
-    area_layer.append(layer_at(j.ways))
-    areas.append([c, area_layer[-1]] + [round(float(v), 2) for v in np.concatenate((j.centre, j.polygon.ravel()))])
+    areas.append([c, area_layer[n]] + [round(float(v), 2) for v in np.concatenate((j.centre, j.polygon.ravel()))])
   in_junctions = {n for j in junctions.junctions for n in j.nodes}
   for n, c in ends.items():  # where flat-ended road pieces meet outside junctions
     if n not in in_junctions and (joint := junctions.joint(n)) is not None and len(joint) >= 3:
@@ -169,22 +196,7 @@ def main():
   if not osm.tagged:
     print(f"no lane tags in {args.osm}: no {args.lanes}")
     return
-  # no lines inside junctions, nor from a stop line in to its junction; each area cuts only its own layer's lines
-  kerb_areas = [(j.centre, j.polygon) for j in junctions.junctions]
-  paint_areas = kerb_areas + [(s.area.mean(0), s.area) for j in junctions.junctions for s in j.stops]
-  paint_layer = area_layer + [area_layer[n] for n, j in enumerate(junctions.junctions) for _ in j.stops]
-  index: dict[tuple[int, int], list[int]] = defaultdict(list)
-  for n, (_, a) in enumerate(paint_areas):
-    lo, hi = a.min(0) // CELL, a.max(0) // CELL
-    for cx in range(int(lo[0]), int(hi[0]) + 1):
-      for cy in range(int(lo[1]), int(hi[1]) + 1):
-        index[(cx, cy)].append(n)
-
-  def near(pts, layer, kerbs_only, but=None):
-    lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
-    found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in index.get((cx, cy), ())}
-    return [paint_areas[n] for n in sorted(found) if paint_layer[n] == layer and n != but and (not kerbs_only or n < len(kerb_areas))]
-
+  # no lines inside junctions, nor from a stop line in to its junction (PaintAreas)
   lines, line_layers = [], []
 
   def add(k, piece, layer):
@@ -192,15 +204,16 @@ def main():
     line_layers.append(layer)
   for (layer, sig), _, nodes in join(layouts):
     pts = points(nodes)
+    ways = {osm.pairs[(a, b)][0] for a, b in zip(nodes[:-1], nodes[1:], strict=True)}
     for kind, offset, style in sig:
       # a median's edges one line each, as maps paint it, rather than the divider's double line on both
       for k, off in [(0, 0.0)] if kind == EDGE else marks('solid' if kind == MEDIAN else style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
-        for piece in clip_outside(geom, near(geom, layer, kind == EDGE)):
+        for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE)):
           add(k, piece, layer)
   for n, j in enumerate(junctions.junctions):
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
-      for piece in clip_outside(kerb, near(kerb, area_layer[n], True, but=n)):
+      for piece in clip_outside(kerb, paint.near(kerb, area_layer[n], kerbs_only=True, but=n)):
         add(KINDS.index('edge'), piece, area_layer[n])
     for s in j.stops:
       add(KINDS.index(s.kind), s.line, area_layer[n])
