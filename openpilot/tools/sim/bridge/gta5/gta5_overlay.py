@@ -9,6 +9,9 @@ signal comes on. The road pieces follow gta5_train's maprender (its lane bands, 
 out at junctions, junction areas as hulls at the junction nodes where roads cross, stop lines across the lanes into
 their junction, the route as its carriageway_line), drawn at their own heights rather than filtered to the car's level.
 Lane edges and dividers are also cut out of junction areas, and edges left out from a stop line in to its junction.
+The lane tags' lines take about 10 s to build on the lane map, so they're cached (GTA5_OVERLAY_CACHE) by the map files'
+contents and the code that builds them; a bridge start that finds none builds them in a separate process, and the
+overlay goes on without the roads until they're ready.
 
 GPS route: while the plugin's gpsroute is on, our route ahead, decimated to the points GTA's custom GPS route takes,
 whenever the route changes or the car nears the end of what was sent.
@@ -20,7 +23,13 @@ Message formats (the plugin parses flat JSON only, so the geometry is one string
   double line is two), y dashed centre line (yellow), l stop line (light), s stop line (sign), j junction outline
   (closed), r route ahead, b route behind, n nav's lane plan, m the next turn, g where its signal comes on.
 - gpsPoints: p, "x,y,z;x,y,z;..." in metres (empty clears)."""
+import argparse
+import contextlib
+import glob
+import hashlib
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -54,6 +63,11 @@ GPS_MAX = 100  # points: GTA's custom GPS route limit isn't documented; the plug
 GPS_SIMPLIFY = 3.0  # m
 GPS_RESEND_BEFORE = 300.0  # m before the end of a capped route sent, the next part goes
 ENABLED = os.getenv("GTA5_OVERLAY", "1") != "0"
+# the lane tags' lines (road_marks) between bridge starts; empty: built each start
+CACHE_DIR = os.path.expanduser(os.getenv("GTA5_OVERLAY_CACHE", "~/.cache/gta5_overlay"))
+CACHE_KEEP = 3  # files
+MARKS_VERSION = 1  # the cache's format
+MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py")  # map/ modules road_marks depends on, as this one
 
 
 def smooth(x: np.ndarray, sigma: float) -> np.ndarray:
@@ -256,12 +270,98 @@ def marking_kinds(line) -> list[tuple[str, float]]:
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
 
 
+def road_marks(paths, osm) -> dict:
+  """The lines the map's lane tags paint, as segments: their ends [M, 2, 3], kinds [M], and the GTA nodes at their
+  way's ends [M, 2]. About 10 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
+  ends, kinds, nodes = [], [], []
+  for wid in osm.ways:
+    pts = osm.way_points(wid)
+    if len(pts) < 2 or np.hypot(*(pts[-1] - pts[0])) < 0.3:
+      continue
+    gta = [paths.nodes_at(q) for q in (pts[0], pts[-1])]
+    if not gta[0] or not gta[1]:
+      continue
+    a, b = gta[0][0], gta[1][0]
+    z = np.interp(np.linspace(0.0, 1.0, len(pts)), [0.0, 1.0], [paths.z[a], paths.z[b]])
+    for line in osm.lanes(wid).lines(FORWARD):
+      for kind, off in marking_kinds(line):
+        geom = offset_polyline(pts, line.offset + off)
+        if len(geom) != len(pts):
+          continue
+        g3 = np.column_stack([geom, z])
+        ends.append(np.stack([g3[:-1], g3[1:]], axis=1))
+        kinds += [kind] * (len(pts) - 1)
+        nodes += [(a, b)] * (len(pts) - 1)
+  return {"segs": np.concatenate(ends) if ends else np.zeros((0, 2, 3)), "kinds": np.array(kinds, "<U1"),
+          "nodes": np.array(nodes, np.int64).reshape(-1, 2)}
+
+
+def marks_key(paths, osm) -> str | None:
+  """The cache key of road_marks(paths, osm): a hash of the two map files read, the code that turns them into the marks,
+  and the settings it reads them with; None where they can't be cached (no cache, the maps not read from files, or
+  read in a way the cache's builder doesn't)."""
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import GTA
+  files = (getattr(paths, "path", None), getattr(osm, "path", None))
+  if not CACHE_DIR or None in files or getattr(osm, "project", None) is not to_game or osm.defaults is not GTA:
+    return None
+  h = hashlib.blake2b(f"marks {MARKS_VERSION} {osm.drive_on_right}".encode(), digest_size=16)
+  here = os.path.dirname(os.path.abspath(__file__))
+  for f in (*files, __file__, *(os.path.join(here, "map", m) for m in MARKS_CODE)):
+    try:
+      with open(f, "rb") as fh:
+        h.update(hashlib.file_digest(fh, "blake2b").digest())
+    except OSError:
+      return None
+  return h.hexdigest()
+
+
+def marks_file(key: str) -> str:
+  return os.path.join(CACHE_DIR, f"marks-{key}.npz")
+
+
+def load_marks(key: str) -> dict | None:
+  try:
+    with np.load(marks_file(key), allow_pickle=False) as z:
+      return {k: z[k] for k in ("segs", "kinds", "nodes")}
+  except FileNotFoundError:
+    return None
+  except Exception as e:  # a torn or stale file: built again
+    print(f"gta5 overlay: bad cache {marks_file(key)}: {type(e).__name__}: {e}", flush=True)
+    return None
+
+
+def save_marks(key: str, marks: dict):
+  """Atomically, so a bridge reading the cache never sees half a file; the newest few are kept."""
+  os.makedirs(CACHE_DIR, exist_ok=True)
+  tmp = f"{marks_file(key)}.{os.getpid()}.tmp"
+  with open(tmp, "wb") as f:
+    np.savez(f, **marks)
+  os.replace(tmp, marks_file(key))
+  old = sorted(glob.glob(os.path.join(CACHE_DIR, "marks-*.npz")), key=os.path.getmtime)[:-CACHE_KEEP]
+  for f in old:
+    with contextlib.suppress(OSError):
+      os.remove(f)
+
+
+def start_marks_build(paths, osm, key: str) -> subprocess.Popen:
+  """road_marks in a separate process (this module's `cache` command), which saves them for load_marks: building them in
+  a thread would hold the GIL for its 10 s and starve the bridge's frame loop."""
+  root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 5))
+  env = {**os.environ, "GTA5_OVERLAY_CACHE": CACHE_DIR,
+         "PYTHONPATH": os.pathsep.join(p for p in (root, os.environ.get("PYTHONPATH")) if p)}
+  cmd = [sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_overlay", "cache", paths.path, osm.path, "--key", key]
+  if not osm.drive_on_right:
+    cmd.append("--left")
+  return subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
+
+
 class RoadGeometry:
   """The roads as lane bands, built once from a paths.Paths (GTA's own roads: junction areas, stop lines, and lane
   edges and dividers where the map has no lane tags) and, with an osm_lanes.OsmLanes that has them, the lines the map's
   lane tags paint; `near` gives the overlay's pieces around a point."""
 
-  def __init__(self, paths, osm=None):
+  def __init__(self, paths, osm=None, marks: dict | None = None):
     from openpilot.tools.sim.bridge.gta5.map.paths import heading, roads_cross
     self.paths = paths
     xy = paths.xy
@@ -301,32 +401,9 @@ class RoadGeometry:
     self.cells = {(int(cx), int(cy)): order[s:e] for (cx, cy), s, e in zip(keys, starts, list(starts[1:]) + [len(order)], strict=True)}
     self.stop_cache: dict[int, list] = {}
     self.hull_cache: dict[int, np.ndarray | None] = {}
-    self.marks = self._marks(osm) if osm is not None and osm.tagged else None
-
-  def _marks(self, osm) -> dict:
-    """The map's lines as segments: their ends [M, 2, 3], kinds [M], and the GTA nodes at their way's ends [M, 2]."""
-    p = self.paths
-    ends, kinds, nodes = [], [], []
-    for wid in osm.ways:
-      pts = osm.way_points(wid)
-      if len(pts) < 2 or np.hypot(*(pts[-1] - pts[0])) < 0.3:
-        continue
-      gta = [p.nodes_at(q) for q in (pts[0], pts[-1])]
-      if not gta[0] or not gta[1]:
-        continue
-      a, b = gta[0][0], gta[1][0]
-      z = np.interp(np.linspace(0.0, 1.0, len(pts)), [0.0, 1.0], [p.z[a], p.z[b]])
-      for line in osm.lanes(wid).lines(FORWARD):
-        for kind, off in marking_kinds(line):
-          geom = offset_polyline(pts, line.offset + off)
-          if len(geom) != len(pts):
-            continue
-          g3 = np.column_stack([geom, z])
-          ends.append(np.stack([g3[:-1], g3[1:]], axis=1))
-          kinds += [kind] * (len(pts) - 1)
-          nodes += [(a, b)] * (len(pts) - 1)
-    return {"segs": np.concatenate(ends) if ends else np.zeros((0, 2, 3)), "kinds": np.array(kinds),
-            "nodes": np.array(nodes, np.int64).reshape(-1, 2)}
+    if marks is None and osm is not None and osm.tagged:
+      marks = road_marks(paths, osm)
+    self.marks = marks
 
   def _nodes_near(self, pos: np.ndarray, z: float, radius: float) -> np.ndarray:
     (x0, y0), (x1, y1) = np.floor((pos - radius) / CELL).astype(int), np.floor((pos + radius) / CELL).astype(int)
@@ -543,9 +620,10 @@ def build(snap: dict, geometry: RoadGeometry | None) -> dict:
 
 class Overlay:
   """Runs the overlay off the bridge's loop: update() hands a snapshot to a worker thread every EVERY s while the
-  plugin's map debug is on, and returns the message it built last for the caller to send."""
+  plugin's map debug is on, and returns the message it built last for the caller to send. With background, the lane
+  tags' lines missing from the cache build in a separate process (start_marks_build); else in make()."""
 
-  def __init__(self):
+  def __init__(self, background: bool = True):
     self.next = 0.0
     self.lock = threading.Lock()
     self.wake = threading.Event()
@@ -556,6 +634,9 @@ class Overlay:
     self.geometry_for = None
     self.carriageway: tuple | None = None  # (route, (points, along))
     self.stats: dict = {}
+    self.background = background
+    self.marks_for: tuple | None = None  # ((paths, osm), their road_marks' cache key, when first asked for)
+    self.builder: subprocess.Popen | None | bool = None  # building them in the background; False: it failed
 
   def update(self, state: dict, route, paths, lane_line, nav, recording: bool, osm=None) -> list[dict]:
     out = []
@@ -605,7 +686,11 @@ class Overlay:
     paths = snap.get("paths")
     osm = snap.get("osm")
     if paths is not None and self.geometry_for != (paths, osm):
-      self.geometry, self.geometry_for = RoadGeometry(paths, osm), (paths, osm)
+      # until its lines are ready, the overlay goes on without the roads, as before the maps load
+      geometry = self._road_geometry(paths, osm)
+      if geometry is not None:
+        self.geometry, self.geometry_for = geometry, (paths, osm)
+        self.stats["geometry_wait_s"] = round(time.monotonic() - self.marks_for[2], 2)
       self.stats["geometry_s"] = round(time.monotonic() - t0, 2)
       t0 = time.monotonic()
     route = snap.get("route")
@@ -616,6 +701,40 @@ class Overlay:
     msg = build(snap, self.geometry)
     self.stats.update(ms=round((time.monotonic() - t0) * 1000, 1), chars=len(msg["g"]), points=msg["n"])
     return msg
+
+  def _road_geometry(self, paths, osm) -> RoadGeometry | None:
+    """The RoadGeometry of these maps, its lane tags' lines from the cache; None while they build in the background."""
+    if self.marks_for is None or self.marks_for[0] != (paths, osm):
+      self.marks_for = ((paths, osm), marks_key(paths, osm) if osm is not None and osm.tagged else None, time.monotonic())
+      self.builder = None
+    if osm is None or not osm.tagged:
+      self.stats["geometry"] = "bands"
+      return RoadGeometry(paths, osm)
+    key = self.marks_for[1]
+    marks = load_marks(key) if key else None
+    if marks is not None:
+      self.stats["geometry"] = "cache" if self.builder is None else "background"
+      return RoadGeometry(paths, osm, marks)
+    if key and self.background and self.builder is not False:
+      if self.builder is None:
+        try:
+          self.builder = start_marks_build(paths, osm, key)
+          return None
+        except OSError as e:
+          print(f"gta5 overlay: can't build the lines in the background: {e}", flush=True)
+      elif self.builder.poll() is None:
+        return None
+      else:
+        print(f"gta5 overlay: the background build of the lines failed ({self.builder.returncode})", flush=True)
+      self.builder = False  # build them here, once
+    marks = road_marks(paths, osm)
+    if key:
+      try:
+        save_marks(key, marks)
+      except OSError as e:
+        print(f"gta5 overlay: can't cache the lines: {e}", flush=True)
+    self.stats["geometry"] = "built"
+    return RoadGeometry(paths, osm, marks)
 
 
 def gps_points(route, max_points: int = GPS_MAX) -> tuple[str, float]:
@@ -663,3 +782,31 @@ class GpsRoute:
     self.capped = self.reach < route.length - 1.0
     self.sent_for = route
     return [{"type": "gpsPoints", "p": p}]
+
+
+def main(argv=None):
+  """`cache paths.jsonl gta5.osm.pbf`: build the lane tags' lines into the overlay's cache, as the bridge does in the
+  background on a start that finds none."""
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+  from openpilot.tools.sim.bridge.gta5.map.paths import Paths
+  ap = argparse.ArgumentParser(description=main.__doc__)
+  ap.add_argument("command", choices=["cache"])
+  ap.add_argument("paths")
+  ap.add_argument("osm")
+  ap.add_argument("--key", help="the key the bridge asked for (default: from the files)")
+  ap.add_argument("--left", action="store_true", help="traffic drives on the left")
+  args = ap.parse_args(argv)
+  with contextlib.suppress(OSError):
+    os.nice(10)  # behind the bridge, which is waiting on frames
+  t = time.monotonic()
+  paths, osm = Paths(args.paths), OsmLanes.load(args.osm, to_game, drive_on_right=not args.left)
+  key = args.key or marks_key(paths, osm)
+  if key is None:
+    sys.exit("gta5 overlay: no cache (GTA5_OVERLAY_CACHE is empty)")
+  save_marks(key, road_marks(paths, osm))
+  print(f"gta5 overlay: cached the lane lines in {time.monotonic() - t:.1f} s: {marks_file(key)}", flush=True)
+
+
+if __name__ == "__main__":
+  main()

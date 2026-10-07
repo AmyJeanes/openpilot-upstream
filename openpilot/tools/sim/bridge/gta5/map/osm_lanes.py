@@ -423,6 +423,8 @@ class OsmLanes:
   def __init__(self, data, project, drive_on_right: bool = True, defaults: Defaults = GTA):
     x, y = project(np.asarray(data.lat), np.asarray(data.lon))
     self.data, self.drive_on_right, self.defaults = data, drive_on_right, defaults
+    self.project = project
+    self.path: str | None = None  # the file load() read it from, for caches built from it
     self.ids = data.node_ids
     self.xy = np.stack([np.asarray(x, float), np.asarray(y, float)], axis=1) if len(self.ids) else np.zeros((0, 2))
     self.ways = {w: v for w, v in data.ways.items() if v[0].get('highway') in ROADS}
@@ -446,7 +448,9 @@ class OsmLanes:
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
     from openpilot.tools.sim.bridge.gta5.map import osm_pbf
-    return cls(osm_pbf.read(path, relations=('connectivity',)), project, **kw)
+    lanes = cls(osm_pbf.read(path, relations=('connectivity',)), project, **kw)
+    lanes.path = path
+    return lanes
 
   def lanes(self, way: int) -> WayLanes:
     if way not in self._lanes:

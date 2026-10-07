@@ -1,9 +1,13 @@
 """The map debug overlay's encoder and the GPS route (gta5_overlay.py). The map tests use GTA's roads from
 GTA5_MAP/paths.jsonl (default ~/gta5map), and the lines of a lane-tagged map from GTA5_LANES_MAP/gta5.osm.pbf (default
 ~/gta5map_lanes), and are skipped without them; `python test_overlay.py` prints the overlay's size and time per update
-at test places."""
+at test places, and `python test_overlay.py startup` how the bridge's frame loop fares while the overlay first gets its
+roads: building the lane tags' lines in its thread (as before the cache), in the background, and from the cache."""
 import os
+import sys
+import tempfile
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -78,6 +82,49 @@ def test_clip_outside_cuts_out_areas():
   out = ov.clip_outside(segs, [square])
   assert len(out) == 3  # the crossing one in two pieces, the one outside whole, the one inside gone
   np.testing.assert_allclose(out[1:], [[[-5, 5, 1], [0, 5, 1.5]], [[10, 5, 2.5], [15, 5, 3]]])
+
+
+@pytest.fixture(autouse=True, scope="module")
+def cache_dir():
+  """The overlay's cache in a folder of the tests' own, not the bridge's."""
+  old = ov.CACHE_DIR
+  with tempfile.TemporaryDirectory() as d:
+    ov.CACHE_DIR = d
+    yield d
+  ov.CACHE_DIR = old
+
+
+def test_marks_key_follows_the_map_files_and_settings(tmp_path):
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import GTA
+  (tmp_path / "paths.jsonl").write_text("a")
+  (tmp_path / "gta5.osm.pbf").write_bytes(b"b")
+  paths = SimpleNamespace(path=str(tmp_path / "paths.jsonl"))
+  osm = SimpleNamespace(path=str(tmp_path / "gta5.osm.pbf"), project=to_game, defaults=GTA, drive_on_right=True)
+  key = ov.marks_key(paths, osm)
+  assert key is not None and key == ov.marks_key(paths, osm)
+  (tmp_path / "paths.jsonl").write_text("a2")
+  assert ov.marks_key(paths, osm) not in (None, key)
+  key = ov.marks_key(paths, osm)
+  osm.drive_on_right = False
+  assert ov.marks_key(paths, osm) not in (None, key)
+  osm.project = lambda lat, lon: (lon, lat)  # read some other way than the background build reads them
+  assert ov.marks_key(paths, osm) is None
+  assert ov.marks_key(SimpleNamespace(), osm) is None
+
+
+def test_saved_marks_load_exactly():
+  rng = np.random.default_rng(1)
+  marks = {"segs": rng.normal(size=(5, 2, 3)) * 1000, "kinds": np.array(list("edwcy"), "<U1"),
+           "nodes": rng.integers(0, 10 ** 6, (5, 2))}
+  ov.save_marks("t" * 32, marks)
+  got = ov.load_marks("t" * 32)
+  assert got is not None
+  for k, v in marks.items():
+    assert got[k].dtype == v.dtype and np.array_equal(got[k], v)
+  assert ov.load_marks("u" * 32) is None
+  with open(ov.marks_file("u" * 32), "wb") as f:
+    f.write(b"torn")
+  assert ov.load_marks("u" * 32) is None
 
 
 def test_gps_route_sends_when_it_changes_or_the_plugin_lost_it():
@@ -162,7 +209,7 @@ def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, 
 
 
 def check_overlay(paths, place, osm=None) -> set:
-  overlay = ov.Overlay()
+  overlay = ov.Overlay(background=False)
   overlay_update(paths, place, overlay, osm)  # builds the road geometry
   msg, stats = overlay_update(paths, place, overlay, osm)
   items = decode(msg)
@@ -200,10 +247,101 @@ def test_overlay_lines_from_lane_tags(paths, osm, place):
   assert "d" in kinds and kinds & set("cy" if place == "L7" else "dw"), kinds  # L7: a two-way road, X1 a freeway
 
 
-if __name__ == "__main__":
+@pytest.fixture(scope="module")
+def fresh_marks(paths, osm):
+  return ov.road_marks(paths, osm)
+
+
+def test_cached_lines_equal_a_fresh_build(paths, osm, fresh_marks):
+  key = ov.marks_key(paths, osm)
+  assert key is not None
+  ov.save_marks(key, fresh_marks)
+  cached = ov.load_marks(key)
+  assert cached is not None
+  for k, v in fresh_marks.items():
+    assert cached[k].dtype == v.dtype and np.array_equal(cached[k], v), k
+  fresh, from_cache = ov.RoadGeometry(paths, osm, fresh_marks), ov.RoadGeometry(paths, osm, cached)
+  for x, y, z, _ in PLACES.values():
+    a, b = fresh.near((x, y), z, ov.RADIUS, ov.DEFAULT_LAYERS), from_cache.near((x, y), z, ov.RADIUS, ov.DEFAULT_LAYERS)
+    assert len(a) == len(b) > 0
+    assert all(ka == kb and np.array_equal(la, lb) for (ka, la), (kb, lb) in zip(a, b, strict=True))
+
+
+def test_lines_build_in_the_background_then_load_from_the_cache(paths, osm, fresh_marks, tmp_path, monkeypatch):
+  monkeypatch.setattr(ov, "CACHE_DIR", str(tmp_path))
+  x, y, z, _ = PLACES["L7"]
+  snap = {"pos": [x, y, z + ov.CAR_HEIGHT], "layers": ov.DEFAULT_LAYERS, "route": None, "paths": paths, "osm": osm}
+  overlay = ov.Overlay()
+  waits, t0 = [], time.monotonic()
+  while overlay.geometry is None:
+    assert time.monotonic() - t0 < 300, "the background build didn't finish"
+    t = time.monotonic()
+    msg = overlay.make(dict(snap))
+    waits.append(time.monotonic() - t)
+    assert msg["type"] == "debugGeo"  # the overlay goes on meanwhile
+    time.sleep(0.2)
+  assert overlay.stats["geometry"] == "background" and len(waits) > 3
+  assert max(waits) < 1.0, waits  # never a whole build's stall in the overlay's thread
+  key = ov.marks_key(paths, osm)
+  cached = ov.load_marks(key)
+  assert cached is not None and all(np.array_equal(cached[k], v) for k, v in fresh_marks.items())
+  # the next start: straight from the cache
+  again = ov.Overlay()
+  t = time.monotonic()
+  again.make(dict(snap))
+  assert again.geometry is not None and again.stats["geometry"] == "cache"
+  assert time.monotonic() - t < 2.0
+
+
+def frame_loop(paths, osm, background: bool, seconds: float, period: float = 0.05) -> dict:
+  """A stand-in for the bridge's frame loop in this thread while the overlay's worker first builds its roads: every
+  period s it hands the overlay a snapshot (Overlay.update, as the bridge does) and does some I/O that lets go of the
+  GIL, as the bridge's sockets and pipes do, and each wake-up is timed against its deadline."""
+  x, y, z, _ = PLACES["L7"]
+  state = {"pos": [x, y, z + ov.CAR_HEIGHT], "debug": {"on": True, "layers": ov.DEFAULT_LAYERS}}
+  overlay = ov.Overlay(background=background)
+  r, w = os.pipe()
+  late, ready, t0 = [], None, time.monotonic()
+  deadline = t0
+  while time.monotonic() - t0 < seconds:
+    overlay.update(state, None, paths, lambda: None, None, False, osm)
+    if ready is None and overlay.geometry is not None:
+      ready = time.monotonic() - t0
+    for _ in range(20):
+      os.write(w, b"x")
+      os.read(r, 1)
+    np.hypot(np.arange(1000.0), 1.0).sum()
+    deadline += period
+    time.sleep(max(deadline - time.monotonic(), 0.0))
+    late.append(time.monotonic() - deadline)
+    deadline = max(deadline, time.monotonic() - period)  # a missed frame is gone, not owed
+  os.close(r)
+  os.close(w)
+  late_a = np.array(late) * 1000
+  return {"ready_s": None if ready is None else round(ready, 1), "ticks": len(late_a),
+          "late>25ms": round(float(np.mean(late_a > 25)), 3), "p99_ms": round(float(np.percentile(late_a, 99)), 1),
+          "max_ms": round(float(late_a.max()), 1), "geometry": overlay.stats.get("geometry")}
+
+
+def startup(seconds: float = 25.0):
   p = Paths(PATHS)
   p.index()
-  overlay = ov.Overlay()
+  osm = OsmLanes.load(LANES, to_game)
+  with tempfile.TemporaryDirectory() as d:
+    ov.CACHE_DIR = d
+    print("in its thread (before the cache):", frame_loop(p, osm, False, seconds), flush=True)
+    for f in os.listdir(d):
+      os.remove(os.path.join(d, f))
+    print("first start, in the background:  ", frame_loop(p, osm, True, seconds), flush=True)
+    print("next start, from the cache:      ", frame_loop(p, osm, True, seconds), flush=True)
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["startup"]:
+  startup()
+elif __name__ == "__main__":
+  p = Paths(PATHS)
+  p.index()
+  overlay = ov.Overlay(background=False)
   for place in sorted(PLACES):
     for n in range(3):
       t = time.monotonic()
