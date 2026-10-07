@@ -12,8 +12,8 @@ from collections import defaultdict
 import osmium
 
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
-from openpilot.tools.sim.bridge.gta5.map.paths import LANE_WIDTH, NARROW_LANE_WIDTH, heading as game_heading, junction_scores, \
-  roads_cross, toward_junction, wrap
+from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
+  wrap
 
 U_TURN = 135.0  # deg: openpilot's driving model can't turn back on itself, so the map forbids it
 TURN_FLAG = 45.0  # deg: a move turning more than this is a left or right turn, for GTA's no left / no right flags
@@ -52,6 +52,13 @@ APPROACH = 30.0  # m before a junction that its lanes' turn arrows are marked (G
 APPROACH_HEADING = 15.0  # m: a junction's ways out turn from the road's heading over this far before it
 RESTRICTION_REACH = 60.0  # m back from an approach that a restriction on it can start (from a stop line or turn flag)
 APPROACH_BEND = 20.0  # deg: where the way into a junction turns more than this from that, which way is through is moot
+# m: lanes as painted, measured in the game (CodeWalker's 5.5 / 4.0 m are the AI's lanes, not the paint: narrow lanes are
+# painted 4.2-4.5 m, freeway lanes 5.9-6.5 m), and the painted median per step of a two-way link's offset (5.2-5.5 m
+# at 6 steps on narrow and normal links alike)
+PAINTED_LANE, PAINTED_NARROW, PAINTED_FREEWAY = 5.5, 4.4, 6.1
+MEDIAN_STEP = 0.9
+FREEWAY = 64  # node flags 2: a freeway's
+MARKED = {'trunk', 'primary', 'residential'}  # classes of GTA's streets with painted centre lines
 
 
 def node_ok(n):
@@ -826,20 +833,29 @@ def placement(lanes_left):
   return ('left_of:1' if k == 0 else f'right_of:{k // 2}') if k % 2 == 0 else f'middle_of:{(k + 1) // 2}'
 
 
-def lane_tags(fwd, back, lf):
-  """The lanes of a link as GTA lays them out (paths.Link, after CodeWalker), in standard tags that osm_lanes.py reads
-  back to the same layout: lanes 5.5 m wide (4 m on narrow links), each direction's starting `offset` right of the link
-  (up to half a lane either way), or a one-way link's centred on it and moved by the offset.
+def layout(lf, back, freeway=False):
+  """How a link's lanes are painted: (lane width, m right of the link to each direction's first lane on a two-way link,
+  to its lanes' middle on a one-way one). GTA's offset field (`steps`, -7..7) between a two-way link's directions is its
+  painted median, MEDIAN_STEP m a step whatever its lanes' width; CodeWalker's reading, a fourteenth of a lane, is kept
+  where it's negative (lanes overlapping on the line) and on one-way links, which no measurement covers."""
+  steps = ((lf[1] >> 4) & 7) * (-1 if lf[1] & 128 else 1)
+  w = PAINTED_FREEWAY if freeway and not back else PAINTED_NARROW if lf[1] & 2 else PAINTED_LANE
+  return w, steps * MEDIAN_STEP / 2 if back and steps > 0 else steps / 14 * w
+
+
+def lane_tags(fwd, back, lf, freeway=False):
+  """The lanes of a link as GTA paints them (layout), in standard tags that osm_lanes.py reads back to the same layout:
+  each direction's lanes starting `offset` right of the link, or a one-way link's centred on it and moved by the offset.
   - Offset 0: the line is the boundary between the directions, the middle of the road unless the counts differ
     (placement:forward/backward=left_of:1 then).
   - A gap between the directions (offset > 0) is a median: `width` is kerb to kerb, its lanes' widths are given, and
     what's left is the median, centred between the directions.
   - Both directions sharing one lane on the line (1 + 1 lanes, offset -0.5 lane) is a single-track road: lanes=1,
     unmarked, as real single-track lanes are mapped. Other overlaps can't be said in OSM: the kerbs are kept.
-  `lf` is the link's flags; returns the tags."""
-  w = NARROW_LANE_WIDTH if lf[1] & 2 else LANE_WIDTH
+  `lf` is the link's flags and `freeway` whether its nodes are a freeway's (a one-way freeway's lanes are wider);
+  returns the tags."""
+  w, offset = layout(lf, back, freeway)
   steps = ((lf[1] >> 4) & 7) * (-1 if lf[1] & 128 else 1)
-  offset = steps / 14 * w
   if not back:
     tags = {'lanes': str(fwd), 'oneway': 'yes', 'width': metres(fwd * w)}
     if steps and (where := placement(fwd / 2 - offset / w)):
@@ -1074,7 +1090,10 @@ def main():
       w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)],
                                        tags={'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
       continue
-    tags = {'highway': cls, **lane_tags(fwd, back, lf), **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
+    freeway = bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2
+    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway), **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
+    if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED:
+      tags['divider'] = 'double_solid_line'  # how GTA paints a two-lane road's centre (OSM's default reading is dashed)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:

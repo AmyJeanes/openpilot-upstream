@@ -153,15 +153,28 @@ def test_lane_tags_reproduce_gta_layout():
     for back in range(4):
       for steps in range(-7, 8):
         for narrow in (False, True):
-          if not back and steps not in (0, -7):  # the one-way offsets GTA uses
-            continue
-          f = flags(fwd, back, steps, narrow)
-          road = WayLanes.from_tags({'highway': 'primary', **lane_tags(fwd, back, f)})
-          for d, ab, ba in ((FORWARD, f, swapped(f)), (BACKWARD, swapped(f), f)):
-            if Link(ab).lanes and compare(road, d, Link(ab), Link(ba)) is not None:
-              mismatched.add((fwd, back, steps))
+          for freeway in (False, True):
+            if not back and steps not in (0, -7):  # the one-way offsets GTA uses
+              continue
+            f = flags(fwd, back, steps, narrow)
+            road = WayLanes.from_tags({'highway': 'primary', **lane_tags(fwd, back, f, freeway and fwd >= 2)})
+            for d, ab, ba in ((FORWARD, f, swapped(f)), (BACKWARD, swapped(f), f)):
+              if Link(ab).lanes and compare(road, d, ab, ba, freeway) is not None:
+                mismatched.add((fwd, back, steps))
   # overlapping lanes OSM can't say: negative offsets on two-way links but a single track's
   assert mismatched == {(f, b, s) for f in range(1, 5) for b in range(1, 4) for s in range(-7, 0) if (f, b, s) != (1, 1, -7)}
+
+
+def test_painted_layout():
+  """The lanes as measured in the game (map audit, topshot): Vinewood Blvd's narrow 2 + 2 with 6 steps of median, its
+  double yellows 2.7 m either side, lane lines 7.1, kerbs 11.3-11.6; Palomino Ave's normal 2 + 2 with 6 steps, 2.7, 7.9,
+  13.4; a 3-lane freeway's edges -8.9 / +9.3."""
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_tags
+  for narrow, edges in ((True, [2.7, 7.1, 11.5]), (False, [2.7, 8.2, 13.7])):
+    road = WayLanes.from_tags({'highway': 'primary', **lane_tags(2, 2, flags(2, 2, 6, narrow))})
+    assert [round(v, 2) for s in road.ours() for v in (s.left, s.right)][::2] + [round(road.ours()[-1].right, 2)] == edges
+  road = WayLanes.from_tags({'highway': 'motorway', **lane_tags(3, 0, flags(3, 0, 0, False), True)})
+  assert np.allclose(road.edges(), (-9.15, 9.15))
 
 
 if __name__ == '__main__':

@@ -28,7 +28,7 @@ The map is the game's data, so it isn't in the repository; build it from your co
    (run from the repository root with `PYTHONPATH=.`, as `python openpilot/tools/sim/bridge/gta5/map/ynd_to_osm.py ...`).
 3. Check its lanes: `validate_lanes.py ~/gta5map/gta5.osm.pbf` checks the lane tags (also on a real OSM extract, with
    `--left` where traffic drives on the left), and `lane_parity.py paths.jsonl ~/gta5map/gta5.osm.pbf` that
-   `osm_lanes.py` reads them back to GTA's own lane layout. `test_osm_lanes.py` and `test_validate_lanes.py` run on the
+   `osm_lanes.py` reads them back to the layout of GTA's links as painted (`ynd_to_osm.layout`). `test_osm_lanes.py` and `test_validate_lanes.py` run on the
    hand-written `fixtures/` (`python test_osm_lanes.py`); `test_route_lanes.py` on small maps made in the test, in the
    bridge's own environment.
 
@@ -80,11 +80,16 @@ shown or a level changes.
   per link, our city streets carry far more junction and turn costs than real ones).
 - Ways carry their lanes in standard OSM tags, as a real road's would be mapped, and `osm_lanes.py` reads them (any
   OSM map, not only ours) into each way's cross-section, its painted lines and its lanes' centre lines:
-  - `lanes`, `lanes:forward` / `lanes:backward`, `oneway`, and `width` (kerb to kerb: GTA's lanes are 5.5 m, 4 m on
-    narrow links). The way's line is the boundary between the directions, the middle of the road unless the counts
-    differ (`placement:forward` / `placement:backward=left_of:1`); a one-way link's lanes are centred on it.
-  - GTA's gap between the directions, up to a lane wide, is a median: `width` includes it, `width:lanes:forward` /
-    `:backward` give the lanes, and what's left is centred between them (`divider=double_solid_line`).
+  - `lanes`, `lanes:forward` / `lanes:backward`, `oneway`, and `width` (kerb to kerb), with lanes as GTA paints them,
+    measured in the game: 5.5 m, 4.4 m on narrow links, 6.1 m on one-way freeway links of two lanes or more.
+    CodeWalker's 4 m narrow lanes (`paths.Link`) are where the game's cars drive, not the paint. The way's line is the
+    boundary between the directions, the middle of the road unless the counts differ (`placement:forward` /
+    `placement:backward=left_of:1`); a one-way link's lanes are centred on it.
+  - GTA's offset between the directions of a two-way link is a painted median, 0.9 m a step whatever the lanes'
+    width (5.2-5.5 m at 6 steps on narrow and normal links): `width` includes it, `width:lanes:forward` / `:backward`
+    give the lanes, and what's left is centred between them (`divider=double_solid_line`).
+  - A two-lane two-way street's centre is `divider=double_solid_line`, as GTA paints most of them (OSM's default
+    reading is a dashed line); not on service roads and tracks.
   - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
     no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
   - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it

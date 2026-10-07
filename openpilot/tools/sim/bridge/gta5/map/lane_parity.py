@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Checks that osm_lanes.py reads the lane tags ynd_to_osm.py writes back to GTA's own lane layout (paths.Link) on every
-way, both ways: the same lanes, edges within TOL. Prints the ways that differ by kind (two-way or one-way, offset in
-fourteenths of a lane, lanes each way, how they differ).
+"""Checks that osm_lanes.py reads the lane tags ynd_to_osm.py writes back to the layout of GTA's links as painted
+(ynd_to_osm.layout) on every way, both ways: the same lanes, edges within TOL. Prints the ways that differ by kind
+(two-way or one-way, offset in steps of GTA's field, lanes each way, how they differ).
 
   python lane_parity.py paths.jsonl gta5.osm.pbf
 """
@@ -12,7 +12,7 @@ from collections import Counter
 import osmium
 
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes
-from openpilot.tools.sim.bridge.gta5.map.paths import Link
+from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import FREEWAY, layout
 
 TOL = 0.05  # m
 
@@ -28,21 +28,33 @@ def swapped(f):
   return f
 
 
-def expected(ab: Link, ba: Link):
-  """GTA's lanes a -> b and b -> a, left to right, m right of the link's line seen from a."""
-  ours = [(ab.inner + k * ab.width, ab.inner + (k + 1) * ab.width) for k in range(ab.lanes)]
-  oncoming = [(-(ba.inner + (k + 1) * ba.width), -(ba.inner + k * ba.width)) for k in reversed(range(ba.lanes))]
+def lanes(f) -> tuple[int, int]:
+  """A link record's lanes its way and back."""
+  return (f[2] >> 5) & 7, (f[2] >> 2) & 7
+
+
+def expected(ab, ba, freeway: bool = False):
+  """The lanes a -> b and b -> a (the link records' flags), left to right, m right of the link's line seen from a; on a
+  `freeway` link, wider where one-way."""
+  def run(f):  # one direction's lanes: how many, how wide, m right of the line to their left edge
+    n, back = lanes(f)
+    w, offset = layout(f, back, freeway and n >= 2)
+    return n, w, offset if back else offset - n * w / 2
+  n, w, inner = run(ab)
+  m, v, inner_back = run(ba)
+  ours = [(inner + k * w, inner + (k + 1) * w) for k in range(n)]
+  oncoming = [(-(inner_back + (k + 1) * v), -(inner_back + k * v)) for k in reversed(range(m))]
   return ours, oncoming
 
 
 def kind(f):
   steps = ((f[1] >> 4) & 7) * (-1 if f[1] & 128 else 1)
-  fwd, back = (f[2] >> 5) & 7, (f[2] >> 2) & 7
+  fwd, back = lanes(f)
   return ('two-way' if fwd and back else 'one-way', steps, fwd, back)
 
 
-def compare(road: WayLanes, direction: int, ab: Link, ba: Link) -> str | None:
-  ours, oncoming = expected(ab, ba)
+def compare(road: WayLanes, direction: int, ab, ba, freeway: bool = False) -> str | None:
+  ours, oncoming = expected(ab, ba, freeway)
   got_ours = [(s.left, s.right) for s in road.ours(direction)]
   got_oncoming = [(s.left, s.right) for s in road.oncoming(direction)]
   if road.single_track:
@@ -60,11 +72,13 @@ def main():
   p.add_argument('osm', help="ynd_to_osm.py's map")
   args = p.parse_args()
 
-  records, twice = {}, set()  # paths.Paths keeps the last record where GTA has two for a link
+  records, twice, freeway = {}, set(), set()  # paths.Paths keeps the last record where GTA has two for a link
   with open(args.dump) as f:
     for line in f:
       d = json.loads(line)
-      if d['t'] == 'l':
+      if d['t'] == 'n' and d['f'][2] & FREEWAY:
+        freeway.add(node_id(d['a'], d['i']))
+      elif d['t'] == 'l':
         key = (node_id(d['a'], d['i']), node_id(d['ta'], d['ti']))
         if key in records and records[key] != d['f']:
           twice.add(key)
@@ -79,13 +93,12 @@ def main():
     road = WayLanes.from_tags(dict(way.tags))
     for direction, (p, q) in ((FORWARD, (a, b)), (BACKWARD, (b, a))):
       fp = records.get((p, q)) or swapped(records[(q, p)])
-      ab, ba = Link(fp), Link(records.get((q, p)) or swapped(fp))
-      if not ab.lanes:
+      if not lanes(fp)[0]:
         continue
       checked += 1
-      if (why := compare(road, direction, ab, ba)) is not None:
+      if (why := compare(road, direction, fp, records.get((q, p)) or swapped(fp), {p, q} <= freeway)) is not None:
         bad[(*kind(fp), why + (', GTA has two differing records' if {(p, q), (q, p)} & twice else ''))] += 1
-  print(f"{checked} directed ways checked, {sum(bad.values())} differ from GTA's layout")
+  print(f"{checked} directed ways checked, {sum(bad.values())} differ from GTA's links' layout")
   for k, n in sorted(bad.items(), key=lambda kv: -kv[1]):
     print(f"  {n:6d}  {k}")
   return 1 if bad else 0
