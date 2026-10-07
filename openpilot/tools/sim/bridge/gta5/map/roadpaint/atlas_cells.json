@@ -1,0 +1,879 @@
+{
+ "_doc": "Road-marking decal atlases, keyed by texture name prefix (lower case; the longest matching prefix wins). lines: cells whose strips are paint lines running along axis (v: strips down the texture, u: across), used for exact line geometry. features: cells that are one marking each; dir is the texture axis pointing the way the marking faces (an arrow's head, the top of text read by an approaching driver, as -v when the text is upright in the texture), turn the axis an arrow's bend goes, through whether it also goes straight on. exclude: decals that aren't road paint (grime, chalk, skid marks, wall art).",
+ "im_roadmarkings01": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "cls_cs3_07_newroadmarkings01": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "im_roadmarkings02": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.28,
+    "kind": "arrow",
+    "dir": "+u",
+    "through": true
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.28,
+    "v1": 0.63,
+    "kind": "arrow",
+    "dir": "+u",
+    "turn": "+v",
+    "through": false
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.63,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+u",
+    "turn": "-v",
+    "through": true
+   }
+  ]
+ },
+ "cls_cs3_07_newroadmarkings02": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.28,
+    "kind": "arrow",
+    "dir": "+u",
+    "through": true
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.28,
+    "v1": 0.63,
+    "kind": "arrow",
+    "dir": "+u",
+    "turn": "+v",
+    "through": false
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.63,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+u",
+    "turn": "-v",
+    "through": true
+   }
+  ]
+ },
+ "dc_roadmarkings01": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.27,
+    "kind": "arrow",
+    "dir": "+u",
+    "through": true
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.27,
+    "v1": 0.62,
+    "kind": "arrow",
+    "dir": "+u",
+    "turn": "+v",
+    "through": false
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.62,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+u",
+    "turn": "-v",
+    "through": true
+   }
+  ]
+ },
+ "im_roadmarkings04": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.75,
+    "v1": 1,
+    "axis": "u"
+   }
+  ]
+ },
+ "im_roadmarkings07": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.47,
+    "kind": "text_stop",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0.5,
+    "v1": 1,
+    "kind": "parking_marker",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.5,
+    "v1": 1,
+    "kind": "bicycle",
+    "dir": "-v"
+   }
+  ]
+ },
+ "im_roadmarkings08": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.4,
+    "kind": "text_wait_here",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.4,
+    "v1": 1,
+    "kind": "text_ped_xing",
+    "dir": "-v"
+   }
+  ]
+ },
+ "im_roadmarkings09": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "kind": "text_only",
+    "dir": "-v"
+   }
+  ]
+ },
+ "im_roadmarkings10": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "kind": "text_stay_in_lane",
+    "dir": "-v"
+   }
+  ]
+ },
+ "im_roadmarkings11": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.73,
+    "kind": "keep_clear",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.73,
+    "v1": 1,
+    "kind": "text_no_parking",
+    "dir": "-v"
+   }
+  ]
+ },
+ "rnos_roadmarkings_001": {
+  "features": [
+   {
+    "u0": 0.4,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.4,
+    "kind": "text_exit",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 0.3,
+    "v0": 0.35,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "-v",
+    "through": true
+   },
+   {
+    "u0": 0.3,
+    "u1": 0.65,
+    "v0": 0.4,
+    "v1": 1,
+    "kind": "disabled",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.65,
+    "u1": 1,
+    "v0": 0.4,
+    "v1": 1,
+    "kind": "text_in",
+    "dir": "-v"
+   }
+  ]
+ },
+ "rnos_roadmarkings_002": {
+  "features": [
+   {
+    "u0": 0.4,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.3,
+    "kind": "text_exit",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 0.3,
+    "v0": 0.3,
+    "v1": 0.7,
+    "kind": "arrow",
+    "dir": "-v",
+    "through": true
+   },
+   {
+    "u0": 0.3,
+    "u1": 0.6,
+    "v0": 0.3,
+    "v1": 0.7,
+    "kind": "disabled",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.6,
+    "u1": 1,
+    "v0": 0.3,
+    "v1": 0.7,
+    "kind": "text_in",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.7,
+    "v1": 0.85,
+    "kind": "keep_clear",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.85,
+    "v1": 1,
+    "kind": "text_no_parking",
+    "dir": "-v"
+   }
+  ]
+ },
+ "cs_rsl_ed_roadlines": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "im_ggroadmarkings01": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.3,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   },
+   {
+    "u0": 0.85,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0.3,
+    "u1": 0.6,
+    "v0": 0,
+    "v1": 0.5,
+    "kind": "disabled",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.6,
+    "u1": 0.85,
+    "v0": 0,
+    "v1": 0.5,
+    "kind": "pedestrian",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.3,
+    "u1": 0.48,
+    "v0": 0.5,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+v",
+    "through": true
+   },
+   {
+    "u0": 0.48,
+    "u1": 0.67,
+    "v0": 0.62,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+v",
+    "turn": "+u",
+    "through": false
+   },
+   {
+    "u0": 0.53,
+    "u1": 0.85,
+    "v0": 0.5,
+    "v1": 0.75,
+    "kind": "text_exit",
+    "dir": "-v"
+   }
+  ]
+ },
+ "po1_08_ggroadmarkings": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.68,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "cs_rsn_sl_freewayarrows_001": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "-v",
+    "through": true
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "-v",
+    "turn": "+u",
+    "through": false
+   }
+  ]
+ },
+ "rsn_ce_white_lines": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.5,
+    "axis": "u"
+   },
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.5,
+    "v1": 1,
+    "axis": "u"
+   }
+  ]
+ },
+ "rsn_os_marking01": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "kind": "keep_clear",
+    "dir": "-v"
+   }
+  ]
+ },
+ "rsn_et_keepclear": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.55,
+    "kind": "keep_clear",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.55,
+    "v1": 1,
+    "kind": "text_stop",
+    "dir": "-v"
+   }
+  ]
+ },
+ "sc1_30_arrows": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.65,
+    "v0": 0,
+    "v1": 0.3,
+    "kind": "arrow",
+    "dir": "-u",
+    "through": true
+   },
+   {
+    "u0": 0,
+    "u1": 0.65,
+    "v0": 0.3,
+    "v1": 0.75,
+    "kind": "arrow",
+    "dir": "-u",
+    "turn": "+v",
+    "through": false
+   },
+   {
+    "u0": 0.65,
+    "u1": 1,
+    "v0": 0.2,
+    "v1": 1,
+    "kind": "text_exit",
+    "dir": "+u"
+   }
+  ]
+ },
+ "sl_parkinglines01": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "im_carparkmarkings01": {
+  "lines": [
+   {
+    "u0": 0.82,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.45,
+    "v0": 0,
+    "v1": 0.5,
+    "kind": "disabled",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.45,
+    "u1": 0.8,
+    "v0": 0,
+    "v1": 0.5,
+    "kind": "pedestrian",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 0.25,
+    "v0": 0.5,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+v",
+    "through": true
+   },
+   {
+    "u0": 0.25,
+    "u1": 0.55,
+    "v0": 0.5,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+v",
+    "turn": "+u",
+    "through": false
+   },
+   {
+    "u0": 0.55,
+    "u1": 0.82,
+    "v0": 0.5,
+    "v1": 1,
+    "kind": "text_exit",
+    "dir": "-v"
+   }
+  ]
+ },
+ "im_carparkmarkings02": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "kind": "disabled",
+    "dir": "-v"
+   }
+  ]
+ },
+ "bh1_13_roadmarkings": {
+  "lines": [
+   {
+    "u0": 0.45,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.4,
+    "v0": 0,
+    "v1": 0.45,
+    "kind": "disabled",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 0.2,
+    "v0": 0.45,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+v",
+    "through": true
+   },
+   {
+    "u0": 0.2,
+    "u1": 0.45,
+    "v0": 0.45,
+    "v1": 1,
+    "kind": "text_exit",
+    "dir": "-u"
+   }
+  ]
+ },
+ "bh1_15_genallmarkings": {
+  "lines": [
+   {
+    "u0": 0.45,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.4,
+    "v0": 0,
+    "v1": 0.45,
+    "kind": "disabled",
+    "dir": "-v"
+   },
+   {
+    "u0": 0,
+    "u1": 0.2,
+    "v0": 0.45,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "+v",
+    "through": true
+   },
+   {
+    "u0": 0.2,
+    "u1": 0.45,
+    "v0": 0.45,
+    "v1": 1,
+    "kind": "text_exit",
+    "dir": "-u"
+   }
+  ]
+ },
+ "sc1_11_road_marking": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "u"
+   }
+  ]
+ },
+ "sc1_32_cmk_roadmarkings_001": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.4,
+    "v0": 0,
+    "v1": 1,
+    "kind": "arrow",
+    "dir": "-v",
+    "turn": "-u",
+    "through": false
+   },
+   {
+    "u0": 0.4,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.45,
+    "kind": "text_exit",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.6,
+    "u1": 1,
+    "v0": 0.45,
+    "v1": 1,
+    "kind": "text_in",
+    "dir": "-v"
+   }
+  ]
+ },
+ "gg_markings": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "im_roadmarkings05": {
+  "exclude": true
+ },
+ "im_roadmarkings03": {
+  "exclude": true
+ },
+ "mc_wall_0001": {
+  "exclude": true
+ },
+ "cs_rsn_sm_resmuddry": {
+  "exclude": true
+ },
+ "scrn_dtls": {
+  "exclude": true
+ },
+ "ap1_01_black1": {
+  "exclude": true
+ },
+ "ap1_01_wheelmarks": {
+  "exclude": true
+ },
+ "ch1_07_reb_dirtmarks": {
+  "exclude": true
+ },
+ "rsn_am_tennis_lines": {
+  "exclude": true
+ },
+ "prop_door": {
+  "exclude": true
+ },
+ "bt1_05_buildmeddtl_lines": {
+  "exclude": true
+ },
+ "ih_rsn_inklinelogo": {
+  "exclude": true
+ },
+ "cs4_rsl_hp_salvationplaster": {
+  "exclude": true
+ },
+ "dch_burntorange": {
+  "exclude": true
+ },
+ "cs_rls_hp_sand_marking": {
+  "exclude": true
+ },
+ "dt1_20_rsn_cmk_carparksign": {
+  "exclude": true
+ },
+ "bh1_16_paintdecals": {
+  "exclude": true
+ },
+ "ck_plaster_wall": {
+  "exclude": true
+ },
+ "rsn_mb_vb_19_plaster": {
+  "exclude": true
+ },
+ "vb1_21_rsn_rb_redwall": {
+  "exclude": true
+ },
+ "bh1_13_alleymarks": {
+  "exclude": true
+ },
+ "prop_opshatch": {
+  "exclude": true
+ },
+ "prop_osphatch": {
+  "exclude": true
+ },
+ "cs_rsn_sl_road_0003b": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "cs_rsn_sl_road_0009": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0.8,
+    "v1": 1,
+    "axis": "u"
+   }
+  ],
+  "features": [
+   {
+    "u0": 0,
+    "u1": 1,
+    "v0": 0,
+    "v1": 0.78,
+    "kind": "text_stop_ahead",
+    "dir": "-v"
+   }
+  ]
+ },
+ "cs_rsn_sl_freewaymrkings": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.2,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "cs_rsn_sl_freewaydtls": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.3,
+    "v0": 0.78,
+    "v1": 1,
+    "kind": "raised_markers_yellow",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.35,
+    "u1": 0.6,
+    "v0": 0.78,
+    "v1": 1,
+    "kind": "raised_markers_white",
+    "dir": "-v"
+   }
+  ]
+ }
+}
