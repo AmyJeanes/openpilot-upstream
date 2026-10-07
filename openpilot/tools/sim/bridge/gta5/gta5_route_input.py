@@ -2,7 +2,9 @@
 goes. The bridge feeds it to modeld from its live route (gta5_world.py, through selfdrive/modeld/route_input.py), and
 gta5-train labels recorded segments with the same encoder, so it depends only on a router.Route and the car's place on it.
 
-Layout (ROUTE_LEN = 173 floats; all zero = no route, which is also what a dropped input looks like):
+Layout (ROUTE_LEN = 223 floats; all zero = no route, which is also what a dropped input looks like). It only grows by
+appending: a model trained on route input v1 (the first V1_LEN = 173 floats) reads that start of it (modeld's
+RouteInputReader, gta5-train), which is why NEXT's lane fields stay although LANES supersedes them.
 - [0:150] NAV: comma's 2023 `nav_instructions` (openpilot 75a69e12b^ modeld.py): multi-hot, index bin * 3 + direction,
   50 bins of 20 m from 500 m behind to 500 m ahead (bin 25 = 0..20 m ahead), direction 0 other / 1 left / 2 right.
   Every Valhalla maneuver of the route lights its bin (LEFT / RIGHT types, the rest "other", start and destination
@@ -20,6 +22,9 @@ Layout (ROUTE_LEN = 173 floats; all zero = no route, which is also what a droppe
   (lane + 0.5) / lanes; 170 lane data present (lanes before > 0).
 - [171:173] STOP: 171 present; 172 m to the next stop line on the route (Route.stops, from 2 m behind, within 300 m)
   / 100. With router.STOP_DIRECTION off they include the far side of junctions: label with the bridge's setting.
+- [173:223] LANES (route input v2): gta5_lane_slots' LANE_SLOTS_LEN floats, the road here and the road out of the next
+  maneuver as lane slots counted from the kerb (oncoming, allowed, target), and from and by where to be in a target
+  lane; zero where the route has no lanes.
 """
 import math
 from typing import NamedTuple
@@ -27,6 +32,8 @@ from typing import NamedTuple
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import gta5_expert, gta5_nav
+from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import LANE_SLOTS_LEN, LaneSlots
+from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import describe as describe_lanes
 
 NAV_BINS, BIN_M, BIN_ZERO = 50, 20.0, 25
 NAV_LEN = NAV_BINS * 3
@@ -34,7 +41,9 @@ PRESENT = NAV_LEN
 HEADING = slice(151, 161)
 NEXT = slice(161, 171)
 STOP = slice(171, 173)
-ROUTE_LEN = 173
+V1_LEN = 173
+LANES = slice(V1_LEN, V1_LEN + LANE_SLOTS_LEN)
+ROUTE_LEN = LANES.stop
 HEADING_AHEAD = np.arange(10.0, 101.0, 10.0)
 # headings sampled from 30 m behind to 130 m ahead, so gta5-train's +-1 bin (20 m) distance jitter can shift them consistently
 HEADING_EXT_AHEAD = np.arange(-30.0, 131.0, 10.0)
@@ -63,9 +72,9 @@ def wrap(deg):
 
 class RouteInput:
   """Encodes one route (router.Route, with GTA's road data for lanes, stops and junctions). Everything about its
-  maneuvers is worked out once here; `encode` per frame is cheap."""
+  maneuvers is worked out once here; `encode` per frame is cheap. `lanes` False leaves LANES zero."""
 
-  def __init__(self, route):
+  def __init__(self, route, drive_on_right: bool = True, lanes: bool = True):
     self.points = np.asarray(route.points, float)
     self.along = np.asarray(route.along, float)
     self.length = float(self.along[-1])
@@ -94,6 +103,7 @@ class RouteInput:
           lo, hi = 0, max(n_in, 1) - 1
       rows.append([s, side, change, entry, n_in, n_out, lo, hi])
     self.next = np.array(rows, float).reshape(-1, 8)
+    self.slots = LaneSlots(route, drive_on_right) if lanes else None
 
   @staticmethod
   def _lanes_at(route, s: float, after: bool) -> int:
@@ -124,8 +134,9 @@ class RouteInput:
     rel = -wrap(self.heading_at(s + HEADING_EXT_AHEAD) - heading)  # right positive
     return np.clip(rel / HEADING_UNIT, -2.0, 2.0).astype(np.float32)
 
-  def encode(self, s: float, heading: float) -> np.ndarray:
-    """[ROUTE_LEN] for the car s m along the route, heading `heading` (game degrees, as the plugin's)."""
+  def encode(self, s: float, heading: float, v: float = 0.0) -> np.ndarray:
+    """[ROUTE_LEN] for the car s m along the route, heading `heading` (game degrees, as the plugin's), at v m/s (the
+    lane slots' target window, as nav's lane plan, depends on speed)."""
     out = np.zeros(ROUTE_LEN, np.float32)
     out[PRESENT] = 1.0
     if len(self.nav):
@@ -150,6 +161,8 @@ class RouteInput:
       d = d[(d > -STOP_BEHIND) & (d < STOP_AHEAD)]
       if len(d):
         out[STOP] = [1.0, d.min() / DIST_UNIT]
+    if self.slots is not None:
+      out[LANES] = self.slots.encode(s, v)
     return out
 
 
@@ -194,8 +207,9 @@ def describe(vec: np.ndarray, lo_bin: int = 20, hi_bin: int = 50) -> str:
          f"lanes {nx.lanes_in}->{nx.lanes_out} tgt {nx.target[0]:.2f}-{nx.target[1]:.2f}") if nx else "next -"
   stop = f"stop {d.stop:4.0f} m" if d.stop is not None else "stop -"
   hd = " ".join(f"{v:+4.0f}" for v in d.heading[::3])
-  return f"{''.join(chars)} | hdg {hd} | {nxt} | {stop}"
+  lanes = f" | {describe_lanes(vec[LANES])}" if len(vec) >= ROUTE_LEN else ""
+  return f"{''.join(chars)} | hdg {hd} | {nxt} | {stop}{lanes}"
 
 
-assert NEXT.stop == STOP.start and STOP.stop == ROUTE_LEN and HEADING.start == PRESENT + 1 and NEXT.start == HEADING.stop
+assert NEXT.stop == STOP.start and STOP.stop == V1_LEN == LANES.start and HEADING.start == PRESENT + 1 and NEXT.start == HEADING.stop
 assert math.isclose(HEADING_EXT_AHEAD[HEADING_EXT_NOMINAL][0], HEADING_AHEAD[0])

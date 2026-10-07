@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 from cereal import log
 
 import openpilot.tools.sim.bridge.gta5.gta5_world as world_mod
@@ -52,20 +53,42 @@ def test_no_nudge_once_the_lane_change_starts_or_for_a_turn():
 
 def test_lane_slots_preview():
   from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as ls
+  from openpilot.tools.sim.bridge.gta5 import gta5_route_input as ri
   from openpilot.tools.sim.bridge.gta5.test_lane_slots import RIGHT, fixture, route
   osm, nodes = fixture('lht.osm', drive_on_right=False)
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
   r.at, r.off = 20.0, 1.0
   w = GTA5World.__new__(GTA5World)
-  writes = []
+  writes, inputs = [], []
   w.lanes_writer = SimpleNamespace(write=writes.append)
-  w.lane_slots, w.route = None, r
+  w.route_writer = SimpleNamespace(write=inputs.append)
+  w.route_input, w.route = None, r
   w.navigator = SimpleNamespace(router=SimpleNamespace(osm=osm))
-  w._write_lane_slots({"vEgo": 10.0})
-  slots = w.lane_slots[1]
-  w._write_lane_slots({"vEgo": 10.0})
-  assert w.lane_slots[1] is slots  # once per route
+  state = {"vEgo": 10.0, "heading": 0.0}
+  w._write_route_input(state)
+  w._write_lane_slots(state)
+  enc = w.route_input[1]
+  w._write_lane_slots(state)
+  assert w.route_input[1] is enc  # once per route, for the model's input and the preview
   assert writes[-1][ls.SIDE] == -1.0 and ls.describe(writes[-1][:ls.LANE_SLOTS_LEN]) == 'here aTo..... out ao...... | from 0 by 50 m'
+  np.testing.assert_array_equal(inputs[-1][ri.LANES], writes[-1][:ls.LANE_SLOTS_LEN])
   r.off = world_mod.OFF_ROUTE_INPUT + 1.0
-  w._write_lane_slots({"vEgo": 10.0})
-  assert len(writes) == 3 and not writes[-1].any()
+  w._write_lane_slots(state)
+  w._write_route_input(state)
+  assert len(writes) == 3 and not writes[-1].any() and not inputs[-1].any()
+
+
+def test_lane_slots_failure_keeps_v1():
+  from openpilot.tools.sim.bridge.gta5 import gta5_route_input as ri
+  from openpilot.tools.sim.bridge.gta5.test_lane_slots import RIGHT, fixture, route
+  osm, nodes = fixture('lht.osm', drive_on_right=False)
+  r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
+  r.at, r.off = 20.0, 1.0
+  w = GTA5World.__new__(GTA5World)
+  inputs = []
+  w.route_writer = SimpleNamespace(write=inputs.append)
+  w.route_input, w.route = None, r
+  w.navigator = SimpleNamespace(router=SimpleNamespace(osm=osm))
+  w._route_encoder(r).slots.encode = None  # broken: calling it raises
+  w._write_route_input({"vEgo": 10.0, "heading": 0.0})
+  assert w.route_input[1].slots is None and inputs[-1][ri.PRESENT] == 1.0 and not inputs[-1][ri.LANES].any()

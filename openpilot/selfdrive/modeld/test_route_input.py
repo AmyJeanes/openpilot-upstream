@@ -56,6 +56,15 @@ def test_wrong_size():
     assert not RouteInputReader(N, path).read().any()
 
 
+def test_prefix():
+  with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "route_input")
+    longer = np.random.default_rng(3).random(N + 50).astype(np.float32)
+    RouteInputWriter(N + 50, path).write(longer)  # a newer layout, appended to
+    np.testing.assert_array_equal(RouteInputReader(N, path).read(), longer[:N])
+    np.testing.assert_array_equal(RouteInputReader(N + 50, path).read(), longer)
+
+
 def test_torn():
   with tempfile.TemporaryDirectory() as d:
     path = os.path.join(d, "route_input")

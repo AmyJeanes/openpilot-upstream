@@ -1,6 +1,8 @@
 """The route input of a route-conditioned driving model, from whoever knows the route (the GTA V bridge) to modeld, in
 a shared-memory file: uint32 seq (odd while being written), uint32 n, float64 CLOCK_MONOTONIC time, float32[n].
-Plain mmap, as multiprocessing.shared_memory registers a reader's attach with the resource tracker, which unlinks it."""
+Plain mmap, as multiprocessing.shared_memory registers a reader's attach with the resource tracker, which unlinks it.
+A route input's layout only grows by appending (gta5_route_input.py), so a model with a smaller input reads the start
+of a longer one."""
 import mmap
 import os
 import struct
@@ -42,8 +44,8 @@ class RouteInputWriter:
 
 
 class RouteInputReader:
-  """read() is the newest input, or zeros (no route) when there is none, it's the wrong size or it's stale. A torn read
-  gives the last good input."""
+  """read() is the newest input (its first n floats), or zeros (no route) when there is none, it's shorter than n or
+  it's stale. A torn read gives the last good input."""
   def __init__(self, n: int, path: str | None = None):
     self.n = n
     self.path = path or route_input_path()
@@ -77,9 +79,9 @@ class RouteInputReader:
       return self.zeros
     now = time.monotonic()
     seq, n, t = HEADER.unpack_from(self.mm)
-    if n != self.n:
+    if n < self.n:
       return self.zeros
-    vec = np.frombuffer(self.mm[HEADER.size:HEADER.size + 4 * n], dtype=np.float32)
+    vec = np.frombuffer(self.mm[HEADER.size:HEADER.size + 4 * self.n], dtype=np.float32)
     if seq & 1 or struct.unpack_from('<I', self.mm)[0] != seq:
       return self.last if now - self.last_t <= MAX_AGE else self.zeros
     if now - t > MAX_AGE:
