@@ -71,6 +71,87 @@ def test_ribbon_line_drops_jogs_keeps_turns():
   assert out[:, :2].tolist() == [[0, 0], [2.5, 21], [2.5, 40], [2.5, 60], [30, 60]]
 
 
+def straight_route() -> Route:
+  return Route(np.column_stack([np.zeros(101), np.arange(101) * 10.0]), [])
+
+
+def lane_from(route: Route, at: float, x: float) -> np.ndarray:
+  """Nav's lane plan line as gta5_world caches it: planned with the car at m along the route, x m right of it."""
+  s = np.arange(at, route.along[-1], 2.0)
+  return np.column_stack([np.full(len(s), x), s])
+
+
+def ribbon_snap(route: Route, lane: np.ndarray, v: float = 20.0, **kw) -> dict:
+  return {"pos": [0.5, route.at, ov.CAR_HEIGHT], "layers": "rm", "route": route, "v": v, "lane_line": lane, **kw}
+
+
+def test_ribbon_starts_under_the_car_from_a_stale_plan():
+  route = straight_route()
+  route.at = 100.0
+  items = ov.Ribbon().items(ribbon_snap(route, lane_from(route, 90.0, 1.75)))  # planned 10 m back
+  r = [line for k, line in items if k == "r"]
+  assert len(r) == 1
+  np.testing.assert_allclose(r[0][0], [1.75, 100.0 + 20.0 * ov.ROUTE_LEAD, ov.RIBBON_LIFT], atol=0.01)
+
+
+def test_ribbon_behind_is_where_it_was_drawn():
+  route = straight_route()
+  ribbon = ov.Ribbon()
+  for y in np.arange(100.0, 141.0, 2.0):  # nav's plan moves a lane left at 120 m
+    route.at = y
+    items = ribbon.items(ribbon_snap(route, lane_from(route, y - 3.0, 1.75 if y < 120 else -1.75)))
+  r = [line for k, line in items if k == "r"]
+  b = [line for k, line in items if k == "b"]
+  assert len(r) == len(b) == 1
+  r, b = r[0], b[0]
+  np.testing.assert_allclose(b[-1], r[0])  # they meet
+  assert b[0, 1] >= r[0, 1] - ov.BEHIND - 0.5
+  # in the lanes the ribbon was in as the car passed, not between them (the route's carriageway line, x 0 here)
+  before, after = b[b[:, 1] < 118, 0], b[b[:, 1] > 122, 0]
+  assert len(before) and len(after) and np.all(np.abs(before - 1.75) < 0.05) and np.all(np.abs(after + 1.75) < 0.05)
+  route.at = 400.0  # a jump: it starts again
+  items = ribbon.items(ribbon_snap(route, lane_from(route, 400.0, 1.75), v=0.0))
+  assert not [line for k, line in items if k == "b"]
+
+
+def test_route_goes_between_full_updates_with_the_rest_as_sent():
+  route = straight_route()
+  route.at = 100.0
+  overlay = ov.Overlay(background=False)
+  full = overlay.make(ribbon_snap(route, lane_from(route, 100.0, 1.75), full=True, turn=np.array([0.0, 300.0])))
+  route.at = 102.0
+  part = overlay.make(ribbon_snap(route, lane_from(route, 100.0, 1.75), full=False))
+  assert (part["ox"], part["oy"], part["oz"]) == (full["ox"], full["oy"], full["oz"])
+  a, b = decode(full), decode(part)
+  assert [line.tolist() for k, line in a if k == "m"] == [line.tolist() for k, line in b if k == "m"] == [[[0.0, 300.0, 0.0]]]
+  ra, rb = (next(line for k, line in items if k == "r") for items in (a, b))
+  assert abs(rb[0, 1] - ra[0, 1] - 2.0) < 0.11
+  assert part["n"] == sum(len(line) for _, line in b) <= ov.MAX_POINTS
+  assert overlay.stats["route_ms"] < 50
+
+
+def test_update_sends_the_route_more_often(monkeypatch):
+  now = [0.0]
+  monkeypatch.setattr(ov, "time", SimpleNamespace(monotonic=lambda: now[0]))
+  route = straight_route()
+  overlay = ov.Overlay(background=False)
+  overlay.thread = object()  # no worker: the snapshots are taken here
+  state = {"pos": [0.0, 0.0, 0.6], "vEgo": 10.0, "debug": {"on": True, "layers": "r"}}
+  fulls = []
+  for ms in range(0, 1000, 10):
+    now[0] = ms / 1000
+    overlay.update(state, route, None, lambda: None, None, False)
+    if overlay.snap is not None:
+      fulls.append(overlay.snap["full"])
+      overlay.snap = None
+  assert fulls.count(True) == 2 and abs(len(fulls) - 1.0 / ov.ROUTE_EVERY) <= 1
+  now[0] = 1.0
+  overlay.update(state, route, None, lambda: None, None, False)
+  now[0] = 1.0 + ov.ROUTE_EVERY
+  overlay.update(state, route, None, lambda: None, None, False)
+  assert overlay.snap["full"]  # one the worker hasn't got to yet stays full
+
+
 def test_within_splits_at_the_radius():
   line = np.column_stack([np.linspace(-300, 300, 61), np.zeros(61), np.zeros(61)])
   runs = ov.within(line, np.zeros(2), 150.0)
@@ -204,7 +285,9 @@ def drive_route(paths: Paths, place: str, length: float = 700.0, turn_after: flo
   return route
 
 
-def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, osm=None) -> tuple[dict, dict]:
+def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, osm=None, full: bool = True,
+                   lane: bool = False) -> tuple[dict, dict]:
+  """A full update, or (full False) the route's alone; with lane, the route's own line stands in for nav's lane plan."""
   overlay = overlay or ov.Overlay()
   route = drive_route(paths, place, osm=osm)
   x, y, z, heading = PLACES[place]
@@ -213,7 +296,7 @@ def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, 
   nav = Nav(lambda m: None, lambda d: None)
   nav.v = 10.0
   snap = {"pos": state["pos"], "layers": ov.DEFAULT_LAYERS + "f", "route": route, "paths": paths, "osm": osm,
-          "recording": False, "lane_line": None}
+          "recording": False, "lane_line": route.rest() if lane else None, "v": 10.0, "full": full}
   points = nav.turn_points(np.array(state["route"]), state)
   if points is not None:
     snap["turn"], snap["signal"] = points
@@ -367,3 +450,7 @@ elif __name__ == "__main__":
         kinds[k] = kinds.get(k, 0) + len(line)
       wall = 1000 * (time.monotonic() - t)
       print(f"{place} #{n}: {len(msg['g'])} chars, {msg['n']} points, {stats} (wall {wall:.0f} ms); points by kind {kinds}")
+    for lane in (False, True):
+      msg, stats = overlay_update(p, place, overlay, full=False, lane=lane)
+      name = f"{place} route alone{' (lane plan)' if lane else ''}"
+      print(f"{name}: {len(msg['g'])} chars, {msg['n']} points, route_ms {stats['route_ms']}")

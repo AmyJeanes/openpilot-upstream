@@ -127,14 +127,16 @@ their own (`GTA5_LANE_SLOTS=0` turns that off); they aren't the model's input ye
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
 problems while driving (`gta5_overlay.py`): lane edges green, dividers cyan, stop lines yellow (lights) and orange
-(signs), junction areas blue, the route a 1.75 m translucent red band on the road (darker behind the car), nav's lane
-plan a dashed white line 0.25 m up (2 m on, 1.5 m off) so it reads over the route, the next turn a white cylinder and
-where its signal comes on an amber cone, all within 150 m and lifted 0.1 m off the road. Lane edges and dividers stop at
+(signs), junction areas blue, the route a 1.75 m translucent red band on the road (darker behind the car, where it
+was drawn as the car passed), nav's lane plan a dashed white line 0.25 m up (2 m on, 1.5 m off) so it reads over the
+route, the next turn a white cylinder and where its signal comes on an amber cone, all within 150 m and lifted 0.1 m
+off the road. Lane edges and dividers stop at
 junctions (from the stop line in, and inside junction areas and the circles round them). The route's band is a quad per
 segment with bevelled corners, along the route's line thinned to 1 m and cleared of short sideways jogs. Lines are
 DRAW_LINE's, 1 px wide. The bridge sends
-them every 0.5 s while the plugin's debug is on (`GTA5_OVERLAY=0` stops it); they come from GTA's roads with
-`GTA5_MAP`/`GTA5_ROUTER`. `layers=` picks some of edges, dividers, stops, junctions, route, nav, points and fill
+them every 0.5 s, and the route alone every 0.1 s between, from where the car will be as it is drawn, while the
+plugin's debug is on (`GTA5_OVERLAY=0` stops it); they come from GTA's roads with `GTA5_MAP`/`GTA5_ROUTER`.
+`layers=` picks some of edges, dividers, stops, junctions, route, nav, points and fill
 (translucent junction areas); `ground=1` puts the lines on the game's ground rather than at the map's heights, which
 hides height errors in the map. The plugin draws them only on the player's frames, never on the openpilot camera's
 (they're the ones with the capture marker), and not at all while the bridge records unless `force=1`.

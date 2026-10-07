@@ -5,7 +5,9 @@ in world coordinates with the road's height, for the plugin to draw into the wor
 the lines painted between lanes (from the map's lane tags where it has them, osm_lanes.py: white dashed between lanes one
 way, solid where change:lanes forbids crossing, yellow between the directions; else GTA's lane bands), stop lines
 (lights, signs), junction areas, the route in the lanes nav plans (its lane plan line), and the next turn with where its
-signal comes on, drawn at their own heights (GTA's) rather than filtered to the car's level.
+signal comes on, drawn at their own heights (GTA's) rather than filtered to the car's level. The route also goes on its
+own every ROUTE_EVERY s in between, with the rest as last sent (the plugin replaces all it draws with each message): from
+where the car will be while it's drawn on, and behind the car where it was drawn as the car passed (Ribbon).
 On a lane-tagged map the roads are all from its tags, as the map view draws them (osm_to_roads.py): junction areas,
 their kerbs round the corners and their stop lines from junctions.py, the lines cut out of junction areas and (but for
 kerbs) from each stop line in to its junction, and a median's edges a yellow line each. They take about 40 s to build,
@@ -42,6 +44,13 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
+ROUTE_EVERY = 0.1  # s between the route's updates, with the roads as last sent
+# s on from the car's state the ribbon starts: the state's age and the trip to the plugin (~0.08 s), and half of
+# ROUTE_EVERY, so its start stays under the car
+ROUTE_LEAD = 0.13
+ROUTE_SLACK = 150  # points (and ROUTE_SLACK * 20 characters) the roads leave for the route to grow by till they go again
+LANE_SEARCH = 100.0  # m along nav's lane plan line from its start (where the car was when it was planned) to find the car
+TRAIL_JUMP = 10.0  # m off the lane plan line the route behind ends: it starts again from the car
 RADIUS = 150.0  # m around the car
 LEVEL = 40.0  # m above or below the car: tunnels and bridges further off are left out
 BEHIND = 30.0  # m of route behind the car
@@ -52,7 +61,7 @@ AREA_SIMPLIFY = 0.5  # m, for a junction area's outline (its kerbs are drawn to 
 RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
 RIBBON_TURN = 60.0  # deg: sharper corners in the route's line are cut where a side is shorter than RIBBON_JOG
 RIBBON_JOG = 5.0  # m
-RIBBON_LIFT = 0.5  # m above the map's road height: the map's heights can sit under the game's ground
+RIBBON_LIFT = 0.25  # m above the map's road height: the map's heights can sit under the game's ground
 CELL = 50.0  # m: node index cells
 LIGHT = 15  # node special: a traffic light's stop line
 CAR_HEIGHT = 0.6  # paths.CAR_HEIGHT
@@ -625,8 +634,91 @@ def encode(origin: np.ndarray, items: list[tuple[str, np.ndarray]]) -> str:
   return ";".join(parts)
 
 
-def build(snap: dict, geometry: RoadGeometry | None) -> dict:
-  """The debugGeo message for a snapshot of the car, route and nav (Overlay._snapshot)."""
+def arc(line: np.ndarray) -> np.ndarray:
+  """m along a polyline [N, 2 or 3] (in plan) to each of its points."""
+  return np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(line[:, :2], axis=0).T))))
+
+
+def nearest_along(line: np.ndarray, s: np.ndarray, pos: np.ndarray, upto: float) -> tuple[float, float]:
+  """Where on the first upto m of a polyline [N >= 2, 2 or 3] (s: arc(line)) is nearest pos (in plan): (m along it, m off)."""
+  n = int(np.clip(np.searchsorted(s, upto) + 1, 2, len(line)))
+  a, ab = line[:n - 1, :2], np.diff(line[:n, :2], axis=0)
+  t = np.clip(np.einsum("ij,ij->i", pos - a, ab) / np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-12), 0.0, 1.0)
+  off = np.hypot(*(a + ab * t[:, None] - pos).T)
+  k = int(np.argmin(off))
+  return float(s[k] + t[k] * (s[k + 1] - s[k])), float(off[k])
+
+
+def piece(line: np.ndarray, s: np.ndarray, lo: float, hi: float) -> np.ndarray:
+  """The part of a polyline [N, D] (s: arc(line)) from lo to hi m along it."""
+  ends = [[np.interp(v, s, line[:, c]) for c in range(line.shape[1])] for v in (lo, hi)]
+  return np.vstack([ends[0], line[(s > lo) & (s < hi)], ends[1]])
+
+
+class Ribbon:
+  """The route's ribbon: from where the car will be while the plugin draws it on (r; n with the route layer off), along
+  nav's lane plan line, which can be up to gta5_world's LANE_LINE_EVERY old; and behind the car (b) the lines it was
+  drawn along as the car passed, kept as the car goes. Without a lane plan, both along the route's carriageway_line."""
+
+  def __init__(self):
+    self.trail = np.zeros((0, 3))  # behind the car, up to where the ribbon last started
+
+  def items(self, snap: dict) -> list[tuple[str, np.ndarray]]:
+    pos3 = np.asarray(snap["pos"], np.float64)
+    pos, road_z = pos3[:2], float(pos3[2]) - CAR_HEIGHT
+    layers = snap["layers"]
+    route = snap.get("route")
+    lead = max(float(snap.get("v") or 0.0), 0.0) * ROUTE_LEAD
+    lane = snap.get("lane_line")
+    lane = np.asarray(lane, np.float64) if lane is not None and len(lane) >= 2 else None
+    out: list[tuple[str, np.ndarray]] = []
+    if lane is None:
+      self.trail = np.zeros((0, 3))
+      if route is None or "r" not in layers or len(route.points) < 2:
+        return out
+      line, along = snap["carriageway"]
+      here = route.at + lead
+      for kind, lo, hi in (("b", route.at - BEHIND, here), ("r", here, route.at + 2 * RADIUS + 100.0)):
+        # both from exactly there, so the two parts meet
+        lo, hi = max(lo, float(along[0])), min(hi, float(along[-1]))
+        v = np.concatenate(([lo], along[(along > lo + RIBBON_GAP) & (along < hi - RIBBON_GAP)], [hi]))
+        if hi - lo > RIBBON_GAP:
+          xy = np.column_stack([np.interp(v, along, line[:, 0]), np.interp(v, along, line[:, 1])])
+          pts = ribbon_line(np.column_stack([xy, route_z(route, v, road_z) + RIBBON_LIFT]))
+          out += [(kind, run) for run in within(pts, pos, RADIUS)]
+      return out
+    s = arc(lane)
+    car, _ = nearest_along(lane, s, pos, LANE_SEARCH)
+    start = min(car + lead, float(s[-1]))
+    # its heights by the route's, from the car's place on both
+    z = route_z(route, route.at + s - car, road_z) if route is not None else np.full(len(s), road_z)
+    line = np.column_stack([lane, z])
+    self._extend_trail(line, s, start)
+    if ("r" in layers or "n" in layers) and s[-1] - start > RIBBON_GAP:
+      pts = ribbon_line(piece(line, s, start, float(s[-1])) + [0.0, 0.0, RIBBON_LIFT])
+      out += [("r" if "r" in layers else "n", run) for run in within(pts, pos, RADIUS)]
+    if "r" in layers and len(self.trail) >= 2:
+      out += [("b", run) for run in within(ribbon_line(self.trail + [0.0, 0.0, RIBBON_LIFT]), pos, RADIUS)]
+    return out
+
+  def _extend_trail(self, line: np.ndarray, s: np.ndarray, start: float):
+    """The trail on along line [N, 3] (s: arc(line)) from where it ended to start, its last BEHIND m kept."""
+    trail, done = self.trail, 0.0
+    if len(trail):
+      done, off = nearest_along(line, s, trail[-1, :2], LANE_SEARCH)
+      if off > TRAIL_JUMP:  # a jump (respawned, or a new route elsewhere): it starts again here
+        trail, done = trail[:0], 0.0
+    if start > done + 0.05:
+      new = piece(line, s, done, start)
+      trail = np.vstack([trail, new[1:]]) if len(trail) else new
+    st = arc(trail) if len(trail) >= 2 else np.zeros(len(trail))
+    if len(trail) >= 2 and st[-1] > BEHIND:
+      trail = piece(trail, st, float(st[-1]) - BEHIND, float(st[-1]))
+    self.trail = trail
+
+
+def road_items(snap: dict, geometry: RoadGeometry | None) -> list[tuple[str, np.ndarray]]:
+  """All but the route's ribbon for a snapshot of the car, route and nav (Overlay.update): the roads and the next turn."""
   pos3 = np.asarray(snap["pos"], np.float64)
   pos, road_z = pos3[:2], float(pos3[2]) - CAR_HEIGHT
   layers = snap["layers"]
@@ -634,25 +726,6 @@ def build(snap: dict, geometry: RoadGeometry | None) -> dict:
   if geometry is not None:
     items += geometry.near(pos, road_z, RADIUS, layers)
   route = snap.get("route")
-  lane = snap.get("lane_line")
-  lane = np.asarray(lane, np.float64) if lane is not None and len(lane) >= 2 else None
-  if route is not None and "r" in layers and len(route.points) >= 2:
-    line, along = snap["carriageway"]
-    for kind, lo, hi in (("b", route.at - BEHIND, route.at), ("r", route.at, route.at + 2 * RADIUS + 100.0)):
-      if kind == "r" and lane is not None:
-        continue  # ahead it follows nav's lane plan (below), so it sits in a lane rather than between two
-      # from exactly the car's place on the route, so the two parts meet there
-      lo, hi = max(lo, float(along[0])), min(hi, float(along[-1]))
-      v = np.concatenate(([lo], along[(along > lo + RIBBON_GAP) & (along < hi - RIBBON_GAP)], [hi]))
-      if hi - lo > RIBBON_GAP:
-        xy = np.column_stack([np.interp(v, along, line[:, 0]), np.interp(v, along, line[:, 1])])
-        pts = ribbon_line(np.column_stack([xy, route_z(route, v, road_z) + RIBBON_LIFT]))
-        items += [(kind, run) for run in within(pts, pos, RADIUS)]
-  if lane is not None and ("r" in layers or "n" in layers):
-    s = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(lane, axis=0).T))))
-    z = route_z(route, (route.at if route is not None else 0.0) + s, road_z) if route is not None else np.full(len(s), road_z)
-    pts = ribbon_line(np.column_stack([lane, z + RIBBON_LIFT]))
-    items += [("r" if "r" in layers else "n", run) for run in within(pts, pos, RADIUS)]
   if "m" in layers:
     for kind, xy in (("m", snap.get("turn")), ("g", snap.get("signal"))):
       if xy is not None:
@@ -661,31 +734,36 @@ def build(snap: dict, geometry: RoadGeometry | None) -> dict:
           k = int(np.argmin(np.hypot(*(np.asarray(route.points) - xy).T)))
           z = float(route_z(route, np.array([route.along[k]]), road_z)[0])
         items.append((kind, np.array([[xy[0], xy[1], z]])))
+  return items
+
+
+def pack(items: list[tuple[str, np.ndarray]], pos: np.ndarray, origin: np.ndarray, max_points: int, max_chars: int) -> tuple[str, int]:
+  """Polylines encoded for debugGeo's g, nearest pos first within each layer, layers by priority, to the budget:
+  (g, its points)."""
   items = [(k, simplify(line, SIMPLIFY) if len(line) > 2 else line) for k, line in items]
-  # nearest first within each layer, layers by priority, to the budget
   items.sort(key=lambda it: (PRIORITY.index(it[0]), float(np.hypot(*(it[1][:, :2] - pos).T).min())))
   kept, points = [], 0
   for kind, line in items:
-    if points + len(line) > MAX_POINTS:
+    if points + len(line) > max_points:
       continue
     kept.append((kind, line))
     points += len(line)
-  origin = np.round(pos3)
   g = encode(origin, kept)
-  while len(g) > MAX_CHARS and kept:
+  while len(g) > max_chars and kept:
     kept = kept[:int(len(kept) * 0.8)]
     g = encode(origin, kept)
-  return {"type": "debugGeo", "ox": float(origin[0]), "oy": float(origin[1]), "oz": float(origin[2]),
-          "rec": int(bool(snap.get("recording"))), "n": points, "g": g}
+  return g, sum(len(line) for _, line in kept)
 
 
 class Overlay:
-  """Runs the overlay off the bridge's loop: update() hands a snapshot to a worker thread every EVERY s while the
-  plugin's map debug is on, and returns the message it built last for the caller to send. With background, the lane
-  tags' lines missing from the cache build in a separate process (start_marks_build); else in make()."""
+  """Runs the overlay off the bridge's loop: update() hands a snapshot to a worker thread every EVERY s (and the route's
+  every ROUTE_EVERY s) while the plugin's map debug is on, and returns the message it built last for the caller to send.
+  With background, the lane tags' lines missing from the cache build in a separate process (start_marks_build); else
+  in make()."""
 
   def __init__(self, background: bool = True):
-    self.next = 0.0
+    self.next = 0.0  # the next full update
+    self.next_route = 0.0
     self.lock = threading.Lock()
     self.wake = threading.Event()
     self.snap: dict | None = None
@@ -694,6 +772,8 @@ class Overlay:
     self.geometry: RoadGeometry | None = None
     self.geometry_for = None
     self.carriageway: tuple | None = None  # (route, (points, along))
+    self.ribbon = Ribbon()
+    self.roads: tuple | None = None  # what the last full update sent but the ribbon: (origin, (g, points), layers)
     self.stats: dict = {}
     self.background = background
     self.marks_for: tuple | None = None  # ((paths, osm), their road_marks' cache key, when first asked for)
@@ -707,18 +787,26 @@ class Overlay:
         self.outbox = None
     debug = state.get("debug") or {}
     now = time.monotonic()
-    if not ENABLED or not debug.get("on") or now < self.next:
+    if not ENABLED or not debug.get("on") or now < self.next_route:
       return out
-    self.next = now + EVERY
     layers = str(debug.get("layers") or DEFAULT_LAYERS)
-    snap = {"pos": state["pos"], "layers": layers, "route": route, "paths": paths, "osm": osm, "recording": recording}
+    full = now >= self.next
+    if not full and (route is None or "r" not in layers and "n" not in layers):
+      return out
+    self.next_route = now + ROUTE_EVERY
+    if full:
+      self.next = now + EVERY
+    snap = {"pos": state["pos"], "layers": layers, "route": route, "paths": paths, "osm": osm, "recording": recording,
+            "v": state.get("vEgo", 0.0), "full": full}
     if "r" in layers or "n" in layers:
       snap["lane_line"] = lane_line()
-    if "m" in layers and state.get("route") and nav is not None:
+    if full and "m" in layers and state.get("route") and nav is not None:
       points = nav.turn_points(np.array(state["route"], dtype=float), state)
       if points is not None:
         snap["turn"], snap["signal"] = points
     with self.lock:
+      if not full and self.snap is not None and self.snap["full"]:
+        snap = {**self.snap, **snap, "full": True}  # the worker hasn't got to the last full one: it stays one
       self.snap = snap
     if self.thread is None:
       self.thread = threading.Thread(target=self._run, name="gta5 overlay", daemon=True)
@@ -743,10 +831,13 @@ class Overlay:
         self.outbox = msg
 
   def make(self, snap: dict) -> dict:
+    """The debugGeo message for a snapshot: all of it, or (snap's full False) the route with the roads as last made."""
     t0 = time.monotonic()
     paths = snap.get("paths")
     osm = snap.get("osm")
-    if paths is not None and self.geometry_for != (paths, osm):
+    layers = snap["layers"]
+    full = snap.get("full", True) or self.roads is None or self.roads[2] != layers
+    if full and paths is not None and self.geometry_for != (paths, osm):
       # until its lines are ready, the overlay goes on without the roads, as before the maps load
       geometry = self._road_geometry(paths, osm)
       if geometry is not None:
@@ -759,8 +850,22 @@ class Overlay:
       if self.carriageway is None or self.carriageway[0] is not route:
         self.carriageway = (route, carriageway_line(route))
       snap["carriageway"] = self.carriageway[1]
-    msg = build(snap, self.geometry)
-    self.stats.update(ms=round((time.monotonic() - t0) * 1000, 1), chars=len(msg["g"]), points=msg["n"])
+    pos3 = np.asarray(snap["pos"], np.float64)
+    ribbon = self.ribbon.items(snap)
+    if full:
+      origin = np.round(pos3)
+      g, n = pack(ribbon, pos3[:2], origin, MAX_POINTS, MAX_CHARS)
+      # the roads leave room for the route to grow until they go again
+      roads, roads_n = pack(road_items(snap, self.geometry), pos3[:2], origin, MAX_POINTS - n - ROUTE_SLACK,
+                            MAX_CHARS - len(g) - 1 - ROUTE_SLACK * 20)
+      self.roads = (origin, (roads, roads_n), layers)
+    else:
+      origin, (roads, roads_n), _ = self.roads
+      g, n = pack(ribbon, pos3[:2], origin, MAX_POINTS - roads_n, MAX_CHARS - len(roads) - 1)
+    msg = {"type": "debugGeo", "ox": float(origin[0]), "oy": float(origin[1]), "oz": float(origin[2]),
+           "rec": int(bool(snap.get("recording"))), "n": n + roads_n, "g": ";".join(p for p in (g, roads) if p)}
+    self.stats.update({"ms" if full else "route_ms": round((time.monotonic() - t0) * 1000, 1), "chars": len(msg["g"]),
+                       "points": msg["n"]})
     return msg
 
   def _road_geometry(self, paths, osm) -> RoadGeometry | None:
