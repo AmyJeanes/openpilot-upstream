@@ -27,7 +27,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
-from openpilot.tools.sim.bridge.gta5.map.paths import Paths
+from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, Paths
 from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
@@ -446,7 +446,7 @@ class GTA5World(World):
     speed = f"{v * 3.6:.0f} km/h" if self.metric else f"{v / 0.44704:.0f} mph"
     self.map_view.update({
       "t": now,
-      "car": {"x": state["pos"][0], "y": state["pos"][1], "bearing": bearing},
+      "car": {"x": state["pos"][0], "y": state["pos"][1], "z": round(state["pos"][2] - CAR_HEIGHT, 1), "bearing": bearing},
       "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
                  "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,

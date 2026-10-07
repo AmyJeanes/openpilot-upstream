@@ -63,7 +63,12 @@ and `footway=crossing` crossings striped across the road. Roads are drawn a laye
 `tunnel`): bridges over what they cross, with a dark casing, tunnels faded. A median between the directions is a
 solid yellow line along each edge. "Turn paths" shows each lane's moves through the junctions (`Junctions.movements`:
 `turn:lanes` arrows matched to the ways out by angle, `type=connectivity` relations, turn restrictions, no U-turns;
-without arrows the outer lanes also turn): dashed blue left, grey through, orange right.
+without arrows the outer lanes also turn): dashed blue left, grey through, orange right. Where the map has heights
+(ynd_to_osm's nodes' `ele`), roads.json and lanes.json give each road, line and junction its height, and zoomed in
+the view draws what's on another level from the car darker, under the car's: within about 4 m of its height, and 6 cm
+more for each metre away from it (a road climbs), so a road crossing over or under it is dimmed but a hillside isn't.
+The view keeps what it has drawn in tiles of screen pixels while the map pans, drawing them again when the zoom, what's
+shown or a level changes.
 `map_view.py roads.json --state <file>` shows the map alone, with a state from a file.
 
 ## The map

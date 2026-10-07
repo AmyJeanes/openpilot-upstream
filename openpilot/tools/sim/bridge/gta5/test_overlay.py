@@ -135,9 +135,11 @@ def test_median_edges_are_one_yellow_line_each():
 
 
 def test_z_along_a_clipped_piece():
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import z_along
   line = np.array([[0, 0], [10, 0], [10, 10]], float)
   z = np.array([0.0, 10.0, 20.0])
-  np.testing.assert_allclose(ov.z_along(np.array([[2.5, 0], [10, 5]]), line, z), [2.5, 15.0])
+  np.testing.assert_allclose(z_along(np.array([[2.5, 0], [10, 5]]), line, z), [2.5, 15.0])
+  np.testing.assert_allclose(z_along(np.column_stack([np.linspace(0, 10, 200), np.zeros(200)]), line, z)[[0, -1]], [0.0, 10.0])
 
 
 def test_gps_route_sends_when_it_changes_or_the_plugin_lost_it():
