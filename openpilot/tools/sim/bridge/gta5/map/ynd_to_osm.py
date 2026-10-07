@@ -768,7 +768,7 @@ def detached_bays(nodes, rows, junction):
         road.append(n[1:])
         path.append(n[0])
         total += length(q, n[0])
-      if path[-1] != j or len({(lanes(r, a), lanes(r, not a)) for r, a in road}) != 1:
+      if path[-1] != j or len({bool(lanes(r, not a)) for r, a in road}) != 1:
         continue
       r0, a0 = road[0]
       n, back, lf = lanes(r0, a0), lanes(r0, not a0), rows[r0][4]
@@ -1011,8 +1011,8 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
   lanes (Valhalla reads them from the way into the junction). None where every lane only goes through, or where the
   road bends into the junction (APPROACH_BEND), which leaves which way is through moot. A one-lane approach gets none,
   as real mappers leave them out, unless it's GTA's left turn only lane; on a wider road that lane is the left one. A
-  turn bay folded into its road (`left_bays`, the links into their junctions) is its left lane, marked from where it
-  opens. On a two-way road with a median (`medians`, its links (node, next node) where the median has room for a lane)
+  turn bay folded into its road (`left_bays`, its road's links) is its left lane, marked from where it opens, also
+  where the road gains lanes on the way (`left|through` before that). On a two-way road with a median (`medians`, its links (node, next node) where the median has room for a lane)
   running in to a junction it may turn left at, GTA paints the median as a left-turn lane without a link of its own
   (measured on 4 of 4 such approaches): one more lane, `left`, on the approach's links within the median, if they are
   at least MEDIAN_LANE_MIN long. Arrows painted on the approach (`painted`, by link (node, next node):
@@ -1051,7 +1051,8 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
       start = p if dist >= APPROACH_HEADING else None
       while dist < (math.inf if (p, j) in left_bays else APPROACH):
         prev = [r for r in into[q] if r != nxt]
-        if junction(q) or len(prev) != 1 or set(out[q]) - {prev[0]} != {nxt} or lanes_to[(prev[0], q)] != n:
+        if junction(q) or len(prev) != 1 or set(out[q]) - {prev[0]} != {nxt} or \
+           lanes_to[(prev[0], q)] != n and (prev[0], q) not in left_bays:
           break
         q, nxt = prev[0], q
         chain.append((q, nxt))
@@ -1094,7 +1095,8 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
         wid = way_of[e]
         a, two_way = drawn[wid]
         key = 'turn:lanes' if not two_way else 'turn:lanes:forward' if e[0] == a else 'turn:lanes:backward'
-        tags[wid].setdefault(key, '|'.join(lanes))
+        # before the road widens beside a bay: the bay and lanes going on
+        tags[wid].setdefault(key, '|'.join(lanes if lanes_to[e] == n else ['left'] + ['through'] * (lanes_to[e] - 1)))
   return tags, approaches, bent, opened
 
 
@@ -1159,8 +1161,7 @@ def main():
       bay_to[row[0]].add(b)
       if b != j:  # GTA forbids turning left from the road's own lanes before the bay's junction: they're its lanes now
         nodes[b] = {**nodes[b], 'f': [nodes[b]['f'][0] & ~128, *nodes[b]['f'][1:]]}
-      if k == len(road) - 1:
-        left_bays.add((a, b))
+      left_bays.add((a, b))
   info = [row for r, row in enumerate(info) if r not in gone]
   used = sorted({k for _, a, b, *_ in info for k in (a, b)})
   out.clear()

@@ -173,8 +173,8 @@ class Network:
     return False
 
   def exits(self, wid: int, d: int) -> list[list[tuple[float, bool]]] | None:
-    """The ways out of the junction at the end of the run of ways with the same arrows as way `wid` travelled `d`
-    (mapped up to the junction): [(turn, allowed)], measured once from the last bit of road in and once from the road
+    """The ways out of the junction at the end of the run of ways with arrows from way `wid` travelled `d` (mapped up
+    to the junction, their arrows changing where the road gains lanes): [(turn, allowed)], measured once from the last bit of road in and once from the road
     over the last APPROACH_SPAN m, as it can bend or jog across lanes into the junction; None at a dead end or
     after REACH."""
     refs, xy, tags = self.ways[wid]
@@ -195,7 +195,8 @@ class Network:
     while True:
       h_in = heading(trail[-2], trail[-1])
       ahead = [m for m in self.moves(node) if not (m[0] == seq[-1] and m[1] != d) and abs(wrap(m[3] - h_in)) <= U_TURN]
-      if len(ahead) != 1 or arrows(self.ways[ahead[0][0]][2], ahead[0][1]) != marked:
+      # on while the road goes on marked, its arrows changing where it gains or loses lanes on the way in
+      if len(ahead) != 1 or arrows(self.ways[ahead[0][0]][2], ahead[0][1]) is None:
         break
       m = ahead[0]
       dist += m[4]

@@ -733,7 +733,7 @@ class RouteLanes:
     if k0 not in self.tapers or self.tapers[k0][0].lanes >= sec.lanes:
       return None
     run = self.along[k1 + 1] - self.along[k0]
-    return float(self.along[k0] + (TAPER_M if run > TAPER_M else run / 2)), sec.lanes - self.tapers[k0][0].lanes, _opens_left(sec)
+    return float(self.along[k0] + (TAPER_M if run > TAPER_M else run / 2)), sec.lanes - self.tapers[k0][0].lanes, _opens_left(self.tapers[k0][0], sec)
 
   def opened_at(self, s: float, k: int | None = None) -> Section | None:
     """section_at's cross-section with only the lanes fully there: those still widening from nothing are left out, so a
@@ -831,9 +831,12 @@ def _taperable(a: Section, b: Section) -> bool:
   return a.back == b.back and a.lanes != b.lanes and min(a.lanes, b.lanes) > 0
 
 
-def _opens_left(many: Section) -> bool:
-  """Whether the lanes a road gains begin on the left of ours: where its leftmost lane's arrows only turn left."""
-  return bool(many.turns[0]) and many.turns[0] <= LEFTS
+def _opens_left(few: Section, many: Section) -> bool:
+  """Whether the lanes a road gains begin on the left of ours: where its leftmost lane's arrows only turn left, and
+  the road's before didn't (a turn bay there already, the road widens on the outside)."""
+  def left_only(sec):
+    return bool(sec.turns) and bool(sec.turns[0]) and sec.turns[0] <= LEFTS
+  return left_only(many) and not left_only(few)
 
 
 def _blend(few: Section, many: Section, t: float) -> Section:
@@ -841,7 +844,7 @@ def _blend(few: Section, many: Section, t: float) -> Section:
   outer side, right of ours) at no width at t = 0."""
   t = min(max(t, 0.0), 1.0)
   extra = many.lanes - few.lanes
-  left = _opens_left(many)
+  left = _opens_left(few, many)
   fo, mo = few.ours, many.ours
   edge = fo[0].left if left else fo[-1].right
   zero = [Span(s.lane, edge, edge, 1) for s in (mo[:extra] if left else mo[-extra:])]
