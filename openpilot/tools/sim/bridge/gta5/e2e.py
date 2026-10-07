@@ -30,6 +30,11 @@ same path by default). A variants file is {"name": {param: value, ...}, ...}; {}
 Every maneuver on the route is scored: done, or missed (a reroute near it), with the car's lane, speed, set speed, the
 nav's signal and the model's desire probabilities over the approach. Gas presses are only the test driver's, after the
 car has stood still for a while (the model won't pull away from a stop by itself).
+
+Time in the oncoming lanes is read two ways: by the game's lane reading (the route's and the plugin's) and by the map's
+lane tags alone outside junctions (map/lane_match.py: also one-ways driven the wrong way and the other direction's turn
+bays). safe() counts either (oncoming_any_*); oncoming_s / oncoming_max are the game's alone, as before. With lane tags,
+a trip starts in the middle of its start lane by the map.
 """
 import argparse
 import glob
@@ -194,6 +199,14 @@ class Map:
     self.node_cells = defaultdict(list)
     for k, n in nodes.items():
       self.node_cells[(int(n['x'] // self.CELL), int(n['y'] // self.CELL))].append(k)
+    self._lane_map: LaneMap | None | bool = False  # not loaded yet
+
+  @property
+  def lane_map(self) -> 'LaneMap | None':
+    """The map's lanes (gta5.osm.pbf's tags), None where it has none."""
+    if self._lane_map is False:
+      self._lane_map = LaneMap.load(MAP_DIR)
+    return self._lane_map
 
   def in_junction(self, x: float, y: float) -> bool:
     i, j = int(x // self.CELL), int(y // self.CELL)
@@ -323,6 +336,114 @@ class Map:
     return spec, {'before': round(dist[i]), 'after': round(dd), 'lanes': self.lanes.get((k, ahead)),
                   'street': self.streets.get(self.nodes[k]['st']), 'street_out': self.streets.get(self.nodes[dn]['st']),
                   'notes': notes}
+
+
+class LaneMap:
+  """The car's lane by the map's lane tags alone (lane_match.py), outside its junctions' areas: the oncoming check that
+  doesn't rest on the game's lane reading, and the lane centres trips start at."""
+  def __init__(self, osm, areas):
+    from openpilot.tools.sim.bridge.gta5.map.lane_match import LaneMatcher
+    self.matcher, self.areas = LaneMatcher(osm), areas
+
+  @classmethod
+  def load(cls, map_dir: str) -> 'LaneMap | None':
+    from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas
+    from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+    path = os.path.join(map_dir, "gta5.osm.pbf")
+    if not os.path.exists(path):
+      return None
+    osm = OsmLanes.load(path, to_game)
+    if not osm.tagged:
+      return None
+    areas = JunctionAreas.cached(osm, build=False)
+    if areas is None:
+      print("e2e: building the map's junction areas (once per map)...", flush=True)
+      areas = JunctionAreas.cached(osm)
+    return cls(osm, areas)
+
+  def read(self, x: float, y: float, z: float, heading: float) -> list | None:
+    """[lane, lanes, kind] at a point (game heading), kind 'bay' for the other direction's turn bay; None off the map's
+    lanes or in a junction's area, where the car is on the moves through it."""
+    if self.areas.inside(x, y, z):
+      return None
+    r = self.matcher.match(x, y, math.radians(heading + 90.0), z)
+    return None if r is None else [r.lane, r.lanes, 'bay' if r.bay else r.kind]
+
+  def lane_start(self, x: float, y: float, z: float, heading: float, lane: int) -> tuple[float, float, float] | None:
+    """The middle of lane `lane` (from the left, clamped) of the road at a trip's start: (x, y, game heading)."""
+    at = self.matcher.lane_centre(x, y, math.radians(heading + 90.0), lane, z)
+    return None if at is None else (at[0], at[1], (math.degrees(at[2]) - 90.0) % 360)
+
+
+MAP_ONCOMING = ('oncoming', 'wrong-way', 'bay')  # LaneMap.read's kinds that are in the oncoming lanes
+MOVING = 1.0  # m/s: slower, time in the oncoming lanes doesn't count
+ONCOMING_HOLD = 3.0  # s a stretch in the oncoming lanes holds over readings that can't say (the map in a junction)
+
+
+def oncoming_readings(p: dict) -> tuple[bool | None, bool | None, bool | None]:
+  """Whether a trace point is in the oncoming lanes by the game's lane reading (route and plugin), by the map's lanes
+  (outside junctions) and by either: True, False, or None where it can't say."""
+  game = p['lane'][0] < 0 if p.get('lane') else None
+  ml = p.get('mlane')
+  by_map = None if ml is None else ml[2] in MAP_ONCOMING
+  either = True if game or by_map else (None if game is None and by_map is None else False)
+  return game, by_map, either
+
+
+class OncomingTime:
+  """Time moving in the oncoming lanes by one reading, and its longest stretch. A point that can't say (None) breaks a
+  stretch only after `hold` s of them."""
+  def __init__(self, hold: float = 0.0):
+    self.s = self.max = self.run = 0.0
+    self.hold, self.unknown = hold, 0.0
+
+  def add(self, prev: dict, prev_on: bool | None, on: bool | None, dt: float) -> bool:
+    """The step from trace point prev (with its reading prev_on) to the next (reading on); whether the stretch grew."""
+    if prev_on and prev['v'] > MOVING:
+      self.s, self.run = self.s + dt, self.run + dt
+      self.max = max(self.max, self.run)
+      self.unknown = 0.0
+      return True
+    if on is None:
+      self.unknown += dt
+      if self.unknown <= self.hold:
+        return False
+    if not on:
+      self.run, self.unknown = 0.0, 0.0
+    return False
+
+
+class OncomingTimes:
+  """A trip's time in the oncoming lanes by the game's lane reading (as e2e has always counted it: no reading is not
+  oncoming), by the map's lanes, and by either, which safe() goes by: the map can't say inside junctions, the game's
+  reading misses one-ways driven the wrong way and the other direction's turn bays."""
+  def __init__(self):
+    self.game, self.map, self.any = OncomingTime(), OncomingTime(ONCOMING_HOLD), OncomingTime(ONCOMING_HOLD)
+
+  def add(self, prev: dict, p: dict) -> bool:
+    """The step between two trace points; whether the stretch by either reading grew."""
+    dt = p['t'] - prev['t']
+    (g0, m0, e0), (g1, m1, e1) = oncoming_readings(prev), oncoming_readings(p)
+    self.game.add(prev, bool(g0), bool(g1), dt)
+    self.map.add(prev, m0, m1, dt)
+    return self.any.add(prev, e0, e1, dt)
+
+  def result(self) -> dict:
+    return {f"oncoming{key}_{k}": round(getattr(timer, k), 1) for key, timer in (('', self.game), ('_map', self.map), ('_any', self.any))
+            for k in ('s', 'max')}
+
+
+def oncoming_times(hist: list[dict], lane_map: LaneMap | None = None) -> dict:
+  """The oncoming times of a trip's trace (Trip's results' oncoming_* keys); points without the map's reading get it
+  from lane_map."""
+  times, prev = OncomingTimes(), None
+  for p in hist:
+    if 'mlane' not in p and lane_map is not None:
+      p['mlane'] = lane_map.read(p['x'], p['y'], p['z'], p['h'])
+    if prev is not None:
+      times.add(prev, p)
+    prev = p
+  return times.result()
 
 
 def angle_diff(a, b):
@@ -628,8 +749,8 @@ class Trip:
     self.stopped_t: float | None = None
     self.last_trace = 0.0
     self.collisions = 0
-    self.oncoming_s = self.oncoming_max = 0.0  # time moving in the oncoming lanes, and the longest stretch
-    self.oncoming_run, self.oncoming_snapped, self.oncoming_snaps = 0.0, False, 0
+    self.oncoming = OncomingTimes()  # time moving in the oncoming lanes, and the longest stretch
+    self.oncoming_snapped, self.oncoming_snaps = False, 0
     self.route_t = 0.0  # when the route being followed was made (trip time)
     self.alert = ''
     self.landing: list[dict] = []  # turns scored done whose landing lane is still to be read
@@ -673,6 +794,12 @@ class Trip:
     cmd("traffic", on=int(self.args.traffic))
     cmd("lead", remove=1)
     kw = {"x": x, "y": y, "z": z, "heading": h, "lane": self.lane, "fix": 1}
+    # at the middle of the start lane by the map: the game's own lanes from a road node can put the car on a centre line
+    lane_map = self.roads.lane_map
+    at = lane_map.lane_start(x, y, z, h, self.lane) if lane_map is not None else None
+    if at is not None:
+      kw.update({"laneX": round(at[0], 2), "laneY": round(at[1], 2), "laneZ": z, "laneHeading": round(at[2], 1)})
+    self.lane_start = at and [round(v, 1) for v in at]
     if self.args.car and not getattr(self.args, 'car_spawned', False):
       kw["model"] = self.args.car
       self.args.car_spawned = True
@@ -706,6 +833,7 @@ class Trip:
       return {**rec, 'outcome': 'setup', 'detail': problem}
     s = rig.state
     rec['engageable_after'] = getattr(self, 'engageable_after', None)
+    rec['lane_start'] = getattr(self, 'lane_start', None)  # the map's lane centre it was placed at (x, y, heading)
     rec['start'] = {'pos': [round(v, 1) for v in s['pos']], 'heading': round(s['heading']), 'street': s.get('street'), 'lane': s.get('lane')}
     try:
       self.route = plan(s['pos'][0], s['pos'][1], s['heading'], dx, dy)
@@ -823,7 +951,7 @@ class Trip:
     s = rig.state
     rec.update({
       'outcome': outcome, 'detail': detail, 'clean': outcome == 'arrived' and not self.reroutes and not self.nudges,
-      'oncoming_s': round(self.oncoming_s, 1), 'oncoming_max': round(self.oncoming_max, 1),
+      **self.oncoming.result(),
       'duration': round(time.monotonic() - self.t0, 1), 'distance': round(self.distance), 'nudges': self.nudges,
       'collisions': self.collisions,
       'damage': None if health0 is None else round(health0 - s.get('bodyHealth', health0)), 'end': {'pos': [round(v, 1) for v in s.get('pos', [0, 0, 0])], 'street': s.get('street'),
@@ -855,19 +983,19 @@ class Trip:
          'lc': str(md.laneChangeState), 'en': bool(ss.enabled), 'alert': ss.alertText1 or None,
          'mt': round(self.rig.sm['modelV2'].modelExecutionTime * 1000, 1), 'drop': round(self.rig.sm['modelV2'].frameDropPerc, 1)}
     p['junc'] = self.roads.in_junction(p['x'], p['y'])
+    lane_map = self.roads.lane_map
+    p['mlane'] = lane_map.read(p['x'], p['y'], p['z'], p['h']) if lane_map is not None else None
     prev = self.history[-1] if self.history else None
     self.history.append(p)
     self._land()
-    if prev is not None and prev['lane'] and prev['lane'][0] < 0 and prev['v'] > 1.0:
-      self.oncoming_s += p['t'] - prev['t']
-      self.oncoming_run += p['t'] - prev['t']
-      self.oncoming_max = max(self.oncoming_max, self.oncoming_run)
-      if self.oncoming_run >= ONCOMING_OK and not self.oncoming_snapped and self.oncoming_snaps < ONCOMING_SNAPS:
-        # frames to check the lane reading by
+    if prev is not None and self.oncoming.add(prev, p):
+      if self.oncoming.any.run >= ONCOMING_OK and not self.oncoming_snapped and self.oncoming_snaps < ONCOMING_SNAPS:
+        # frames to check the lane readings by
         self.oncoming_snapped, self.oncoming_snaps = True, self.oncoming_snaps + 1
-        self.event('oncoming', lane=prev['lane'], street=p['street'], v=p['v'], snap=self.snap(f"onc{self.oncoming_snaps}"))
-    elif not (p['lane'] and p['lane'][0] < 0):
-      self.oncoming_run, self.oncoming_snapped = 0.0, False
+        self.event('oncoming', lane=prev['lane'], mlane=prev['mlane'], street=p['street'], v=p['v'],
+                   snap=self.snap(f"onc{self.oncoming_snaps}"))
+    elif not self.oncoming.any.run:
+      self.oncoming_snapped = False
     if now - self.last_trace >= TRACE_EVERY:
       self.last_trace = now
       self.trace.write(json.dumps(p) + "\n")
@@ -990,6 +1118,7 @@ class Trip:
       'desires': desires, 'stopped_before': round(stopped, 1), 'nav': nav_lines[-12:],
       'min_v': round(min((p['v'] for p in hist if t0 - 10 <= p['t'] <= t0 + 3), default=0.0), 2),
       'oncoming': any(p['lane'] and p['lane'][0] < 0 for p in around),
+      'oncoming_map': any(oncoming_readings(p)[1] for p in around),
       'end_lane': lanes_after[-1] if lanes_after else None,
       'collision': any(e['event'] == 'collision' and t0 - 5 <= e['t'] for e in self.events),
       'speeds': turn_speeds(hist, t0),
@@ -1080,10 +1209,17 @@ def backfill_landing(rs: list[dict]):
       m['land'] = landing(hist, {**m, 't': t}, roads.in_junction if roads else None)
 
 
+def oncoming_max(r: dict) -> float | None:
+  """A result's longest stretch in the oncoming lanes: by either the game's or the map's lane reading, or for results
+  from before the map's, the game's alone; None from before either."""
+  return r.get('oncoming_any_max', r.get('oncoming_max'))
+
+
 def safe(r: dict) -> bool:
   """Arrived with nothing a driver would have taken over for: no collision, gas press or time in the oncoming lanes
   (reroutes are fine). Results from before oncoming_s count a turn that went into the oncoming lanes."""
-  oncoming = r['oncoming_max'] >= ONCOMING_OK if 'oncoming_max' in r else any(m.get('oncoming') for m in r.get('maneuvers', []))
+  longest = oncoming_max(r)
+  oncoming = longest >= ONCOMING_OK if longest is not None else any(m.get('oncoming') for m in r.get('maneuvers', []))
   return r['outcome'] == 'arrived' and not r.get('collisions') and not r.get('nudges') and not oncoming
 
 
@@ -1166,11 +1302,12 @@ def paired(by: dict, out=print):
       if not better:
         gain, loss = loss, gain
       out(f"    {label:9s} better in {gain}, worse in {loss}: {hint(sign_p(gain, loss))}")
-    diffs = [b.get('oncoming_max', 0) - a.get('oncoming_max', 0) for a, b in pairs if 'oncoming_max' in a and 'oncoming_max' in b]
-    if diffs:
-      less, more = sum(d < -0.5 for d in diffs), sum(d > 0.5 for d in diffs)
-      out(f"    oncoming  longest stretch {mean_range(diffs)} s on average; shorter in {less}, longer in {more}: "
-          f"{hint(sign_p(less, more))}")
+    for label, key in (('oncoming', 'oncoming_any_max'), ("game's", 'oncoming_max')):
+      diffs = [b[key] - a[key] for a, b in pairs if key in a and key in b]
+      if diffs:
+        less, more = sum(d < -0.5 for d in diffs), sum(d > 0.5 for d in diffs)
+        out(f"    {label:9s} longest stretch {mean_range(diffs)} s on average; shorter in {less}, longer in {more}: "
+            f"{hint(sign_p(less, more))}")
 
 
 def landings(turns: list[dict]) -> str:
@@ -1252,6 +1389,8 @@ def drive(args, roads, trips):
   out = args.out or os.path.join(OUT_DIR, f"{args.name or time.strftime('%m%d-%H%M')}.jsonl")
   trace_dir = os.path.join(os.path.dirname(out), "traces", os.path.splitext(os.path.basename(out))[0])
   os.makedirs(trace_dir, exist_ok=True)
+  if roads.lane_map is None:
+    print(f"e2e: {MAP_DIR} has no lane tags: oncoming time by the game's lane reading alone, starts at road nodes", flush=True)
   rig = Rig()
   rig.wait(2)
   ai_off()
@@ -1399,7 +1538,7 @@ def cmd_sweepsum(args):
 
     def landed(xs):
       return f"{100 * sum(x['ok'] for x in xs) / len(xs):.0f}%" if xs else '-'
-    oncoming = sum(bool(m.get('oncoming')) for m in turns)
+    oncoming = sum(bool(m.get('oncoming') or m.get('oncoming_map')) for m in turns)
     hit =sum(bool(m.get('collision')) for m in turns)
     stopped = sum(m.get('stopped_before', 0) >= 2 for m in turns)
     speeds = [m['min_v'] for m in turns if m.get('min_v') is not None]
@@ -1419,9 +1558,11 @@ def cmd_sweepsum(args):
   print("95% ranges:")
   for name, group in sorted(by.items()):
     n = len(group)
-    onc = [r['oncoming_max'] for r in group if 'oncoming_max' in r]
+    onc = [oncoming_max(r) for r in group if oncoming_max(r) is not None]
+    game = [r['oncoming_max'] for r in group if 'oncoming_max' in r and 'oncoming_any_max' in r]
     print(f"  {name:16s} arrived {rate(sum(r['outcome'] == 'arrived' for r in group), n)}, safe {rate(sum(safe(r) for r in group), n)}, "
-          f"crashed {rate(sum(crashed(r) for r in group), n)}, longest oncoming {mean_range(onc)} s")
+          f"crashed {rate(sum(crashed(r) for r in group), n)}, longest oncoming {mean_range(onc)} s"
+          + (f" (by the game's reading {mean_range(game)} s)" if game else ""))
   if len(by) > 1:
     print("paired:")
     paired(by)

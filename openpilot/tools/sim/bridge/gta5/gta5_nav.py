@@ -213,6 +213,11 @@ class Tune:
     # keepRight while the plugin reads the car in the oncoming lanes outside a junction, where the route's reading
     # disagrees and nav has no lane to change back from
     "oncoming_keep": True,
+    # and while the map's lanes (laneMap) put it in an oncoming lane, on a one-way the wrong way or in the other
+    # direction's turn bay, which the plugin and route readings miss
+    "oncoming_map": True,
+    # going straight on through a junction, out of lanes that end there (laneDrops)
+    "lane_drops": True,
     # a turn the car is one lane beside the lanes for, at the last place a lane change for it starts, is signalled from
     # there rather than left to the route: on the traffic-free bench the model turns across the lane, and turn bays
     # that open late (2 lanes becoming 3) leave the car one lane off after its planned change
@@ -346,7 +351,7 @@ class Fork:
 
 
 class Through:
-  """Straight on through a junction where some of the lanes into it only turn: the lanes that go on."""
+  """Straight on through a junction where some of the lanes into it only turn, or end there: the lanes that go on."""
   def __init__(self, dist: float, targets: tuple[int, int, int]):
     self.dist = dist  # m along the route to the end of the lanes' arrows
     self.side = "through"
@@ -356,12 +361,19 @@ class Through:
     return remap(self.targets, n, self.targets[0] == 0)
 
 
-def throughs(route: np.ndarray, arrows: list, moves: list) -> list[Through]:
-  """The junctions the route goes straight on through (no turn or fork near) where the arrows leave some lanes out."""
+def throughs(route: np.ndarray, arrows: list, moves: list, drops: list | None = None) -> list[Through]:
+  """The junctions the route goes straight on through (no turn or fork near) where the arrows leave some lanes out, or
+  where some lanes end (Route.info's laneDrops: [m ahead, first and last lane that carry on, of how many])."""
   out = []
   along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T)))) if len(route) >= 2 else np.zeros(1)
+
+  def clear(d):
+    return d > 0 and not any(d - ARROWS_AFTER <= m.dist <= d + ARROWS_BEFORE for m in moves) and d + 25.0 <= along[-1] and d >= 15.0
+  for d, lo, hi, n in drops or []:
+    if clear(d):
+      out.append(Through(d, (lo, hi, n)))
   for d, lanes in arrows:
-    if d <= 0 or any(d - ARROWS_AFTER <= m.dist <= d + ARROWS_BEFORE for m in moves) or d + 25.0 > along[-1] or d < 15.0:
+    if not clear(d):
       continue
     found = turn_targets(lanes, "through")
     if not found or len(found) == len(lanes):
@@ -444,12 +456,12 @@ def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> 
 
 
 def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
-              arrows: list | None = None) -> list[tuple[float, float]]:
+              arrows: list | None = None, drops: list | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
   in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
-  turn, by where nav's changes for it must have ended, and arrives from a turn in its side's outside lane. lanes_at(m,
-  after) is the lanes the car's way just before (after: past) a point."""
+  turn or end (laneDrops), by where nav's changes for it must have ended, and arrives from a turn in its side's outside
+  lane. lanes_at(m, after) is the lanes the car's way just before (after: past) a point."""
   t = tune or TUNE
   arrows = parse_arrows(arrows)
   ahead: list[Turn | Fork | Through] = []
@@ -460,7 +472,7 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   ahead += [Fork(d, side, *rest) for d, side, *rest in forks if d > 0]
   for m in ahead:
     aim(m, arrows)
-  ahead += throughs(route, arrows, ahead)
+  ahead += throughs(route, arrows, ahead, drops if t.lane_drops else None)
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
   keys = [(0.0, float(cur))]
@@ -613,7 +625,7 @@ class Nav:
     self.lane_frac, self.one_way = state.get("laneFrac"), state.get("twoWay") is False
     self._keep_right(v, now)
     near = [d for d in (state.get("stops") or []) + (state.get("junctions") or []) if abs(d) < ONCOMING_JUNCTION]
-    self._oncoming_keep(state.get("lanePlugin"), bool(near), now)
+    self._oncoming_keep(state.get("lanePlugin"), bool(near), now, state.get("laneMap"))
     if not route:
       self._cancel(indicator)
       self.keeping, self.fork_keep = None, None
@@ -696,7 +708,8 @@ class Nav:
     moves: list = forks + ([turn] if turn is not None else [])
     for m in moves:
       aim(m, arrows)
-    ahead = moves + [m for m in throughs(route, arrows, moves) if turn is None or m.dist < turn.dist]
+    drops = state.get("laneDrops") if t.lane_drops else None
+    ahead = moves + [m for m in throughs(route, arrows, moves, drops) if turn is None or m.dist < turn.dist]
     caps = [self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now)]
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, state.get("stops") or [], state.get("junctions") or [])
@@ -1092,11 +1105,15 @@ class Nav:
         and now - self.change_t > LANE_CHANGE_GAP):
       self._start_change("right", f"out of oncoming lane {-lane[0]}")
 
-  def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float):
+  def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float, map_lane: dict | None = None):
     """keepRight while the plugin's own lane reading has held in the oncoming lanes (oncoming_keep): it's right outside
-    junctions, but nav has no lane, so no lane change back, where the route's reading disagrees."""
-    on = (self.tune.oncoming_keep and bool(plugin_lane) and plugin_lane[0] < 0 and not near_junction and self.turn is None
-          and not self.one_way and self.driven >= self.bay_to and self.v > 1.0)
+    junctions, but nav has no lane, so no lane change back, where the route's reading disagrees. Also while the map's
+    lanes have the car oncoming (oncoming_map), as on a one-way the wrong way, where the plugin reads no lane."""
+    plugin = bool(plugin_lane) and plugin_lane[0] < 0 and not self.one_way and not near_junction
+    # the bridge leaves the map's reading out in junctions' areas once it has them ("areas"), else near ones
+    by_map = (self.tune.oncoming_map and bool(map_lane) and bool(map_lane.get("oncoming"))
+              and (bool(map_lane.get("areas")) or not near_junction))
+    on = self.tune.oncoming_keep and (plugin or by_map) and self.turn is None and self.driven >= self.bay_to and self.v > 1.0
     if not on:
       self.oncoming_since, self.recover = None, None
       return
@@ -1106,7 +1123,8 @@ class Nav:
     if self.recover is None:
       self.recover_t = now
       if DEBUG:
-        print(f"nav: keepRight out of oncoming lane {-plugin_lane[0]}")
+        what = f"lane {-plugin_lane[0]}" if plugin else f"({'turn bay' if map_lane.get('bay') else map_lane.get('kind')} by the map)"
+        print(f"nav: keepRight out of oncoming {what}")
     elif now - self.recover_t > self.tune.repulse_every:
       self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
     self.recover = "keepRight"

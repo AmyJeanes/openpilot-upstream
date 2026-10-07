@@ -69,7 +69,10 @@ Near the waypoint it slows to a stop there and disengages.
 
 Before a turn the car changes into the lanes the map's turn arrows (`turn:lanes`) allow it from, else the leftmost lane
 for a left turn or the rightmost for a right; going straight on through a junction it moves out of lanes whose arrows
-only turn; and it moves back over if it drifts into the oncoming lanes. Lane changes are planned back from the last place one may start (30 m before
+only turn, or that end there (the road out has fewer lanes its way: the lanes that carry on are those in line with its
+lanes, kerb to kerb where it is as wide, else by its line); and it moves back over if it drifts into the oncoming lanes,
+by its lane reading or by the map's lanes alone (`map/lane_match.py`, outside junctions' areas: an oncoming lane, a
+one-way the wrong way, the other direction's turn bay), with keepRight. Lane changes are planned back from the last place one may start (30 m before
 a turn), about 8 s each, and when there isn't room left the set speed comes down for it; a turn the car still isn't in
 the lane for is left for the route to come round again, as the model won't take it from the wrong lane anyway. The car's
 lane comes from the road's lanes along our route (map/README.md: the map's lane tags, or GTA's links on a map without

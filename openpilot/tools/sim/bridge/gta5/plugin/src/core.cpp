@@ -231,6 +231,7 @@ struct Setup {
   int minLanes = 0;  // lanes in the direction of travel, e.g. 3 for a freeway
   float heading = NAN;  // the direction wanted, deg
   int lane = -1;  // the lane wanted, from the left
+  float laneX = NAN, laneY = NAN, laneZ = NAN, laneHeading = NAN;  // that lane's middle by the bridge's map: placed there as is
   Hash model = 0;
   double t = 0;
 } g_setup;
@@ -1534,6 +1535,17 @@ void StepSetup(Ped ped, double now) {
     REQUEST_COLLISION_AT_COORD(s.x, s.y, s.z);
     LOAD_ALL_PATH_NODES(TRUE);
     if (now - s.t > 3) s.step = 3;
+  } else if (s.step == 3 && !std::isnan(s.laneX) && !std::isnan(s.laneY) && !std::isnan(s.laneHeading)) {
+    FREEZE_ENTITY_POSITION(e, FALSE);
+    float z = std::isnan(s.laneZ) ? s.z : s.laneZ;
+    SET_ENTITY_COORDS(e, s.laneX, s.laneY, z + 0.5f, FALSE, FALSE, FALSE, FALSE);
+    SET_ENTITY_HEADING(e, s.laneHeading);
+    if (e != ped) {
+      SET_VEHICLE_ON_GROUND_PROPERLY(e, 5.0f);
+      if (s.speed > 0) SET_VEHICLE_FORWARD_SPEED(e, s.speed);
+    }
+    Log("setup: placed in the lane at " + Num(s.laneX) + "," + Num(s.laneY) + "," + Num(z) + " heading " + Num(s.laneHeading));
+    s.step = 0;
   } else if (s.step == 3) {
     Vector3 node{};
     float heading = 0;
@@ -2167,6 +2179,10 @@ void HandleMessage(const Message &m, double now) {
     s.minLanes = static_cast<int>(MsgNum(m, "lanes", 0));
     s.heading = static_cast<float>(MsgNum(m, "heading", NAN));
     s.lane = static_cast<int>(MsgNum(m, "lane", -1));
+    s.laneX = static_cast<float>(MsgNum(m, "laneX", NAN));
+    s.laneY = static_cast<float>(MsgNum(m, "laneY", NAN));
+    s.laneZ = static_cast<float>(MsgNum(m, "laneZ", NAN));
+    s.laneHeading = static_cast<float>(MsgNum(m, "laneHeading", NAN));
     s.t = now;
     std::string model = MsgStr(m, "model");
     if (!model.empty()) {

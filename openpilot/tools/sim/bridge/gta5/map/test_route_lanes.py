@@ -10,8 +10,8 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Through, Turn, aim, lane_plan, parse_arrows, throughs
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, turn_targets, ways_from_nodes, \
-  ways_from_trace
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, continuing, turn_targets, \
+  ways_from_nodes, ways_from_trace
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 
 # a junction at (0, 0): a one-way road north into it, two lanes, widening to three 30 m before it (a left turn bay);
@@ -134,6 +134,53 @@ def test_nav_targets_from_arrows():
   keys = lane_plan(route, [], (0, 3), lambda d, after: 3, 10.0, arrows=[[100.0, ['left', 'through', 'through']]])
   assert keys[-1][1] == 1.0 and keys[-1][0] <= 100.0  # out of the left only lane before the junction
   assert lane_plan(route, [], (0, 3), lambda d, after: 3, 10.0) == [(0.0, 0.0)]
+
+
+def lane_drop_map(arrows: str = 'left;through|through;right', out_tags: dict | None = None) -> OsmLanes:
+  """A road north through a junction at (0, 0) with a road east: 2 lanes north and 1 south into it, and out of it 1
+  north and 2 south (the southbound left turn lane), as wide: one direction's lane ends as the other's begins."""
+  nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (100.0, 0.0), 4: (0.0, 100.0)}
+  split = {'highway': 'primary', 'lanes': '3', 'width': '16.5', 'placement:forward': 'left_of:1', 'placement:backward': 'left_of:1'}
+  ways = {
+    20: ({**split, 'lanes:forward': '2', 'lanes:backward': '1', 'turn:lanes:forward': arrows}, [1, 2]),
+    21: ({**split, 'lanes:forward': '1', 'lanes:backward': '2'} if out_tags is None else out_tags, [2, 4]),
+    22: ({'highway': 'primary', 'lanes': '2', 'width': '11'}, [2, 3]),
+  }
+  ids = np.array(sorted(nodes), np.int64)
+  data = OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {})
+  return OsmLanes(data, lambda lat, lon: (lon, lat))
+
+
+def test_continuing_lanes():
+  osm = lane_drop_map()
+  into, out = Section.of(osm.lanes(20)), Section.of(osm.lanes(21))
+  assert continuing(into, out) == [1]  # as wide: the kerbs carry on, so the right lane does
+  narrower = Section.of(WayLanes.from_tags({'highway': 'primary', 'lanes': '2', 'width': '11'}))
+  assert continuing(into, narrower) == [0]  # narrower: the line carries on, and the lane on the outside ends
+
+
+def test_lane_drops():
+  osm = lane_drop_map()
+  pts = np.array([(0.0, -100.0), (0.0, 0.0), (0.0, 100.0)])
+  assert RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm).drops == [(100.0, (1, 1, 2))]
+  turning = np.array([(0.0, -100.0), (0.0, 0.0), (100.0, 0.0)])  # the right turn onto the road east
+  assert RouteLanes.from_osm(turning, ways_from_nodes(turning, osm), osm).drops == []
+  only = lane_drop_map('left|through;right')  # a turn only lane: the arrows say where to go straight on
+  assert RouteLanes.from_osm(pts, ways_from_nodes(pts, only), only).drops == []
+  same = lane_drop_map(out_tags={'highway': 'primary', 'lanes': '3', 'lanes:forward': '2', 'lanes:backward': '1', 'width': '16.5',
+                                 'placement:forward': 'left_of:1', 'placement:backward': 'left_of:1'})
+  assert RouteLanes.from_osm(pts, ways_from_nodes(pts, same), same).drops == []  # no lane ends
+
+
+def test_nav_aims_for_the_lanes_that_carry_on():
+  route = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
+  ahead = throughs(route, [], [], [[100.0, 1, 1, 2]])
+  assert len(ahead) == 1 and isinstance(ahead[0], Through) and ahead[0].lanes(2) == (1, 1)
+  assert throughs(route, [], [Turn(110.0, 'left', 90.0)], [[100.0, 1, 1, 2]]) == []  # turning there
+  # over to the lane that carries on, done by the last place a lane change for it starts, then the one lane past it
+  keys = lane_plan(route, [], (0, 2), lambda d, after: 1 if after and d >= 100.0 else 2, 10.0, drops=[[100.0, 1, 1, 2]])
+  assert keys == [(0.0, 0.0), (30.0, 0.0), (70.0, 1.0), (100.0, 1.0), (100.0, 0.0)]
+  assert lane_plan(route, [], (0, 2), lambda d, after: 2, 10.0) == [(0.0, 0.0)]
 
 
 def pbf_bytes() -> bytes:
