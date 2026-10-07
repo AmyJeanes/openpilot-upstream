@@ -173,7 +173,7 @@ def main():
     high = True
   except (KeyError, ValueError):
     high = False
-  roads, layouts = [], []
+  roads, layouts, tapered = [], [], []
   for wid, (tags, refs) in junctions.ways.items():
     road = osm.lanes(wid)
     lo, hi = road.edges(FORWARD)
@@ -181,7 +181,9 @@ def main():
     kind = (ROAD_CLASSES.index(tags['highway'].removesuffix('_link')), int(lanes) if lanes.isdigit() else 1,
             round(hi - lo, 1), round((lo + hi) / 2, 1), wid in junctions.inside, *levels[wid])
     roads.append((kind, tags.get('oneway') == 'yes', refs))
-    if wid not in junctions.inside:
+    if wid not in junctions.inside and osm.taper(wid) is not None:
+      tapered.append(wid)  # its lines move along it: drawn on their own
+    elif wid not in junctions.inside:
       lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or (road.markings
                     and ln.kind != PARKING)) + tuple((PARKING_STRIP, round((a + b) / 2, 2), None) for a, b in road.parking_lanes(FORWARD))
       layouts.append(((levels[wid][0], lines), True, refs))  # lines are offsets along a way's direction: join only ways going on
@@ -265,6 +267,21 @@ def main():
         geom = offset_line(pts, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE)):
           add(k, piece, layer, z_along(piece, pts, z) if high else None)
+  for wid in tapered:  # lanes opening or closing along it (osm_lanes.OsmLanes.taper)
+    refs, road, layer = junctions.ways[wid][1], osm.lanes(wid), levels[wid][0]
+    pts = points(refs)
+    z = heights(refs) if high else None
+    for line, geom in osm.line_geometry(wid):
+      if line.kind != EDGE and (not road.markings or line.kind == PARKING):
+        continue
+      for k, off in [(0, 0.0)] if line.kind == EDGE else marks('solid' if line.kind == MEDIAN else line.style, line.kind == DIVIDER):
+        g = offset_line(geom, off) if off else geom
+        for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE)):
+          add(k, piece, layer, z_along(piece, pts, z) if high else None)
+    for a, b in road.parking_lanes(FORWARD):
+      g = offset_line(pts, (a + b) / 2)
+      for piece in clip_outside(g, paint.near(g, layer, {wid})):
+        add(KINDS.index('parking'), piece, layer, z_along(piece, pts, z) if high else None)
   for n, j in enumerate(junctions.junctions):
     jz = junction_z[n] if high else None
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other

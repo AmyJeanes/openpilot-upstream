@@ -109,6 +109,36 @@ def test_route_lanes():
   assert np.hypot(*(mid[0] - line[np.argmin(np.abs(np.hypot(*(line - mid[0]).T)))])) < 0.6
 
 
+def test_taper_lines():
+  # the bay's way: its lines move with the lanes over TAPER_M from where it opens; the white line beside the opening
+  # lane starts once it has opened (on the next way, here none)
+  osm = junction_map()
+  d, knots = osm.taper(11)
+  assert d == 1 and [round(s) for s, _ in knots] == [0, 30]
+  lines = osm.line_geometry(11)
+  left = next(g for line, g in lines if line.kind == 'edge' and g[0, 0] < 0)
+  assert np.allclose(left[0], (-3.5, -30.0), atol=0.01) and np.allclose(left[-1], (-5.25, 0.0), atol=0.01)
+  assert len([line for line, _ in lines if line.kind == 'divider']) == 1  # between the old lanes only
+  assert osm.taper(10) is None and osm.taper(13) is None
+
+
+def test_explicit_taper():
+  # a way whose bay widens along it (width:lanes:start / :end): no default taper, the bay opened at the way's end
+  ways = {**WAYS, 11: ({**WAYS[11][0], 'width:lanes': '3.5|3.5|3.5', 'width:lanes:start': '0|3.5|3.5'}, [2, 3])}
+  ids = np.array(sorted(NODES), np.int64)
+  osm = OsmLanes(OsmData(ids, np.array([NODES[i][1] for i in ids]), np.array([NODES[i][0] for i in ids]), {}, ways, {}),
+                 lambda lat, lon: (lon, lat))
+  assert osm.has_ends(11) and osm.taper(10) is None
+  assert [round(sec.spans[0].right - sec.spans[0].left, 2) for _, sec in osm.taper(11)[1]] == [0.0, 3.5]
+  pts = left_turn_route()
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert 1 not in lanes.tapers and 1 in lanes.explicit
+  mid = lanes.section_at(85.0, 1)
+  assert abs(mid.ours[0].right - mid.ours[0].left - 1.75) < 0.01
+  assert lanes.opening(1) == (100.0, 1, True)
+  assert lanes.opened_at(85.0, 1).lanes == 2 and lanes.opened_at(100.0, 1).lanes == 3
+
+
 def test_route_lanes_bend_has_no_fillet():
   # a road bending through a node that isn't a junction keeps its own lane line
   osm = junction_map()

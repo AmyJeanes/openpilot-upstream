@@ -41,7 +41,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, offset_line as offset_polyline
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, MEDIAN, offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
 ROUTE_EVERY = 0.1  # s between the route's updates, with the roads as last sent
@@ -286,6 +286,21 @@ def marking_kinds(line) -> list[tuple[str, float]]:
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
 
 
+def gta_at(paths, q) -> tuple[int, float] | None:
+  """GTA's node at a map node and its height; for a node the map adds along one of GTA's links (where a lane's taper
+  starts or ends), the link's nearer node and the height along it."""
+  if found := paths.nodes_at(q):
+    return found[0], float(paths.z[found[0]])
+  best = None
+  for i, j in paths._near(q):
+    p, d = paths.xy[i], paths.xy[j] - paths.xy[i]
+    t = float(np.clip((q - p) @ d / max(d @ d, 1e-9), 0.0, 1.0))
+    off = float(np.hypot(*(p + d * t - q)))
+    if off < 0.5 and (best is None or off < best[0]):
+      best = (off, i if t < 0.5 else j, float(paths.z[i] + (paths.z[j] - paths.z[i]) * t))
+  return (best[1], best[2]) if best else None
+
+
 def road_marks(paths, osm) -> dict:
   """What the overlay draws of a lane-tagged map, from its tags alone (osm_lanes.py, junctions.py), as the map view draws
   it (osm_to_roads.py): the lines the lane tags paint, as segments (their ends [M, 2, 3], kinds [M], and the GTA nodes
@@ -317,16 +332,19 @@ def road_marks(paths, osm) -> dict:
     pts = osm.way_points(wid)
     if len(pts) < 2 or np.hypot(*(pts[-1] - pts[0])) < 0.3:
       continue
-    gta = [paths.nodes_at(q) for q in (pts[0], pts[-1])]
+    gta = [gta_at(paths, q) for q in (pts[0], pts[-1])]
     if not gta[0] or not gta[1]:
       continue
-    a, b = gta[0][0], gta[1][0]
-    z = np.interp(np.linspace(0.0, 1.0, len(pts)), [0.0, 1.0], [paths.z[a], paths.z[b]])
+    (a, za), (b, zb) = gta
     layer = level(osm.ways[wid][0])[0]
-    for line in osm.lanes(wid).lines(FORWARD):
+    for line, base in osm.line_geometry(wid):
+      if np.hypot(*(base[0] - pts[0])) > np.hypot(*(base[-1] - pts[0])):
+        base = base[::-1]  # drawn the other way (OsmLanes.taper)
+      along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(base, axis=0).T))))
+      z = za + (zb - za) * along / max(along[-1], 1e-6)
       for kind, off in marking_kinds(line):
-        geom = offset_polyline(pts, line.offset + off)
-        if len(geom) != len(pts):
+        geom = offset_polyline(base, off) if off else base
+        if len(geom) != len(base):
           continue
         areas = paint.near(geom, layer, {wid}, kind == "e")
         pieces = clip_areas(geom, areas) if areas else [geom]
