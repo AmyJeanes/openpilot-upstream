@@ -24,6 +24,8 @@ bool Install(std::function<void(const std::string &)> log, std::function<void(co
 void Uninstall();
 // while on, frames with the interleave marker go to onFrame and are replaced on screen
 void SetEnabled(bool on);
+// saves the player's next frame (as the screen shows it) to a 32-bit BMP at path; false while one is pending
+bool RequestGrab(const std::string &path);
 // whether frame n's texture may have been overwritten by a later frame: a consumer that read it since should drop it
 bool Reused(uint64_t n);
 }  // namespace present_hook

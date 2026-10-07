@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
@@ -73,6 +74,10 @@ std::atomic<uint64_t> g_recorded{0};  // presents recorded, which a frame's text
 thread_local bool t_inPresent = false;
 std::function<void(const std::string &)> g_log;
 std::function<void(const HookFrame &)> g_onFrame;
+// a grab of the player's frame (RequestGrab): 1 asked, 2 recorded on present g_grabN, saved by the worker
+std::atomic<int> g_grabState{0};
+std::atomic<uint64_t> g_grabN{0};
+std::string g_grabPath;
 
 void Log(const std::string &s) {
   if (g_log) g_log("present hook: " + s);
@@ -144,6 +149,8 @@ struct Renderer {
 
   D3D12_RESOURCE_DESC frameDesc{};
   com_ptr<ID3D12Resource> last, marker, frames[FRAMES];  // marker: the marker's corner, which the shader reads
+  com_ptr<ID3D12Resource> grab;  // a readback copy of the player's last frame, for RequestGrab
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT grabFp{};
   HANDLE handles[FRAMES]{};
   uint64_t ids[FRAMES]{};
   uint64_t nextId = 1;
@@ -161,7 +168,7 @@ struct Renderer {
       if (handles[i]) CloseHandle(handles[i]);
       handles[i] = nullptr;
     }
-    last = marker = nullptr;
+    last = marker = grab = nullptr;
     frameDesc = {};
   }
 
@@ -305,6 +312,51 @@ struct Renderer {
     return true;
   }
 
+  bool MakeGrab() {
+    if (grab) return true;
+    UINT rows = 0;
+    UINT64 rowBytes = 0, total = 0;
+    device->GetCopyableFootprints(&frameDesc, 0, 1, 0, &grabFp, &rows, &rowBytes, &total);
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = total;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(grab.put())))) {
+      Log("grab buffer creation failed");
+      g_grabState = 0;
+      return false;
+    }
+    return true;
+  }
+
+  // Writes the grab buffer as a top-down 32-bit BMP (the swap chain's BGRA as it is; other formats are written raw)
+  void SaveGrab() {
+    void *p = nullptr;
+    D3D12_RANGE range{0, SIZE_T(grabFp.Footprint.RowPitch) * grabFp.Footprint.Height};
+    if (!grab || FAILED(grab->Map(0, &range, &p))) return Log("grab: map failed");
+    int w = int(grabFp.Footprint.Width), h = int(grabFp.Footprint.Height);
+    FILE *f = nullptr;
+    if (fopen_s(&f, g_grabPath.c_str(), "wb") || !f) {
+      grab->Unmap(0, nullptr);
+      return Log("grab: can't write " + g_grabPath);
+    }
+    uint32_t image = uint32_t(w) * h * 4;
+    uint8_t hdr[54] = {'B', 'M'};
+    auto put32 = [&](int at, uint32_t v) { memcpy(hdr + at, &v, 4); };
+    put32(2, 54 + image), put32(10, 54), put32(14, 40), put32(18, uint32_t(w)), put32(22, uint32_t(-h));
+    hdr[26] = 1, hdr[28] = 32;
+    put32(34, image);
+    fwrite(hdr, 1, 54, f);
+    for (int y = 0; y < h; y++) fwrite(static_cast<uint8_t *>(p) + size_t(y) * grabFp.Footprint.RowPitch, 1, size_t(w) * 4, f);
+    fclose(f);
+    D3D12_RANGE none{0, 0};
+    grab->Unmap(0, &none);
+    Log("grab: saved " + g_grabPath + " (" + std::to_string(w) + "x" + std::to_string(h) + ", format " + std::to_string(int(grabFp.Footprint.Format)) + ")");
+  }
+
   // Queues, on the game's queue ahead of its present: the marker check; for an openpilot frame, a copy for openpilot and
   // the player's last frame copied over it; otherwise a copy kept as the player's last frame. Returns the present's number.
   uint64_t Record(IDXGISwapChain3 *sc, std::shared_mutex &lock) {
@@ -368,6 +420,14 @@ struct Renderer {
     list->SetPredication(pred.get(), isOp, D3D12_PREDICATION_OP_EQUAL_ZERO);
     list->CopyResource(bb.get(), last.get());
     list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    // `last` is the player's frame whichever this was: this one, or the one an openpilot frame's place shows
+    bool grabbing = g_grabState == 1 && MakeGrab();
+    if (grabbing) {
+      D3D12_TEXTURE_COPY_LOCATION gd{grab.get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
+      gd.PlacedFootprint = grabFp;
+      D3D12_TEXTURE_COPY_LOCATION gs{last.get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
+      list->CopyTextureRegion(&gd, 0, 0, 0, &gs, nullptr);
+    }
     list->CopyBufferRegion(readback.get(), isOp, pred.get(), isOp, PRED_STRIDE);
     D3D12_RESOURCE_BARRIER b4[] = {
         Transition(bb.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
@@ -381,6 +441,7 @@ struct Renderer {
     ID3D12CommandList *lists[] = {list.get()};
     queue->ExecuteCommandLists(1, lists);
     queue->Signal(fence.get(), n);
+    if (grabbing) g_grabN = n, g_grabState = 2;
     allocFence[f] = n;
     presents = n;
     g_recorded = n;
@@ -421,6 +482,10 @@ void Worker() {
     if (g_r.fence->GetCompletedValue() < p.n) {
       g_r.fence->SetEventOnCompletion(p.n, event);
       if (WaitForSingleObject(event, 500) != WAIT_OBJECT_0) continue;
+    }
+    if (g_grabState == 2 && p.n >= g_grabN) {
+      g_r.SaveGrab();
+      g_grabState = 0;
     }
     int f = int(p.n % FRAMES);
     // the worker fell so far behind that the texture may already hold a later frame
@@ -595,6 +660,13 @@ void Uninstall() {
 }
 
 void SetEnabled(bool on) { g_enabled = on; }
+
+bool RequestGrab(const std::string &path) {
+  if (g_grabState != 0) return false;
+  g_grabPath = path;
+  g_grabState = 1;
+  return true;
+}
 
 bool Reused(uint64_t n) { return g_recorded - n >= FRAMES - 1; }
 

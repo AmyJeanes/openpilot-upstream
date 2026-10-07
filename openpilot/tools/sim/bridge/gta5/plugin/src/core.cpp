@@ -418,6 +418,18 @@ void RenderCamera(bool on) {
   g_rendering = on;
 }
 
+// A camera looking straight down on a point (topcam command), shown on the player's frames instead of the gameplay
+// camera, to check the map overlay against the road paint from above; openpilot's frames are unchanged
+struct TopCam {
+  bool on = false, follow = true, hud = true;
+  float x = 0, y = 0, height = 40, heading = 0, fov = 50;
+  float ground = 0;    // the game's ground under the point, which the height is above
+  float zref = NAN;    // a height near that ground (the road's, from the map), else the vehicle's
+  bool focus = false;  // the game streams the world around the point, not the player
+  bool shown = false;  // the active camera
+  Cam cam = 0;
+} g_top;
+
 // Picks the frames to render the openpilot camera in, and returns the view the frame being drawn shows (a HOOK_ view), or
 // -1 for the player's camera. Interleaved, that's one frame at each 20 Hz capture time, or with split views a road view
 // then a wide view half a period later, so the player's frames are evenly spaced; the rest are the player's camera.
@@ -483,18 +495,66 @@ int UpdateCameraFrame(double now, float dt, bool split) {
       g_statsT = now;
     }
   }
-  if (view >= 0 && view != g_activeView) {
+  if (view >= 0 && (view != g_activeView || g_top.shown)) {
+    if (g_top.shown) SET_CAM_ACTIVE(g_top.cam, FALSE), g_top.shown = false;
     SET_CAM_ACTIVE(g_cams[g_activeView], FALSE);
     SET_CAM_ACTIVE(g_cams[view], TRUE);
     g_activeView = view;
+  } else if (view < 0 && g_top.cam && !g_top.shown) {
+    SET_CAM_ACTIVE(g_cams[g_activeView], FALSE);
+    SET_CAM_ACTIVE(g_top.cam, TRUE);
+    g_top.shown = true;
   }
-  RenderCamera(view >= 0);
+  RenderCamera(view >= 0 || g_top.cam != 0);
   g_frameViews = (g_frameViews << 4) | uint64_t(view + 1);
   return int((g_frameViews >> (4 * g_cfg.interleaveLag)) & 0xF) - 1;
 }
 
+void ReleaseTopCam() {
+  if (!g_top.cam) return;
+  if (g_top.shown) SET_CAM_ACTIVE(g_top.cam, FALSE);
+  if (!g_cam) RENDER_SCRIPT_CAMS(FALSE, FALSE, 0, TRUE, FALSE, 0), g_rendering = false;
+  else if (g_top.shown) SET_CAM_ACTIVE(g_cams[g_activeView], TRUE);
+  if (DOES_CAM_EXIST(g_top.cam)) DESTROY_CAM(g_top.cam, FALSE);
+  g_top.cam = 0, g_top.shown = false;
+  if (g_top.focus) CLEAR_FOCUS(), g_top.focus = false;
+}
+
+// places the top camera over the vehicle (follow) or the given point; without the openpilot camera it's shown here
+void UpdateTopCam(Entity follow) {
+  if (!g_top.on) return ReleaseTopCam();
+  if (!g_top.cam) {
+    g_top.cam = CREATE_CAM("DEFAULT_SCRIPTED_CAMERA", FALSE);
+    SET_CAM_NEAR_CLIP(g_top.cam, 0.5f);
+  }
+  Vector3 ref = GET_ENTITY_COORDS(follow ? follow : PLAYER_PED_ID(), TRUE);
+  if (g_top.follow) g_top.x = ref.x, g_top.y = ref.y;
+  float z = 0, probe = std::isnan(g_top.zref) ? ref.z : g_top.zref;
+  g_top.ground = GET_GROUND_Z_FOR_3D_COORD(g_top.x, g_top.y, probe + 10.0f, &z, FALSE, FALSE) && std::fabs(z - probe) < 15.0f
+                     ? z
+                     : (std::isnan(g_top.zref) ? ref.z - 0.5f : g_top.zref);
+  SET_CAM_FOV(g_top.cam, g_top.fov);
+  SET_CAM_COORD(g_top.cam, g_top.x, g_top.y, g_top.ground + g_top.height);
+  SET_CAM_ROT(g_top.cam, -90.0f, 0.0f, g_top.heading, 2);
+  bool away = std::hypot(g_top.x - ref.x, g_top.y - ref.y) > 60.0f;
+  if (away) SET_FOCUS_POS_AND_VEL(g_top.x, g_top.y, g_top.ground, 0, 0, 0), g_top.focus = true;
+  else if (g_top.focus) CLEAR_FOCUS(), g_top.focus = false;
+  if (!g_cam && !g_top.shown) {
+    SET_CAM_ACTIVE(g_top.cam, TRUE);
+    RENDER_SCRIPT_CAMS(TRUE, FALSE, 0, TRUE, FALSE, 0);
+    g_rendering = true, g_top.shown = true;
+  }
+}
+
+std::string TopCamState() {
+  return "\"topcam\":{\"on\":" + std::string(g_top.on ? "true" : "false") + ",\"x\":" + Num(g_top.x) + ",\"y\":" + Num(g_top.y) +
+         ",\"ground\":" + Num(g_top.ground) + ",\"height\":" + Num(g_top.height) + ",\"heading\":" + Num(g_top.heading) +
+         ",\"fov\":" + Num(g_top.fov) + "}";
+}
+
 void ReleaseCamera() {
   if (!g_cam) return;
+  if (g_top.shown) SET_CAM_ACTIVE(g_top.cam, FALSE), g_top.shown = false;
   RENDER_SCRIPT_CAMS(FALSE, FALSE, 0, TRUE, FALSE, 0);
   g_rendering = false;
   for (Cam &c : g_cams) {
@@ -1478,7 +1538,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now),
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now), TopCamState(),
                                     GpsState(), DirectionsState(now)})
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
@@ -1989,6 +2049,33 @@ void HandleMessage(const Message &m, double now) {
     if (g_debug.ground) SnapToGround(g_debug.lines);
     g_debug.recording = MsgBool(m, "rec");
     g_debug.t = now;
+  } else if (type == "roadq") {
+    // GTA's closest road to a point as GET_CLOSEST_ROAD gives it (map audit): its two nodes, lanes towards each, median
+    Vector3 a{}, b{};
+    int toA = 0, toB = 0;
+    float median = 0;
+    float x = static_cast<float>(MsgNum(m, "x")), y = static_cast<float>(MsgNum(m, "y")), z = static_cast<float>(MsgNum(m, "z"));
+    BOOL ok = GET_CLOSEST_ROAD(x, y, z, static_cast<float>(MsgNum(m, "p3", 1.0)), static_cast<int>(MsgNum(m, "p4", 1)), &a, &b, &toA, &toB, &median, FALSE);
+    Log("roadq " + Num(x) + "," + Num(y) + "," + Num(z) + ": " +
+        (ok ? "a " + Num(a.x) + "," + Num(a.y) + "," + Num(a.z) + " b " + Num(b.x) + "," + Num(b.y) + "," + Num(b.z) + " lanes to a " +
+                  std::to_string(toA) + " to b " + std::to_string(toB) + " median " + Num(median)
+            : std::string("none")));
+  } else if (type == "grab") {
+    std::string path = MsgStr(m, "path");
+    bool ok = g_hook == Hook::On && !path.empty() && present_hook::RequestGrab(path);
+    Log("grab " + path + (ok ? "" : ": not taken (no present hook, or one pending)"));
+  } else if (type == "topcam") {
+    g_top.on = MsgBool(m, "on", true);
+    g_top.height = std::clamp(static_cast<float>(MsgNum(m, "height", g_top.height)), 3.0f, 300.0f);
+    g_top.fov = std::clamp(static_cast<float>(MsgNum(m, "fov", g_top.fov)), 5.0f, 120.0f);
+    g_top.heading = static_cast<float>(MsgNum(m, "heading", g_top.heading));
+    g_top.hud = MsgBool(m, "hud", g_top.hud);
+    double x = MsgNum(m, "x", NAN), y = MsgNum(m, "y", NAN);
+    g_top.follow = std::isnan(x) || std::isnan(y);
+    g_top.zref = static_cast<float>(MsgNum(m, "z", NAN));
+    if (!g_top.follow) g_top.x = static_cast<float>(x), g_top.y = static_cast<float>(y);
+    Log("topcam " + std::string(g_top.on ? "on" : "off") + (g_top.follow ? " over the car" : " at " + Num(x) + "," + Num(y)) + ", height " +
+        Num(g_top.height) + ", heading " + Num(g_top.heading) + ", fov " + Num(g_top.fov));
   } else if (type == "gpsroute") {
     // our route on the game's map: on, colour (HUD colour), max (points), radar and map (line widths), take (the map's
     // waypoint held off the map meanwhile, as GTA's own route line to it can't be hidden; take=0 leaves both lines)
@@ -2280,7 +2367,9 @@ extern "C" __declspec(dllexport) void CoreTick() {
   present_hook::SetEnabled(want && hooked);
 
   script_hook::SetOverride(g_cam != 0);
+  UpdateTopCam(v);
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
+  if (view < 0 && g_top.on && !g_top.hud) HIDE_HUD_AND_RADAR_THIS_FRAME();
   if (view >= 0) {
     // help text would cover the marker, and the wide lens reaches the radar in the corner. Hiding the rest of the HUD
     // or the feed for a frame restarts their animations (the radio station's name never shows), so the feed is hidden
@@ -2304,7 +2393,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (view >= 0 || lastOp) FREEZE_MICROPHONE();
   lastOp = view >= 0;
   // on the player's frames only, which keeps it out of the openpilot camera's
-  if (connected && v && view < 0) DrawSpeed(now);
+  if (connected && v && view < 0 && (g_top.hud || !g_top.on)) DrawSpeed(now);
   if (g_debugPresses.exchange(0) % 2) {
     g_debug.on = !g_debug.on;
     if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
@@ -2341,6 +2430,8 @@ extern "C" __declspec(dllexport) void CoreTick() {
 extern "C" __declspec(dllexport) void CoreShutdown() {
   AiOff(PLAYER_PED_ID(), "shutdown");  // a task left running would keep driving under the reloaded core
   ReleaseControls();
+  g_top.on = false;
+  ReleaseTopCam();
   ReleaseCamera();
   RemoveLead();
   script_hook::Uninstall();
