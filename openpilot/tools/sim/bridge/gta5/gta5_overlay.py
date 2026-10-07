@@ -5,13 +5,16 @@ in world coordinates with the road's height, for the plugin to draw into the wor
 the lines painted between lanes (from the map's lane tags where it has them, osm_lanes.py: white dashed between lanes one
 way, solid where change:lanes forbids crossing, yellow between the directions; else GTA's lane bands), stop lines
 (lights, signs), junction areas, the route in the lanes nav plans (its lane plan line), and the next turn with where its
-signal comes on. The road pieces follow gta5_train's maprender (its lane bands, dividers left
-out at junctions, junction areas as hulls at the junction nodes where roads cross, stop lines across the lanes into
-their junction, the route as its carriageway_line), drawn at their own heights rather than filtered to the car's level.
-Lane edges and dividers are also cut out of junction areas, and edges left out from a stop line in to its junction.
-The lane tags' lines take about 10 s to build on the lane map, so they're cached (GTA5_OVERLAY_CACHE) by the map files'
-contents and the code that builds them; a bridge start that finds none builds them in a separate process, and the
-overlay goes on without the roads until they're ready.
+signal comes on, drawn at their own heights (GTA's) rather than filtered to the car's level.
+On a lane-tagged map the roads are all from its tags, as the map view draws them (osm_to_roads.py): junction areas,
+their kerbs round the corners and their stop lines from junctions.py, the lines cut out of junction areas and (but for
+kerbs) from each stop line in to its junction, and a median's edges a yellow line each. They take about 40 s to build,
+so they're cached (GTA5_OVERLAY_CACHE) by the map files' contents and the code that builds them; a bridge start that
+finds none builds them in a separate process, and the overlay goes on without the roads until they're ready.
+Elsewhere the road pieces follow gta5_train's maprender (its lane bands, dividers left out at junctions, junction areas
+as hulls at the junction nodes where roads cross, stop lines across the lanes into their junction, the route as its
+carriageway_line); lane edges and dividers are also cut out of junction areas, and edges left out from a stop line in to
+its junction.
 
 GPS route: while the plugin's gpsroute is on, our route ahead, decimated to the points GTA's custom GPS route takes,
 whenever the route changes or the car nears the end of what was sent.
@@ -36,7 +39,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, offset_line as offset_polyline
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
 RADIUS = 150.0  # m around the car
@@ -45,6 +48,7 @@ BEHIND = 30.0  # m of route behind the car
 MAX_POINTS = 2500  # vertices per update, nearest first by layer priority
 MAX_CHARS = 60000
 SIMPLIFY = 0.15  # m a dropped vertex may be off the line
+AREA_SIMPLIFY = 0.5  # m, for a junction area's outline (its kerbs are drawn to SIMPLIFY): it's drawn before them
 RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
 RIBBON_TURN = 60.0  # deg: sharper corners in the route's line are cut where a side is shorter than RIBBON_JOG
 RIBBON_JOG = 5.0  # m
@@ -66,8 +70,9 @@ ENABLED = os.getenv("GTA5_OVERLAY", "1") != "0"
 # the lane tags' lines (road_marks) between bridge starts; empty: built each start
 CACHE_DIR = os.path.expanduser(os.getenv("GTA5_OVERLAY_CACHE", "~/.cache/gta5_overlay"))
 CACHE_KEEP = 3  # files
-MARKS_VERSION = 1  # the cache's format
-MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py")  # map/ modules road_marks depends on, as this one
+MARKS_VERSION = 2  # the cache's format
+# map/ modules road_marks depends on, as this one
+MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py", "junctions.py", "osm_to_roads.py")
 
 
 def smooth(x: np.ndarray, sigma: float) -> np.ndarray:
@@ -265,16 +270,65 @@ def marking_kinds(line) -> list[tuple[str, float]]:
   """An osm_lanes.Line as the overlay's kinds and their offsets (m right of it): [(kind, offset)]."""
   if line.kind == EDGE:
     return [("e", 0.0)]
+  if line.kind == MEDIAN:  # a median's edges one yellow line each, as maps paint it (and the map view draws it)
+    return [("c", 0.0)]
   dashed, solid = ("d", "w") if line.kind == DIVIDER else ("y", "c")
   return {"dashed": [(dashed, 0.0)], "solid": [(solid, 0.0)], "double_solid": [(solid, -DOUBLE), (solid, DOUBLE)],
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
 
 
+def z_along(piece: np.ndarray, line: np.ndarray, z: np.ndarray) -> np.ndarray:
+  """The heights [P] of the points of a piece of a polyline [N, 2] that has heights z [N], by where each falls along it."""
+  a, ab = line[:-1], np.diff(line, axis=0)
+  ab2 = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-12)
+  t = np.clip(np.einsum("pij,ij->pi", piece[:, None] - a[None], ab) / ab2, 0.0, 1.0)
+  k = np.argmin(np.hypot(*(a[None] + ab[None] * t[..., None] - piece[:, None]).transpose(2, 0, 1)), axis=1)
+  tk = t[np.arange(len(piece)), k]
+  return z[k] + (z[k + 1] - z[k]) * tk
+
+
 def road_marks(paths, osm) -> dict:
-  """The lines the map's lane tags paint, as segments: their ends [M, 2, 3], kinds [M], and the GTA nodes at their
-  way's ends [M, 2]. About 10 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
+  """What the overlay draws of a lane-tagged map, from its tags alone (osm_lanes.py, junctions.py), as the map view draws
+  it (osm_to_roads.py): the lines the lane tags paint, as segments (their ends [M, 2, 3], kinds [M], and the GTA nodes
+  near them [M, 2], for heights and finding them near the car), cut out of the junctions' areas and, but for kerbs, from
+  each stop line in to its junction, each area cutting only its own layer's lines; and the junctions' kerbs round their
+  corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's length, kind and GTA node
+  [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
+  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, level
+
+  junctions = Junctions(osm, lambda tags: tags.get("highway", "").removesuffix("_link") in ROAD_CLASSES)
+  # each junction's height and a GTA node at it, from its nodes (which are GTA's)
+  at = []
+  for j in junctions.junctions:
+    gta = [found[0] for n in j.nodes if (found := paths.nodes_at(osm.node_xy(n)))]
+    at.append((float(np.mean(paths.z[gta])), gta[0]) if gta else None)
+  area_layer = [max(level(junctions.ways[w][0])[0] for w in j.ways) for j in junctions.junctions]
+  kerb_areas = [(j.centre, j.polygon) for j in junctions.junctions]
+  paint_areas = kerb_areas + [(s.area.mean(0), s.area) for j in junctions.junctions for s in j.stops]
+  paint_layer = area_layer + [area_layer[n] for n, j in enumerate(junctions.junctions) for _ in j.stops]
+  index: dict[tuple[int, int], list[int]] = defaultdict(list)
+  for n, (_, a) in enumerate(paint_areas):
+    lo, hi = a.min(0) // CELL, a.max(0) // CELL
+    for cx in range(int(lo[0]), int(hi[0]) + 1):
+      for cy in range(int(lo[1]), int(hi[1]) + 1):
+        index[(cx, cy)].append(n)
+
+  def near(pts, layer, kerbs_only, but=None):  # the areas that cut a line (osm_to_roads' rules)
+    lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
+    found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in index.get((cx, cy), ())}
+    return [paint_areas[n] for n in sorted(found) if paint_layer[n] == layer and n != but and (not kerbs_only or n < len(kerb_areas))]
+
   ends, kinds, nodes = [], [], []
+
+  def add(kind, line3, ab):
+    ends.append(np.stack([line3[:-1], line3[1:]], axis=1))
+    kinds.extend([kind] * (len(line3) - 1))
+    nodes.extend([ab] * (len(line3) - 1))
+
   for wid in osm.ways:
+    if wid in junctions.inside:
+      continue
     pts = osm.way_points(wid)
     if len(pts) < 2 or np.hypot(*(pts[-1] - pts[0])) < 0.3:
       continue
@@ -283,17 +337,39 @@ def road_marks(paths, osm) -> dict:
       continue
     a, b = gta[0][0], gta[1][0]
     z = np.interp(np.linspace(0.0, 1.0, len(pts)), [0.0, 1.0], [paths.z[a], paths.z[b]])
+    layer = level(osm.ways[wid][0])[0]
     for line in osm.lanes(wid).lines(FORWARD):
       for kind, off in marking_kinds(line):
         geom = offset_polyline(pts, line.offset + off)
         if len(geom) != len(pts):
           continue
-        g3 = np.column_stack([geom, z])
-        ends.append(np.stack([g3[:-1], g3[1:]], axis=1))
-        kinds += [kind] * (len(pts) - 1)
-        nodes += [(a, b)] * (len(pts) - 1)
+        areas = near(geom, layer, kind == "e")
+        pieces = clip_areas(geom, areas) if areas else [geom]
+        for piece in pieces:
+          add(kind, np.column_stack([piece, z if piece is geom else z_along(piece, geom, z)]), (a, b))
+  shape_pts, shape_len, shape_kind, shape_node = [], [], [], []
+
+  def shape(kind, pts, z, node):
+    shape_pts.append(np.column_stack([pts, np.full(len(pts), z)]))
+    shape_len.append(len(pts))
+    shape_kind.append(kind)
+    shape_node.append(node)
+
+  for n, j in enumerate(junctions.junctions):
+    if at[n] is None:
+      continue
+    z, g = at[n]
+    for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
+      for piece in clip_areas(kerb, near(kerb, area_layer[n], True, but=n)):
+        add("e", np.column_stack([piece, np.full(len(piece), z)]), (g, g))
+    shape("j", simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), z, g)
+    for s in j.stops:
+      shape("l" if s.signal else "s", s.line, z, g)
   return {"segs": np.concatenate(ends) if ends else np.zeros((0, 2, 3)), "kinds": np.array(kinds, "<U1"),
-          "nodes": np.array(nodes, np.int64).reshape(-1, 2)}
+          "nodes": np.array(nodes, np.int64).reshape(-1, 2),
+          "shape_pts": np.concatenate(shape_pts) if shape_pts else np.zeros((0, 3)),
+          "shape_len": np.array(shape_len, np.int64), "shape_kind": np.array(shape_kind, "<U1"),
+          "shape_node": np.array(shape_node, np.int64)}
 
 
 def marks_key(paths, osm) -> str | None:
@@ -323,7 +399,7 @@ def marks_file(key: str) -> str:
 def load_marks(key: str) -> dict | None:
   try:
     with np.load(marks_file(key), allow_pickle=False) as z:
-      return {k: z[k] for k in ("segs", "kinds", "nodes")}
+      return {k: z[k] for k in z.files}
   except FileNotFoundError:
     return None
   except Exception as e:  # a torn or stale file: built again
@@ -357,9 +433,9 @@ def start_marks_build(paths, osm, key: str) -> subprocess.Popen:
 
 
 class RoadGeometry:
-  """The roads as lane bands, built once from a paths.Paths (GTA's own roads: junction areas, stop lines, and lane
-  edges and dividers where the map has no lane tags) and, with an osm_lanes.OsmLanes that has them, the lines the map's
-  lane tags paint; `near` gives the overlay's pieces around a point."""
+  """The roads, built once: with an osm_lanes.OsmLanes that has lane tags, all from the map (road_marks: its lines,
+  junction areas and stop lines), with GTA's heights from a paths.Paths; else as GTA's lane bands (its junction areas,
+  stop lines, lane edges and dividers). `near` gives the overlay's pieces around a point."""
 
   def __init__(self, paths, osm=None, marks: dict | None = None):
     from openpilot.tools.sim.bridge.gta5.map.paths import heading, roads_cross
@@ -404,6 +480,7 @@ class RoadGeometry:
     if marks is None and osm is not None and osm.tagged:
       marks = road_marks(paths, osm)
     self.marks = marks
+    self.shapes = [] if marks is None else np.split(marks["shape_pts"], np.cumsum(marks["shape_len"])[:-1])
 
   def _nodes_near(self, pos: np.ndarray, z: float, radius: float) -> np.ndarray:
     (x0, y0), (x1, y1) = np.floor((pos - radius) / CELL).astype(int), np.floor((pos + radius) / CELL).astype(int)
@@ -449,6 +526,11 @@ class RoadGeometry:
       return out
     mask = np.zeros(len(p.xy), bool)
     mask[nodes] = True
+    if self.marks is not None:  # all from the map's tags, its junctions' areas already cut out
+      m = self.marks
+      shapes = np.nonzero(mask[m["shape_node"]])[0].tolist() if len(self.shapes) else []
+      return self._near_marks(mask, layers) + [(str(m["shape_kind"][k]), self.shapes[k]) for k in shapes
+                                               if LAYER_OF[str(m["shape_kind"][k])] in layers or (m["shape_kind"][k] == "j" and "f" in layers)]
     ks = np.nonzero(mask[self.A] | mask[self.B])[0]
     A, B, R = self.A[ks], self.B[ks], self.right[ks]
     P = np.column_stack([p.xy[A], p.z[A]])
@@ -464,9 +546,7 @@ class RoadGeometry:
     # GTA's X-shaped junctions' diagonals, cross the junction beyond its node's own hull
     masks = [h[:-1, :2] for _, h in hulls]
     masks += [disk(p.xy[i], float(np.hypot(*(h[:-1, :2] - p.xy[i]).T).max())) for i, h in hulls]
-    if self.marks is not None:
-      out += self._near_marks(mask, masks, layers)
-    elif "e" in layers:
+    if "e" in layers:
       # not from a stop line in to its junction, nor across one: they'd criss-cross its area
       inA, inB = jA | self.stop_node[A], jB | self.stop_node[B]
       sel = ~(inA & inB & (jA | jB))
@@ -478,7 +558,7 @@ class RoadGeometry:
       ends[flip] = np.concatenate([ends[flip, 3:], ends[flip, :3]], axis=1)
       _, first = np.unique(ends, axis=0, return_index=True)
       out += [("e", line) for line in chain(segs[np.sort(first)])]
-    if "d" in layers and self.marks is None:
+    if "d" in layers:
       sel = ~(jA | jB)  # maprender: no dividers inside junctions
       n = self.lanes[ks]
       rows, offs = [], []
@@ -497,20 +577,15 @@ class RoadGeometry:
     return out
 
 
-  def _near_marks(self, mask: np.ndarray, masks: list, layers: str) -> list[tuple[str, np.ndarray]]:
-    """The map's lines near the nodes in mask, as the lane bands' edges and dividers are cut."""
+  def _near_marks(self, mask: np.ndarray, layers: str) -> list[tuple[str, np.ndarray]]:
+    """The map's lines near the nodes in mask."""
     m = self.marks
-    a, b = m["nodes"][:, 0], m["nodes"][:, 1]
-    near = mask[a] | mask[b]
-    jA, jB = self.junction[a], self.junction[b]
-    inA, inB = jA | self.stop_node[a], jB | self.stop_node[b]
-    edge = m["kinds"] == "e"
-    keep = near & np.where(edge, ~(inA & inB & (jA | jB)), ~(jA | jB))
+    keep = mask[m["nodes"][:, 0]] | mask[m["nodes"][:, 1]]
     out = []
     for kind in np.unique(m["kinds"][keep]):
       if LAYER_OF[kind] not in layers:
         continue
-      segs = clip_outside(m["segs"][keep & (m["kinds"] == kind)], masks)
+      segs = m["segs"][keep & (m["kinds"] == kind)]
       if kind == "e" and len(segs):  # one edge where two ways' kerbs meet
         q = np.round(segs * 4).astype(np.int64).reshape(-1, 6)
         diff = q[:, :3] - q[:, 3:]

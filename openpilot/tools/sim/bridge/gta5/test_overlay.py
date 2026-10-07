@@ -127,6 +127,18 @@ def test_saved_marks_load_exactly():
   assert ov.load_marks("u" * 32) is None
 
 
+def test_median_edges_are_one_yellow_line_each():
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CENTRE, MEDIAN, Line
+  assert ov.marking_kinds(Line(MEDIAN, 3.0, "double_solid")) == [("c", 0.0)]
+  assert ov.marking_kinds(Line(CENTRE, 3.0, "double_solid")) == [("c", -ov.DOUBLE), ("c", ov.DOUBLE)]
+
+
+def test_z_along_a_clipped_piece():
+  line = np.array([[0, 0], [10, 0], [10, 10]], float)
+  z = np.array([0.0, 10.0, 20.0])
+  np.testing.assert_allclose(ov.z_along(np.array([[2.5, 0], [10, 5]]), line, z), [2.5, 15.0])
+
+
 def test_gps_route_sends_when_it_changes_or_the_plugin_lost_it():
   pts = np.column_stack([np.zeros(200), np.arange(200) * 5.0])
   route = Route(pts, [])
@@ -225,7 +237,9 @@ def check_overlay(paths, place, osm=None) -> set:
       for poly in areas:
         e = np.roll(poly, -1, axis=0) - poly
         rel = mids[:, None] - poly[None]
-        inside = ((e[None, :, 0] * rel[..., 1] - e[None, :, 1] * rel[..., 0]) > 0.2).all(1)
+        # well inside every edge: a kerb on the area's outline lies within the outline's simplification of it
+        depth = (e[None, :, 0] * rel[..., 1] - e[None, :, 1] * rel[..., 0]) / np.hypot(*e.T)[None]
+        inside = (depth > ov.AREA_SIMPLIFY + 0.2).all(1)
         assert not inside.any(), (k, mids[inside][:3])
   assert len(msg["g"]) <= ov.MAX_CHARS and msg["n"] <= ov.MAX_POINTS
   assert stats["ms"] < 250
@@ -336,8 +350,8 @@ def startup(seconds: float = 25.0):
     print("next start, from the cache:      ", frame_loop(p, osm, True, seconds), flush=True)
 
 
-if __name__ == "__main__" and sys.argv[1:] == ["startup"]:
-  startup()
+if __name__ == "__main__" and sys.argv[1:2] == ["startup"]:
+  startup(*map(float, sys.argv[2:3]))
 elif __name__ == "__main__":
   p = Paths(PATHS)
   p.index()

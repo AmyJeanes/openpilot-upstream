@@ -277,6 +277,7 @@ class Stop:
   member: Member
   along: float  # m along the member's line from its junction node
   area: np.ndarray  # the whole road from the junction's mouth out to the stop line, where no lane lines are painted
+  signal: bool = False  # a traffic light's
 
 
 @dataclass
@@ -654,22 +655,21 @@ class Junctions:
             continue
         found.append((along, j, m))
       for along, j, m in sorted(found, key=lambda f: f[0])[:1 if facing not in ('forward', 'backward') else None]:
-        self._add_stop(j, m, kind, along)
+        self._add_stop(j, m, kind, along, tags['highway'] == 'traffic_signals')
     for j in self.junctions:
-      kinds = [STOPS.get(tags_of.get(n, {}).get('highway', '')) for n in j.nodes]
-      kind = next((k for k in kinds if k), None)
-      if kind is not None:
+      tags = next((tags_of[n] for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', ''))), None)
+      if tags is not None:
         for arm in j.arms:
           for m in arm.members:
             if not any(s.member is m for s in j.stops):
-              self._add_stop(j, m, kind, 0.0)
+              self._add_stop(j, m, STOPS[tags['highway']], 0.0, tags['highway'] == 'traffic_signals')
 
   @staticmethod
   def _along(m: Member, k: int) -> float:
     pts = m.line.p[1:-1]
     return float(np.hypot(*np.diff(pts[:k + 1], axis=0).T).sum()) if k else 0.0
 
-  def _add_stop(self, j: Junction, m: Member, kind: str, along: float):
+  def _add_stop(self, j: Junction, m: Member, kind: str, along: float, signal: bool = False):
     w, fwd = m.ways[0]
     spans = self.osm.lanes(w).ours(BACKWARD if fwd else FORWARD)  # the lanes towards the junction
     if not spans:
@@ -687,7 +687,7 @@ class Junctions:
     q = m.line.at(m.trim)
     uq = _left(m.line.tangent(m.trim))
     area = np.array([q - uq * e_hi, p + right * (-e_hi), p + right * (-e_lo), q - uq * e_lo])
-    j.stops.append(Stop(kind, line, m, s, area))
+    j.stops.append(Stop(kind, line, m, s, area, signal))
 
   # *** movements ***
 
