@@ -6,7 +6,13 @@ export SIMULATION="1"
 export SKIP_FW_QUERY="1"
 export FINGERPRINT="${FINGERPRINT:-HONDA_CIVIC_2022}"  # or TESLA_MODEL_3, with the bridge given the same
 
-export BLOCK="${BLOCK},camerad,loggerd,encoderd,micd,logmessaged,manage_athenad"
+# SIM_RECORD=1 keeps loggerd and encoderd, so drives are saved as routes in the log root (on PC, fcamera and ecamera
+# are lossless ffvhuff in Matroska, about 1.2 GB per minute each)
+if [[ "$SIM_RECORD" == "1" ]]; then
+  export BLOCK="${BLOCK},camerad,micd,logmessaged,manage_athenad"
+else
+  export BLOCK="${BLOCK},camerad,loggerd,encoderd,micd,logmessaged,manage_athenad"
+fi
 if [[ "$CI" ]]; then
   # TODO: offscreen UI should work
   export BLOCK="${BLOCK},ui"
