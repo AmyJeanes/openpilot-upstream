@@ -25,7 +25,10 @@ A way's line can't leave GTA's nodes, so the line stays put and the paint moves 
 the line is the middle of the road between the kerbs (OSM's default reading), so a centre off the line is said by the
 lanes' widths alone; with more lanes one way the line is the centre's (placement), which must then be on the line
 (within CENTRE_TOL). Lane counts never change here; disagreements are only counted.
-Painted arrows (game files only) give each direction's lanes their turn arrows, where there is one per lane.
+Painted arrows (game files only, a sample's "arrows" or arrow "features") give each direction's lanes their turn arrows,
+where there is one per lane, and the game files' kinds of the lines between lanes (solid, solid on one half) their
+change:lanes. Other fields (z, a mark's width / cover / line id, kerb_step, hatched spans, stop lines, other
+features) are read past.
 """
 import json
 from collections import Counter, defaultdict
@@ -41,7 +44,13 @@ CENTRE_TOL = 0.4  # m, where the line must be the centre's
 KERB_TOL = 0.4  # m between the two kerbs' distances from the line, to take them as the road's
 KERB_REACH = 2.5  # m between a seen kerb and where the class layout has it
 LANE_MIN, LANE_MAX = 3.0, 7.0  # m
-LANE_LINES = ('dashed', 'solid', 'markers')  # white lane lines; double and edge lines are mostly kerbs, not lanes
+LANE_LINES = ('dashed', 'solid', 'markers')  # white lane lines; the camera's double and edge lines are mostly kerbs
+# the game files' white lines between lanes, by kind: (may cross from its left, from its right), halves given left to
+# right as seen travelling a -> b
+CROSSING = {'dashed': (True, True), 'markers': (True, True), 'double_dashed': (True, True), 'solid': (False, False),
+            'double_solid': (False, False), 'solid_dashed': (False, True), 'dashed_solid': (True, False)}
+HALVES_SWAPPED = {'solid_dashed': 'dashed_solid', 'dashed_solid': 'solid_dashed'}  # a line seen the other way
+CHANGE = {(True, True): 'yes', (False, False): 'no', (False, True): 'not_left', (True, False): 'not_right'}
 ARROW_APART = 1.5  # m between two lanes' arrows
 GAMEFILES = 'gamefiles'
 
@@ -68,8 +77,10 @@ def load(paths) -> dict[tuple, list[dict]]:
 def _flip(d: dict) -> dict:
   kerbs = d.get('kerbs') or {}
   return {**d,
-          'marks': [{**m, 'offset': -m['offset'], 'pair': [-v for v in m['pair']][::-1] if m.get('pair') else None} for m in d['marks']],
-          'arrows': [{**a, 'offset': -a['offset'], 'dir': 'oncoming' if a.get('dir') in ('ab', 'ahead') else 'ab'} for a in d.get('arrows') or []],
+          'marks': [{**m, 'offset': -m['offset'], 'pair': [-v for v in m['pair']][::-1] if m.get('pair') else None,
+                     'type': HALVES_SWAPPED.get(m['type'], m['type'])} for m in d['marks']],
+          **{key: [{**a, 'offset': -a['offset'], 'dir': 'oncoming' if a.get('dir') in ('ab', 'ahead') else 'ab'} if 'offset' in a else a
+                   for a in d.get(key) or []] for key in ('arrows', 'features')},
           'kerbs': {**kerbs, 'left': -kerbs['right'] if kerbs.get('right') is not None else None,
                     'right': -kerbs['left'] if kerbs.get('left') is not None else None}}
 
@@ -100,17 +111,36 @@ def clusters(values: list[tuple[int, float]], tol: float = AGREE) -> list[tuple[
 
 
 def measure(samples: list[dict]):
-  """The yellow and white lines along a link: ([(offset, samples)], [(offset, samples)])."""
-  yellow, white = [], []
+  """The yellow and white lines along a link: ([(offset, samples)], [(offset, samples)]), and each white mark
+  [(offset, kind)]."""
+  yellow, white, kinds = [], [], []
   for k, d in enumerate(samples):
+    files = d.get('src') == GAMEFILES
     for m in d['marks']:
       if m['conf'] < CONF:
         continue
       if m['colour'] == 'yellow' and abs(m['offset']) <= CENTRE_REACH + 3.5:
         yellow.append((k, sum(m['pair']) / 2 if m.get('pair') else m['offset']))
-      elif m['colour'] == 'white' and m['type'] in LANE_LINES:
-        white.append((k, m['offset']))
-  return clusters(yellow), clusters(white)
+      elif m['colour'] == 'white' and (m['type'] in CROSSING if files else m['type'] in LANE_LINES):
+        offset = sum(m['pair']) / 2 if m.get('pair') else m['offset']
+        white.append((k, offset))
+        kinds.append((offset, m['type'] if files else None))
+  return clusters(yellow), clusters(white), kinds
+
+
+def changes(lines: list[float], kinds: list[tuple[float, str | None]], flip: bool) -> list[str] | None:
+  """change:lanes for a direction's lanes from the kinds of the lines between them (`lines`, left to right as seen
+  travelling it; `flip` where that's b -> a, which swaps a line's halves): None where a kind isn't known."""
+  crossing = []
+  for v in lines:
+    seen = Counter(kind for o, kind in kinds if abs((-o if flip else o) - v) <= AGREE)
+    kind = seen.most_common(1)[0][0] if seen else None
+    if kind not in CROSSING:
+      return None
+    crossing.append(CROSSING[kind][::-1] if flip else CROSSING[kind])
+  left = [True] + [c[1] for c in crossing]  # each lane may cross the line on its left (none: the centre or kerb)
+  right = [c[0] for c in crossing] + [True]
+  return [CHANGE[(a, b)] for a, b in zip(left, right, strict=True)]
 
 
 def road_kerbs(samples: list[dict], kerbs: tuple[float, float]) -> tuple[float, float]:
@@ -131,11 +161,12 @@ def road_kerbs(samples: list[dict], kerbs: tuple[float, float]) -> tuple[float, 
 def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]):
   """The painted cross-section of a two-way link with fwd and back lanes and its kerbs where the class layout has them
   (m left and right of its line), from its samples seen along it (one source's: sources()): ({'forward': [widths],
-  'backward': [widths] (each direction's lanes left to right as seen travelling it), 'median': m}, None), or (None, why
-  not)."""
+  'backward': [widths] (each direction's lanes left to right as seen travelling it), 'median': m, and from the game
+  files' line kinds 'change:forward' / 'change:backward': [change:lanes values] where a line can't be crossed}, None),
+  or (None, why not)."""
   if not (fwd and back):
     return None, 'one-way'
-  yellow, white = measure(samples)
+  yellow, white, kinds = measure(samples)
   need = max(MIN_SAMPLES, (len(samples) + 1) // 2)
   yellow = [v for v, c in yellow if c >= need]
   if len(yellow) == 1:
@@ -158,7 +189,11 @@ def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]
   b = [round(float(x), 2) for x in np.diff([-lo, *left, -kerbs[0]])]
   if not all(LANE_MIN <= x <= LANE_MAX for x in f + b):
     return None, 'lane widths'
-  return {'forward': f, 'backward': b, 'median': round(hi - lo, 2)}, None
+  out = {'forward': f, 'backward': b, 'median': round(hi - lo, 2)}
+  for key, between, flip in (('change:forward', right, False), ('change:backward', left, True)):
+    if (got := changes(between, kinds, flip)) and set(got) != {'yes'}:
+      out[key] = got
+  return out, None
 
 
 def disagree(a: dict, b: dict, tol: float = AGREE) -> bool:
@@ -176,11 +211,12 @@ TURNS = {'through;left': 'left;through', 'through;right': 'through;right', 'left
 
 def arrows(samples: list[dict]) -> dict[str, list[str]]:
   """The game files' painted arrows each way along a link: {'forward': [turn:lanes values], 'backward': [...]} (each
-  direction's lanes left to right as seen travelling it), an arrow per lane, its kind the one most seen there."""
+  direction's lanes left to right as seen travelling it), an arrow per lane, its kind the one most seen there. Arrows
+  come as a sample's "arrows", or "features" whose kind is an arrow's."""
   out = {}
   for key, ahead in (('forward', True), ('backward', False)):
-    seen = [(k, a) for k, d in enumerate(samples) if d.get('src') == GAMEFILES for a in d.get('arrows') or []
-            if (a.get('dir') in ('ab', 'ahead')) == ahead and a.get('conf', 1.0) >= CONF and a.get('kind') in TURNS]
+    seen = [(k, a) for k, d in enumerate(samples) if d.get('src') == GAMEFILES for a in (d.get('arrows') or []) + (d.get('features') or [])
+            if (a.get('dir') in ('ab', 'ahead')) == ahead and a.get('conf', 1.0) >= CONF and a.get('kind') in TURNS and 'offset' in a]
     if not seen:
       continue
     offsets = sorted(a['offset'] if ahead else -a['offset'] for _, a in seen)

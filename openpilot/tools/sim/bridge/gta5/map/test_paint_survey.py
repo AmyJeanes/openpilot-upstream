@@ -75,6 +75,26 @@ def test_painted_arrows():
   assert arrows(flipped) == {'forward': ['left;through', 'right'], 'backward': ['left', 'through', 'through;right']}
 
 
+def test_lines_that_cant_be_crossed():
+  # 3 lanes our way from the game files: solid between the left two, dashed on the left half / solid right between
+  # the right two (as seen travelling a -> b); oncoming 1 lane
+  marks = [mark(0.0, 'yellow', 'double_solid'), mark(5.5, kind='solid'), mark(11.0, kind='dashed_solid')]
+  files = [sample(marks, s, src='gamefiles') for s in (0, 3, 6)]
+  got, _ = correct(files, 3, 1, (-5.5, 16.5))
+  assert got['change:forward'] == ['not_right', 'not_left', 'not_left'] and 'change:backward' not in got
+  # seen the other way, the same line's halves swap
+  got, _ = correct(along({((1, 1), (1, 0)): files}, (1, 0), (1, 1)), 1, 3, (-16.5, 5.5))
+  assert got['change:backward'] == ['not_right', 'not_left', 'not_left']
+  camera = [{**d, 'src': None} for d in files]
+  assert 'change:forward' not in (correct(camera, 3, 1, (-5.5, 16.5))[0] or {})  # the camera's kinds aren't trusted
+
+
+def test_arrows_from_features():
+  feature = {'kind': 'left', 'offset': 2.0, 'dir': 'ab', 'conf': 0.95, 's': 1.0}
+  files = [sample([], 0, src='gamefiles', features=[feature, {**feature, 'kind': 'through;right', 'offset': 7.5}, {'kind': 'stop', 'offset': 5.0}])]
+  assert arrows(files) == {'forward': ['left', 'through;right']}
+
+
 if __name__ == '__main__':
   for name, test in list(globals().items()):
     if name.startswith('test_'):

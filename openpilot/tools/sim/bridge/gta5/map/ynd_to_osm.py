@@ -966,6 +966,9 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
     tags = {'lanes': str(fwd + back), 'lanes:forward': str(fwd), 'lanes:backward': str(back),
             'width': metres(sum(wf) + sum(wb) + painted['median']), 'width:lanes:forward': '|'.join(map(metres, wf)),
             'width:lanes:backward': '|'.join(map(metres, wb)), 'divider': 'double_solid_line', 'source:width': 'survey'}
+    for d in ('forward', 'backward'):
+      if f'change:{d}' in painted:
+        tags[f'change:lanes:{d}'] = '|'.join(painted[f'change:{d}'])
     if fwd != back:
       tags['placement:forward'] = tags['placement:backward'] = 'left_of:1'
     return tags
