@@ -3,7 +3,8 @@ import json
 import os
 import tempfile
 
-from openpilot.tools.sim.bridge.gta5.map.paint_survey import along, arrows, correct, correct_oneway, disagree, load, sources, strips
+from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrows, centre_kind, correct, correct_oneway, disagree, \
+  line_kinds, load, sources, strips
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -120,6 +121,25 @@ def test_parking_strips_and_painted_counts():
   got, _ = correct(files, 2, 2, (-11.0, 11.0), counts_from_paint=True)
   assert got['forward'] == [4.3, 4.2, 4.2] and got['backward'] == [4.45, 4.45] and got['parking'] == (0.0, 2.3) and got['middle']
   assert strips([{**d, 'kerb_step': {'left': -11.4, 'right': 11.3}} for d in files]) == (0.0, 0.0)  # a gutter, not a strip
+
+
+def test_cleaning_the_game_files_lines():
+  # a solid line read dashed in a worn section; raised markers that are the gutter's edge; a white dashed centre
+  polylines = [{'id': 1, 'style': 'dashed', 'painted': 0.76, 'dashes': [[0, 61.5], [67.9, 103.5]]},
+               {'id': 2, 'style': 'dashed', 'painted': 0.38, 'dashes': [[0, 0.4], [2.7, 3.1], [5.3, 5.7], [8.0, 8.4]]},
+               {'id': 3, 'style': 'dashed', 'painted': 0.29, 'dashes': [[0, 1.0], [6.0, 7.0], [12.0, 13.0]]}]
+  with tempfile.NamedTemporaryFile('w', suffix='.jsonl', delete=False) as f:
+    f.write('\n'.join(json.dumps(p) for p in polylines))
+  try:
+    kinds = line_kinds(f.name)
+  finally:
+    os.unlink(f.name)
+  assert kinds == {1: 'solid', 2: 'solid', 3: 'dashed'}  # worn, tiled decals, real dashes
+  d = sample([{**mark(2.0, kind='dashed'), 'line': 1}, {**mark(0.1, kind='dashed'), 'line': 3}, mark(5.3, kind='markers')],
+             src='gamefiles', kerbs={'left': -5.5, 'right': 5.5})
+  assert [(m['offset'], m['type']) for m in _clean(d, kinds)['marks']] == [(2.0, 'solid'), (0.1, 'dashed')]
+  centre = sample([{**mark(0.1, kind='dashed'), 'line': 3}, mark(5.3, kind='edge_line')], src='gamefiles')
+  assert centre_kind([_clean(centre, kinds)] * 2, 0.0, 0.4) == 'dashed_line'  # no yellow: the white centre
 
 
 def test_arrows_from_features():

@@ -64,9 +64,53 @@ def node_key(s: str) -> tuple[int, int]:
   return int(a), int(i)
 
 
-def load(paths) -> dict[tuple, list[dict]]:
+SOLID_PAINTED = 0.7  # of a line's length painted: solid with worn or hidden stretches, not dashed
+DASH_PERIOD = 4.0  # m: a "dashed" line repeating faster than this is a solid one laid as tiled decals
+MARKER_KERB = 1.0  # m: raised markers this near the asphalt's edge or the kerb are the gutter's edge, not paint
+
+
+def line_kinds(path) -> dict[int, str]:
+  """Whether each of the game files' polylines (polylines.jsonl: id, style, painted, dashes) is solid or dashed, by its
+  whole length: a section's reading can call a solid line dashed where it's worn, interrupted or tiled."""
+  out = {}
+  with open(path) as f:
+    for line in f:
+      try:
+        p = json.loads(line)
+      except ValueError:
+        continue
+      starts = [d[0] for d in p.get('dashes') or []]
+      period = float(np.median(np.diff(starts))) if len(starts) >= 3 else None
+      solid = p['style'] == 'solid' or p.get('painted', 0) >= SOLID_PAINTED or (period is not None and period < DASH_PERIOD)
+      out[p['id']] = 'solid' if solid else p['style']
+  return out
+
+
+HALVES = {('solid', 'solid'): 'double_solid', ('dashed', 'dashed'): 'double_dashed', ('solid', 'dashed'): 'solid_dashed',
+          ('dashed', 'solid'): 'dashed_solid'}
+
+
+def _clean(d: dict, lines: dict[int, str]) -> dict:
+  """A game-file sample with its lines' kinds read off their whole polylines, and raised markers at the kerbs dropped."""
+  kerbs = [v for k in ('kerbs', 'kerb_step') for v in (d.get(k) or {}).values() if isinstance(v, (int, float))]
+  marks = []
+  for m in d['marks']:
+    if m['type'] == 'markers' and any(abs(m['offset'] - v) <= MARKER_KERB for v in kerbs):
+      continue
+    ids = m.get('line') if isinstance(m.get('line'), list) else [m.get('line')]
+    kinds = [lines.get(i) for i in ids]
+    if None not in kinds and m['type'] in ('dashed', 'solid') and len(kinds) == 1:
+      m = {**m, 'type': kinds[0]}
+    elif None not in kinds and len(kinds) == 2 and kinds[0] == kinds[1] and m['type'] in HALVES.values():
+      m = {**m, 'type': HALVES[tuple(kinds)]}  # (which polyline is the left half isn't said: only where both agree)
+    marks.append(m)
+  return {**d, 'marks': marks}
+
+
+def load(paths, lines: dict[int, str] | None = None) -> dict[tuple, list[dict]]:
   """{(a, b): [sample]} by link, each sample's offsets seen travelling a -> b; junction and bay sections left out, and
-  lines that aren't whole JSON (a survey still being written)."""
+  lines that aren't whole JSON (a survey still being written). With the game files' `lines` (line_kinds), their
+  samples' marks are cleaned (_clean)."""
   out = defaultdict(list)
   for path in paths:
     with open(path) as f:
@@ -77,6 +121,8 @@ def load(paths) -> dict[tuple, list[dict]]:
           continue
         if d.get('junction') or d.get('bay'):
           continue
+        if lines is not None and d.get('src') == GAMEFILES:
+          d = _clean(d, lines)
         a, b = node_key(d['a']), node_key(d['b'])
         out[(b, a) if d.get('dir', 'ab') == 'ba' else (a, b)].append(d)
   return out
@@ -238,8 +284,11 @@ def centre_kind(samples: list[dict], at: float = 0.0, tol: float = AGREE) -> str
   more; None where they show none, or a median."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
   seen = Counter()
+  # a white centre where no yellow shows at all (Greenwich Pkwy's dashed one)
+  colour = 'yellow' if any(m['colour'] == 'yellow' for d in files for m in d['marks']) else 'white'
+  reach = CENTRE_REACH + 3.5 if colour == 'yellow' else 2.0  # white lines further out are lane or edge lines
   for d in files:
-    yellow = [m for m in d['marks'] if m['colour'] == 'yellow' and m['conf'] >= CONF and abs(m['offset']) <= CENTRE_REACH + 3.5]
+    yellow = [m for m in d['marks'] if m['colour'] == colour and m['conf'] >= CONF and abs(m['offset']) <= reach]
     near = [m['type'] for m in yellow if abs((sum(m['pair']) / 2 if m.get('pair') else m['offset']) - at) <= tol]
     if len(near) == 1 and len(yellow) == 1:
       seen[near[0]] += 1

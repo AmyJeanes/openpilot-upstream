@@ -111,7 +111,11 @@ shown or a level changes.
     lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
     lanes between their painted edges, and the painted arrows as `turn:lanes` where there's one per lane. GTA's lane
-    counts stay on one-way links (freeways GTA draws as parallel links are painted as one carriageway).
+    counts stay on one-way links (freeways GTA draws as parallel links are painted as one carriageway). With
+    `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
+    tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
+    gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
+    rp_all/polylines.jsonl`.
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for

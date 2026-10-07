@@ -1129,6 +1129,8 @@ def main():
   p.add_argument('--minimap', help="ynddump's minimap.jsonl: minor links GTA's minimap draws as roads become roads")
   p.add_argument('--survey', nargs='*', default=[], help="surveys of the game's road paint (paint_survey.py): the lane "
                  "widths where they were measured")
+  p.add_argument('--survey-lines', help="the game files' paint as polylines (polylines.jsonl): each line's kind by its "
+                 "whole length, for the survey's sections")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -1254,7 +1256,8 @@ def main():
   for wid, a, b, fwd, back, *_, lf in info:
     if back and 2 * layout(lf, back)[1] >= BAY_MIN:
       medians.update(e for e in ((a, b), (b, a)) if e[1] not in bay_to[wid])
-  survey = paint_survey.load(args.survey) if args.survey else {}
+  lines = paint_survey.line_kinds(args.survey_lines) if args.survey_lines else None
+  survey = paint_survey.load(args.survey, lines) if args.survey else {}
   painted_arrows = {}  # (node, next node) -> the lanes' painted turn arrows that way, left to right
   for _, a, b, *_ in info:
     if (samples := paint_survey.along(survey, a, b)) is not None:
