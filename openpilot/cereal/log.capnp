@@ -2448,6 +2448,10 @@ struct NavInstruction {
     directions @0 :List(Direction);
     active @1 :Bool;
     activeDirection @2 :Direction;
+
+    # fork additions
+    oncoming @3 :Bool;  # runs the other way, shown for context only
+    current @4 :Bool;  # the car is in this lane
   }
 
   enum Direction {
@@ -2468,7 +2472,18 @@ struct NavInstruction {
     distance @0 :Float32;
     type @1 :Text;
     modifier @2 :Text;
+
+    # fork additions
+    primaryText @3 :Text;  # the road it leads onto
   }
+
+  # fork additions: any navigation service fills them alike, whatever drives it
+  valid @13 :Bool;  # a route is active; false: navigation is idle and the guidance hidden
+  destinationName @14 :Text;
+  position @15 :NavRoute.Coordinate;  # the car, matched onto the route
+  bearingDeg @16 :Float32;  # the route's heading at the car, clockwise from north
+  laneDistance @17 :Float32;  # m ahead by which to be in an active lane, 0 when in one already
+  laneOpenDistance @18 :Float32;  # m ahead to where the first active lane opens, 0 when open
 }
 
 struct NavRoute {
@@ -2477,6 +2492,14 @@ struct NavRoute {
   struct Coordinate {
     latitude @0 :Float32;
     longitude @1 :Float32;
+  }
+
+  # fork additions: the roads near the route ahead, simplified, for a small route map
+  roads @1 :List(Road);
+
+  struct Road {
+    coordinates @0 :List(Coordinate);
+    width @1 :Float32;  # m, roughly the carriageway
   }
 }
 
@@ -2713,8 +2736,8 @@ struct Event {
     driverMonitoringStateDEPRECATED @71 :DriverMonitoringStateDEPRECATED;
     gpsNMEADEPRECATED @3 :GPSNMEAData;
     uploaderStateDEPRECATED @79 :UploaderState;
-    navInstructionDEPRECATED @82 :NavInstruction;
-    navRouteDEPRECATED @83 :NavRoute;
+    navInstruction @82 :NavInstruction;
+    navRoute @83 :NavRoute;
     navThumbnailDEPRECATED @84 :Thumbnail;
     gnssMeasurementsDEPRECATED @91 :GnssMeasurements;
     mapRenderStateDEPRECATED @105: MapRenderState;
