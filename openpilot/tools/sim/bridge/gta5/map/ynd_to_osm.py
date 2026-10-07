@@ -967,15 +967,20 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
     return tags
   if steps == -7 and fwd == back == 1:
     return {'lanes': '1', 'width': metres(w), 'lane_markings': 'no'}
-  if painted:
+  if painted:  # the lanes as painted, their counts too
     wf, wb = painted['forward'], painted['backward']
-    tags = {'lanes': str(fwd + back), 'lanes:forward': str(fwd), 'lanes:backward': str(back),
-            'width': metres(sum(wf) + sum(wb) + painted['median']), 'width:lanes:forward': '|'.join(map(metres, wf)),
-            'width:lanes:backward': '|'.join(map(metres, wb)), 'divider': 'double_solid_line', 'source:width': 'survey'}
+    left, right = painted.get('parking', (0.0, 0.0))
+    tags = {'lanes': str(len(wf) + len(wb)), 'lanes:forward': str(len(wf)), 'lanes:backward': str(len(wb)),
+            'width': metres(sum(wf) + sum(wb) + painted['median'] + left + right), 'width:lanes:forward': '|'.join(map(metres, wf)),
+            'width:lanes:backward': '|'.join(map(metres, wb)), 'divider': painted.get('divider', 'double_solid_line'),
+            'source:width': 'survey'}
     for d in ('forward', 'backward'):
       if f'change:{d}' in painted:
         tags[f'change:lanes:{d}'] = '|'.join(painted[f'change:{d}'])
-    if fwd != back:
+    for side, strip in (('left', left), ('right', right)):
+      if strip:
+        tags[f'parking:{side}'], tags[f'parking:{side}:width'] = 'lane', metres(strip)
+    if len(wf) != len(wb) and not painted.get('middle'):
       tags['placement:forward'] = tags['placement:backward'] = 'left_of:1'
     return tags
   bay = 2 * offset / (bf + bb) if bf + bb else 0.0
@@ -1255,16 +1260,8 @@ def main():
     if (samples := paint_survey.along(survey, a, b)) is not None:
       for key, e in paint_survey.arrows(samples).items():
         painted_arrows[(a, b) if key == 'forward' else (b, a)] = e
-  arrows_at, approaches, bent, opened = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions,
-                                                   left_bays, medians, painted_arrows)
   row_of = {row[0]: row for row in info}
-  way_of = graph(ways)[0]
-  for p, q in opened:
-    row = row_of[way_of[(p, q)]]
-    row[3 if row[2] == q else 4] += 1
-    bay_to[row[0]].add(q)
-  print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
-  painted, why, skipped = {}, Counter(), 0
+  painted, why, skipped, centre_kinds = {}, Counter(), 0, {}
   # where the game files' paint covers the map, the camera's survey only checks it
   from_files = any(d.get('src') == paint_survey.GAMEFILES for ds in survey.values() for d in ds)
   for wid, a, b, fwd, back, *_, lf in info:
@@ -1285,10 +1282,30 @@ def main():
       skipped += 1
       continue
     kerbs = (-(offset + back * w), offset + fwd * w)
-    painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs)
-    why[reason or ('measured (game files)' if use[0].get('src') == paint_survey.GAMEFILES else 'measured (camera)')] += 1
+    files = use[0].get('src') == paint_survey.GAMEFILES
+    painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs, counts_from_paint=files)
+    if got := painted[wid]:
+      medians.discard((a, b))  # the paint says where the turn lanes are
+      medians.discard((b, a))
+      if (len(got['forward']), len(got['backward'])) != (fwd, back):  # as many lanes as painted, arrows and all
+        why[f"lanes from the paint: {len(got['backward'])}+{len(got['forward'])} where GTA has {back}+{fwd}"] += 1
+        row = row_of[wid]
+        row[3], row[4] = len(got['forward']), len(got['backward'])
+        lanes_to[(a, b)], lanes_to[(b, a)] = row[3], row[4]
+    why[reason or ('measured (game files)' if files else 'measured (camera)')] += 1
     if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
       why['sources disagree' if paint_survey.disagree(painted[wid], check) else 'sources agree'] += 1
+    if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
+      centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
+  print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
+  arrows_at, approaches, bent, opened = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions,
+                                                   left_bays, medians, painted_arrows)
+  way_of = graph(ways)[0]
+  for p, q in opened:
+    row = row_of[way_of[(p, q)]]
+    row[3 if row[2] == q else 4] += 1
+    bay_to[row[0]].add(q)
+  print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
   if survey:
     print(f"paint survey of {len(painted) + skipped} links: " +
           ', '.join(f'{n} {k}' for k, n in why.most_common()))
@@ -1311,7 +1328,9 @@ def main():
     tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, (b in bay_to[wid], a in bay_to[wid]), painted.get(wid)),
             **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
     if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED:
-      tags['divider'] = 'double_solid_line'  # how GTA paints a two-lane road's centre (OSM's default reading is dashed)
+      tags.setdefault('divider', 'double_solid_line')  # how GTA paints most two-lane roads' centre (OSM reads dashed)
+    if wid in centre_kinds and 'lane_markings' not in tags:
+      tags['divider'] = centre_kinds[wid]
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:

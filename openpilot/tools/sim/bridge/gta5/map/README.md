@@ -106,8 +106,12 @@ shown or a level changes.
     cross-checks them, and corrects links itself only when no game-file survey is given. On a two-way link whose samples agree with each other and with GTA's lane counts, the
     lanes take the measured widths out to the kerbs (the game files' asphalt edges where they're symmetric, else the
     layout's), so a centre line off GTA's link line is said by the lanes' widths (the way's line stays on GTA's nodes,
-    the middle of the road); `source:width=survey` marks them. The game files' painted arrows replace `turn:lanes` on
-    approaches with an arrow per lane. Lane counts don't change; the log counts the links whose paint disagrees.
+    the middle of the road); `source:width=survey` marks them. From the game files also: a two-way link's lane counts
+    where its paint has other counts than GTA's (Eclipse Blvd's 3 + 2; arrows are then laid out for the painted
+    lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
+    between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
+    lanes between their painted edges, and the painted arrows as `turn:lanes` where there's one per lane. GTA's lane
+    counts stay on one-way links (freeways GTA draws as parallel links are painted as one carriageway).
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for

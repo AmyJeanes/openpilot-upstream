@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 
-from openpilot.tools.sim.bridge.gta5.map.paint_survey import along, arrows, correct, correct_oneway, disagree, load, sources
+from openpilot.tools.sim.bridge.gta5.map.paint_survey import along, arrows, correct, correct_oneway, disagree, load, sources, strips
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -19,13 +19,13 @@ def test_median_and_lanes():
   marks = [mark(-2.7, 'yellow', 'double_solid', pair=[-2.8, -2.6]), mark(2.7, 'yellow', 'double_solid', pair=[2.6, 2.8]),
            mark(-7.1), mark(7.1), mark(11.5, kind='double_solid'), mark(-11.5, kind='edge_line')]
   got, why = correct([sample(marks, s) for s in (2, 5, 8)], 2, 2, (-11.5, 11.5))
-  assert why is None and got == {'forward': [4.4, 4.4], 'backward': [4.4, 4.4], 'median': 5.4}
+  assert why is None and got == {'middle': True, 'forward': [4.4, 4.4], 'backward': [4.4, 4.4], 'median': 5.4}
 
 
 def test_centre_off_the_line():
   # a 1 + 1 road whose centre is 0.3 m right of the link: the lanes' widths say it, the kerbs stay
   got, _ = correct([sample([mark(0.3, 'yellow', 'double_solid')], s) for s in (2, 8)], 1, 1, (-5.5, 5.5))
-  assert got == {'forward': [5.2], 'backward': [5.8], 'median': 0.0}
+  assert got == {'middle': True, 'forward': [5.2], 'backward': [5.8], 'median': 0.0}
   # with more lanes one way the line is the centre's, so it must be on it
   got, why = correct([sample([mark(1.0, 'yellow'), mark(6.5), mark(-11.0, kind='edge_line')], s) for s in (2, 8)], 2, 1, (-5.5, 11.0))
   assert got is None and why == 'centre off the line'
@@ -58,7 +58,7 @@ def test_game_files_first_with_their_kerbs():
   assert use == files and other == camera
   assert sources(camera) == (camera, []) and sources(camera, camera_corrects=False) == ([], camera)
   got, _ = correct(use, 2, 2, (-11.0, 11.0))
-  assert got == {'forward': [5.4, 5.4], 'backward': [5.4, 5.4], 'median': 0.0}  # out to the asphalt's edges, 10.8 m
+  assert got == {'middle': True, 'forward': [5.4, 5.4], 'backward': [5.4, 5.4], 'median': 0.0, 'divider': 'double_solid_line'}  # to the asphalt edges
   assert disagree(got, correct(other, 2, 2, (-11.0, 11.0))[0])
   lopsided = [{**d, 'kerbs': {'left': -7.6, 'right': 13.8}} for d in files]  # can't be the middle of the road: the layout's
   assert correct(lopsided, 2, 2, (-11.0, 11.0))[0]['forward'] == [5.4, 5.6]
@@ -100,6 +100,26 @@ def test_one_way_from_the_game_files():
   assert correct_oneway([{**d, 'src': None} for d in files], 3, (-9.15, 9.15))[1] == 'one-way, no game files'
   bare = [sample([mark(0.1)], s, src='gamefiles', kerbs={'left': -5.4, 'right': 5.6}) for s in (0, 3)]  # no edge lines
   assert correct_oneway(bare, 2, (-5.5, 5.5))[0] == {'lanes': [5.5, 5.5]}
+
+
+def test_centre_kind_from_the_game_files():
+  files = [sample([mark(0.1, 'yellow', 'solid_dashed', pair=[0.0, 0.2])], s, src='gamefiles') for s in (0, 3)]
+  assert correct(files, 1, 1, (-5.5, 5.5))[0]['divider'] == 'solid_line;dashed_line'
+  # seen the other way along the link, the halves swap
+  assert correct(along({((1, 1), (1, 0)): files}, (1, 0), (1, 1)), 1, 1, (-5.5, 5.5))[0]['divider'] == 'dashed_line;solid_line'
+  assert 'divider' not in correct([{**d, 'src': None} for d in files], 1, 1, (-5.5, 5.5))[0]
+
+
+def test_parking_strips_and_painted_counts():
+  # Eclipse Blvd as painted: 2 lanes one way, 3 the other, the centre 1.9 m left of GTA's 2 + 2 link; asphalt to
+  # +-10.8, a paver strip to the kerb's face 2.3 m beyond on the right
+  marks = [mark(-1.9, 'yellow', 'double_solid'), mark(-6.35), mark(2.4), mark(6.6)]
+  files = [sample(marks, s, src='gamefiles', kerbs={'left': -10.8, 'right': 10.8}, kerb_step={'left': -11.4, 'right': 13.1})
+           for s in (0, 3, 6)]
+  assert correct(files, 2, 2, (-11.0, 11.0))[1] == '2+3 lanes painted, GTA has 2+2'
+  got, _ = correct(files, 2, 2, (-11.0, 11.0), counts_from_paint=True)
+  assert got['forward'] == [4.3, 4.2, 4.2] and got['backward'] == [4.45, 4.45] and got['parking'] == (0.0, 2.3) and got['middle']
+  assert strips([{**d, 'kerb_step': {'left': -11.4, 'right': 11.3}} for d in files]) == (0.0, 0.0)  # a gutter, not a strip
 
 
 def test_arrows_from_features():

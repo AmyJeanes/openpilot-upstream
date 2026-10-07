@@ -50,6 +50,9 @@ LANE_LINES = ('dashed', 'solid', 'markers')  # white lane lines; the camera's do
 # right as seen travelling a -> b
 CROSSING = {'dashed': (True, True), 'markers': (True, True), 'double_dashed': (True, True), 'solid': (False, False),
             'double_solid': (False, False), 'solid_dashed': (False, True), 'dashed_solid': (True, False)}
+# OSM's divider=* for a centre line's kind (halves left to right along the way; OSM has no double dashed line)
+DIVIDER = {'double_solid': 'double_solid_line', 'solid': 'solid_line', 'dashed': 'dashed_line', 'double_dashed': 'dashed_line',
+           'solid_dashed': 'solid_line;dashed_line', 'dashed_solid': 'dashed_line;solid_line'}
 HALVES_SWAPPED = {'solid_dashed': 'dashed_solid', 'dashed_solid': 'solid_dashed'}  # a line seen the other way
 CHANGE = {(True, True): 'yes', (False, False): 'no', (False, True): 'not_left', (True, False): 'not_right'}
 ARROW_APART = 1.5  # m between two lanes' arrows
@@ -166,12 +169,32 @@ def road_kerbs(samples: list[dict], kerbs: tuple[float, float]) -> tuple[float, 
   return -half, half
 
 
-def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]):
+PARKING_MIN, PARKING_MAX = 1.8, 5.5  # m of paved strip between the asphalt's edge and the kerb's face: a parking lane
+STRIP_AGREE = 0.6  # m between a strip's widths along a link
+
+
+def strips(samples: list[dict]) -> tuple[float, float]:
+  """The paved strips (paver or parking) left and right between the asphalt's edge and the kerb's face, from the game
+  files where half their samples or more agree on one: their widths, 0 for none."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  out = []
+  for side, sign in (('left', -1), ('right', 1)):
+    gaps = [(d['kerb_step'][side] - d['kerbs'][side]) * sign for d in files
+            if (d.get('kerbs') or {}).get(side) is not None and (d.get('kerb_step') or {}).get(side) is not None]
+    gaps = [g for g in gaps if PARKING_MIN <= g <= PARKING_MAX]
+    ok = files and len(gaps) * 2 >= len(files) and len(gaps) >= MIN_SAMPLES and max(gaps) - min(gaps) <= STRIP_AGREE
+    out.append(round(float(np.median(gaps)), 2) if ok else 0.0)
+  return out[0], out[1]
+
+
+def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float], counts_from_paint: bool = False):
   """The painted cross-section of a two-way link with fwd and back lanes and its kerbs where the class layout has them
   (m left and right of its line), from its samples seen along it (one source's: sources()): ({'forward': [widths],
   'backward': [widths] (each direction's lanes left to right as seen travelling it), 'median': m, and from the game
-  files' line kinds 'change:forward' / 'change:backward': [change:lanes values] where a line can't be crossed}, None),
-  or (None, why not)."""
+  files' line kinds 'change:forward' / 'change:backward': [change:lanes values] where a line can't be crossed, the
+  'divider' its centre line's kind, 'parking' (left, right) strips beyond the asphalt's edges}, None), or (None, why
+  not). With `counts_from_paint` (the game files only), the painted lanes may be more or fewer than GTA's: the count
+  then comes from the lane lines, each lane still LANE_MIN to LANE_MAX wide."""
   if not (fwd and back):
     return None, 'one-way'
   yellow, white, kinds = measure(samples)
@@ -186,12 +209,13 @@ def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]
   centre = (lo + hi) / 2
   if abs(centre) > (CENTRE_REACH if fwd == back else CENTRE_TOL):
     return None, 'centre off the line'
-  if fwd == back:
+  layout = kerbs
+  if fwd == back or counts_from_paint:
     kerbs = road_kerbs(samples, kerbs)
   lines = [v for v, c in white if c >= need]
   right = [v for v in lines if hi + LANE_MIN * 0.8 < v < kerbs[1] - LANE_MIN * 0.8]
   left = sorted(-v for v in lines if kerbs[0] + LANE_MIN * 0.8 < v < lo - LANE_MIN * 0.8)
-  if len(right) != fwd - 1 or len(left) != back - 1:
+  if (len(right) != fwd - 1 or len(left) != back - 1) and not (counts_from_paint and kerbs != layout):
     return None, f'{len(left) + 1}+{len(right) + 1} lanes painted, GTA has {back}+{fwd}'
   f = [round(float(x), 2) for x in np.diff([hi, *right, kerbs[1]])]
   b = [round(float(x), 2) for x in np.diff([-lo, *left, -kerbs[0]])]
@@ -201,7 +225,26 @@ def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]
   for key, between, flip in (('change:forward', right, False), ('change:backward', left, True)):
     if (got := changes(between, kinds, flip)) and set(got) != {'yes'}:
       out[key] = got
+  if lo == hi and (divider := centre_kind(samples, lo)):
+    out['divider'] = divider
+  if kerbs != layout and any(parking := strips(samples)):  # beyond the asphalt's edges the lanes run out to
+    out['parking'] = parking
+  out['middle'] = abs(kerbs[0] + kerbs[1]) < 1e-6  # the line is the middle of the road between the kerbs
   return out, None
+
+
+def centre_kind(samples: list[dict], at: float = 0.0, tol: float = AGREE) -> str | None:
+  """divider=* for the one yellow centre line the game files show near `at` m right of the line in half their samples or
+  more; None where they show none, or a median."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  seen = Counter()
+  for d in files:
+    yellow = [m for m in d['marks'] if m['colour'] == 'yellow' and m['conf'] >= CONF and abs(m['offset']) <= CENTRE_REACH + 3.5]
+    near = [m['type'] for m in yellow if abs((sum(m['pair']) / 2 if m.get('pair') else m['offset']) - at) <= tol]
+    if len(near) == 1 and len(yellow) == 1:
+      seen[near[0]] += 1
+  kind, n = seen.most_common(1)[0] if seen else (None, 0)
+  return DIVIDER.get(kind) if n >= MIN_SAMPLES and n * 2 >= len(files) else None
 
 
 EDGE_REACH = 2.5  # m between a one-way road's painted edge and where the class layout has its kerb
