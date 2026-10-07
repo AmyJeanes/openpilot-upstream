@@ -3,7 +3,7 @@ navigation view. Nothing here is GTA's: it reads a router.Route over the map, it
 car's place on the route, and writes the map's own lat/lon, as a navigation service on a real map would.
 
 navInstruction: the next maneuver (OSRM's type and modifier words, as upstream navd sent), the lanes for it, the time
-and distance left, and the car matched onto the route. navRoute: the route, and the roads near the route ahead
+and distance left, and the car's position and heading. navRoute: the route, and the roads near the route ahead
 simplified for a small map (fork fields), from a background thread since gathering them takes tens of ms."""
 import threading
 import time
@@ -168,8 +168,10 @@ def lane_guide(slots, s: float, v: float, car_lane: list[int] | None) -> LaneGui
   return LaneGuide(lanes, True, 0.0 if inside else max(target.end - s, 0.0), opens)
 
 
-def fill_instruction(ni, route, at: float, v: float, project=to_lat_lon, lanes: LaneGuide = NO_LANES) -> None:
-  """A navInstruction for the car `at` m along `route`."""
+def fill_instruction(ni, route, at: float, v: float, project=to_lat_lon, lanes: LaneGuide = NO_LANES,
+                     pose: tuple | None = None) -> None:
+  """A navInstruction for the car `at` m along `route`. `pose` is the car's own position (map metres) and heading
+  (deg clockwise from north), as the car's localizer has them; without it, its place on the route stands in."""
   ni.valid = True
   ahead = [m for m in maneuvers(route) if m.along > at]
   if ahead:
@@ -187,9 +189,10 @@ def fill_instruction(ni, route, at: float, v: float, project=to_lat_lon, lanes: 
   ni.speedLimit = float(route.limit_list[k]) if route.limit_list else 0.0
   ni.speedLimitSign = "mutcd"
   ni.destinationName = destination_name(route)
-  lat, lon = project(*point_at(route, at))
+  xy, bearing = (pose[0], pose[1]) if pose is not None else (point_at(route, at), heading_at(route, at))
+  lat, lon = project(float(xy[0]), float(xy[1]))
   ni.position.latitude, ni.position.longitude = float(lat), float(lon)
-  ni.bearingDeg = heading_at(route, at)
+  ni.bearingDeg = float(bearing) % 360
   ni.showFull = lanes.show
   ni.laneDistance, ni.laneOpenDistance = lanes.distance, lanes.opens
   ni.init("lanes", len(lanes.lanes))
@@ -325,11 +328,13 @@ class NavMessages:
     self.busy = False
     self.lock = threading.Lock()
 
-  def update(self, route, v: float, osm=None, slots_for: Callable | None = None, now: float | None = None) -> None:
+  def update(self, route, v: float, osm=None, slots_for: Callable | None = None, now: float | None = None,
+             pose: tuple | None = None) -> None:
+    """`pose`: the car's position (map metres) and heading (deg clockwise from north), for fill_instruction."""
     now = time.monotonic() if now is None else now
     if now >= self.next_instruction:
       self.next_instruction = now + INSTRUCTION_EVERY
-      self.pm.send("navInstruction", self.instruction(route, v, slots_for))
+      self.pm.send("navInstruction", self.instruction(route, v, slots_for, pose))
 
     if route is not self.route:
       self.route_bytes = route_message(route, [], self.project).to_bytes()  # the route alone: a few hundred points
@@ -347,7 +352,7 @@ class NavMessages:
         self.busy = True
         threading.Thread(target=self._gather, args=(route, route.at, osm), daemon=True).start()
 
-  def instruction(self, route, v: float, slots_for: Callable | None = None):
+  def instruction(self, route, v: float, slots_for: Callable | None = None, pose: tuple | None = None):
     msg = messaging.new_message("navInstruction", valid=True)
     if route is None or len(route.points) < 2:
       return msg
@@ -362,7 +367,7 @@ class NavMessages:
     except Exception as e:
       print(f"nav msgs: lanes: {e!r}")
       guide = NO_LANES
-    fill_instruction(msg.navInstruction, route, route.at, v, self.project, guide)
+    fill_instruction(msg.navInstruction, route, route.at, v, self.project, guide, pose)
     return msg
 
   def _gather(self, route, at: float, osm):

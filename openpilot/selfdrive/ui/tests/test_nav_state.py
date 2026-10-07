@@ -1,7 +1,9 @@
+import math
+
 import numpy as np
 
 from openpilot.cereal import messaging
-from openpilot.selfdrive.ui.nav.nav_state import M_PER_DEG, NavState, Projection, format_duration, instruction_guidance
+from openpilot.selfdrive.ui.nav.nav_state import M_PER_DEG, NavState, PoseTracker, Projection, format_duration, instruction_guidance, wrap
 from openpilot.selfdrive.ui.nav.text import lane_caption, maneuver_road, then_text
 
 
@@ -50,6 +52,46 @@ def test_guidance_and_captions():
   assert then_text(g, True) == "Then left in 400 m"
   g.lane_open_distance = 300.0
   assert lane_caption(g, True) == ("Turn lane opens", "from 300 m · in by 60 m")
+
+
+def test_pose_follows_the_yaw_rate_between_fixes():
+  # a quarter circle of radius 30 m at 6 m/s, fixes at 10 Hz and frames at 20 Hz: the heading moves every frame, by
+  # about the yaw rate's step, never by a fix's jump
+  t = PoseTracker()
+  v, r = 6.0, 30.0
+  w = v / r  # rad/s, turning right
+  bearings, dt = [], 0.05
+  for k in range(int((math.pi / 2) / w / dt) + 1):
+    now = k * dt
+    a = w * now
+    fix = (np.array([r - r * math.cos(a), r * math.sin(a)]), math.degrees(a)) if k % 2 == 0 else None
+    t.update(now, v, w, fix)
+    bearings.append(t.bearing)
+    assert abs(wrap(t.bearing - math.degrees(a))) < 1.0, k
+  steps = np.diff(np.unwrap(np.radians(bearings)))
+  assert np.all(steps > 0) and np.degrees(steps).max() < 1.5 * math.degrees(w * dt)
+
+
+def test_pose_eases_towards_fixes_without_a_yaw_rate():
+  # no yaw rate (no deviceMotion): a heading 30 deg off is taken in gradually, the short way across north
+  t = PoseTracker()
+  t.update(0.0, 0.0, 0.0, (np.zeros(2), 350.0))
+  t.update(0.05, 0.0, 0.0, (np.zeros(2), 20.0))
+  assert 350.0 < t.bearing < 352.0
+  for k in range(2, 100):
+    t.update(k * 0.05, 0.0, 0.0)
+  assert abs(wrap(t.bearing - 20.0)) < 0.5
+  t.update(5.0, 0.0, 0.0, (np.array([100.0, 0.0]), 90.0))  # far off: a new place, taken at once
+  assert t.pos[0] == 100.0 and t.bearing == 90.0
+
+
+def test_pose_keeps_its_place_across_a_new_route():
+  t = PoseTracker()
+  a, b = Projection(51.5, 0.0), Projection(51.501, 0.001)
+  t.update(0.0, 0.0, 0.0, (np.array([10.0, 20.0]), 45.0))
+  where = a.lat_lon(t.pos)
+  t.shift(a, b)
+  assert np.allclose(b.lat_lon(t.pos), where)
 
 
 def test_durations():

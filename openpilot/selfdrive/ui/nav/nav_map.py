@@ -33,27 +33,22 @@ class MapStyle:
 
 DEFAULT_STYLE = MapStyle()
 ZOOM_TC = 1.0  # s, the zoom's filter
-BEARING_TC = 0.3  # s
 
 
 class NavMap:
   def __init__(self, style: MapStyle = DEFAULT_STYLE, fps: float = 20.0):
     self.style = style
     self._zoom = FirstOrderFilter(0.0, ZOOM_TC, 1 / fps, initialized=False)  # m ahead in view
-    self._bearing = FirstOrderFilter(0.0, BEARING_TC, 1 / fps, initialized=False)  # deg, unwrapped
     self._roads = StrokeBatch([], [])
     self._roads_version = -1
 
-  def render(self, rect: rl.Rectangle, nav: NavState, v_ego: float) -> None:
+  def render(self, rect: rl.Rectangle, nav: NavState) -> None:
     st = self.style
-    car = nav.car(v_ego)
+    car = nav.car()
     if car is None:
       return
-    pos, bearing = car
-    if not self._bearing.initialized:
-      self._bearing.x, self._bearing.initialized = bearing, True
-    # filter the heading unwrapped, so it turns the short way round
-    b = self._bearing.update(self._bearing.x + ((bearing - self._bearing.x + 180) % 360 - 180))
+    pos, bearing = car  # already smooth: NavState's PoseTracker
+    b = bearing
     m = nav.guidance.maneuver
     ahead = min(max((m.distance if m is not None else st.view_max) * st.view_extra, st.view_min), st.view_max)
     if not self._zoom.initialized:

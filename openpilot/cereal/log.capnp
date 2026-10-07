@@ -2480,8 +2480,8 @@ struct NavInstruction {
   # fork additions: any navigation service fills them alike, whatever drives it
   valid @13 :Bool;  # a route is active; false: navigation is idle and the guidance hidden
   destinationName @14 :Text;
-  position @15 :NavRoute.Coordinate;  # the car, matched onto the route
-  bearingDeg @16 :Float32;  # the route's heading at the car, clockwise from north
+  position @15 :NavRoute.Coordinate;  # the car, as localized
+  bearingDeg @16 :Float32;  # the car's heading, clockwise from north
   laneDistance @17 :Float32;  # m ahead by which to be in an active lane, 0 when in one already
   laneOpenDistance @18 :Float32;  # m ahead to where the first active lane opens, 0 when open
 }

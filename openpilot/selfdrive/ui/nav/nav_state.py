@@ -12,7 +12,13 @@ from openpilot.system.ui.lib.multilang import tr
 
 M_PER_DEG = 111319.49  # m per degree of latitude, as the map's projection
 STALE_AFTER = 2.0  # s without a navInstruction: navigation has stopped
-EXTRAPOLATE_MAX = 0.3  # s the car is moved on from its last position
+# The car's pose between navigation's updates (10 Hz): dead reckoned each frame from openpilot's own yaw rate and speed,
+# and drawn towards each reported pose with these time constants, so the map neither snaps nor drifts
+POSITION_TC = 0.5  # s
+BEARING_TC = 0.8  # s
+SNAP_DIST = 50.0  # m from the reported position: a new place, taken at once
+DT_MAX = 1.0  # s of dead reckoning in one step: through a stalled frame, not a screen that was off
+YAW_STALE = 0.5  # s without deviceMotion: no yaw rate
 FEET_PER_M = 3.28084
 
 
@@ -83,6 +89,54 @@ class Projection:
   def local(self, lat, lon) -> np.ndarray:
     return np.stack([(np.asarray(lon, np.float64) - self.lon0) * self.kx, (np.asarray(lat, np.float64) - self.lat0) * M_PER_DEG], axis=-1)
 
+  def lat_lon(self, xy: np.ndarray) -> tuple[float, float]:
+    return float(self.lat0 + xy[1] / M_PER_DEG), float(self.lon0 + xy[0] / self.kx)
+
+
+def wrap(deg: float) -> float:
+  return (deg + 180.0) % 360.0 - 180.0
+
+
+class PoseTracker:
+  """The car's position (local m) and heading (deg clockwise from north) for drawing: moved on every frame by the car's
+  speed and yaw rate, and pulled smoothly towards each pose navigation reports, moved on alike since it came."""
+  def __init__(self):
+    self.pos: np.ndarray | None = None
+    self.bearing = 0.0
+    self._fix: tuple[np.ndarray, float] | None = None
+    self._t: float | None = None
+
+  def reset(self) -> None:
+    self.pos, self._fix, self._t = None, None, None
+
+  def shift(self, old: 'Projection', new: 'Projection') -> None:
+    """Keeps the pose where it is as the local frame moves to another origin (a new route)."""
+    if self.pos is not None:
+      self.pos = new.local(*old.lat_lon(self.pos))
+    if self._fix is not None:
+      self._fix = (new.local(*old.lat_lon(self._fix[0])), self._fix[1])
+
+  def update(self, now: float, v: float, yaw_rate: float, fix: tuple[np.ndarray, float] | None = None) -> None:
+    """yaw_rate: rad/s, clockwise (right) positive, as the bearing turns. fix: a newly reported (position, bearing)."""
+    dt = min(max(now - self._t, 0.0), DT_MAX) if self._t is not None else 0.0
+    self._t = now
+    if fix is not None:
+      if self.pos is None or float(np.hypot(*(fix[0] - self.pos))) > SNAP_DIST:
+        self.pos, self.bearing = fix[0].copy(), fix[1]
+      self._fix = (fix[0].copy(), fix[1])
+    if self.pos is None or self._fix is None:
+      return
+    turn = math.degrees(yaw_rate) * dt
+    self.pos, self.bearing = self._step(self.pos, self.bearing, v * dt, turn)
+    self._fix = self._step(self._fix[0], self._fix[1], v * dt, turn)
+    self.pos = self.pos + (self._fix[0] - self.pos) * (1.0 - math.exp(-dt / POSITION_TC))
+    self.bearing = (self.bearing + wrap(self._fix[1] - self.bearing) * (1.0 - math.exp(-dt / BEARING_TC))) % 360.0
+
+  @staticmethod
+  def _step(pos: np.ndarray, bearing: float, dist: float, turn: float) -> tuple[np.ndarray, float]:
+    mid = math.radians(bearing + turn / 2)
+    return pos + dist * np.array([math.sin(mid), math.cos(mid)]), (bearing + turn) % 360.0
+
 
 class NavState:
   """Reads the nav messages from a SubMaster that has them. `active` says whether to show the guidance."""
@@ -94,18 +148,31 @@ class NavState:
     self.route_along = np.zeros(0)
     self.roads: list[Road] = []
     self.version = 0  # counts navRoute updates, for drawing caches
+    self.pose = PoseTracker()
     self._route_fingerprint: tuple = ()
-    self._position_t = 0.0
 
   def update(self, sm) -> None:
+    now = time.monotonic()
     if sm.updated["navRoute"]:
       self._read_route(sm["navRoute"])
-    if sm.updated["navInstruction"]:
-      ni = sm["navInstruction"]
-      self.guidance = instruction_guidance(ni) if ni.valid else Guidance()
-      self._position_t = time.monotonic()
-    fresh = sm.recv_frame["navInstruction"] > 0 and time.monotonic() - sm.recv_time["navInstruction"] < STALE_AFTER
+    fix = self.read_instruction(sm["navInstruction"]) if sm.updated["navInstruction"] else None
+    fresh = sm.recv_frame["navInstruction"] > 0 and now - sm.recv_time["navInstruction"] < STALE_AFTER
     self.active = fresh and sm["navInstruction"].valid
+    if not self.active:
+      self.pose.reset()
+      return
+    # the device's z axis points down, so its rate about z is the bearing's (clockwise)
+    moving = sm.recv_frame["deviceMotion"] > 0 and now - sm.recv_time["deviceMotion"] < YAW_STALE
+    yaw_rate = sm["deviceMotion"].angularVelocityDevice.z if moving else 0.0
+    self.pose.update(now, sm["carState"].vEgo, yaw_rate, fix)
+
+  def read_instruction(self, ni) -> tuple[np.ndarray, float] | None:
+    """Takes a navInstruction's guidance; returns the pose it reports, in local m, if any."""
+    self.guidance = instruction_guidance(ni) if ni.valid else Guidance()
+    g = self.guidance
+    if g.position is None or self.projection is None:
+      return None
+    return self.projection.local(*g.position), g.bearing
 
   @staticmethod
   def _fingerprint(nr) -> tuple:
@@ -127,21 +194,17 @@ class NavState:
       return
     lat = np.array([c.latitude for c in coords])
     lon = np.array([c.longitude for c in coords])
-    self.projection = Projection(float(lat[0]), float(lon[0]))
+    old, self.projection = self.projection, Projection(float(lat[0]), float(lon[0]))
+    if old is not None:
+      self.pose.shift(old, self.projection)
     self.route = self.projection.local(lat, lon)
     self.route_along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.route, axis=0).T))))
     self.roads = [Road(self.projection.local([c.latitude for c in r.coordinates], [c.longitude for c in r.coordinates]), r.width)
                   for r in nr.roads if len(r.coordinates) >= 2]
 
-  def car(self, v_ego: float) -> tuple[np.ndarray, float] | None:
-    """The car in local m and its bearing (deg clockwise from north), moved on at v_ego since the last position."""
-    g = self.guidance
-    if g.position is None or self.projection is None:
-      return None
-    pos = self.projection.local(*g.position)
-    dt = min(max(time.monotonic() - self._position_t, 0.0), EXTRAPOLATE_MAX)
-    b = math.radians(g.bearing)
-    return pos + v_ego * dt * np.array([math.sin(b), math.cos(b)]), g.bearing
+  def car(self) -> tuple[np.ndarray, float] | None:
+    """The car in local m and its heading (deg clockwise from north), as drawn this frame."""
+    return (self.pose.pos, self.pose.bearing) if self.pose.pos is not None else None
 
   def along_route(self, pos: np.ndarray, bearing: float) -> tuple[float, int]:
     """m along the route to its point nearest pos, and the segment it's on, of those heading the car's way: where the

@@ -71,6 +71,7 @@ class UIState:
         "rawAudioData",
         "navInstruction",
         "navRoute",
+        "deviceMotion",
       ]
     )
 

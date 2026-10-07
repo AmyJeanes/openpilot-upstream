@@ -5,7 +5,7 @@ import time
 import numpy as np
 
 from openpilot.cereal import messaging
-from openpilot.selfdrive.ui.nav.nav_state import NavState, format_distance, instruction_guidance
+from openpilot.selfdrive.ui.nav.nav_state import NavState, format_distance
 from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as ls
 from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
@@ -172,11 +172,12 @@ def test_ui_reads_them():
   pub.update(r, 10.0, osm, lambda route: slots, now=1.0)
   nav = NavState()
   nav._read_route(pm.last('navRoute'))
-  g = instruction_guidance(pm.last('navInstruction'))
+  fix = nav.read_instruction(pm.last('navInstruction'))
+  nav.pose.update(0.0, 0.0, 0.0, fix)
+  g = nav.guidance
   assert g.maneuver.type == "turn" and g.show_lanes and abs(g.lane_open_distance - (240.0 + TAPER_M - 20.0)) < 0.01
   assert [lane.oncoming for lane in g.lanes] == [True, True, False, False]
-  nav.guidance = g
-  pos, bearing = nav.car(0.0)
+  pos, bearing = nav.car()
   along, _ = nav.along_route(pos, bearing)
   assert abs(along - 20.0) < 0.5 and abs(nav.route_along[-1] - r.length) < 1.0
   turn = nav.route_point(along + g.maneuver.distance)

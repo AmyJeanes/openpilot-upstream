@@ -337,7 +337,9 @@ class GTA5World(World):
         simulator_state.speed_limit = limits[0][1]
       simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
     if self.nav_msgs is not None:
-      self.nav_msgs.update(self.route, v, self.navigator.router.osm if self.navigator is not None else None, self._lane_slots)
+      # the game's pose stands in for the car's localizer (GPS and odometry)
+      self.nav_msgs.update(self.route, v, self.navigator.router.osm if self.navigator is not None else None, self._lane_slots,
+                           pose=(np.array(state["pos"][:2], dtype=float), bearing))
     for msg in self._overlay(state, v):
       self._send(msg)
     if self.expert.update(state, self.route, self.simulator_state.is_engaged):

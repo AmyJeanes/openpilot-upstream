@@ -147,7 +147,7 @@ class NavPanel(Widget):
     style = self.map.style
     self._card(rect, style.background)
     rl.begin_scissor_mode(int(rect.x), int(rect.y), int(rect.width), int(rect.height))
-    self.map.render(rect, self.nav, ui_state.sm["carState"].vEgo)
+    self.map.render(rect, self.nav)
     chip = then_text(g, metric)
     if chip:
       size = measure_text_cached(self._bold, chip, CHIP_SIZE)

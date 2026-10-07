@@ -2,6 +2,8 @@
 """The onroad UI's navigation view, offline: a route over the map's roads (gta5.osm.pbf, routed here by shortest path,
 no Valhalla), the bridge's nav messages for a car placed along it (gta5_nav_msgs.py), and the openpilot state the onroad
 view needs, all published under OPENPILOT_PREFIX to the UI run in this process, which saves screenshots of each scene.
+The car drives along the route in real time in each scene, reporting its own heading and a yaw rate (deviceMotion) as a
+car would; the drive scene follows it through the first turn and checks the map turns with it smoothly.
 
   OPENPILOT_PREFIX=navui BIG=1 SCALE=0.5 GALLIUM_DRIVER=d3d12 python nav_ui_demo.py --out <dir> [--find]
 
@@ -11,6 +13,7 @@ import heapq
 import math
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -21,7 +24,7 @@ os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 
 from openpilot.cereal import log, messaging
 from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots
-from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages, point_at
+from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages, heading_at, point_at
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, oneway_of
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -125,13 +128,14 @@ def nv12(path: str, w: int, h: int) -> bytes:
 class Openpilot:
   """The state the onroad view reads, engaged at a speed, with an alert when given."""
   SERVICES = ['deviceState', 'pandaStates', 'selfdriveState', 'carState', 'controlsState', 'modelV2', 'extrinsicsCalibration',
-              'carParams', 'driverMonitoringState']
+              'carParams', 'driverMonitoringState', 'deviceMotion']
 
   def __init__(self):
     self.pm = messaging.PubMaster(self.SERVICES)
     self.v = 12.0
     self.alert: tuple[str, str, str] | None = None  # text1, text2, size
     self.engaged = True
+    self.yaw_rate = 0.0  # rad/s, clockwise positive
 
   def send(self):
     msgs = {s: messaging.new_message(s, valid=True) for s in self.SERVICES if s != 'pandaStates'}
@@ -165,12 +169,27 @@ class Openpilot:
       edge.x, edge.y, edge.z = x, [y] * 33, [0.0] * 33
     md.roadEdgeStds = [0.3, 0.3]
     md.acceleration.x = [0.0] * 33
+    msgs['deviceMotion'].deviceMotion.angularVelocityDevice.z = self.yaw_rate  # device z points down
     for s, m in msgs.items():
       self.pm.send(s, m)
 
 
-def place(route: Route, s: float, lane: int | None):
-  """Moves the car s m along the route, into our lane `lane` from the left (None: on the route's line)."""
+HEADING_SPAN = 6.0  # m either side over which the car's heading follows the route, cutting its corners as a car does
+
+
+def car_heading(route: Route, s: float) -> float:
+  """The car's heading s m along, clockwise from north."""
+  a, b = point_at(route, s - HEADING_SPAN), point_at(route, s + HEADING_SPAN)
+  return math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) % 360
+
+
+def yaw_rate(route: Route, s: float, v: float) -> float:
+  """rad/s, clockwise positive, at v m/s."""
+  return math.radians(((car_heading(route, s + 0.5) - car_heading(route, s - 0.5) + 180) % 360 - 180) * v)
+
+
+def place(route: Route, s: float, lane: int | None) -> np.ndarray:
+  """Moves the car s m along the route, into our lane `lane` from the left (None: on the route's line); its position."""
   route.at = max(s - 5.0, 0.0)
   p = point_at(route, s)
   if lane is not None and route.lanes is not None:
@@ -181,6 +200,7 @@ def place(route: Route, s: float, lane: int | None):
       right = np.array([d[1], -d[0]]) / max(float(np.hypot(*d)), 1e-6)
       p = p + right * sec.offset(min(lane, sec.lanes - 1))
   route.locate(p)
+  return p
 
 
 def main():
@@ -192,7 +212,8 @@ def main():
   ap.add_argument("--metric", action="store_true")
   ap.add_argument("--fps", type=int, default=10)
   ap.add_argument("--disengaged", action="store_true", help="openpilot disengaged (the grey-blue border); names end _disengaged")
-  ap.add_argument("--scenes", default="turn,lanes,arrive,idle", help="any of turn, lanes, arrive, idle, at=<m>:<lane>")
+  ap.add_argument("--scenes", default="turn,lanes,arrive,idle",
+                  help="any of turn, lanes, arrive, idle, at=<m>:<lane>, drive (through the first turn)")
   args = ap.parse_args()
   osm = load_map()
   if args.find:
@@ -214,7 +235,7 @@ def main():
   import pyray as rl
   from msgq.visionipc import VisionIpcServer
   from openpilot.cereal.visionipc import VisionStreamType
-  from openpilot.selfdrive.ui.layouts.main import MainLayout
+  from openpilot.selfdrive.ui.layouts.main import MainLayout, MainState
   from openpilot.selfdrive.ui.ui_state import ui_state
   from openpilot.system.ui.lib.application import gui_app
 
@@ -229,16 +250,14 @@ def main():
   op.engaged = not args.disengaged
   nav = NavMessages()
   gui_app.init_window("nav ui demo", fps=args.fps)
-  MainLayout()
+  layout = MainLayout()
+  ui_nav = layout._layouts[MainState.ONROAD].nav
 
-  scenes = []
-  for name in args.scenes.split(","):
-    scenes.append(name)
   lanes_at = [float(s) for s in np.arange(0, route.length, 5.0) if slots.target(float(s), op.v)[1] is not None]
   turns = [float(route.along[m['begin_shape_index']]) for m in route.maneuvers if m['type'] in (9, 10, 11, 14, 15, 16)]
 
   def setup(name):
-    """(s along, lane, alert, route on) for a scene."""
+    """(s along to be at for the screenshot, lane, alert, route on) for a scene."""
     if name == "turn":
       return max(turns[0] - 180.0, 0.0), None, None, True
     if name == "lanes":
@@ -252,42 +271,95 @@ def main():
       return max(turns[-1] + 10.0, route.length - 100.0), None, None, True
     if name == "idle":
       return 0.0, None, None, False
+    if name == "drive":
+      return turns[0] + DRIVE_PAST, None, None, True
     s, _, lane = name.removeprefix("at=").partition(":")
     return float(s), int(lane) if lane else None, None, True
 
-  frame_id = 0
-  k, settle = 0, 0
-  s, lane, alert, on = setup(scenes[0])
-  cpu: list[float] = []
+  scenes = args.scenes.split(",")
+  frame_id, k, cpu = 0, 0, []
+  t0, lead = None, SETTLE
+  drive_log: list[tuple[float, float, float, float]] = []  # t, the car's heading, the map's, the route segment's
+  strip: list[str] = []
   for _, _, cpu_time in gui_app.render():
     if k >= len(scenes):
       break
-    place(route, s, lane)
-    op.alert = alert
+    now = time.monotonic()
+    target, lane, alert, on = setup(scenes[k])
+    if t0 is None:
+      t0 = now
+      lead = (DRIVE_FROM + DRIVE_PAST) / DRIVE_SPEED if scenes[k] == "drive" else SETTLE
+    op.v = DRIVE_SPEED if scenes[k] == "drive" else SPEED_SHOWN
+    s = target - op.v * max(lead - (now - t0), 0.0)  # driving, to be there at the screenshot
+    pos = place(route, s, lane)
+    op.alert, op.yaw_rate = alert, yaw_rate(route, s, op.v)
     op.send()
-    nav.update(route if on else None, op.v, osm, lambda r: slots)
+    nav.update(route if on else None, op.v, osm, lambda r: slots, pose=(pos, car_heading(route, s)))
     vipc.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, frame, frame_id, frame_id * 50_000_000, frame_id * 50_000_000)
     frame_id += 1
     ui_state.update()
-    settle += 1
-    if settle > args.fps:
+    if now - t0 > 1.0:
       cpu.append(cpu_time)
-    if settle == args.fps * 4 and not nav.busy:
-      rl.rl_draw_render_batch_active()
-      img = rl.load_image_from_texture(gui_app._render_texture.texture)
-      rl.image_flip_vertical(img)
+    if scenes[k] == "drive" and ui_nav.pose.pos is not None:
+      drive_log.append((now - t0, car_heading(route, s), ui_nav.pose.bearing, heading_at(route, route.at)))
+      if len(drive_log) % max(int(args.fps * STRIP_EVERY), 1) == 0 and abs(s - turns[0]) < STRIP_NEAR:
+        strip.append(save_frame(rl, gui_app, f"/tmp/navui_strip_{len(strip):02d}.png"))
+    if now - t0 >= lead and not nav.busy and (ui_nav.roads or not on):  # the map drawn, roads and all
       name = scenes[k].replace('=', '_').replace(':', '_') + ("_disengaged" if args.disengaged else "")
-      out = os.path.join(args.out, f"navui_{name}.png")
-      rl.export_image(img, out)
-      rl.unload_image(img)
+      out = save_frame(rl, gui_app, os.path.join(args.out, f"navui_{name}.png"))
       print(f"saved {out} at {s:.0f} m; UI render {1000 * np.mean(cpu):.1f} ms mean, {1000 * np.max(cpu):.1f} max", flush=True)
+      if scenes[k] == "drive":
+        report_drive(drive_log, strip, os.path.join(args.out, "navui_drive_strip.jpg"))
       cpu.clear()
-      k, settle = k + 1, 0
-      if k < len(scenes):
-        s, lane, alert, on = setup(scenes[k])
-    elif settle == args.fps * 4:
-      settle -= 1  # still gathering the roads
+      k, t0 = k + 1, None
   gui_app.close()
+
+
+DRIVE_FROM, DRIVE_PAST = 200.0, 40.0  # m before the first turn the drive starts, and past it it ends
+DRIVE_SPEED = 8.0  # m/s
+SPEED_SHOWN = 12.0  # m/s, in the other scenes
+SETTLE = 4.0  # s of driving before a scene's screenshot
+STRIP_EVERY, STRIP_NEAR = 1.0, 60.0  # s between the strip's frames, within this many m of the turn
+
+
+def save_frame(rl, gui_app, out: str) -> str:
+  rl.rl_draw_render_batch_active()
+  img = rl.load_image_from_texture(gui_app._render_texture.texture)
+  rl.image_flip_vertical(img)
+  rl.export_image(img, out)
+  rl.unload_image(img)
+  return out
+
+
+def report_drive(log_: list, frames: list[str], out: str):
+  """How the map's heading followed the car's over the drive: the largest error, and the largest step from one frame to
+  the next beyond the car's own (a snap); the route's segment headings, which the map used to follow, for comparison."""
+  t, car, shown, seg = (np.array(c) for c in zip(*log_, strict=True))
+  unwrap = lambda d: np.degrees(np.unwrap(np.radians(d)))  # noqa: E731
+  err = (shown - car + 180) % 360 - 180
+  snap = np.abs(np.diff(unwrap(shown)) - np.diff(unwrap(car)))
+  seg_snap = np.abs(np.diff(unwrap(seg)) - np.diff(unwrap(car)))
+  turned = unwrap(car)[-1] - unwrap(car)[0]
+  worst = int(np.argmax(snap))
+  print("; ".join([
+    f"drive: {len(t)} frames over {t[-1]:.1f} s, car turned {turned:.0f} deg",
+    f"map heading error max {np.abs(err).max():.1f} deg (rms {np.sqrt(np.mean(err ** 2)):.1f})",
+    f"largest step beyond the car's {snap.max():.1f} deg (frame gap {1000 * (t[worst + 1] - t[worst]):.0f} ms)",
+    f"route segment headings would step {seg_snap.max():.1f} deg",
+  ]), flush=True)
+  if frames:
+    from PIL import Image
+    crops = [Image.open(f).convert("RGB").crop((664, 222, 1066, 432)) for f in frames]
+    sheet = Image.new("RGB", (sum(c.width for c in crops) + 6 * (len(crops) - 1), crops[0].height), (40, 40, 40))
+    x = 0
+    for c in crops:
+      sheet.paste(c, (x, 0))
+      x += c.width + 6
+    sheet.thumbnail((2400, 400))
+    sheet.save(out, quality=85)
+    for f in frames:
+      os.remove(f)
+    print(f"saved {out} ({len(crops)} frames, {STRIP_EVERY} s apart)", flush=True)
 
 
 if __name__ == "__main__":
