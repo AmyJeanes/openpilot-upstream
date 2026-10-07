@@ -29,8 +29,8 @@ The map is the game's data, so it isn't in the repository; build it from your co
 3. Check its lanes: `validate_lanes.py ~/gta5map/gta5.osm.pbf` checks the lane tags (also on a real OSM extract, with
    `--left` where traffic drives on the left), and `lane_parity.py paths.jsonl ~/gta5map/gta5.osm.pbf` that
    `osm_lanes.py` reads them back to GTA's own lane layout. `test_osm_lanes.py` and `test_validate_lanes.py` run on the
-   hand-written `fixtures/` (`python test_osm_lanes.py`); `test_route_lanes.py` on small maps made in the test, in the
-   bridge's own environment.
+   hand-written `fixtures/` (`python test_osm_lanes.py`); `test_route_lanes.py` and `test_lane_match.py` on small maps
+   made in the test, in the bridge's own environment.
 
 ## Using it
 ```bash
@@ -49,10 +49,18 @@ The lanes along a route come from the map's lane tags, where `GTA5_MAP/gta5.osm.
 `RouteLanes`, read with `osm_pbf.py`, which needs no pyosmium): the route's ways (each shape point is a map node; a real
 map's would come from Valhalla's `trace_attributes`, `ways_from_trace`), each one's cross-section in the route's
 direction, a lane widening from nothing over 30 m where a way's lane count rises (falls) at a node no other road
-joins, the turn arrows into each junction, from which nav takes the lanes for each turn, and the line through the lanes
+joins, the turn arrows into each junction, from which nav takes the lanes for each turn, the junctions it goes straight
+on through onto fewer lanes, with the lanes that carry on (`continuing`: kerb to kerb where the road is as wide on both
+sides, else by its line), and the line through the lanes
 nav plans, on fillets from the lane in to the lane out through turns at junctions. A map without lane tags (only lane
 counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
-on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map. The
+on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map.
+`lane_match.py` reads the car's lane from the map's lane tags alone, route or not: the way at its height running its
+way whose lanes it is in (a turn bay laid as its own way in a road's median before the road), and whether that's an
+oncoming lane, a one-way driven the wrong way or the other direction's turn bay; nav moves back over on it and e2e
+counts the time. Inside junctions' areas (`junctions.py`) the reading means nothing; they take about half a minute to
+work out, so they're kept in `~/.cache/gta5_lanes` (`GTA5_LANE_CACHE`) by the map file's contents, built by the bridge in
+the background (`python -m openpilot.tools.sim.bridge.gta5.map.lane_match gta5.osm.pbf`) and by e2e when it starts. The
 map view draws the roads at their width and, from `lanes.json` (`osm_to_roads.py --lanes`) zoomed in, their lines:
 edges, white dashed lines between lanes one way (solid where `change:lanes` forbids crossing), the yellow line between
 the directions; and the plugin's debug overlay the same lines, from the map's tags. Zoomed in, junctions are drawn as

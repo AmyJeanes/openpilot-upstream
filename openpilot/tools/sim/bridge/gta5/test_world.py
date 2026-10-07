@@ -1,5 +1,7 @@
+import os
 from types import SimpleNamespace
 
+import numpy as np
 from cereal import log
 
 import openpilot.tools.sim.bridge.gta5.gta5_world as world_mod
@@ -69,3 +71,59 @@ def test_lane_slots_preview():
   r.off = world_mod.OFF_ROUTE_INPUT + 1.0
   w._write_lane_slots({"vEgo": 10.0})
   assert len(writes) == 3 and not writes[-1].any()
+
+
+def test_map_lane_for_nav():
+  from openpilot.tools.sim.bridge.gta5.map.test_lane_match import matcher
+  w = GTA5World.__new__(GTA5World)
+  w.lane_matcher, w.junction_areas = matcher(), None
+  state = {"pos": [-3.0, -150.0, 0.5], "heading": 0.0}  # northbound in the divided road's southbound lanes
+  assert w._map_lane(state) == {"lane": -1, "lanes": 2, "kind": "oncoming", "bay": False, "oncoming": True, "areas": False}
+  w.junction_areas = SimpleNamespace(inside=lambda x, y, z: False)
+  assert w._map_lane(state)["areas"] is True
+  w.junction_areas = SimpleNamespace(inside=lambda x, y, z: True)
+  assert w._map_lane(state) is None  # in a junction's area
+  w.lane_matcher = None
+  assert w._map_lane(state) is None
+
+
+def e2e_module():
+  """e2e.py, without the live stack's OPENPILOT_PREFIX it defaults to reaching the other tests."""
+  had = "OPENPILOT_PREFIX" in os.environ
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  if not had:
+    os.environ.pop("OPENPILOT_PREFIX", None)
+  return e2e
+
+
+def test_e2e_oncoming_times():
+  e2e = e2e_module()
+  pts = [{"t": 0.5 * k, "v": 5.0, "lane": [0, 2], "mlane": [0, 2, "own"]} for k in range(20)]
+  for k in range(4, 10):  # 3 s the wrong way on a one-way, which the game's reading misses
+    pts[k].update(lane=None, mlane=[-1, 0, "wrong-way"])
+  for k in range(10, 14):  # on through a junction, where the map can't say, and the game's reading sees it the last 1 s
+    pts[k].update(lane=[-1, 2] if k >= 12 else None, mlane=None)
+  t = e2e.oncoming_times(pts)
+  assert t == {"oncoming_s": 1.0, "oncoming_max": 1.0, "oncoming_map_s": 3.0, "oncoming_map_max": 3.0, "oncoming_any_s": 4.0,
+               "oncoming_any_max": 4.0}
+  assert not e2e.safe({"outcome": "arrived", **t})
+  assert e2e.safe({"outcome": "arrived", "oncoming_s": 0.5, "oncoming_max": 0.5})  # results from before the map's reading
+  pts[5]["v"] = 0.5  # stopped: not counted, and not over
+  assert e2e.oncoming_times(pts)["oncoming_map_max"] == 2.5
+
+
+def test_e2e_lane_map():
+  from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas
+  from openpilot.tools.sim.bridge.gta5.map.test_junctions import make
+  from openpilot.tools.sim.bridge.gta5.map.test_lane_match import HEIGHTS, NODES, WAYS
+  e2e = e2e_module()
+  lm = e2e.LaneMap(make(NODES, WAYS, HEIGHTS), JunctionAreas(np.zeros((0, 2)), [], np.zeros(0)))
+  assert lm.read(-3.0, -150.0, 0.5, 0.0) == [-1, 2, "oncoming"]
+  assert lm.read(0.6, -70.0, 0.5, 0.0) == [-1, 0, "bay"]  # the southbound left turn bay in the median
+  assert lm.read(6.0, -150.0, 0.5, 180.0) == [-2, 2, "oncoming"]  # southbound in the far northbound lane
+  # a trip's start: the middle of its lane, not the road's line
+  x, y, h = lm.lane_start(0.0, -150.0, 0.5, 0.0, 9)
+  assert abs(x - 6.25) < 1e-6 and abs(y + 150.0) < 1e-6 and abs(h) < 1e-6
+  assert abs(lm.lane_start(0.0, -150.0, 0.5, 180.0, 0)[0] + 2.75) < 1e-6
+  lm.areas = SimpleNamespace(inside=lambda x, y, z: True)
+  assert lm.read(-3.0, -150.0, 0.5, 0.0) is None

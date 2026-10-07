@@ -3,6 +3,7 @@ import math
 import multiprocessing
 import os
 import subprocess
+import sys
 import threading
 import time
 from multiprocessing import Queue
@@ -25,6 +26,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths
@@ -138,6 +140,8 @@ class GTA5World(World):
     self.next_map = 0.0
     self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
+    self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
+    self.junction_areas: JunctionAreas | None = None
     if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
       threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
     self.dest: np.ndarray | None = None
@@ -367,6 +371,8 @@ class GTA5World(World):
     if lanes is not None and lanes.tagged:
       self.navigator.router.osm = lanes
       print(f"gta5: lanes from the map's tags ({osm})")
+      self.lane_matcher = LaneMatcher(lanes)
+      self.junction_areas = self._junction_areas(lanes)
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
 
@@ -392,7 +398,7 @@ class GTA5World(World):
     self.route = route
     self._write_route_input(state)
     self._write_lane_slots(state)
-    state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": []}
+    state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
     if self.route is None:
       return state
     on = self.route.off < ON_ROUTE
@@ -404,6 +410,34 @@ class GTA5World(World):
       lane = plugin
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
+
+  @staticmethod
+  def _junction_areas(osm: OsmLanes) -> JunctionAreas | None:
+    """The map's junction areas from their cache, built by a separate process the first time (about half a minute)."""
+    areas = JunctionAreas.cached(osm, build=False)
+    if areas is not None:
+      return areas
+    print("gta5: building the map's junction areas in the background", flush=True)
+    try:
+      subprocess.run(["nice", "-n", "10", sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.map.lane_match", osm.path],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+      print(f"gta5: no junction areas: {e}")
+      return None
+    return JunctionAreas.cached(osm, build=False)
+
+  def _map_lane(self, state: dict) -> dict | None:
+    """The car's lane by the map's lanes alone (lane_match.py), for nav's way back out of the oncoming lanes; None in a
+    junction's area, where the car is on the moves through it. "areas" says whether those were looked at yet."""
+    m, areas = self.lane_matcher, self.junction_areas
+    if m is None:
+      return None
+    x, y, z = state["pos"]
+    if areas is not None and areas.inside(x, y, z):
+      return None
+    r = m.match(x, y, math.radians(state["heading"] + 90.0), z)
+    return None if r is None else {"lane": r.lane, "lanes": r.lanes, "kind": r.kind, "bay": r.bay, "oncoming": r.oncoming,
+                                   "areas": areas is not None}
 
   def _write_route_input(self, state: dict):
     """The driving model's route input for the route and the car's place on it; zero off it."""
@@ -463,7 +497,8 @@ class GTA5World(World):
     if r is self.lane_line[0] and now < self.lane_line[1]:
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
-    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0)))
+    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
+                                 r.lane_drops(r.length, 0.0)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

@@ -344,6 +344,10 @@ FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a 
 CORNER_SHARP, SHARP_SHARE = 10.0, 0.6  # a turn through a junction turns this share of its angle within this many m
 FILLET_RADIUS = {'left': 20.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns
 MATCH_TOL = 0.5  # m between a route's shape point and a map node it is at
+DROP_SPAN = 25.0  # m: junction nodes this near each other along a route are one junction, for the lanes through it
+DROP_TURN = 30.0  # deg at most a route turns going straight on through a junction (over DROP_REACH m either side)
+DROP_REACH = 15.0  # m
+SAME_WIDTH = 0.5  # m: roads either side of a junction this near as wide are one road carrying on, kerb to kerb
 
 
 class Section:
@@ -400,6 +404,17 @@ class Section:
 
   def lane(self, right: float) -> int:
     return int(min(max(np.floor(self.frac(right) + 0.5), self.lo), self.hi))
+
+
+def continuing(into: Section, out: Section) -> list[int]:
+  """Which of our lanes into a junction (from the left) carry on into the road out of it straight across: those whose
+  middle falls in one of the road out's lanes our way. Where the road is as wide on both sides its kerbs carry on, and
+  its line jogs if the split between the directions moves (one direction's lane ending as the other's begins);
+  otherwise its line carries on."""
+  (lo_in, hi_in), (lo_out, hi_out) = into.edges, out.edges
+  same = abs((hi_in - lo_in) - (hi_out - lo_out)) < SAME_WIDTH
+  shift = (lo_in - lo_out + hi_in - hi_out) / 2 if same else 0.0
+  return [i for i, s in enumerate(into.ours) if any(o.left + shift <= s.centre <= o.right + shift for o in out.ours)]
 
 
 def turn_targets(turns: list[frozenset[str]], move: str, fork: bool = False) -> list[int]:
@@ -620,6 +635,7 @@ class RouteLanes:
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     self._corners: list[tuple[float, float]] | None = None
+    self._drops: list[tuple[float, tuple[int, int, int]]] | None = None
 
   @classmethod
   def from_osm(cls, points, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes) -> 'RouteLanes':
@@ -665,6 +681,34 @@ class RouteLanes:
         if abs(inner) >= SHARP_SHARE * abs(turned):
           self._corners.append((sc, turned))
     return self._corners
+
+  @property
+  def drops(self) -> list[tuple[float, tuple[int, int, int]]]:
+    """Where the route goes straight on through a junction onto fewer lanes its way, all the lanes into it going
+    straight on (by their arrows, or none): [(m along to the junction's first node, (the first and last of our lanes
+    into it that carry on through it (continuing), from the left, of how many))]."""
+    if self._drops is None:
+      self._drops = []
+      groups: list[list[float]] = []
+      for s in self.junctions:
+        if groups and s - groups[-1][-1] < DROP_SPAN:
+          groups[-1].append(float(s))
+        else:
+          groups.append([float(s)])
+      for g in groups:
+        s0, s1 = g[0], g[-1]
+        if s0 - DROP_REACH < 0 or s1 + DROP_REACH > self.along[-1]:
+          continue
+        into, out = self.sections[self.segment(s0 - 1e-3)], self.sections[self.segment(s1 + 1e-3)]
+        if into is None or out is None or not 0 < out.lanes < into.lanes or not all(not t or 'through' in t for t in into.turns):
+          continue
+        p = [np.array([np.interp(v, self.along, self.points[:, 0]), np.interp(v, self.along, self.points[:, 1])])
+             for v in (s0 - DROP_REACH, s0, s1, s1 + DROP_REACH)]
+        turned = np.degrees((heading_of(p[3] - p[2]) - heading_of(p[1] - p[0]) + np.pi) % (2 * np.pi) - np.pi)
+        on = continuing(into, out)
+        if abs(turned) <= DROP_TURN and on and len(on) < into.lanes:
+          self._drops.append((s0, (min(on), max(on), into.lanes)))
+    return self._drops
 
   def segment(self, s: float) -> int:
     return int(min(max(np.searchsorted(self.along, s, side='right') - 1, 0), max(len(self.sections) - 1, 0)))
