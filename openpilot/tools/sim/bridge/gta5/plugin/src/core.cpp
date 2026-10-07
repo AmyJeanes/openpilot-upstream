@@ -423,6 +423,7 @@ struct TopCam {
   bool on = false, follow = true, hud = true;
   float x = 0, y = 0, height = 40, heading = 0, fov = 50;
   float ground = 0;    // the game's ground under the point, which the height is above
+  float zref = NAN;    // a height near that ground (the road's, from the map), else the vehicle's
   bool focus = false;  // the game streams the world around the point, not the player
   bool shown = false;  // the active camera
   Cam cam = 0;
@@ -527,8 +528,10 @@ void UpdateTopCam(Entity follow) {
   }
   Vector3 ref = GET_ENTITY_COORDS(follow ? follow : PLAYER_PED_ID(), TRUE);
   if (g_top.follow) g_top.x = ref.x, g_top.y = ref.y;
-  float z = 0;
-  g_top.ground = GET_GROUND_Z_FOR_3D_COORD(g_top.x, g_top.y, ref.z + 10.0f, &z, FALSE, FALSE) && std::fabs(z - ref.z) < 15.0f ? z : ref.z - 0.5f;
+  float z = 0, probe = std::isnan(g_top.zref) ? ref.z : g_top.zref;
+  g_top.ground = GET_GROUND_Z_FOR_3D_COORD(g_top.x, g_top.y, probe + 10.0f, &z, FALSE, FALSE) && std::fabs(z - probe) < 15.0f
+                     ? z
+                     : (std::isnan(g_top.zref) ? ref.z - 0.5f : g_top.zref);
   SET_CAM_FOV(g_top.cam, g_top.fov);
   SET_CAM_COORD(g_top.cam, g_top.x, g_top.y, g_top.ground + g_top.height);
   SET_CAM_ROT(g_top.cam, -90.0f, 0.0f, g_top.heading, 2);
@@ -2057,6 +2060,7 @@ void HandleMessage(const Message &m, double now) {
     g_top.hud = MsgBool(m, "hud", g_top.hud);
     double x = MsgNum(m, "x", NAN), y = MsgNum(m, "y", NAN);
     g_top.follow = std::isnan(x) || std::isnan(y);
+    g_top.zref = static_cast<float>(MsgNum(m, "z", NAN));
     if (!g_top.follow) g_top.x = static_cast<float>(x), g_top.y = static_cast<float>(y);
     Log("topcam " + std::string(g_top.on ? "on" : "off") + (g_top.follow ? " over the car" : " at " + Num(x) + "," + Num(y)) + ", height " +
         Num(g_top.height) + ", heading " + Num(g_top.heading) + ", fov " + Num(g_top.fov));
