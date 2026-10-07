@@ -20,6 +20,8 @@
 
 ExitHandler do_exit;
 
+constexpr double CAMERA_STALE_MS = 3000;
+
 struct EncoderdState {
   int max_waiting = 0;
 
@@ -70,20 +72,24 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
 
   std::vector<std::unique_ptr<Encoder>> encoders;
 
-  VisionIpcClient vipc_client = VisionIpcClient("camerad", cam_info.stream_type, false);
+  auto vipc_client = std::make_unique<VisionIpcClient>("camerad", cam_info.stream_type, false);
+  // a restarted camera server (the simulator bridge) counts frames from 0 again; offsetting them keeps the frame ids
+  // that segment rotation counts going on from where they were
+  uint32_t frame_id_offset = 0, last_frame_id = 0;
+  bool rebase = false;
 
   std::unique_ptr<JpegEncoder> jpeg_encoder;
 
   int cur_seg = 0;
   while (!do_exit) {
-    if (!vipc_client.connect(false)) {
+    if (!vipc_client->connect(false)) {
       util::sleep_for(5);
       continue;
     }
 
     // init encoders
     if (encoders.empty()) {
-      const VisionBuf &buf_info = vipc_client.buffers[0];
+      const VisionBuf &buf_info = vipc_client->buffers[0];
       LOGW("encoder %s init %zux%zu", cam_info.thread_name, buf_info.width, buf_info.height);
       assert(buf_info.width > 0 && buf_info.height > 0);
 
@@ -99,10 +105,21 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
     }
 
     bool lagging = false;
+    double last_frame_tms = millis_since_boot();
     while (!do_exit) {
       VisionIpcBufExtra extra;
-      VisionBuf* buf = vipc_client.recv(&extra);
-      if (buf == nullptr) continue;
+      VisionBuf* buf = vipc_client->recv(&extra);
+      if (buf == nullptr) {
+        // a client can also miss the restart and just stop getting frames, so a stale one starts afresh too
+        if (!vipc_client->is_connected() || millis_since_boot() - last_frame_tms > CAMERA_STALE_MS) {
+          LOGW("encoder %s: camera server restarted or stale, reconnecting", cam_info.thread_name);
+          vipc_client = std::make_unique<VisionIpcClient>("camerad", cam_info.stream_type, false);
+          rebase = true;
+          break;
+        }
+        continue;
+      }
+      last_frame_tms = millis_since_boot();
 
       // detect loop around and drop the frames
       if (buf->get_frame_id() != extra.frame_id) {
@@ -113,6 +130,13 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
         continue;
       }
       lagging = false;
+
+      if (rebase) {
+        frame_id_offset = last_frame_id + 1 - extra.frame_id;
+        rebase = false;
+      }
+      extra.frame_id += frame_id_offset;
+      last_frame_id = extra.frame_id;
 
       if (!sync_encoders(s, cam_info.stream_type, extra.frame_id)) {
         continue;
