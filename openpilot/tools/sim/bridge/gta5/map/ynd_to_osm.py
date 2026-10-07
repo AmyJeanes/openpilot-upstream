@@ -57,6 +57,7 @@ APPROACH_BEND = 20.0  # deg: where the way into a junction turns more than this 
 # at 6 steps on narrow and normal links alike)
 PAINTED_LANE, PAINTED_NARROW, PAINTED_FREEWAY = 5.5, 4.4, 6.1
 MEDIAN_STEP = 0.9
+MEDIAN_LANE_MIN = 15.0  # m: a median runs in to a junction at least this far to be painted as a turn lane
 FREEWAY = 64  # node flags 2: a freeway's
 MARKED = {'trunk', 'primary', 'residential'}  # classes of GTA's streets with painted centre lines
 BAY_MIN = 2.5  # m: a two-way road's median narrower than this has no room for a turn bay
@@ -990,7 +991,7 @@ def arrows(n, kinds, fewer_left=False):
   return ['left'] * left + ['right'] * (n - left)
 
 
-def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions, left_bays=frozenset()):
+def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions, left_bays=frozenset(), medians=frozenset()):
   """turn:lanes on the lanes into GTA's junctions where roads cross (see arrows), from the ways out of each, a move
   turning more than TURN_FLAG being a left or right turn, as for GTA's turn flags, less those the restrictions forbid.
   Marked on every way along the approach from APPROACH m before the junction while the road runs on with the same
@@ -998,9 +999,12 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
   road bends into the junction (APPROACH_BEND), which leaves which way is through moot. A one-lane approach gets none,
   as real mappers leave them out, unless it's GTA's left turn only lane; on a wider road that lane is the left one. A
   turn bay folded into its road (`left_bays`, the links into their junctions) is its left lane, marked from where it
-  opens. `ways` is [(way id, a, b, two_way)], `left_only` GTA's left turn only lane nodes, `restrictions` [(kind, from
-  way, via, to way)] as written; returns {way id: {tag: value}}, how many approaches got arrows and how many were left
-  out for bending."""
+  opens. On a two-way road with a median (`medians`, its links (node, next node) where the median has room for a lane)
+  running in to a junction it may turn left at, GTA paints the median as a left-turn lane without a link of its own
+  (measured on 4 of 4 such approaches): one more lane, `left`, on the approach's links within the median, if they are
+  at least MEDIAN_LANE_MIN long. `ways` is [(way id, a, b, two_way)], `left_only` GTA's left turn only lane nodes,
+  `restrictions` [(kind, from way, via, to way)] as written; returns {way id: {tag: value}}, how many approaches got
+  arrows, how many were left out for bending, and the links (node, next node) given a median lane."""
   way_of, out, into = graph(ways)
   drawn = {wid: (a, two_way) for wid, a, _, two_way in ways}
 
@@ -1019,13 +1023,14 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
                for k, w in enumerate(seq) for via, wt in banned.get(w, ()))
 
   only_left = {(path[-2], path[-1]) for i in left_only for path in toward.get(i, {}).values()} | set(left_bays)
-  tags, approaches, bent = defaultdict(dict), 0, 0
+  tags, approaches, bent, opened = defaultdict(dict), 0, 0, set()
   for j in sorted(into):
     if not junction(j):
       continue
     for p in into[j]:
       n, only = lanes_to[(p, j)], (p, j) in only_left
-      if junction(p) or (n < 2 and not only):
+      median = (p, j) in medians and not only
+      if junction(p) or (n < 2 and not only and not median):
         continue
       chain, q, nxt, dist = [(p, j)], p, j, length(p, j)
       start = p if dist >= APPROACH_HEADING else None
@@ -1057,6 +1062,13 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
       lanes = arrows(n, allowed, fewer_left)
       if only and n > 1 and 'left' in allowed and allowed - {'left'}:
         lanes = ['left', *arrows(n - 1, allowed - {'left'}, fewer_left)]
+      inside = next((k for k, e in enumerate(chain) if e not in medians), len(chain))  # the median runs in to the junction
+      if median and 'left' in allowed and allowed - {'left'} and sum(length(*e) for e in chain[:inside]) >= MEDIAN_LANE_MIN:
+        chain = chain[:inside]
+        lanes = ['left', *arrows(n, allowed - {'left'}, fewer_left)]
+        opened.update(chain)
+      elif n < 2 and not only:
+        continue
       if all(lane == 'through' for lane in lanes):
         continue
       approaches += 1
@@ -1065,7 +1077,7 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
         a, two_way = drawn[wid]
         key = 'turn:lanes' if not two_way else 'turn:lanes:forward' if e[0] == a else 'turn:lanes:backward'
         tags[wid].setdefault(key, '|'.join(lanes))
-  return tags, approaches, bent
+  return tags, approaches, bent, opened
 
 
 def node_id(k):
@@ -1198,7 +1210,19 @@ def main():
   u_turns = len(restrictions)
   turns, skipped, dead_ends = turn_restrictions(nodes, ways, toward, flags)
   restrictions += turns
-  arrows_at, approaches, bent = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions, left_bays)
+  medians = set()  # two-way links (node, next node) with room for a turn lane in their median, and no turn bay that way
+  for wid, a, b, fwd, back, *_, lf in info:
+    if back and 2 * layout(lf, back)[1] >= BAY_MIN:
+      medians.update(e for e in ((a, b), (b, a)) if e[1] not in bay_to[wid])
+  arrows_at, approaches, bent, opened = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions,
+                                                   left_bays, medians)
+  row_of = {row[0]: row for row in info}
+  way_of = graph(ways)[0]
+  for p, q in opened:
+    row = row_of[way_of[(p, q)]]
+    row[3 if row[2] == q else 4] += 1
+    bay_to[row[0]].add(q)
+  print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
   print(f"{approaches} approaches to junctions with turn arrows, on {len(arrows_at)} ways ({bent} bending into theirs left out)")
   layer_of = {ways[i][0]: v for i, v in levels(nodes, [(a, b) for _, a, b, _ in ways]).items()}
   print(f"{len(layer_of)} ways over others as bridges (up to layer {max(layer_of.values(), default=0)})")

@@ -97,6 +97,9 @@ shown or a level changes.
     paints it: the median tapers away where the bay opens) with `turn:lanes` such as `left|through|through;right` from
     there, and the left turn GTA forbade from the road's own lanes is allowed from it. osm_lanes widens the new lane
     from nothing over 30 m where the lane count rises. Every other link stays as GTA has it.
+  - Where a two-way road's median (2.5 m or more) runs in to a junction it may turn left at and GTA has no bay link,
+    the game paints the median as a left-turn lane on the approach (seen on 4 of 4 such approaches): its links within
+    the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for

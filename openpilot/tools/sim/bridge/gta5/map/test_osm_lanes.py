@@ -222,6 +222,21 @@ def test_detached_bays():
   assert find(6.0) == []  # on the right: a slip lane, not a bay
 
 
+def test_median_turn_lane():
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_turns
+  xy = {'P': (0, -100), 'Q': (0, -60), 'R': (0, -30), 'J': (0, 0), 'W': (-50, 0), 'E': (50, 0), 'N': (0, 50)}
+  nodes = {k: {'x': x, 'y': y} for k, (x, y) in xy.items()}
+  ways = [(1, 'P', 'Q', True), (2, 'Q', 'R', True), (3, 'R', 'J', True), (4, 'W', 'J', True), (5, 'J', 'E', True), (6, 'J', 'N', True)]
+  lanes_to = {e: 1 for _, a, b, _ in ways for e in ((a, b), (b, a))}
+
+  def turns(medians):
+    tags, _, _, opened = lane_turns(nodes, ways, lanes_to, lambda k: k == 'J', {}, set(), [], medians=medians)
+    return tags.get(3), opened
+  # a one-lane approach in a median: the median is its left-turn lane on its last 30 m
+  assert turns({('P', 'Q'), ('Q', 'R'), ('R', 'J')}) == ({'turn:lanes:forward': 'left|through;right'}, {('R', 'J')})
+  assert turns(set()) == (None, set())  # no median: one lane, no arrows
+
+
 if __name__ == '__main__':
   for name, test in list(globals().items()):
     if name.startswith('test_'):
