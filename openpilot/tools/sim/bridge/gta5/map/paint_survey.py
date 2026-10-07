@@ -14,7 +14,8 @@ A survey file has a JSON object per line, one per cross-section read across a GT
    "kerbs": {"left": -11.3, "right": 11.4, "conf": 0.8}, "junction": false, "bay": false, "src": "gamefiles"}
 offsets in m right of the link's line, seen in the "dir" direction.
 
-Only two-way links are corrected, and only where the samples agree with each other and with GTA's lane counts:
+One-way links are corrected from the game files alone (correct_oneway: their painted edges and lane lines). Two-way
+links are corrected from either source, only where the samples agree with each other and with GTA's lane counts:
 - a yellow centre (one line, or a median's two edges more than MEDIAN_MIN apart) in at least MIN_SAMPLES samples and
   half of them, within CENTRE_REACH of the link's line;
 - in each direction exactly its lanes less one white lane lines (dashed, solid or raised markers), seen as often,
@@ -193,6 +194,53 @@ def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]
   for key, between, flip in (('change:forward', right, False), ('change:backward', left, True)):
     if (got := changes(between, kinds, flip)) and set(got) != {'yes'}:
       out[key] = got
+  return out, None
+
+
+EDGE_REACH = 2.5  # m between a one-way road's painted edge and where the class layout has its kerb
+
+
+def correct_oneway(samples: list[dict], n: int, kerbs: tuple[float, float]):
+  """The painted lanes of a one-way link with n lanes and its kerbs where the class layout has them, from the game
+  files' samples alone (the camera's lines are too loose for roads without a yellow centre to anchor them): its edges
+  are the yellow or white lines nearest those kerbs (within EDGE_REACH), else the asphalt's edges, with n - 1 white lane
+  lines between, each lane LANE_MIN to LANE_MAX wide, centred on the link (within CENTRE_TOL; one-way links are centred
+  on their lanes, so the line can't say more): ({'lanes': [widths left to right], 'change': [...] where a line can't
+  be crossed}, None), or (None, why not)."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < MIN_SAMPLES:
+    return None, 'one-way, no game files'
+  need = max(MIN_SAMPLES, (len(files) + 1) // 2)
+  lines, kinds = [], []
+  for k, d in enumerate(files):
+    for m in d['marks']:
+      if m['conf'] >= CONF and (m['colour'] == 'yellow' or m['type'] in CROSSING or m['type'] == 'edge_line'):
+        offset = sum(m['pair']) / 2 if m.get('pair') else m['offset']
+        if kerbs[0] - EDGE_REACH <= offset <= kerbs[1] + EDGE_REACH:
+          lines.append((k, offset))
+          kinds.append((offset, m['type'] if m['colour'] == 'white' else None))
+  seen = [v for v, c in clusters(lines) if c >= need]
+
+  def edge(side, i):  # the painted edge nearest the layout's kerb, else the asphalt's
+    near = [v for v in seen if abs(v - kerbs[i]) <= EDGE_REACH]
+    if near:
+      return min(near, key=lambda v: abs(v - kerbs[i]))
+    asphalt = [d['kerbs'][side] for d in files if (d.get('kerbs') or {}).get(side) is not None]
+    return float(np.median(asphalt)) if len(asphalt) * 2 >= len(files) and abs(np.median(asphalt) - kerbs[i]) <= EDGE_REACH else None
+  lo, hi = edge('left', 0), edge('right', 1)
+  if lo is None or hi is None:
+    return None, 'one-way, no edges'
+  between = [v for v in seen if lo + LANE_MIN * 0.8 < v < hi - LANE_MIN * 0.8]
+  if len(between) != n - 1:
+    return None, f'one-way, {len(between) + 1} lanes painted, GTA has {n}'
+  if abs((lo + hi) / 2) > CENTRE_TOL:
+    return None, 'one-way, off the line'
+  widths = [round(float(x), 2) for x in np.diff([lo, *between, hi])]
+  if not all(LANE_MIN <= x <= LANE_MAX for x in widths):
+    return None, 'lane widths'
+  out = {'lanes': widths}
+  if (got := changes(between, kinds, False)) and set(got) != {'yes'}:
+    out['change'] = got
   return out, None
 
 

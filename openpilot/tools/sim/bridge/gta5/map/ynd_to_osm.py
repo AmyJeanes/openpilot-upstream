@@ -948,12 +948,18 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
     down its middle; bays both ways share the median, the line between them. Beside a one-way road it is a lane wide.
   - Where the paint was surveyed (`painted`: paint_survey.correct's widths each way and median), its lanes take the
     measured widths, kerbs where the layout has them; the line is the middle of the road between them, or the centre's
-    with more lanes one way (`source:width=survey`).
+    with more lanes one way (`source:width=survey`). A surveyed one-way link's painted lanes are centred on it.
   `lf` is the link's flags and `freeway` whether its nodes are a freeway's (a one-way freeway's lanes are wider);
   returns the tags."""
   w, offset = layout(lf, back, freeway)
   steps = ((lf[1] >> 4) & 7) * (-1 if lf[1] & 128 else 1)
   bf, bb = (int(v) for v in bays)
+  if painted and not back:  # centred on the link
+    tags = {'lanes': str(fwd), 'oneway': 'yes', 'width': metres(sum(painted['lanes'])),
+            'width:lanes': '|'.join(map(metres, painted['lanes'])), 'source:width': 'survey'}
+    if 'change' in painted:
+      tags['change:lanes'] = '|'.join(painted['change'])
+    return tags
   if not back:
     tags = {'lanes': str(fwd), 'oneway': 'yes', 'width': metres(fwd * w)}
     if (steps or bf) and (where := placement(bf + (fwd - bf) / 2 - offset / w)):
@@ -1253,13 +1259,18 @@ def main():
     row[3 if row[2] == q else 4] += 1
     bay_to[row[0]].add(q)
   print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
-  painted, why = {}, Counter()
+  painted, why, skipped = {}, Counter(), 0
   for wid, a, b, fwd, back, *_, lf in info:
     if (samples := paint_survey.along(survey, a, b)) is None:
       continue
-    w, offset = layout(lf, back)
-    if not back or offset < 0 or bay_to[wid]:  # bays fill medians: what the survey reads there isn't the road's
-      why['one-way' if not back else 'turn bay' if bay_to[wid] else 'lanes overlap'] += 1
+    w, offset = layout(lf, back, bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2)
+    if (back and offset < 0) or (not back and offset) or bay_to[wid]:  # bays fill medians: not the road's paint there
+      why['turn bay' if bay_to[wid] else 'lanes overlap' if back else 'one-way, off-centre'] += 1
+      skipped += 1
+      continue
+    if not back:
+      painted[wid], reason = paint_survey.correct_oneway(samples, fwd, (-fwd * w / 2, fwd * w / 2))
+      why[reason or 'measured one-way (game files)'] += 1
       continue
     use, other = paint_survey.sources(samples)
     kerbs = (-(offset + back * w), offset + fwd * w)
@@ -1268,7 +1279,7 @@ def main():
     if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
       why['sources disagree' if paint_survey.disagree(painted[wid], check) else 'sources agree'] += 1
   if survey:
-    print(f"paint survey of {len(painted) + why['one-way'] + why['turn bay'] + why['lanes overlap']} links: " +
+    print(f"paint survey of {len(painted) + skipped} links: " +
           ', '.join(f'{n} {k}' for k, n in why.most_common()))
   print(f"{approaches} approaches to junctions with turn arrows, on {len(arrows_at)} ways ({bent} bending into theirs left out)")
   layer_of = {ways[i][0]: v for i, v in levels(nodes, [(a, b) for _, a, b, _ in ways]).items()}

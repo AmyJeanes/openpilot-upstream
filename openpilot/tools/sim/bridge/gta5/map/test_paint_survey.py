@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 
-from openpilot.tools.sim.bridge.gta5.map.paint_survey import along, arrows, correct, disagree, load, sources
+from openpilot.tools.sim.bridge.gta5.map.paint_survey import along, arrows, correct, correct_oneway, disagree, load, sources
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -87,6 +87,18 @@ def test_lines_that_cant_be_crossed():
   assert got['change:backward'] == ['not_right', 'not_left', 'not_left']
   camera = [{**d, 'src': None} for d in files]
   assert 'change:forward' not in (correct(camera, 3, 1, (-5.5, 16.5))[0] or {})  # the camera's kinds aren't trusted
+
+
+def test_one_way_from_the_game_files():
+  # a 3-lane freeway: yellow left edge, lane lines 6.1 m apart (a solid one), white edge line
+  marks = [mark(-9.15, 'yellow', 'solid'), mark(-3.05), mark(3.05, kind='solid'), mark(9.2, kind='edge_line')]
+  files = [sample(marks, s, src='gamefiles') for s in (0, 3, 6)]
+  got, _ = correct_oneway(files, 3, (-9.15, 9.15))
+  assert got == {'lanes': [6.1, 6.1, 6.15], 'change': ['yes', 'not_right', 'not_left']}
+  assert correct_oneway(files, 2, (-6.1, 6.1))[0] is None  # GTA says 2 lanes: the paint isn't read
+  assert correct_oneway([{**d, 'src': None} for d in files], 3, (-9.15, 9.15))[1] == 'one-way, no game files'
+  bare = [sample([mark(0.1)], s, src='gamefiles', kerbs={'left': -5.4, 'right': 5.6}) for s in (0, 3)]  # no edge lines
+  assert correct_oneway(bare, 2, (-5.5, 5.5))[0] == {'lanes': [5.5, 5.5]}
 
 
 def test_arrows_from_features():
