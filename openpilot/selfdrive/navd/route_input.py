@@ -1,6 +1,7 @@
 """The route input: a fixed-size vector telling a route-conditioned driving model (gta5-train --route) where the route
-goes. The bridge feeds it to modeld from its live route (gta5_world.py, through selfdrive/modeld/route_input.py), and
-gta5-train labels recorded segments with the same encoder, so it depends only on a router.Route and the car's place on it.
+goes. navd's route feeds it to modeld (for now the GTA bridge's, gta5_world.py, through selfdrive/modeld/route_input.py),
+and gta5-train labels recorded segments with the same encoder, so it depends only on a router.Route and the car's place
+on it.
 
 Layout (ROUTE_LEN = 223 floats; all zero = no route, which is also what a dropped input looks like). It only grows by
 appending: a model trained on route input v1 (the first V1_LEN = 173 floats) reads that start of it (modeld's
@@ -12,17 +13,17 @@ RouteInputReader, gta5-train), which is why NEXT's lane fields stay although LAN
 - [150] PRESENT: 1 whenever a route is given.
 - [151:161] HEADING: the route's direction at 10, 20, ..., 100 m ahead (the chord over +-10 m) relative to the car's
   heading, right positive, in units of 90 deg (clipped to +-2). Beyond the route's end its last direction is held.
-- [161:171] NEXT: the next maneuver nav acts on (gta5_expert.maneuvers: turns and keeps), kept until 20 m past it
+- [161:171] NEXT: the next maneuver nav acts on (maneuvers.py: turns and keeps), kept until 20 m past it
   (or until the next is within 60 m), within 500 m:
   161 present; 162 side (-1 left, +1 right); 163 heading change, right positive, / 90 deg;
-  164 m to it / 100 (clipped -0.5..3); 165 m to its junction entry / 100 (gta5_nav.junction_entry: the stop line, else
+  164 m to it / 100 (clipped -0.5..3); 165 m to its junction entry / 100 (planner.junction_entry: the stop line, else
   the first junction node; the maneuver itself for keeps; clipped -0.5..3);
   166 / 167 lanes before / after it (Route.lanes_at) / 6, clipped to 1; 168 / 169 the target lanes nav aims for
-  (gta5_nav Turn.lanes / Fork.lanes): the centres of the first and last as a fraction of the road from the left,
+  (planner Turn.lanes / Fork.lanes): the centres of the first and last as a fraction of the road from the left,
   (lane + 0.5) / lanes; 170 lane data present (lanes before > 0).
 - [171:173] STOP: 171 present; 172 m to the next stop line on the route (Route.stops, from 2 m behind, within 300 m)
   / 100. With router.STOP_DIRECTION off they include the far side of junctions: label with the bridge's setting.
-- [173:223] LANES (route input v2): gta5_lane_slots' LANE_SLOTS_LEN floats, the road here and the road out of the next
+- [173:223] LANES (route input v2): lane_slots.py's LANE_SLOTS_LEN floats, the road here and the road out of the next
   maneuver as lane slots counted from the kerb (oncoming, allowed, target), and from and by where to be in a target
   lane; zero where the route has no lanes.
 """
@@ -31,9 +32,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5 import gta5_expert, gta5_nav
-from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import LANE_SLOTS_LEN, LaneSlots
-from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import describe as describe_lanes
+from openpilot.selfdrive.navd import maneuvers, planner
+from openpilot.selfdrive.navd.lane_slots import LANE_SLOTS_LEN, LaneSlots
+from openpilot.selfdrive.navd.lane_slots import describe as describe_lanes
 
 NAV_BINS, BIN_M, BIN_ZERO = 50, 20.0, 25
 NAV_LEN = NAV_BINS * 3
@@ -84,21 +85,21 @@ class RouteInput:
     self.stops = np.sort(np.asarray(route.stops, float))
     # NEXT: per maneuver nav acts on, [along, side, change, entry, lanes in, lanes out, target lo, target hi]
     rows = []
-    for m in gta5_expert.maneuvers(route):
+    for m in maneuvers.maneuvers(route):
       s = m.along
-      before, here = (self.point(v) for v in (s - gta5_expert.HEADING_SPAN, s))
-      change = -float(wrap(m.exit_heading - gta5_expert.heading_between(before, here)))  # right positive
+      before, here = (self.point(v) for v in (s - maneuvers.HEADING_SPAN, s))
+      change = -float(wrap(m.exit_heading - maneuvers.heading_between(before, here)))  # right positive
       side = -1.0 if m.desire.endswith("Left") else 1.0
       n_in, n_out = self._lanes_at(route, s, False), self._lanes_at(route, s, True)
       if m.turn:
-        entry = gta5_nav.junction_entry(s, list(route.stops), list(route.junctions))[0]
-        lo, hi = gta5_nav.Turn(s, "left" if side < 0 else "right", m.exit_heading).lanes(max(n_in, 1))
+        entry = planner.junction_entry(s, list(route.stops), list(route.junctions))[0]
+        lo, hi = planner.Turn(s, "left" if side < 0 else "right", m.exit_heading).lanes(max(n_in, 1))
       else:
         entry = s
         forks = [f for f in route.forks if abs(f.along - s) < 15.0]
         if forks:
           f = min(forks, key=lambda f: abs(f.along - s))
-          lo, hi = gta5_nav.Fork(0.0, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip).lanes(max(n_in, 1))
+          lo, hi = planner.Fork(0.0, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip).lanes(max(n_in, 1))
         else:
           lo, hi = 0, max(n_in, 1) - 1
       rows.append([s, side, change, entry, n_in, n_out, lo, hi])

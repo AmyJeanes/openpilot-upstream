@@ -1,7 +1,9 @@
 import numpy as np
 
-import openpilot.tools.sim.bridge.gta5.gta5_nav as nav_mod
-from openpilot.tools.sim.bridge.gta5.gta5_nav import Fork, Nav, find_turn, lane_plan
+import openpilot.selfdrive.navd.planner as nav_mod
+from openpilot.selfdrive.navd.planner import Fork, Planner, find_turn, lane_plan
+from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
+from openpilot.tools.sim.bridge.gta5.gta5_navd import nav_inputs
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
@@ -22,14 +24,24 @@ def route_to_turn(before: float, side: str = "right", after: float = 100.0) -> n
 
 
 class Drive:
-  """Nav driven along a route by a car that does as it's asked, northwards at a steady speed."""
+  """navd's planner driven along a route by a car whose driver does as it's asked, northwards at a steady speed."""
   def __init__(self, lane, v=8.0):
     self.clock = Clock()
-    nav_mod.time = self.clock
     self.sent, self.desires = [], []
     self.indicator = None
-    self.nav = Nav(self._send, self.desires.append)
+    self.nav = Planner()
+    self.driver = Driver(self._send, lambda: None)
     self.lane, self.v = lane, v
+
+  def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict) -> tuple[float, bool]:
+    """A step from the bridge's state, as the world takes it: the driver's game commands to `sent`, NavDesire to
+    `desires`, and the game's waypoint off on arriving."""
+    out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t))
+    self.driver.act(out)
+    self.desires += out.desires
+    if out.arrived:
+      self._send({"type": "waypoint", "off": True})
+    return out.cap, out.arrived
 
   def _send(self, m):
     self.sent.append(m)
@@ -39,7 +51,7 @@ class Drive:
     self.clock.t += dt
     state = {"vEgo": self.v, "pos": [0.0, y, 0.0], "heading": 0.0, "yawRate": 0.0, "lane": list(self.lane),
              "route": [[0.0, 0.0]] + [p for p in (route - [0.0, y]).tolist() if p[1] > 0.0 or p[0] != 0.0], **(extra or {})}
-    return self.nav.update(state, True, self.indicator, {})
+    return self.update(state, True, self.indicator, {})
 
 
 def signals(d: Drive):
@@ -185,7 +197,7 @@ def test_turn_straight_after_a_turn():
     s = along[int(np.argmin(np.hypot(*(route - pos).T)))]
     ahead = [pos.tolist()] + [p.tolist() for p, a in zip(route, along, strict=True) if a > s + 0.5]
     state = {"vEgo": d.v, "pos": [*pos, 0.0], "heading": heading, "yawRate": 0.0, "lane": [0, 1], "route": ahead, "routeEnd": along[-1] - s}
-    d.nav.update(state, True, d.indicator, {})
+    d.update(state, True, d.indicator, {})
     if d.nav.signaled and (not sides or sides[-1] != d.nav.signaled):
       sides.append(d.nav.signaled)
     # follow the route, heading along it
@@ -258,7 +270,7 @@ def test_turn_done_at_its_way_out_without_repulse():
     d.clock.t += 0.1
     state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": 0.5, "lane": [0, 1], "routeEnd": 200.0,
              "route": [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]}
-    d.nav.update(state, True, d.indicator, {"left": 1.0 if k < 30 else 0.05})
+    d.update(state, True, d.indicator, {"left": 1.0 if k < 30 else 0.05})
   assert d.nav.signaled is None and d.nav.repeat_t == repeats
   assert d.nav.cue == "keepRight"
 
@@ -277,7 +289,7 @@ def test_exit_cue_stacked_within_the_turn():
     d.clock.t += 0.1
     state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": 0.5, "lane": [0, 1], "routeEnd": 200.0,
              "route": [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]}
-    d.nav.update(state, True, d.indicator, {"left": 1.0})
+    d.update(state, True, d.indicator, {"left": 1.0})
     if h < 40:
       assert d.nav.desire != "+keepRight"
   assert "+keepRight" in d.desires and d.nav.signaled is None and d.desires[-1] == "keepRight"
@@ -345,7 +357,7 @@ def test_unturned_cancel_can_keep_pulses():
 
 
 def test_junction_entry():
-  from openpilot.tools.sim.bridge.gta5.gta5_nav import junction_entry
+  from openpilot.selfdrive.navd.planner import junction_entry
   assert junction_entry(100.0, [30.0, 85.0], [100.0]) == (85.0, "stop line")
   assert junction_entry(100.0, [], [65.0, 82.0, 92.0, 100.0]) == (82.0, "junction")  # back while the nodes are close
   assert junction_entry(100.0, [], [100.0]) == (85.0, "default")
@@ -355,7 +367,7 @@ def test_tune_reloads(tmp_path=None):
   import json as _json
   import os as _os
   import tempfile
-  from openpilot.tools.sim.bridge.gta5.gta5_nav import Tune
+  from openpilot.selfdrive.navd.planner import Tune
   path = _os.path.join(tmp_path or tempfile.mkdtemp(), "tune.json")
   t = Tune(path)
   assert t.signal_mode == "time" and t.changed() == {}
@@ -375,7 +387,7 @@ def test_signal_at_the_junction_entry():
   import os as _os
   import tempfile
   import json as _json
-  from openpilot.tools.sim.bridge.gta5.gta5_nav import Tune
+  from openpilot.selfdrive.navd.planner import Tune
   path = _os.path.join(tempfile.mkdtemp(), "tune.json")
   with open(path, "w") as f:
     _json.dump({"signal_mode": "entry", "signal_entry_offset": 1.0}, f)
@@ -404,7 +416,7 @@ def test_turn_speed_held_through_the_arc():
   caps = []
   for h, yaw in [(hh, 0.5) for hh in np.linspace(0, 80, 30)] + [(80.0, 0.3)] * 5 + [(88.0, 0.02)] * 30:
     d.clock.t += 0.1
-    cap, _ = d.nav.update({"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": yaw, "lane": [0, 1],
+    cap, _ = d.update({"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": yaw, "lane": [0, 1],
                            "routeEnd": 500.0, "route": ahead}, True, d.indicator, {})
     caps.append(cap)
   held = d.nav.tune.turn_speed_square
@@ -484,7 +496,7 @@ def left_turn_then_on(d: Drive, after: list[tuple[float, float]], wait: float = 
   for h, yaw in seq:
     d.clock.t += 0.1
     state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": h, "yawRate": yaw, "lane": [0, 1], "routeEnd": 200.0, "route": west}
-    d.nav.update(state, True, d.indicator, {"left": 1.0})
+    d.update(state, True, d.indicator, {"left": 1.0})
     cues.append((h, d.nav.cue))
   return cues
 
@@ -524,7 +536,7 @@ def test_turned_unwrapped_and_no_repulse_past_the_way_out():
     d.clock.t += 3.0
     state = {"vEgo": 5.0, "pos": [0.0, k * 0.25, 0.0], "heading": 350.0, "yawRate": 0.0, "lane": [0, 1],
              "route": [[0.0, 0.0]] + [p for p in (route - [0.0, k * 0.25]).tolist() if p[1] > 0.0 or p[0] != 0.0]}
-    d.nav.update(state, True, d.indicator, {"left": 0.05})
+    d.update(state, True, d.indicator, {"left": 0.05})
     assert d.nav.turn is not None
     assert (d.nav.repeat_t != repeats) == want, (unwrapped, past_exit)
 
@@ -540,7 +552,7 @@ def test_blinker_steady_when_openpilot_refreshes_the_turn():
     y, gaps = 0.0, 0
     while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
       d.step(route, y, {"routeEnd": 300.0 - y})
-      gaps += d.nav.signaled is not None and d.nav.blinker_gap
+      gaps += d.nav.signaled is not None and d.nav.blinker_gap(d.clock.t)
       y += d.v * 0.05
     assert (gaps == 0) == refresh, (refresh, gaps)
 

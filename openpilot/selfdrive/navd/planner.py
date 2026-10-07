@@ -1,17 +1,22 @@
-"""Navigation: drives the GPS route to the game map's waypoint, as a driver would with openpilot's lane turn desire. It
-moves into the lane for each turn and fork on the route, slows for it, signals it, and stops at the waypoint. PullAway
-pulls away from a light once it turns green."""
+"""navd's planner: drives the route to the destination, as a driver would with openpilot's lane turn desire. It moves
+into the lane for each turn and fork on the route, slows for it, has it signalled, and stops at the destination. Each
+step (NavInputs) gives a cruise cap, NavDesire's changes and requests to the driver (NavOutputs): signal a turn, change
+lanes, cancel the signal; the driver works the stalk.
+
+Game-agnostic: nothing here reads a game. Until navd localizes itself and reads the lane from perception, the car's
+pose and lane in its inputs are the simulator's truth (inputs.py)."""
 import json
 import math
 import os
-import time
 
 import numpy as np
 
 from openpilot.common.constants import CV
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import turn_targets
+from openpilot.selfdrive.navd.inputs import NavInputs, NavOutputs
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import turn_targets  # the map stack moves into navd with the OSM-only Route
 
-DEBUG = bool(os.getenv("GTA5_DEBUG"))
+# the GTA5_ names are the bridge's, while navd runs inside it
+DEBUG = bool(os.getenv("NAVD_DEBUG") or os.getenv("GTA5_DEBUG"))
 TURN_ANGLE = 50.0  # deg of heading change along TURN_WINDOW m of route that makes a turn, not a bend
 TURN_WINDOW = 30.0  # m
 TURN_HOLDS = 20.0  # m past the turn where the route still heads the new way: a jog between lanes comes back
@@ -53,7 +58,7 @@ STOP_REPEAT_TURNED = 30.0  # deg: after a stop, asked again unless turned this f
 EXIT_DONE = 25.0  # deg from the turn's way out: done, the blinker off, whatever the yaw rate
 # Coming round past a left turn's way out, the model is held back by keepRight for a moment (not keepLeft after a right
 # turn, which takes the car into the oncoming lanes)
-EXIT_CUE = os.getenv("GTA5_EXIT_CUE", "1") != "0"
+EXIT_CUE = os.getenv("NAVD_EXIT_CUE", os.getenv("GTA5_EXIT_CUE", "1")) != "0"
 EXIT_CUE_FOR = 2.0  # s at most
 EXIT_CUE_YAW = 0.15  # rad/s still turning
 EXIT_WATCH_QUEUE = 6.6  # s a pulse stays in the big model's desire queue (exit_watch)
@@ -113,7 +118,7 @@ BAY_BEFORE = 70.0  # m
 BAY_SIGNAL = 5.0  # m before it opens
 # and the car changes lanes into it as it opens, from the lane beside it, then signals the turn (by BAY_LAST at the
 # latest): from the lane beside a bay the model carries straight on
-BAY_CHANGE = os.getenv("GTA5_BAY", "1") != "0"
+BAY_CHANGE = os.getenv("NAVD_BAY", os.getenv("GTA5_BAY", "1")) != "0"
 BAY_OPEN = 3.0  # m before it opens
 BAY_LAST = 18.0  # m before the turn
 BAY_SPEED = 4.5  # m/s, changing into it
@@ -133,13 +138,6 @@ KEEP_FOR = 30.0  # m driven at least
 KEEP_GAP = 0.5  # s off to repeat it: openpilot reads the desire every 0.2 s
 KEEP_AFTER_TURN = 60.0  # m: the model's expectation of the turn just taken fades only after it
 KEEP_MIN_SPEED = 3.0  # m/s: pulling away, its turn probabilities are noise
-# the driver's gas press that gets the car moving again, which the model won't do itself once stopped
-GO_AFTER = 1.0  # s stopped
-GO_GREEN = 0.4  # s since traffic last showed red
-GO_GAS = 0.5  # s
-GO_EVERY = 3.0  # s
-GO_TRIES = 3
-GO_CLEAR = 15.0  # m: a vehicle nearer ahead leads the car away
 # A turn's junction entry: GTA's stop line (11-22 m before the turn's node in the junction), else its junction nodes
 ENTRY_STOP_BEFORE = 50.0  # m before the turn
 ENTRY_JUNCTION_BEFORE = 40.0  # m
@@ -159,8 +157,9 @@ def wrap(deg: float) -> float:
 
 
 class Tune:
-  """Nav's turn parameters, from a JSON file (GTA5_NAVTUNE) read again whenever it changes, so a test harness can sweep
-  them without restarting the bridge; the defaults are those above. Keys left out keep their defaults."""
+  """Nav's turn parameters, from a JSON file (the bridge's GTA5_NAVTUNE) read again whenever it changes, so a test harness
+  can sweep them without restarting; the defaults are those above, and without a file. Keys left out keep their
+  defaults."""
   DEFAULTS = {
     "turn_speed_soft": SOFT_TURN_SPEED,  # m/s for a turn of TURN_ANGLE, between it and a square turn by angle
     "turn_speed_square": TURN_SPEED,  # m/s for a square turn
@@ -235,7 +234,7 @@ class Tune:
   CHECK_EVERY = 1.0  # s
 
   def __init__(self, path: str | None = None):
-    self.path = path if path is not None else os.getenv("GTA5_NAVTUNE")
+    self.path = path
     self.values = dict(self.DEFAULTS)
     self.mtime: float | None = None
     self.next_check = 0.0
@@ -525,11 +524,12 @@ def junction_entry(turn_dist: float, stops: list, junctions: list) -> tuple[floa
   return turn_dist - ENTRY_DEFAULT, "default"
 
 
-class Nav:
-  def __init__(self, send, set_desire, tune: Tune | None = None, refresh: bool = False):
-    self.send = send  # to the plugin
-    self.set_desire = set_desire  # openpilot's NavDesire
+class Planner:
+  def __init__(self, tune: Tune | None = None, refresh: bool = False):
     self.tune = tune or Tune()
+    self.requests: list[str] = []  # this step's requests to the driver (NavOutputs)
+    self.desires: list[str] = []  # this step's NavDesire changes
+    self.now = 0.0
     self.refresh = refresh  # openpilot asks for the turn again itself (TurnDesireRefresh): the blinker stays on
     self.was_engaged = False
     self.desire = ""  # what NavDesire is set to
@@ -592,21 +592,27 @@ class Nav:
     self.keep_gap_until = 0.0  # repeating a keep desire: off until then
     self.keep_stopped = False
 
-  def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict[str, float]) -> tuple[float, bool]:
-    """Returns the cruise cap (m/s, 0 for none) and whether to disengage, having arrived. `desire` is the model's
-    probability of each turn ("left", "right") and keep ("keepLeft", "keepRight")."""
-    now = time.monotonic()
+  def update(self, inp: NavInputs) -> NavOutputs:
+    """The step's cruise cap, arrival, requests to the driver and NavDesire's changes."""
+    self.requests, self.desires = [], []
+    cap, arrived = self._update(inp)
+    return NavOutputs(cap, arrived, self.requests, self.desires)
+
+  def _update(self, inp: NavInputs) -> tuple[float, bool]:
+    """The cruise cap (m/s, 0 for none) and whether the car has arrived."""
+    now = self.now = inp.t
+    engaged, indicator, desire = inp.engaged, inp.blinker, inp.desire
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
     self.was_engaged = engaged
     t = self.tune
-    v = self.v = state.get("vEgo", 0.0)
+    v = self.v = inp.v
     step = v * min(now - self.last_t, 0.1)
     self.last_t = now
     self.driven += step
-    route = state.get("route")
-    pos = np.array(state.get("pos", (0.0, 0.0))[:2], dtype=float)
-    self._read_lane(state.get("lane"), now)
+    route = inp.route
+    pos = np.array(inp.pos[:2], dtype=float)
+    self._read_lane(inp.truth_lane, now)
     if not engaged:
       self._cancel(indicator)
       self._end_change(indicator)
@@ -620,12 +626,12 @@ class Nav:
     self._watch_change(indicator, now)
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
-      self.send({"type": "setIndicator", "side": self.changing})
-    self.yaw = state.get("yawRate", 0.0)
-    self.lane_frac, self.one_way = state.get("laneFrac"), state.get("twoWay") is False
+      self.requests.append("laneChange" + self.changing.capitalize())
+    self.yaw = inp.yaw_rate
+    self.lane_frac, self.one_way = inp.truth_lane_frac, inp.two_way is False
     self._keep_right(v, now)
-    near = [d for d in (state.get("stops") or []) + (state.get("junctions") or []) if abs(d) < ONCOMING_JUNCTION]
-    self._oncoming_keep(state.get("lanePlugin"), bool(near), now, state.get("laneMap"))
+    near = [d for d in (inp.stops or []) + (inp.junctions or []) if abs(d) < ONCOMING_JUNCTION]
+    self._oncoming_keep(inp.truth_lane_plugin, bool(near), now, inp.truth_lane_map)
     if not route:
       self._cancel(indicator)
       self.keeping, self.fork_keep = None, None
@@ -638,19 +644,19 @@ class Nav:
       self.route_end, self.dest = None, None
       return 0.0, False
     route = np.array(route, dtype=float)
-    waypoint = np.array(state.get("waypoint") or (0.0, 0.0), dtype=float)
+    waypoint = np.array(inp.dest or (0.0, 0.0), dtype=float)
     self.dest = waypoint if waypoint.any() else route[-1]  # (0, 0) as GTA clears it
     self.route_end = None
-    self.min_ahead = MIN_AHEAD_MAP if state.get("routeEnd") is not None else MIN_AHEAD
-    if state.get("routeEnd") is not None:
-      if state["routeEnd"] < ARRIVE_KEEP * 5:
-        self.route_end = float(state["routeEnd"])
+    self.min_ahead = MIN_AHEAD_MAP if inp.route_end is not None else MIN_AHEAD
+    if inp.route_end is not None:
+      if inp.route_end < ARRIVE_KEEP * 5:
+        self.route_end = float(inp.route_end)
     elif len(route) < ROUTE_POINTS:
       # along the route to its point nearest the waypoint: past that it sometimes runs on
       along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
       near = int(np.argmin(np.hypot(*(route - self.dest).T)))
       self.route_end = float(along[near] + np.hypot(*(route[near] - self.dest)))
-    heading, yaw_rate = state["heading"], state["yawRate"]
+    heading, yaw_rate = inp.heading, inp.yaw_rate
     if self.turn is not None:
       self.swept += wrap(heading - self.swept_heading)
       self.swept_heading = heading
@@ -703,16 +709,16 @@ class Nav:
       self.seen = (turn.side, now)
     if turn is not None and now - self.seen[1] < CONFIRM:
       turn = None
-    forks = self._forks(state.get("forks"), route, turn)
-    arrows = parse_arrows(state.get("laneArrows"))
+    forks = self._forks(inp.forks, route, turn)
+    arrows = parse_arrows(inp.lane_arrows)
     moves: list = forks + ([turn] if turn is not None else [])
     for m in moves:
       aim(m, arrows)
-    drops = state.get("laneDrops") if t.lane_drops else None
+    drops = inp.lane_drops if t.lane_drops else None
     ahead = moves + [m for m in throughs(route, arrows, moves, drops) if turn is None or m.dist < turn.dist]
     caps = [self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now)]
     if turn is not None:
-      self.entry, self.entry_kind = junction_entry(turn.dist, state.get("stops") or [], state.get("junctions") or [])
+      self.entry, self.entry_kind = junction_entry(turn.dist, inp.stops or [], inp.junctions or [])
     if turn is not None and turn.dist < t.slow_from:
       bay = self._bay(forks, turn)
       ref = self.entry if t.slow_ref == "entry" else turn.dist
@@ -735,7 +741,7 @@ class Nav:
         self.stopped = False
     self._exit_watch(heading, yaw_rate, now)
     caps.append(curve_cap(route, v, t))
-    caps.append(limit_cap(state.get("limits") or [], v))
+    caps.append(limit_cap(inp.limits or [], v))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
     self._keep_straight(turn, desire, v, now)
     self._set_desire(now)
@@ -896,7 +902,7 @@ class Nav:
       lane = f"lane {self.lane} at {self.lane_frac}"
       entry = f"{self.entry_kind} in {self.entry:.0f} m"
       print(f"nav: signal {turn.side} in {turn.dist:.0f} m, {entry}, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
-    self.send({"type": "setIndicator", "side": turn.side})
+    self.requests.append("signalTurn" + turn.side.capitalize())
 
   def _signal_window(self, v: float, bay: float) -> float:
     """m before the turn the time mode signals from, once slow enough."""
@@ -916,7 +922,8 @@ class Nav:
       at = max(at, min(entry - t.left_signal_max_entry, turn.dist - SIGNAL_LAST))
     return at
 
-  def turn_points(self, route: np.ndarray, state: dict) -> tuple[np.ndarray, np.ndarray | None] | None:
+  def turn_points(self, route: np.ndarray, forks: list | None, stops: list | None,
+                  junctions: list | None) -> tuple[np.ndarray, np.ndarray | None] | None:
     """For the map overlay: where the turn nav signals next is and where its signal comes on by distance; once
     signalled, where the car was when it did."""
     if self.turn is not None and self.turn_point is not None:
@@ -924,8 +931,8 @@ class Nav:
     turn = self._next_turn(route)
     if turn is None:
       return None
-    bay = self._bay(self._forks(state.get("forks"), route, turn), turn)
-    entry, _ = junction_entry(turn.dist, state.get("stops") or [], state.get("junctions") or [])
+    bay = self._bay(self._forks(forks, route, turn), turn)
+    entry, _ = junction_entry(turn.dist, stops or [], junctions or [])
     return self._point(route, turn.dist), self._point(route, max(self.signal_from(turn, entry, self.v, bay), 0.0))
 
   def _signal_due(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, bay: float) -> bool:
@@ -1092,7 +1099,7 @@ class Nav:
       want = "+" + want  # given alongside the turn the blinker asks for (openpilot's NavDesire stacking)
     if want != self.desire:
       self.desire = want
-      self.set_desire(want)
+      self.desires.append(want)
 
   def _keep_right(self, v: float, now: float):
     """Back over from the oncoming lanes, which the model sometimes drifts into on wide roads."""
@@ -1130,7 +1137,7 @@ class Nav:
     self.recover = "keepRight"
 
   def _start_change(self, side: str, why: str, turn: bool = False):
-    self.changing, self.change_shown, self.change_t, self.change_turn = side, False, time.monotonic(), turn
+    self.changing, self.change_shown, self.change_t, self.change_turn = side, False, self.now, turn
     self.change_side = side
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
@@ -1149,8 +1156,8 @@ class Nav:
     if self.changing is None:
       return
     if indicator == self.changing:
-      self.send({"type": "indicatorOff"})
-    self.changing, self.change_t, self.change_send_at = None, time.monotonic(), 0.0
+      self.requests.append("cancelSignal")
+    self.changing, self.change_t, self.change_send_at = None, self.now, 0.0
     self.change_hold_until = self.change_t + PARAM_HOLD
     self._set_desire(self.change_t)
 
@@ -1159,7 +1166,6 @@ class Nav:
     # or stopped near it, short of the cap's aim (not at lights further back)
     arrived = v < 2.0 and self.route_end < ARRIVED_DIST or v < 0.3 and self.route_end < 2 * ARRIVED_DIST
     if arrived:
-      self.send({"type": "waypoint", "off": True})
       self.route_end, self.dest = None, None
     return stop, arrived
 
@@ -1173,45 +1179,14 @@ class Nav:
 
   def _cancel(self, indicator: str | None):
     if self.signaled is not None and (indicator == self.signaled or not self.shown):
-      self.send({"type": "indicatorOff"})
+      self.requests.append("cancelSignal")
     self.turn, self.signaled = None, None
 
-  @property
-  def blinker_gap(self) -> bool:
+  def blinker_gap(self, now: float) -> bool:
     """Whether openpilot shouldn't see the blinker just now, to repeat the turn request."""
-    return not self.refresh and time.monotonic() - self.repeat_t < REPEAT_GAP
+    return not self.refresh and now - self.repeat_t < REPEAT_GAP
 
   @property
   def signaling(self) -> bool:
     return self.signaled is not None
 
-
-class PullAway:
-  """Presses the gas, as a driver would, when AI traffic waiting with the car at a red light shows it has turned green."""
-  def __init__(self, send):
-    self.send = send
-    self.stopped_t: float | None = None
-    self.red_t: float | None = None  # when traffic last showed a red light during this stop
-    self.go_t = 0.0
-    self.tries = 0
-
-  def update(self, state: dict, engaged: bool):
-    now = time.monotonic()
-    if not engaged or state.get("vEgo", 0.0) > 0.3:
-      self.stopped_t, self.red_t, self.tries = None, None, 0
-      return
-    if self.stopped_t is None:
-      self.stopped_t = now
-    traffic = state.get("traffic", {})
-    if traffic.get("red", 0):
-      self.red_t = now
-      return
-    user = state.get("user") or {}
-    ahead = state.get("vehicleAhead", 0.0)
-    blocked = traffic.get("crossing", 0) or traffic.get("peds", 0) or 0 < ahead < GO_CLEAR or user.get("gas") or user.get("brake")
-    if (self.red_t is not None and now - self.red_t > GO_GREEN and not blocked and now - self.stopped_t > GO_AFTER and now - self.go_t > GO_EVERY
-        and self.tries < GO_TRIES):
-      self.go_t, self.tries = now, self.tries + 1
-      if DEBUG:
-        print(f"nav: green, pulling away ({self.tries})")
-      self.send({"type": "gas", "secs": GO_GAS})

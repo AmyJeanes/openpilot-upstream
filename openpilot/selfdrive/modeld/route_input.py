@@ -1,7 +1,7 @@
 """The route input of a route-conditioned driving model, from whoever knows the route (the GTA V bridge) to modeld, in
 a shared-memory file: uint32 seq (odd while being written), uint32 n, float64 CLOCK_MONOTONIC time, float32[n].
 Plain mmap, as multiprocessing.shared_memory registers a reader's attach with the resource tracker, which unlinks it.
-A route input's layout only grows by appending (gta5_route_input.py), so a model with a smaller input reads the start
+A route input's layout only grows by appending (selfdrive/navd/route_input.py), so a model with a smaller input reads the start
 of a longer one."""
 import mmap
 import os

@@ -333,13 +333,13 @@ def _world(head: dict, mp: Map, rec: dict):
   w.tesla, w.metric, w.VM, w.log, w.recorder = True, False, None, None, None
   w._send = lambda obj: rec["cmd"].append(obj)
   w.params = Params(head["refresh"], rec["nd"])
+  w.presses, w.curvature, w.steering, w.gnss = {}, 0.0, False, None
   navd = hasattr(w, "_init_nav")
   if navd:
     w._init_nav()
   else:  # the bridge before the split: GTA5World.__init__'s nav part
     from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway
     w.indicator, w.indicator_t, w.indicator_heading, w.lane_changing = None, 0.0, 0.0, False
-    w.presses, w.curvature, w.steering = {}, 0.0, False
     w.nav = Nav(w._send, w._set_nav_desire, refresh=w.params.get_bool("TurnDesireRefresh"))
     w.pull_away = PullAway(w._send)
     w.next_map, w.lane_line = 0.0, (None, 0.0, [])
@@ -365,7 +365,11 @@ def _turn_points(w, navd: bool):
   state = getattr(w, "_replay_state", None)
   if state is None or not state.get("route"):
     return None
-  tp = w.nav.turn_points(np.array(state["route"], dtype=float), state)
+  route = np.array(state["route"], dtype=float)
+  if navd:
+    tp = w.nav.turn_points(route, state.get("forks"), state.get("stops"), state.get("junctions"))
+  else:
+    tp = w.nav.turn_points(route, state)
   return None if tp is None else [None if p is None else np.asarray(p).tolist() for p in tp]
 
 

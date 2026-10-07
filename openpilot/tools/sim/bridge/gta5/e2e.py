@@ -23,7 +23,7 @@ ends SHORT_AFTER m past it, built from the trip's route in earlier results (or, 
 results' routes). sweepsum reports each variant's rates with 95% ranges, and each variant against the first (or
 "base") trip for trip, run for run.
 
-Nav's turn parameters (gta5_nav.Tune) come from the file the bridge was started with as GTA5_NAVTUNE (svc.sh:
+Nav's turn parameters (navd planner.Tune) come from the file the bridge was started with as GTA5_NAVTUNE (svc.sh:
 BRIDGE_EXTRA="GTA5_NAVTUNE=$HOME/gta5test/navtune.json"); --tune and sweep write it before each trip (E2E_NAVTUNE, the
 same path by default). A variants file is {"name": {param: value, ...}, ...}; {} is the defaults.
 
@@ -1139,7 +1139,7 @@ ONCOMING_OK = 1.0  # s in the oncoming lanes a driver would let go (the lane rea
 ONCOMING_SNAPS = 3  # frames saved per trip, as the car has been in the oncoming lanes that long
 JUNCTION_NEAR = 15.0  # m from a junction or stop-line node: in the junction (recorded, as the lane reading there can follow GTA's diagonal links)
 # m past a turn's point where the lane it lands in is read: out of the junction, and before nav's lane plan can move on
-# for the next maneuver (gta5_nav.TURN_HOLDS, then a lane per LANE_LINE_CHANGE m)
+# for the next maneuver (navd planner.TURN_HOLDS, then a lane per LANE_LINE_CHANGE m)
 LAND_FROM, LAND_TO = 10.0, 35.0
 # m: where the road on is junction nodes all the way (they come close together), past the turn's diagonal links
 LAND_JUNCTION_FROM, LAND_FAR = 20.0, 50.0
@@ -1148,7 +1148,7 @@ LAND_WAIT = 20.0  # s after the turn to stop waiting for the car to get past it
 
 def landing(hist: list[dict], m: dict, in_junction=None) -> dict | None:
   """The lane the car lands in after a turn (the reading most often seen out of the junction LAND_FROM to LAND_TO m past
-  its point, else LAND_JUNCTION_FROM to LAND_FAR in it), against the one nav's lane plan (gta5_nav.lane_plan) has it
+  its point, else LAND_JUNCTION_FROM to LAND_FAR in it), against the one nav's lane plan (navd planner.lane_plan) has it
   arrive in: the turn side's lane, 0 from the left for a left turn and the rightmost for a right. A history without
   junction flags takes them from in_junction(x, y)."""
   clear, junction = [], []
