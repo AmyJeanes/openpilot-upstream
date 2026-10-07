@@ -8,6 +8,7 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as ls
 from openpilot.tools.sim.bridge.gta5 import gta5_nav
+from openpilot.tools.sim.bridge.gta5 import gta5_route_input as ri
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M, OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -278,6 +279,21 @@ def test_no_lanes_and_preview():
   assert not ls.LaneSlots(untagged).encode(10.0).any()
   here, out, start, end = ls.decode(vec)
   assert list(here[:3]) == [ls.ALLOWED, ls.ONCOMING, -1] and (out == -1).all() and start is None and end is None
+
+
+def test_route_input_v2():
+  """The model's route input is v1's 173 floats, unchanged, then the lane slots."""
+  slots, r = bay()
+  v2, v1 = ri.RouteInput(r), ri.RouteInput(r, lanes=False)
+  assert ri.ROUTE_LEN == ri.V1_LEN + ls.LANE_SLOTS_LEN and ri.LANES.stop == ri.ROUTE_LEN
+  for s in np.linspace(0.0, r.length, 60):
+    vec, old = v2.encode(float(s), 0.0, 8.0), v1.encode(float(s), 0.0, 8.0)
+    assert vec.shape == (ri.ROUTE_LEN,)
+    np.testing.assert_array_equal(vec[:ri.V1_LEN], old[:ri.V1_LEN])
+    np.testing.assert_array_equal(vec[ri.LANES], slots.encode(float(s), 8.0))
+    assert not old[ri.LANES].any()
+  assert any(ls.decode(v2.encode(float(s), 0.0, 8.0)[ri.LANES])[2] is not None for s in np.linspace(0.0, r.length, 60))
+  assert ri.describe(v2.encode(150.0, 0.0, 8.0)).count('here') == 1
 
 
 def test_encode_is_cheap():

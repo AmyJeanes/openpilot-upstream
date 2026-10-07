@@ -11,7 +11,7 @@ from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as slots_mod
-from openpilot.tools.sim.bridge.gta5.gta5_route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, ROUTE_LEN, decode
+from openpilot.tools.sim.bridge.gta5.gta5_route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, V1_LEN, decode
 
 FPS = 10
 NAV_FROM, NAV_TO = BIN_ZERO - 5, 50  # bins shown: 100 m behind to 500 m ahead
@@ -265,7 +265,7 @@ if __name__ == "__main__":
   gui_app.init_window("Route input", fps=FPS)
   rl.set_window_state(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE)
   rl.set_target_fps(0)  # raylib's frame limiter busy-waits the end of each frame: sleep instead
-  reader = RouteInputReader(ROUTE_LEN)
+  reader = RouteInputReader(V1_LEN)
   lanes_reader = RouteInputReader(slots_mod.PREVIEW_LEN, slots_mod.lane_slots_path())
   due = time.monotonic()
   for _ in gui_app.render():

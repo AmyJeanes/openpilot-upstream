@@ -3,6 +3,7 @@ import math
 import multiprocessing
 import os
 import subprocess
+import sys
 import threading
 import time
 from multiprocessing import Queue
@@ -18,13 +19,14 @@ from openpilot.selfdrive.modeld.route_input import RouteInputWriter
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
-from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import PREVIEW_LEN, LaneSlots, lane_slots_path, preview
+from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import PREVIEW_LEN, lane_slots_path, preview
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, Paths
@@ -47,7 +49,7 @@ ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugi
 # the route input of a route-conditioned driving model (gta5_route_input.py); modeld reads it only if its model has one
 ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the model, to A/B one model with and without
 OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
-# route input v2's lane slots (gta5_lane_slots.py), to their own file for watch_route.py's preview, not the model
+# route input v2's lane slots (gta5_lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
@@ -138,6 +140,8 @@ class GTA5World(World):
     self.next_map = 0.0
     self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
+    self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
+    self.junction_areas: JunctionAreas | None = None
     if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
       threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
     self.dest: np.ndarray | None = None
@@ -145,9 +149,8 @@ class GTA5World(World):
     self.game_waypoint: np.ndarray | None = None
     self.route: Route | None = None
     self.route_writer = RouteInputWriter(ROUTE_LEN) if ROUTE_INPUT else None
-    self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput)
+    self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
     self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
-    self.lane_slots: tuple | None = None  # (the Route it encodes, its LaneSlots)
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
     self.cap = 0.0
     self.gps_route: list = []
@@ -367,6 +370,8 @@ class GTA5World(World):
     if lanes is not None and lanes.tagged:
       self.navigator.router.osm = lanes
       print(f"gta5: lanes from the map's tags ({osm})")
+      self.lane_matcher = LaneMatcher(lanes)
+      self.junction_areas = self._junction_areas(lanes)
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
 
@@ -392,7 +397,7 @@ class GTA5World(World):
     self.route = route
     self._write_route_input(state)
     self._write_lane_slots(state)
-    state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": []}
+    state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
     if self.route is None:
       return state
     on = self.route.off < ON_ROUTE
@@ -405,6 +410,34 @@ class GTA5World(World):
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
 
+  @staticmethod
+  def _junction_areas(osm: OsmLanes) -> JunctionAreas | None:
+    """The map's junction areas from their cache, built by a separate process the first time (about half a minute)."""
+    areas = JunctionAreas.cached(osm, build=False)
+    if areas is not None:
+      return areas
+    print("gta5: building the map's junction areas in the background", flush=True)
+    try:
+      subprocess.run(["nice", "-n", "10", sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.map.lane_match", osm.path],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+      print(f"gta5: no junction areas: {e}")
+      return None
+    return JunctionAreas.cached(osm, build=False)
+
+  def _map_lane(self, state: dict) -> dict | None:
+    """The car's lane by the map's lanes alone (lane_match.py), for nav's way back out of the oncoming lanes; None in a
+    junction's area, where the car is on the moves through it. "areas" says whether those were looked at yet."""
+    m, areas = self.lane_matcher, self.junction_areas
+    if m is None:
+      return None
+    x, y, z = state["pos"]
+    if areas is not None and areas.inside(x, y, z):
+      return None
+    r = m.match(x, y, math.radians(state["heading"] + 90.0), z)
+    return None if r is None else {"lane": r.lane, "lanes": r.lanes, "kind": r.kind, "bay": r.bay, "oncoming": r.oncoming,
+                                   "areas": areas is not None}
+
   def _write_route_input(self, state: dict):
     """The driving model's route input for the route and the car's place on it; zero off it."""
     if self.route_writer is None:
@@ -412,9 +445,29 @@ class GTA5World(World):
     if self.route is None or self.route.off > OFF_ROUTE_INPUT:
       self.route_writer.write(np.zeros(ROUTE_LEN, np.float32))
       return
-    if self.route_input is None or self.route_input[0] is not self.route:
-      self.route_input = (self.route, RouteInput(self.route))  # once per route, a few ms
-    self.route_writer.write(self.route_input[1].encode(self.route.at, state["heading"]))
+    enc = self._route_encoder(self.route)
+    try:
+      vec = enc.encode(self.route.at, state["heading"], state["vEgo"])
+    except Exception as e:  # the lane slots on a map they can't read: the rest of the input carries on without them
+      print(f"gta5: lane slots: {e!r}")
+      enc = self._route_encoder(self.route, lanes=False)
+      vec = enc.encode(self.route.at, state["heading"], state["vEgo"])
+    self.route_writer.write(vec)
+
+  def _route_encoder(self, route: Route, lanes: bool = True) -> RouteInput:
+    """The route's RouteInput, made once per route (a few ms); without its lane slots where they fail."""
+    if self.route_input is None or self.route_input[0] is not route or (not lanes and self.route_input[1].slots is not None):
+      osm = self.navigator.router.osm
+      side = osm.drive_on_right if osm is not None else True
+      try:
+        enc = RouteInput(route, side, lanes)
+      except Exception as e:
+        if not lanes:
+          raise
+        print(f"gta5: lane slots: {e!r}")
+        enc = RouteInput(route, side, False)
+      self.route_input = (route, enc)
+    return self.route_input[1]
 
   def _write_lane_slots(self, state: dict):
     """Route input v2's lane slots for the preview; zero off the route."""
@@ -422,13 +475,13 @@ class GTA5World(World):
       return
     route = self.route if self.route is not None and self.route.off <= OFF_ROUTE_INPUT else None
     try:
-      if route is not None and (self.lane_slots is None or self.lane_slots[0] is not route):
-        osm = self.navigator.router.osm
-        self.lane_slots = (route, LaneSlots(route, osm.drive_on_right if osm is not None else True))  # once per route
-      vec = preview(self.lane_slots[1] if route is not None else None, route.at if route is not None else 0.0, state["vEgo"])
+      vec = preview(self._route_encoder(route).slots if route is not None else None, route.at if route is not None else 0.0,
+                    state["vEgo"])
     except Exception as e:  # only a preview: it mustn't stop the bridge
       print(f"gta5: lane slots: {e!r}")
-      self.lane_slots, vec = (route, None), preview(None, 0.0, 0.0)
+      vec = preview(None, 0.0, 0.0)
+      if route is not None:
+        self._route_encoder(route, lanes=False)
     self.lanes_writer.write(vec)
 
   def _overlay(self, state: dict, v: float) -> list[dict]:
@@ -463,7 +516,8 @@ class GTA5World(World):
     if r is self.lane_line[0] and now < self.lane_line[1]:
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
-    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0)))
+    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
+                                 r.lane_drops(r.length, 0.0)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

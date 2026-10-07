@@ -69,7 +69,10 @@ Near the waypoint it slows to a stop there and disengages.
 
 Before a turn the car changes into the lanes the map's turn arrows (`turn:lanes`) allow it from, else the leftmost lane
 for a left turn or the rightmost for a right; going straight on through a junction it moves out of lanes whose arrows
-only turn; and it moves back over if it drifts into the oncoming lanes. Lane changes are planned back from the last place one may start (30 m before
+only turn, or that end there (the road out has fewer lanes its way: the lanes that carry on are those in line with its
+lanes, kerb to kerb where it is as wide, else by its line); and it moves back over if it drifts into the oncoming lanes,
+by its lane reading or by the map's lanes alone (`map/lane_match.py`, outside junctions' areas: an oncoming lane, a
+one-way the wrong way, the other direction's turn bay), with keepRight. Lane changes are planned back from the last place one may start (30 m before
 a turn), about 8 s each, and when there isn't room left the set speed comes down for it; a turn the car still isn't in
 the lane for is left for the route to come round again, as the model won't take it from the wrong lane anyway. The car's
 lane comes from the road's lanes along our route (map/README.md: the map's lane tags, or GTA's links on a map without
@@ -122,7 +125,8 @@ route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without i
 `OPENPILOT_PREFIX=gta5 GALLIUM_DRIVER=d3d12 python openpilot/tools/sim/bridge/gta5/watch_route.py` (in the venv) shows that input live.
 Below it, it previews route input v2's lane slots (`gta5_lane_slots.py`: the road here and the road out of the next
 maneuver, counted from the kerb, with the lanes the route needs), which the bridge writes to a shared-memory file of
-their own (`GTA5_LANE_SLOTS=0` turns that off); they aren't the model's input yet.
+their own (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats (route input v2);
+a model trained on v1's 173 reads only the start of it.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map

@@ -315,6 +315,7 @@ class Route:
       "stops": [round(a - self.at, 1) for a in self.stops if -JUNCTION_BEHIND < a - self.at < distance],
       "junctions": [round(a - self.at, 1) for a in self.junctions if -JUNCTION_BEHIND < a - self.at < distance],
       "laneArrows": self.lane_arrows(distance),
+      "laneDrops": self.lane_drops(distance),
     }
 
   def lane_arrows(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
@@ -322,6 +323,12 @@ class Route:
     from the left, ';'-separated]]."""
     arrows = self.lanes.arrows if self.lanes is not None else []
     return [[round(e - self.at, 1), [";".join(sorted(t)) for t in turns]] for e, turns in arrows if -behind < e - self.at < distance]
+
+  def lane_drops(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
+    """The junctions within `distance` m the route goes straight on through onto fewer lanes (RouteLanes.drops):
+    [[m ahead, first and last lane into it that carry on, from the left, of how many]]."""
+    drops = self.lanes.drops if self.lanes is not None else []
+    return [[round(s - self.at, 1), lo, hi, n] for s, (lo, hi, n) in drops if -behind < s - self.at < distance]
 
 
 class Router:

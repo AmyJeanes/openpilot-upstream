@@ -27,7 +27,6 @@ import os
 
 import numpy as np
 
-from openpilot.common.hardware.hw import Paths
 from openpilot.tools.sim.bridge.gta5 import gta5_expert, gta5_nav
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import LEFTS, RIGHTS, Section
 
@@ -53,6 +52,7 @@ NEXT_PAST, NEXT_AHEAD, NEXT_SOON = 20.0, 500.0, 60.0
 
 
 def lane_slots_path() -> str:
+  from openpilot.common.hardware.hw import Paths  # here: gta5-train imports the encoder without openpilot's runtime
   return os.path.join(Paths.shm_path(), "route_lanes" + os.environ.get("OPENPILOT_PREFIX", ""))
 
 

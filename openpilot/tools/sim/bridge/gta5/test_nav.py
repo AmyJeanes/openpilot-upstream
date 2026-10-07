@@ -543,3 +543,48 @@ def test_blinker_steady_when_openpilot_refreshes_the_turn():
       gaps += d.nav.signaled is not None and d.nav.blinker_gap
       y += d.v * 0.05
     assert (gaps == 0) == refresh, (refresh, gaps)
+
+
+def test_keep_right_out_of_oncoming_by_the_map():
+  # the map's lanes (the bridge's laneMap) see a one-way driven the wrong way, which the plugin's and route's readings miss
+  route = np.array([(0.0, y) for y in np.arange(0.0, 400.0, 5.0)])
+  wrong = {"lane": -1, "lanes": 0, "kind": "wrong-way", "bay": False, "oncoming": True, "areas": True}
+
+  def desires(lane_map, extra=None, **tune):
+    d = Drive((0, 2))
+    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune.values.update(tune)
+    for k in range(40):  # 2 s
+      d.step(route, k * 0.4, {"laneMap": lane_map, "routeEnd": 400.0, **(extra or {})})
+    return d.desires
+  assert "keepRight" in desires(wrong)
+  assert "keepRight" not in desires(None) and "keepRight" not in desires({**wrong, "kind": "own", "oncoming": False})
+  assert "keepRight" not in desires(wrong, oncoming_map=False)
+  # by a junction's node: the plugin's reading follows GTA's diagonal links there, and so does the map's, until the
+  # bridge has the junctions' areas to leave it out in
+  near = {"junctions": [5.0]}
+  assert "keepRight" not in desires({**wrong, "areas": False}, near)
+  assert "keepRight" in desires(wrong, near)
+  assert "keepRight" in desires(None, {"lanePlugin": [-1, 2]}) and "keepRight" not in desires(None, {"lanePlugin": [-1, 2], **near})
+
+
+def test_lane_change_for_a_lane_that_ends():
+  # straight on through a junction where the left lane ends (laneDrops: only the right one of two carries on)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 400.0, 5.0)])
+  d = Drive((0, 2))
+  y, started = 0.0, None
+  while y < 150.0 and started is None:
+    d.step(route, y, {"laneDrops": [[150.0 - y, 1, 1, 2]], "routeEnd": 400.0 - y})
+    started = d.nav.changing and (d.nav.changing, 150.0 - y)
+    y += d.v * 0.05
+  assert started and started[0] == "right" and started[1] > nav_mod.LANE_CHANGE_DIST
+  d = Drive((0, 2))
+  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune.values.update(lane_drops=False)
+  for k in range(100):
+    d.step(route, k * 0.4, {"laneDrops": [[150.0 - k * 0.4, 1, 1, 2]], "routeEnd": 400.0})
+  assert d.nav.changing is None  # off, for an A/B
+  d = Drive((1, 2))
+  for k in range(100):
+    d.step(route, k * 0.4, {"laneDrops": [[150.0 - k * 0.4, 1, 1, 2]], "routeEnd": 400.0})
+  assert d.nav.changing is None  # already in it
