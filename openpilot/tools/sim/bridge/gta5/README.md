@@ -127,6 +127,10 @@ Below it, it previews route input v2's lane slots (`gta5_lane_slots.py`: the roa
 maneuver, counted from the kerb, with the lanes the route needs), which the bridge writes to a shared-memory file of
 their own (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats (route input v2);
 a model trained on v1's 173 reads only the start of it.
+`GTA5_NAV_MSGS=1` also publishes openpilot's `navInstruction` and `navRoute` for that route (`gta5_nav_msgs.py`: the
+next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
+beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,
+from a route it finds over the map itself (its docstring says how).
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map

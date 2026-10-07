@@ -24,6 +24,7 @@ with no target, which the target slots tell apart). The bridge writes it with [5
 left, 0 no route) to its own shared-memory file for watch_route.py's preview, apart from the model's route input.
 """
 import os
+from typing import NamedTuple
 
 import numpy as np
 
@@ -106,6 +107,16 @@ class Move:
   def start_at(self, s: float, start: float, end: float) -> float:
     """Where a car s m along may start moving into the target: from `start`, and past a ban on changing towards it."""
     return max([start] + [b for a, b in self.bans if a <= s < b <= end])
+
+
+class Target(NamedTuple):
+  """The lanes a move needs the car in, as they show at the car."""
+  move: Move
+  want: set[int]  # of ours, numbered from the left
+  centre: bool  # the centre turn lane
+  start: float  # m along: where moving into them may start
+  end: float  # m along: by where the car must be in them
+  opens: float | None  # m along: where they open, while the car is before (a bay; the lane beside it until then)
 
 
 def allowed_lanes(sec: Section) -> set[int]:
@@ -257,27 +268,37 @@ class LaneSlots:
       k -= 1
     return out
 
+  def target(self, s: float, v: float = 0.0) -> tuple[Section | None, Target | None]:
+    """The road's lanes at the car s m along at v m/s, and the target lanes in them once they show."""
+    if self.lanes is None:
+      return None, None
+    here = self.section_here(s)
+    k = int(np.searchsorted(self.along, s, side='right')) if self.moves else 0
+    if here is None or k >= len(self.moves) or not self.moves[k].need:
+      return here, None
+    move = self.moves[k]
+    show, start, end = move.window(v)
+    before = move.opens is not None and s < move.opens  # its lanes aren't the target yet: the lane beside them
+    if before and move.centre:
+      want, centre = strict(here, {centre_side(here)}), False
+    else:
+      want, centre = targets(here, move.nav)
+    if show > s or not (want or centre):
+      return here, None
+    return here, Target(move, want, centre, move.start_at(s, start, end), min(end, move.opens) if before else end,
+                        move.opens if before else None)
+
   def encode(self, s: float, v: float = 0.0) -> np.ndarray:
     """[LANE_SLOTS_LEN] for the car s m along the route at v m/s."""
     out = np.zeros(LANE_SLOTS_LEN, np.float32)
     if self.lanes is None:
       return out
-    here = self.section_here(s)
-    k = int(np.searchsorted(self.along, s, side='right')) if self.moves else 0
-    if here is not None and k < len(self.moves) and self.moves[k].need:
-      move = self.moves[k]
-      show, start, end = move.window(v)
-      before = move.opens is not None and s < move.opens  # its lanes aren't the target yet: the lane beside them
-      if before and move.centre:
-        want, centre = strict(here, {centre_side(here)}), False
-      else:
-        want, centre = targets(here, move.nav)
-      if show <= s and (want or centre):
-        self._fill(out[LANES_HERE], here, want, centre)
-        out[TARGET_START] = np.clip((move.start_at(s, start, end) - s) / DIST_UNIT, 0.0, 3.0)
-        out[TARGET_END] = np.clip(((min(end, move.opens) if before else end) - s) / DIST_UNIT, 0.0, 3.0)
-        here = None
-    if here is not None:
+    here, target = self.target(s, v)
+    if target is not None:
+      self._fill(out[LANES_HERE], here, target.want, target.centre)
+      out[TARGET_START] = np.clip((target.start - s) / DIST_UNIT, 0.0, 3.0)
+      out[TARGET_END] = np.clip((target.end - s) / DIST_UNIT, 0.0, 3.0)
+    elif here is not None:
       self._fill(out[LANES_HERE], here, set(), False)
     nxt = self._next(s)
     if nxt is not None:

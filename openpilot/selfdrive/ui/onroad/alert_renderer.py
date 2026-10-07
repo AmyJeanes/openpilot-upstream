@@ -173,6 +173,9 @@ class AlertRenderer(Widget):
 
   def _draw_centered(self, text, rect, font, font_size, center_y=True, color=rl.WHITE) -> None:
     text_size = measure_text_cached(font, text, font_size)
+    if text_size.x > rect.width:  # a narrower view, as beside the navigation panel
+      font_size = int(font_size * rect.width / text_size.x)
+      text_size = measure_text_cached(font, text, font_size)
     x = rect.x + (rect.width - text_size.x) / 2
     y = rect.y + ((rect.height - text_size.y) / 2 if center_y else 0)
     rl.draw_text_ex(font, text, rl.Vector2(x, y), font_size, 0, color)

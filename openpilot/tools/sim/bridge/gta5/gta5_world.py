@@ -21,6 +21,7 @@ from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import PREVIEW_LEN, lane_slots_path, preview
 from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
+from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_route_input import ROUTE_LEN, RouteInput
@@ -52,6 +53,8 @@ OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's label
 # route input v2's lane slots (gta5_lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
+# openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
+NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
@@ -149,6 +152,7 @@ class GTA5World(World):
     self.game_waypoint: np.ndarray | None = None
     self.route: Route | None = None
     self.route_writer = RouteInputWriter(ROUTE_LEN) if ROUTE_INPUT else None
+    self.nav_msgs = NavMessages() if NAV_MSGS else None
     self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
     self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
@@ -332,6 +336,8 @@ class GTA5World(World):
       if known:
         simulator_state.speed_limit = limits[0][1]
       simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
+    if self.nav_msgs is not None:
+      self.nav_msgs.update(self.route, v, self.navigator.router.osm if self.navigator is not None else None, self._lane_slots)
     for msg in self._overlay(state, v):
       self._send(msg)
     if self.expert.update(state, self.route, self.simulator_state.is_engaged):
@@ -468,6 +474,10 @@ class GTA5World(World):
         enc = RouteInput(route, side, False)
       self.route_input = (route, enc)
     return self.route_input[1]
+
+  def _lane_slots(self, route: Route):
+    """The route's lane slots, from its RouteInput (made once per route), for the nav messages' lane guidance."""
+    return self._route_encoder(route).slots
 
   def _write_lane_slots(self, state: dict):
     """Route input v2's lane slots for the preview; zero off the route."""
