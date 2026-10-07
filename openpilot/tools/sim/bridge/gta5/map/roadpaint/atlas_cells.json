@@ -837,5 +837,43 @@
     "dir": "-v"
    }
   ]
+ },
+ "cs_rsn_sl_freewaymrkings": {
+  "lines": [
+   {
+    "u0": 0,
+    "u1": 0.5,
+    "v0": 0,
+    "v1": 1,
+    "axis": "v"
+   },
+   {
+    "u0": 0.5,
+    "u1": 1,
+    "v0": 0.2,
+    "v1": 1,
+    "axis": "v"
+   }
+  ]
+ },
+ "cs_rsn_sl_freewaydtls": {
+  "features": [
+   {
+    "u0": 0,
+    "u1": 0.3,
+    "v0": 0.78,
+    "v1": 1,
+    "kind": "raised_markers_yellow",
+    "dir": "-v"
+   },
+   {
+    "u0": 0.35,
+    "u1": 0.6,
+    "v0": 0.78,
+    "v1": 1,
+    "kind": "raised_markers_white",
+    "dir": "-v"
+   }
+  ]
  }
 }

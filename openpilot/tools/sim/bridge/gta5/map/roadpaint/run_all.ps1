@@ -11,7 +11,7 @@ function Step($name, $exe, $argList) {
   if ($p.ExitCode -ne 0) { throw "$name failed" }
 }
 $env:RP_THREADS = "6"; $env:RP_DUMPTEX = "0"; $env:RP_ATLAS = "$G\atlas_cells.json"
-Set-Content $log ""
+Remove-Item $log -ErrorAction SilentlyContinue; Set-Content $log ""
 Step "roadpaint" "$G\roadpaint\bin\Release\net8.0-windows\roadpaint.exe" @("`"$Game`"", "$G\$Out")
 Step "rpchain" "$G\rpchain\bin\Release\net8.0\rpchain.exe" @("$G\$Out")
 $W = "/mnt/" + $G.Substring(0, 1).ToLower() + ($G.Substring(2) -replace '\\', '/')  # the same folder from WSL

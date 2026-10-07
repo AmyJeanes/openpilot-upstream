@@ -41,12 +41,13 @@ void Log(string s) => Console.Error.WriteLine($"[{sw.Elapsed:hh\\:mm\\:ss}] {s}"
 
 var gutterRe = new Regex("road_edge|gutter|edgedecal", RegexOptions.IgnoreCase);
 var kerbRe = new Regex("kerb|curb", RegexOptions.IgnoreCase);
-var roadRe = new Regex("road|marking|blend|crossing|tarmac|asphalt|carpark|keep", RegexOptions.IgnoreCase);
+var roadRe = new Regex("road|marking|blend|crossing|tarmac|asphalt|carpark|keep|freeway", RegexOptions.IgnoreCase);
+var notRoadRe = new Regex("barrier|signborder|wall", RegexOptions.IgnoreCase);  // freeway furniture and walls, not the road surface
 var walkRe = new Regex("sidewalk|pave|concrete|ground", RegexOptions.IgnoreCase);
 var crossingRe = new Regex("crossing", RegexOptions.IgnoreCase);
 // decals that can be road paint; the rest (dirt, weeds, drains, posters...) have bright texels that aren't
-var markingRe = new Regex("mark|line|crossing|keep|arrow|parking_objects|carpark|stop|hatch|paintdecal", RegexOptions.IgnoreCase);
-int ClassOf(string t) => gutterRe.IsMatch(t) ? GUTTER : kerbRe.IsMatch(t) ? KERB : roadRe.IsMatch(t) ? ROAD : walkRe.IsMatch(t) ? WALK : NONE;
+var markingRe = new Regex("mark|mrking|line|crossing|keep|arrow|parking_objects|carpark|stop|hatch|paintdecal", RegexOptions.IgnoreCase);
+int ClassOf(string t) => notRoadRe.IsMatch(t) ? NONE : gutterRe.IsMatch(t) ? GUTTER : kerbRe.IsMatch(t) ? KERB : roadRe.IsMatch(t) ? ROAD : walkRe.IsMatch(t) ? WALK : NONE;
 
 // atlas cell table: texture (lower case) -> { "lines": [{u0,u1,v0,v1,axis}], "features": [...] (used by the Python side) }
 // keys are texture name prefixes; the longest matching one applies
@@ -153,6 +154,7 @@ Tex GetTex(string name, bool decal, int cls, DrawableBase dr, uint td)
 
 // geometry: world-space vertices (x, y, z, u, v, vertex alpha) and triangles, per drawable geometry
 var geos = new List<Geo>();
+var dropped = new Dictionary<string, int>();
 var seen = new HashSet<string>();
 using var decW = new StreamWriter(Path.Combine(outDir, "decals.jsonl"));
 long nTris = 0;
@@ -201,7 +203,7 @@ foreach (var (h, fe) in byExt[".ymap"])
         var vd = g.VertexData; var ib = g.IndexBuffer?.Indices;
         if (vd == null || ib == null) continue;
         var t = GetTex(diff, decal, cls, dr, a.TextureDict.Hash);
-        if (t == null) continue;
+        if (t == null) { if (decal) dropped[diff.ToLowerInvariant()] = dropped.GetValueOrDefault(diff.ToLowerInvariant()) + 1; continue; }
         bool hasCol = (vd.Info.Flags & (1u << 4)) != 0;
         var V = new float[vd.VertexCount * 6];
         for (int v = 0; v < vd.VertexCount; v++)
@@ -228,6 +230,7 @@ foreach (var (h, fe) in byExt[".ymap"])
 }
 decW.Flush();
 Log($"loaded: {geos.Count} geometries, {nTris} triangles, {texList.Count} textures");
+File.WriteAllLines(Path.Combine(outDir, "dropped_decals.tsv"), dropped.OrderByDescending(k => k.Value).Select(k => $"{k.Value}	{k.Key}"));  // decals left out: review for unlisted marking atlases
 using (var tw = new StreamWriter(Path.Combine(outDir, "textures.tsv")))
 {
   tw.WriteLine("id\tname\tdecal\tcls\tw\th\tbands");
