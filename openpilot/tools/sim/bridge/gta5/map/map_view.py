@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Serves the map view: a web page of the roads with the car and routes, for a browser on this machine or the network.
 
-MapView.update() sets what /state reports: {"t": seconds, "car": {"x", "y", "bearing"}, "routes": {name: [[x, y], ...]},
-"waypoint": [x, y], "text": "..."}, in the same metres as roads.json, bearing in degrees clockwise from north.
+MapView.update() sets what /state reports: {"t": seconds, "car": {"x", "y", "z", "bearing"}, "routes": {name: [[x, y], ...]},
+"waypoint": [x, y], "text": "..."}, in the same metres as roads.json, bearing in degrees clockwise from north, z the
+height of the road under the car (optional: the view dims the roads on other levels from it).
 A destination picked on the page (POST /destination {"x", "y"}, or {} to clear) waits in take_destination().
 lanes.json beside roads.json (osm_to_roads.py --lanes), where there is one, gives the lines painted on the roads.
 """

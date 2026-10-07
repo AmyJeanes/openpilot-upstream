@@ -286,16 +286,6 @@ def marking_kinds(line) -> list[tuple[str, float]]:
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
 
 
-def z_along(piece: np.ndarray, line: np.ndarray, z: np.ndarray) -> np.ndarray:
-  """The heights [P] of the points of a piece of a polyline [N, 2] that has heights z [N], by where each falls along it."""
-  a, ab = line[:-1], np.diff(line, axis=0)
-  ab2 = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-12)
-  t = np.clip(np.einsum("pij,ij->pi", piece[:, None] - a[None], ab) / ab2, 0.0, 1.0)
-  k = np.argmin(np.hypot(*(a[None] + ab[None] * t[..., None] - piece[:, None]).transpose(2, 0, 1)), axis=1)
-  tk = t[np.arange(len(piece)), k]
-  return z[k] + (z[k + 1] - z[k]) * tk
-
-
 def road_marks(paths, osm) -> dict:
   """What the overlay draws of a lane-tagged map, from its tags alone (osm_lanes.py, junctions.py), as the map view draws
   it (osm_to_roads.py): the lines the lane tags paint, as segments (their ends [M, 2, 3], kinds [M], and the GTA nodes
@@ -304,7 +294,7 @@ def road_marks(paths, osm) -> dict:
   junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
   from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas
-  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, PaintAreas, level
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, PaintAreas, level, z_along
 
   junctions = Junctions(osm, lambda tags: tags.get("highway", "").removesuffix("_link") in ROAD_CLASSES)
   # each junction's height and a GTA node at it, from its nodes (which are GTA's)
