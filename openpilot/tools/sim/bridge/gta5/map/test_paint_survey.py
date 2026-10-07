@@ -3,8 +3,10 @@ import json
 import os
 import tempfile
 
+import numpy as np
+
 from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrows, centre_kind, correct, correct_oneway, disagree, \
-  line_kinds, load, opening_taper, sources, strips
+  line_kinds, load, median_edges, opening_taper, sources, strips, swing_taper
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -152,6 +154,30 @@ def test_opening_taper():
   assert abs(start - 41.6) < 1.0 and abs(end - 58.4) < 1.0
   assert opening_taper([(d, sample([mark(2.7, 'yellow')], src='gamefiles')) for d in range(1, 100, 3)], 5.4) is None
   assert opening_taper([(d, {**s, 'src': None}) for d, s in sections], 5.4) is None  # the game files' only
+
+
+def test_swing_taper():
+  # a road along +y with a 5.4 m median; our edge at +2.7 swings across to -2.7 between 20 and 35 m along, steeper than
+  # sections read, and runs on beside the oncoming edge
+  road = np.array([[0.0, 0.0], [0.0, 30.0], [0.0, 60.0]])
+  ours = (1, np.array([[2.7, 0.0], [2.7, 20.0], [-2.7, 35.0], [-2.7, 60.0]]))
+  oncoming = (2, np.array([[-2.7, 0.0], [-2.7, 60.0]]))
+  start, end = swing_taper([ours, oncoming], road, 2.7)
+  assert abs(start - 21.2) < 0.3 and abs(end - 33.3) < 0.3  # 8% across, and within 0.6 m of the far edge
+  # the other way's edge crossing back to back with ours (a diamond): it reads as a swing here too, but our edge runs on
+  # at +2.7 past it, so it's theirs
+  theirs = (3, np.array([[2.7, 5.0], [-2.7, 18.0]]))
+  edge = (4, np.array([[2.7, 0.0], [2.7, 60.0]]))
+  assert swing_taper([theirs, edge, oncoming], road, 2.7) is None
+  assert swing_taper([oncoming], road, 2.7) is None
+
+
+def test_median_edges():
+  # double solid beside the oncoming lanes, one solid line beside ours; a lone centre line says nothing
+  marks = [mark(-2.7, 'yellow', 'double_solid', pair=[-2.8, -2.6]), mark(2.6, 'yellow', 'solid'), mark(7.0)]
+  files = [sample(marks, s, src='gamefiles') for s in (1.0, 4.0, 7.0)]
+  assert median_edges(files, 5.4) == ('double_solid_line', 'solid_line')
+  assert median_edges([sample([mark(0.1, 'yellow', 'double_solid')], src='gamefiles')] * 3, 5.4) == (None, None)
 
 
 def test_arrows_from_features():

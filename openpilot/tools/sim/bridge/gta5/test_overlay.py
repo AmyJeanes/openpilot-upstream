@@ -209,9 +209,10 @@ def test_saved_marks_load_exactly():
   assert ov.load_marks("u" * 32) is None
 
 
-def test_median_edges_are_one_yellow_line_each():
+def test_median_edges_take_their_own_kind():
   from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CENTRE, MEDIAN, Line
-  assert ov.marking_kinds(Line(MEDIAN, 3.0, "double_solid")) == [("c", 0.0)]
+  assert ov.marking_kinds(Line(MEDIAN, 3.0, "solid")) == [("c", 0.0)]
+  assert ov.marking_kinds(Line(MEDIAN, 3.0, "double_solid")) == [("c", -ov.DOUBLE), ("c", ov.DOUBLE)]
   assert ov.marking_kinds(Line(CENTRE, 3.0, "double_solid")) == [("c", -ov.DOUBLE), ("c", ov.DOUBLE)]
 
 

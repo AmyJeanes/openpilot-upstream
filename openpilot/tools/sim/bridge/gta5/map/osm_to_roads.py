@@ -21,7 +21,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, PARKING, OsmLanes, offset_line
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
 # lanes.json's kinds: a road's edge (kerb), white lines between lanes one way, yellow lines between the directions,
@@ -261,9 +261,8 @@ def main():
     z = heights(nodes) if high else None
     ways = {osm.pairs[(a, b)][0] for a, b in zip(nodes[:-1], nodes[1:], strict=True)}
     for kind, offset, style in sig:
-      # a median's edges one line each, as maps paint it, rather than the divider's double line on both
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
-          marks('solid' if kind == MEDIAN else style, kind == DIVIDER):
+          marks(style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE)):
           add(k, piece, layer, z_along(piece, pts, z) if high else None)
@@ -274,7 +273,7 @@ def main():
     for line, geom in osm.line_geometry(wid):
       if line.kind != EDGE and (not road.markings or line.kind == PARKING):
         continue
-      for k, off in [(0, 0.0)] if line.kind == EDGE else marks('solid' if line.kind == MEDIAN else line.style, line.kind == DIVIDER):
+      for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.kind == DIVIDER):
         g = offset_line(geom, off) if off else geom
         for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE)):
           add(k, piece, layer, z_along(piece, pts, z) if high else None)

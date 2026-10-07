@@ -95,8 +95,9 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
       out.append(('width', f'{tag}={tags[tag]}'))
   if 'width' in tags and not metres(tags['width']):
     out.append(('width', f"width={tags['width']}"))
-  if 'divider' in tags and tags['divider'] not in DIVIDERS and not set(tags['divider'].split(';')) <= PHYSICAL_DIVIDERS:
-    out.append(('divider', f"divider={tags['divider']}"))
+  for key in ('divider', 'divider:forward', 'divider:backward'):  # a median's two edges where they differ
+    if key in tags and tags[key] not in DIVIDERS and not set(tags[key].split(';')) <= PHYSICAL_DIVIDERS:
+      out.append(('divider', f"{key}={tags[key]}"))
   if tags.get('lane_markings', 'yes') not in ('yes', 'no'):
     out.append(('lane_markings', f"lane_markings={tags['lane_markings']}"))
   for side in ('left', 'right', 'both'):
@@ -124,9 +125,16 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
     elif int(m.group(2)) > n_lanes:
       out.append(('placement', f'{key}={v} but {n_lanes} lanes that way'))
   if len(road.placed) > 1:
-    spread, median = max(road.placed.values()) - min(road.placed.values()), sum(b - a for a, b in road.gaps)
-    if spread > median + 0.05:
-      out.append(('placement', f'placements {", ".join(road.placed)} disagree by {spread - median:.2f} m'))
+    # apart by no more than the median, and where lanes widen along the way, the lanes either side of it (turn bays
+    # opening in it: placed beyond them, the line doesn't move with them)
+    lo, hi = min(road.placed.values()), max(road.placed.values())
+    widening = any(k.startswith('width:lanes') and k.endswith((':start', ':end')) for k in tags)
+    inner = {k for i in range(1, len(road.lanes)) if road.lanes[i - 1].direction != road.lanes[i].direction for k in (i - 1, i)} \
+      if widening else set()
+    between = sum(b - a for a, b in road.gaps) + sum(road.lanes[i].width for i in inner
+                                                     if road.x[i] >= lo - 0.05 and road.x[i] + road.lanes[i].width <= hi + 0.05)
+    if hi - lo > between + 0.05:
+      out.append(('placement', f'placements {", ".join(road.placed)} disagree by {hi - lo - between:.2f} m'))
   return out
 
 

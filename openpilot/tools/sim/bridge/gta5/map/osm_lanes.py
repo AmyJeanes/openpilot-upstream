@@ -17,7 +17,9 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
 - `parking:left|right|both=lane` (with `parking:<side>:width`, else by `:orientation`): a parking lane on the
   carriageway between that kerb and the lanes; it isn't a lane. Without placement the line is the middle of the lanes
   (and median) between the parking lanes.
-- `divider`: the marking between the directions. `lane_markings=no`: no lines between lanes at all.
+- `divider`: the marking between the directions, or both edges of a median between them (each one solid line by
+  default). `divider:forward` / `divider:backward`: a median's edge beside that direction's lanes, where its two edges
+  differ. `lane_markings=no`: no lines between lanes at all.
 - Missing tags fall back to OSM's defaults, then to `Defaults` by road class: lanes 1 each way (2 on a one-way motorway
   or trunk), a single track on tracks, the line in the middle.
 
@@ -170,6 +172,7 @@ class WayLanes:
     self.line = parking[0] + (width - parking[0] - parking[1]) / 2  # m from the left kerb to the way's line
     self.margin = margin  # m between each kerb (or parking lane) and its outer lane
     self.markings, self.divider = markings, divider
+    self.median_edges: tuple[str | None, str | None] = (None, None)  # divider:forward, divider:backward
     self.placed: dict[str, float] = {}  # where each placement tag puts the line, m from the left kerb
     self.tagged: tuple[float | None, float, int] = (None, 0.0, 0)  # width=*, the lanes' width:lanes total, lanes without
     self.single_track = all(lane.direction == BOTH_WAYS for lane in lanes)
@@ -238,6 +241,7 @@ class WayLanes:
                         left, right, not (closed[i] or bus[i]), destinations[i] or None))
     markings = tags.get('lane_markings') != 'no' and not (tags.get('lanes') is None and highway in UNMARKED)
     road = cls(lanes, width, spare if two_way else 0.0, 0.0 if two_way else spare / 2, markings, tags.get('divider'), parking)
+    road.median_edges = (tags.get('divider:forward'), tags.get('divider:backward'))
 
     def place(value, d):  # m from the left kerb
       m = PLACEMENT.fullmatch(value or '')
@@ -300,8 +304,9 @@ class WayLanes:
 
   def lines(self, direction: int = FORWARD) -> list[Line]:
     """The lines on the road left to right: its edges, white lines between lanes one way (solid where change:lanes
-    forbids crossing), and the centre line between the directions or the edges of a median (divider=*; by default
-    dashed with one lane each way, else double solid), and where a parking lane meets the lanes."""
+    forbids crossing), and the centre line between the directions (divider=*; by default dashed with one lane each way,
+    else double solid) or the edges of a median (divider=*, divider:forward / :backward; one solid line by default), and
+    where a parking lane meets the lanes."""
     return [line for _, line in self.keyed_lines(direction)]
 
   def keyed_lines(self, direction: int = FORWARD, gaps=frozenset()) -> list[tuple[tuple, Line]]:
@@ -315,6 +320,9 @@ class WayLanes:
     if self.markings:
       wide = max(self.counts[:2]) >= 2
       centre = DIVIDERS.get(self.divider, 'solid') if self.divider else ('double_solid' if wide else 'dashed')
+      # a median's edges, beside the oncoming lanes and beside ours
+      theirs, ours = self.median_edges if direction == BACKWARD else self.median_edges[::-1]
+      edges = [DIVIDERS.get(v, 'solid') if v else 'solid' for v in (theirs or self.divider, ours or self.divider)]
       for i, (a, b) in enumerate(zip(sec, sec[1:], strict=False)):
         if a.heading == b.heading != 0:
           a_may = a.lane.change_right if a.heading == 1 else a.lane.change_left
@@ -326,7 +334,7 @@ class WayLanes:
         elif centre is None:
           continue
         elif b.left - a.right > EPS or i in gaps:
-          out += [(('median', i, 0), Line(MEDIAN, a.right, centre)), (('median', i, 1), Line(MEDIAN, b.left, centre))]
+          out += [(('median', i, 0), Line(MEDIAN, a.right, edges[0])), (('median', i, 1), Line(MEDIAN, b.left, edges[1]))]
         else:
           out.append((('lane', i), Line(CENTRE, a.right, centre)))
     out += [(('parking', 1), Line(PARKING, a, None)) for a, b in parking if b == hi]

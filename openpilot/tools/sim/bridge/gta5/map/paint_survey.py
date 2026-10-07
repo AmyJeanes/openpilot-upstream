@@ -199,6 +199,114 @@ def opening_taper(sections: list[tuple[float, dict]], median: float) -> tuple[fl
   return (float(start), float(end)) if TAPER_LENGTH[0] <= end - start <= TAPER_LENGTH[1] else None
 
 
+SWING_STEP = 0.5  # m between the points a polyline is read at
+SWING_BACK = 0.3  # m a swinging edge may wander back on its way across
+RUNS_ON = 10.0  # m past a swing looked along for the median's right edge running on
+
+
+def yellow_lines(path) -> list[tuple[int, np.ndarray]]:
+  """The game files' yellow polylines (polylines.jsonl): [(id, points [N, 2], game x y)]."""
+  out = []
+  with open(path) as f:
+    for line in f:
+      try:
+        p = json.loads(line)
+      except ValueError:
+        continue
+      if p.get('colour') == 'yellow' and len(p.get('pts') or []) >= 2:
+        out.append((p['id'], np.array(p['pts'], dtype=float)[:, :2]))
+  return out
+
+
+def _project(road: np.ndarray, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+  """Points as (m along the road polyline, m right of it), by the nearest of its segments."""
+  a, d = road[:-1], np.diff(road, axis=0)
+  length = np.hypot(d[:, 0], d[:, 1])
+  starts = np.concatenate(([0.0], np.cumsum(length)))
+  rel = pts[:, None, :] - a[None, :, :]
+  t = np.clip((rel * d[None]).sum(-1) / np.maximum(length ** 2, 1e-9)[None], 0.0, 1.0)
+  off = rel - t[..., None] * d[None]
+  dist = np.hypot(off[..., 0], off[..., 1])
+  k = np.argmin(dist, axis=1)
+  i = np.arange(len(pts))
+  right = (off[i, k, 0] * d[k, 1] - off[i, k, 1] * d[k, 0]) / np.maximum(length[k], 1e-9)
+  return starts[k] + t[i, k] * length[k], right
+
+
+def _cross(d: np.ndarray, off: np.ndarray, k: int, level: float) -> float:
+  """m along where a line passes `level` m right of the road between its points k and k + 1."""
+  d0, d1, o0, o1 = d[k], d[k + 1], off[k], off[k + 1]
+  return float(d0 + (d1 - d0) * (o0 - level) / (o0 - o1)) if o0 != o1 else float(d0)
+
+
+def swing_taper(lines: list[tuple[int, np.ndarray]], road: np.ndarray, half: float) -> tuple[float, float] | None:
+  """Where a turn lane opens in a two-way road's median, from the game files' yellow polylines near the road (`road`:
+  its line's points in the direction travelled, a median `half` m either side of it): a polyline swinging from the
+  median's right edge across to its left edge, the oncoming lanes', the lane opening behind it, as GTA paints its bays.
+  Read off the whole polyline, it is seen however steeply it crosses (sections only read lines along the road). (m
+  along the road where it leaves its place, where it arrives) for the last one along the road; None where none does.
+  A line crossing the median reads the same travelling either way: it is this way's bay where no line runs on at the
+  median's right edge after it, and the other way's where one does (back to back bays, the median between them a
+  diamond). Where the two bays meet at the one line (a centre line jogging across, the median handed from one way's
+  bay to the other's) it is both ways'."""
+  hi, lo = half - TAPER_EDGE * 2 * half, -half + max(TAPER_EDGE * 2 * half, ARRIVED)
+  total = float(np.hypot(*np.diff(road, axis=0).T).sum())
+  found, seen = [], []
+  for _, pts in lines:
+    seg = np.diff(pts, axis=0)
+    n = np.maximum(np.ceil(np.hypot(seg[:, 0], seg[:, 1]) / SWING_STEP), 1).astype(int)
+    dense = np.vstack([pts[:-1][k] + seg[k] * (np.arange(n[k])[:, None] / n[k]) for k in range(len(seg))] + [pts[-1:]])
+    d, off = _project(road, dense)
+    keep = (d > 0.0) & (d < total) & (np.abs(off) <= half + 1.5)
+    if keep.sum() < 3:
+      continue
+    order = np.argsort(d[keep])
+    d, off = d[keep][order], off[keep][order]
+    seen.append((d, off))
+    arrive = next((k for k in range(len(off)) if off[k] <= lo and (off[:k] >= hi).any()), None)
+    if arrive is None:
+      continue
+    leave = int(np.nonzero(off[:arrive] >= hi)[0][-1])
+    span = off[leave:arrive + 1]
+    if (np.diff(span) > 0).any() and (np.maximum.accumulate(span[::-1])[::-1] - span).max() > SWING_BACK:
+      continue  # not one crossing
+    start, end = _cross(d, off, leave, hi), _cross(d, off, arrive - 1, lo)
+    if TAPER_LENGTH[0] <= end - start <= TAPER_LENGTH[1]:
+      found.append((start, end))
+
+  def runs(a, b, at):  # a line along the median's edge at `at` between a and b m along
+    return any(((d > a) & (d < b) & (np.abs(off - at) < ARRIVED)).any() for d, off in seen)
+  found = [(s, e) for s, e in found if not runs(e + 1.0, e + 1.0 + RUNS_ON, half)]  # nothing left at its right edge after it
+  if not found:
+    return None
+  last = max(e for _, e in found)  # a double line's two polylines: the same swing
+  same = [(s, e) for s, e in found if e > last - 3.0]
+  return float(np.median([s for s, _ in same])), float(np.median([e for _, e in same]))
+
+
+MEDIAN_TOL = 1.0  # m between two yellow lines' spacing and the median's width, to take them as its edges
+
+
+def median_edges(samples: list[dict], median: float) -> tuple[str | None, str | None]:
+  """divider=* for a two-way link's median edges, seen travelling a -> b (left, the oncoming lanes', and right): the
+  kinds of the two yellow lines the game files show about `median` m apart, in half their samples or more."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  seen = (Counter(), Counter())
+  for d in files:
+    ys = sorted(((sum(m['pair']) / 2 if m.get('pair') else m['offset']), m['type']) for m in d['marks']
+                if m['colour'] == 'yellow' and m['conf'] >= CONF)
+    pairs = [(abs(b[0] - a[0] - median), a, b) for i, a in enumerate(ys) for b in ys[i + 1:] if abs(b[0] - a[0] - median) <= MEDIAN_TOL]
+    if pairs:
+      _, a, b = min(pairs)
+      seen[0][a[1]] += 1
+      seen[1][b[1]] += 1
+  out = []
+  for side in seen:
+    kind, n = side.most_common(1)[0] if side else (None, 0)
+    out.append(DIVIDER.get(kind) if n >= MIN_SAMPLES and n * 2 >= len(files) else None)
+  return out[0], out[1]
+
+
 def sources(samples: list[dict], camera_corrects: bool = True) -> tuple[list[dict], list[dict]]:
   """(the samples to use, the others to cross-check them): the game files' where there are enough, else the camera's
   if `camera_corrects` (none where the game files cover the map: the camera is then only a check)."""

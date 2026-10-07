@@ -96,7 +96,11 @@ shown or a level changes.
     `placement:backward=left_of:1`); a one-way link's lanes are centred on it.
   - GTA's offset between the directions of a two-way link is a painted median, 0.9 m a step whatever the lanes'
     width (5.2-5.5 m at 6 steps on narrow and normal links): `width` includes it, `width:lanes:forward` / `:backward`
-    give the lanes, and what's left is centred between them (`divider=double_solid_line`).
+    give the lanes, and what's left is centred between them. Its edges are the kinds the game files paint there
+    (`paint_survey.median_edges`): `divider=solid_line` / `double_solid_line` / `dashed_line` for both, else
+    `divider:forward` / `divider:backward` for the edge beside that direction's lanes (OSM's direction suffix: no
+    tag says a median's two edges apart). The game paints single and double edges about equally often; unsurveyed
+    medians have no `divider`, and osm_lanes draws them one solid line each.
   - A two-lane two-way street's centre is `divider=double_solid_line`, as GTA paints most of them (OSM's default
     reading is a dashed line); not on service roads and tracks.
   - GTA lays a left-turn bay as a one-way link of its own (through its slip lane or left turn only nodes) from where
@@ -106,14 +110,21 @@ shown or a level changes.
     paints it: the median tapers away where the bay opens) with `turn:lanes` such as `left|through|through;right` from
     there, and the left turn GTA forbade from the road's own lanes is allowed from it. Every other link stays as GTA has
     it.
-  - Where the game files paint a bay opening (`--survey`: the median's right edge swinging across to its left edge,
-    `paint_survey.opening_taper`), the road's links are split where the taper starts and ends (nodes added along the
-    link, ids from `TAPER_NODE_AREA`; the router and lane parity skip them as GTA's), the lane count changes there in
-    whole steps instead of at GTA's split, and the links in between widen the new lane from nothing with
-    `width:lanes:forward:start` / `:end` (`:backward`; the widths at the way's first and last node). Not along links
-    whose lane counts come from the paint, which already count the lane where it's painted. osm_lanes draws lines and
-    lane centres between those sections, so the median's edge kinks across, and nav's lane slots open the lane where
-    it's wide. Elsewhere osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
+  - Where the game files paint a bay opening (`--survey-lines`: a yellow polyline swinging from the median's right
+    edge across to its left edge, `paint_survey.swing_taper`, read off the whole polyline since sections miss steep
+    ones; `--survey` sections alone: `opening_taper`), the road's links are split where the taper starts and ends
+    (nodes added along the link, ids from `TAPER_NODE_AREA`; the router and lane parity skip them as GTA's), the lane
+    count changes there in whole steps instead of at GTA's split, and the links in between widen the new lane from
+    nothing with `width:lanes:forward:start` / `:end` (`:backward`; the widths at the way's first and last node). On
+    links whose lane counts come from the paint, the lane is there where the paint counts one more than GTA. osm_lanes
+    draws lines and lane centres between those sections, so the median's edge kinks across, and nav's lane slots open
+    the lane where it's wide. Elsewhere osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
+  - Both ways' bays often share one median back to back (a diamond, or one line handing the median from one way's bay
+    to the other's). A line crossing the median looks the same from either way: it is the bay of the way after which
+    nothing runs on at the median's right edge. Each way's bay opens from its own end, both widths on the same ways
+    where they overlap (each its share of the median, halved where both are open at once). On a widening way with
+    more lanes one way, the line is placed midway between the lanes either side of the median and its bays
+    (`placement:forward` / `:backward=left_of:N`), which keeps it on GTA's link as the bays widen.
   - Where a two-way road's median (2.5 m or more) runs in to a junction it may turn left at and GTA has no bay link,
     the game paints the median as a left-turn lane on the approach (seen on 4 of 4 such approaches): its links within
     the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.

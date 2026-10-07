@@ -41,7 +41,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, MEDIAN, offset_line as offset_polyline
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
 ROUTE_EVERY = 0.1  # s between the route's updates, with the roads as last sent
@@ -279,8 +279,6 @@ def marking_kinds(line) -> list[tuple[str, float]]:
   """An osm_lanes.Line as the overlay's kinds and their offsets (m right of it): [(kind, offset)]."""
   if line.kind == EDGE:
     return [("e", 0.0)]
-  if line.kind == MEDIAN:  # a median's edges one yellow line each, as maps paint it (and the map view draws it)
-    return [("c", 0.0)]
   dashed, solid = ("d", "w") if line.kind == DIVIDER else ("y", "c")
   return {"dashed": [(dashed, 0.0)], "solid": [(solid, 0.0)], "double_solid": [(solid, -DOUBLE), (solid, DOUBLE)],
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])

@@ -63,6 +63,7 @@ MEDIAN_LANE_MIN = 15.0  # m: a median runs in to a junction at least this far to
 FREEWAY = 64  # node flags 2: a freeway's
 MARKED = {'trunk', 'primary', 'residential'}  # classes of GTA's streets with painted centre lines
 BAY_MIN = 2.5  # m: a two-way road's median narrower than this has no room for a turn bay
+EDGE_GAP = 0.5  # m: a painted median narrower than this is the double centre line's gap
 
 
 def node_ok(n):
@@ -797,16 +798,24 @@ def detached_bays(nodes, rows, junction):
 MINOR = {'service', 'track', 'unclassified'}  # roads too minor to end the road a turn lane opens along
 TAPER_BACK = 100.0  # m back from where a turn lane's link began that its taper is looked for
 TAPER_SNAP = 1.0  # m: a taper starting or ending this near a node starts or ends there, no node added
+KEYS = ('forward', 'backward')
+LINE_CELL = 25.0  # m: the squares the game files' polylines are looked up by
 TAPER_NODE_AREA = 4096  # GTA's areas are below this: the nodes added where tapers start and end are (this, n)
 
 
-def lane_tapers(nodes, info, lane_links, junction, survey):
+def lane_tapers(nodes, info, lane_links, junction, survey, lines=None):
   """Where the turn lanes folded into roads (detached_bays) or painted in medians (lane_turns) open, from the game
-  files' paint (paint_survey.opening_taper): the median's right edge swings across over the taper. `lane_links` are the
+  files' paint: the median's right edge swings across over the taper, read off their yellow polylines (,
+  paint_survey.swing_taper) where given, else off their sections (paint_survey.opening_taper). `lane_links` are the
   links (node, next node) carrying such a lane, `info` the rows [way id, a, b, fwd, back, ...]; returns [(the links
   along the road to the junction [(a, b)], m along to each one's start, the taper's start and end m along)], the road
-  reaching back up to TAPER_BACK before the lane's links, across minor roads (service roads and tracks) meeting it."""
+  reaching back up to TAPER_BACK before the lane's links, across minor roads (service roads and tracks) meeting it and
+  the other way's turn lanes (back to back bays share the median, each opening from its own end)."""
   import numpy as np
+  grid = defaultdict(list)  # the polylines by LINE_CELL squares they pass through
+  for k, (_, pts) in enumerate(lines or []):
+    for cell in {(int(x // LINE_CELL), int(y // LINE_CELL)) for x, y in pts}:
+      grid[cell].append(k)
   rows = {}
   at = defaultdict(list)
   out_of = defaultdict(list)  # node -> [(next node, lanes that way, two-way)]
@@ -835,7 +844,7 @@ def lane_tapers(nodes, info, lane_links, junction, survey):
     if not junction(j):
       continue
     chain = [(p, j)]
-    while (prev := [q for q in into[chain[0][0]] if (q, chain[0][0]) in lane_links and (q, chain[0][0]) not in chain]):
+    while (prev := [q for q in into[chain[0][0]] if (q, chain[0][0]) in lane_links and q != chain[0][1] and (q, chain[0][0]) not in chain]):
       chain.insert(0, (prev[0], chain[0][0]))
     if not all(rows[e][4] and rows[e][3] for e in chain):  # in a two-way road's median
       continue
@@ -848,19 +857,29 @@ def lane_tapers(nodes, info, lane_links, junction, survey):
       s0, s1 = chain[0]
       prev = [q for q in into[s0] if q != s1 and abs(wrap(heading(q, s0) - heading(s0, s1))) < STRAIGHT and rows[(q, s0)][3] and
               rows[(q, s0)][4] and 2 * layout(rows[(q, s0)][8], rows[(q, s0)][4])[1] >= BAY_MIN]  # with a median to open in
-      if len(prev) != 1 or (prev[0], s0) in chain or (s0, prev[0]) in lane_links:  # not into the other way's bay
+      if len(prev) != 1 or (prev[0], s0) in chain:
         break
       chain.insert(0, (prev[0], s0))
       back += length(prev[0], s0)
     starts = np.concatenate(([0.0], np.cumsum([length(a, b) for a, b in chain])))
-    sections = []
-    for (a, b), d0 in zip(chain, starts, strict=False):
-      for sample in paint_survey.along(survey, a, b) or []:
-        if 's' in sample:
-          sections.append((d0 + sample['s'], sample))
     row = rows[chain[-1]]
     median = 2 * layout(row[8], row[4])[1]
-    if median < BAY_MIN or (taper := paint_survey.opening_taper(sections, median)) is None:
+    if median < BAY_MIN:
+      continue
+    if lines is not None:
+      road = np.array([(nodes[a]['x'], nodes[a]['y']) for a, _ in chain] + [(nodes[chain[-1][1]]['x'], nodes[chain[-1][1]]['y'])])
+      lo, hi = road.min(axis=0) - median, road.max(axis=0) + median
+      ks = {k for cx in range(int(lo[0] // LINE_CELL), int(hi[0] // LINE_CELL) + 1)
+            for cy in range(int(lo[1] // LINE_CELL), int(hi[1] // LINE_CELL) + 1) for k in grid.get((cx, cy), ())}
+      taper = paint_survey.swing_taper([lines[k] for k in sorted(ks)], road, median / 2)
+    else:
+      sections = []
+      for (a, b), d0 in zip(chain, starts, strict=False):
+        for sample in paint_survey.along(survey, a, b) or []:
+          if 's' in sample:
+            sections.append((d0 + sample['s'], sample))
+      taper = paint_survey.opening_taper(sections, median)
+    if taper is None:
       continue
     start, end = taper
     if start < 0.5 or end > starts[-1] - 5.0:  # not seen opening, or opening into the junction
@@ -869,30 +888,37 @@ def lane_tapers(nodes, info, lane_links, junction, survey):
   return found
 
 
-def split_tapers(nodes, info, tapers, lane_links, arrows_at, bay_to, recounted=frozenset()):
+def split_tapers(nodes, info, tapers, lane_links, arrows_at, bay_to, recounted=None):
   """The roads' rows with the turn lanes of `tapers` (lane_tapers) from where they open: a lane added to the links of
   the road before the lane's links where it opens earlier, taken off those where it opens later, links split where it
   starts and ends opening (a node added there, along the link, unless one is within TAPER_SNAP), and the links where it
   opens widening it from nothing (width:lanes...:start / :end). Returns the new rows, {new way id: the way it was split
   from}, {way id: {'forward' | 'backward': (lane width share at its first node, at its last)}} for the widening, and
   {way id: (a bay forward, a bay backward)} for lane_tags of the rows it changes, and how many tapers were applied: one
-  a way and direction, none where a bay the other way shares the median or along links whose lane counts are the
-  paint's (`recounted`: those count the lane where it's painted). The rows' arrows (arrows_at) follow their lanes."""
+  a way and direction. A link carries the lane where it's one of `lane_links`, or where its lane counts are the
+  paint's (`recounted`: {way id: GTA's lanes forward and backward}) and count one more than GTA that way. Each
+  way's bay opens from its own end of a median they share (back to back bays). The rows' arrows (arrows_at) follow
+  their lanes."""
   rows = {row[0]: row for row in info}
   head = {}  # (a, b) -> way id
   for row in info:
     head[(row[1], row[2])] = head[(row[2], row[1])] = row[0]
   cuts, effects = defaultdict(set), defaultdict(list)
   taken, applied = set(), 0  # (way id, forward)
+  recounted = recounted or {}
+
+  def carrying(a, b):
+    wid = head[(a, b)]
+    if wid in recounted:
+      fwd = rows[wid][1] == a
+      return rows[wid][3 if fwd else 4] > recounted[wid][0 if fwd else 1]
+    return (a, b) in lane_links
+
   for chain, starts, start, end in tapers:
     start, end = (next((float(d) for d in starts if abs(d - at) <= TAPER_SNAP), at) for at in (start, end))
-    # one taper a way and direction; none where a bay the other way shares the median; no lanes taken off down to none;
-    # none changing links whose lanes are counted from the paint
-    sides = [(head[(a, b)], rows[head[(a, b)]][1] == a, (a, b) in lane_links,
-              (d0 < end and d1 > start) or ((a, b) in lane_links) != ((d0 + d1) / 2 > start))
-             for (a, b), d0, d1 in zip(chain, starts, starts[1:], strict=False)]
-    if any((wid, fwd) in taken or (changed and wid in recounted) or (rows[wid][1] if fwd else rows[wid][2]) in bay_to[wid] or
-           (carried and rows[wid][3 if fwd else 4] < 2) for wid, fwd, carried, changed in sides):
+    # one taper a way and direction; no lanes taken off down to none
+    sides = [(head[(a, b)], rows[head[(a, b)]][1] == a, carrying(a, b)) for a, b in chain]
+    if any((wid, fwd) in taken or (carried and rows[wid][3 if fwd else 4] < 2) for wid, fwd, carried in sides):
       continue
     taken.update((wid, fwd) for wid, fwd, *_ in sides)
     applied += 1
@@ -913,7 +939,8 @@ def split_tapers(nodes, info, tapers, lane_links, arrows_at, bay_to, recounted=f
         if d0 + TAPER_SNAP < at < d1 - TAPER_SNAP:
           cuts[wid].add(round((at - d0) / (d1 - d0) if forward else (d1 - at) / (d1 - d0), 4))
       # m along the road at the row's first and last node
-      effects[wid].append((forward, d0 if forward else d1, d1 if forward else d0, start, end, (a, b) in lane_links, template))
+      effects[wid].append((forward, d0 if forward else d1, d1 if forward else d0, start, end, carrying(a, b), template,
+                           b == chain[-1][1]))
   out, parent, widen, bays = [], {}, {}, {}
   next_id = max(rows) + 1
   synthetic = 0
@@ -941,15 +968,19 @@ def split_tapers(nodes, info, tapers, lane_links, arrows_at, bay_to, recounted=f
       piece = [pid, ends[n], ends[n + 1], *row[3:]]
       tags = dict(original)
       fb = [row[2] in bay_to[wid], row[1] in bay_to[wid]]  # bays this way that open elsewhere
-      for forward, da, db, start, end, carried, template in effects[wid]:
+      for forward, da, db, start, end, carried, template, last in effects[wid]:
         key = 'forward' if forward else 'backward'
         p0, p1 = da + (db - da) * t0, da + (db - da) * t1  # m along the road at the piece's ends
         carries = (p0 + p1) / 2 > start
         lanes = piece[3 if forward else 4] - carried + carries
         piece[3 if forward else 4] = lanes
         arrows = tags.get(f'turn:lanes:{key}')
-        if carries and not carried and arrows:  # (arrows only on the ways into the junction, as lane_turns)
-          arrows = template if template and len(template.split('|')) == lanes else 'left|' + arrows
+        if carries and not carried and arrows:  # (arrows only on the ways into a junction, as lane_turns)
+          # into the lane's junction its arrows there; into one before it, on through
+          if not last:
+            arrows = 'through|' + arrows
+          else:
+            arrows = template if template and len(template.split('|')) == lanes else 'left|' + arrows
         elif carried and not carries and arrows:
           arrows = '|'.join(arrows.split('|')[1:]) or None
         if arrows and len(arrows.split('|')) == lanes:
@@ -1180,8 +1211,9 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
     left, right = painted.get('parking', (0.0, 0.0))
     tags = {'lanes': str(len(wf) + len(wb)), 'lanes:forward': str(len(wf)), 'lanes:backward': str(len(wb)),
             'width': metres(sum(wf) + sum(wb) + painted['median'] + left + right), 'width:lanes:forward': '|'.join(map(metres, wf)),
-            'width:lanes:backward': '|'.join(map(metres, wb)), 'divider': painted.get('divider', 'double_solid_line'),
-            'source:width': 'survey'}
+            'width:lanes:backward': '|'.join(map(metres, wb)), 'source:width': 'survey'}
+    if (divider := painted.get('divider', 'double_solid_line' if painted['median'] < EDGE_GAP else None)):
+      tags['divider'] = divider  # a median's edges are their own (median_edges)
     for d in ('forward', 'backward'):
       if f'change:{d}' in painted:
         tags[f'change:lanes:{d}'] = '|'.join(painted[f'change:{d}'])
@@ -1197,7 +1229,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
   if offset > 0:
     tags['width:lanes:forward'] = '|'.join([metres(bay)] * bf + [metres(w)] * (fwd - bf))
     tags['width:lanes:backward'] = '|'.join([metres(bay)] * bb + [metres(w)] * (back - bb))
-    tags['divider'] = 'double_solid_line'
+    if bf or bb:  # the line between a bay filling the median and the oncoming lanes; a median's edges are their own
+      tags['divider'] = 'double_solid_line'
   if bf and bb:
     tags['placement:forward'] = tags['placement:backward'] = 'left_of:1'
   elif bf or bb:
@@ -1472,7 +1505,7 @@ def main():
       for key, e in paint_survey.arrows(samples).items():
         painted_arrows[(a, b) if key == 'forward' else (b, a)] = e
   row_of = {row[0]: row for row in info}
-  painted, why, left_out, centre_kinds, recounted = {}, Counter(), 0, {}, set()
+  painted, why, left_out, centre_kinds, recounted, median_kinds = {}, Counter(), 0, {}, {}, {}
   # where the game files' paint covers the map, the camera's survey only checks it
   from_files = any(d.get('src') == paint_survey.GAMEFILES for ds in survey.values() for d in ds)
   for wid, a, b, fwd, back, *_, lf in info:
@@ -1501,10 +1534,12 @@ def main():
       if (len(got['forward']), len(got['backward'])) != (fwd, back):  # as many lanes as painted, arrows and all
         why[f"lanes from the paint: {len(got['backward'])}+{len(got['forward'])} where GTA has {back}+{fwd}"] += 1
         row = row_of[wid]
+        recounted[wid] = (row[3], row[4])
         row[3], row[4] = len(got['forward']), len(got['backward'])
-        recounted.add(wid)
         lanes_to[(a, b)], lanes_to[(b, a)] = row[3], row[4]
     why[reason or ('measured (game files)' if files else 'measured (camera)')] += 1
+    if (median := got['median'] if got and got.get('median', 0.0) > EDGE_GAP else 2 * offset) > EDGE_GAP:
+      median_kinds[wid] = paint_survey.median_edges(samples, median)  # the painted median's, else GTA's
     if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
       why['sources disagree' if paint_survey.disagree(painted[wid], check) else 'sources agree'] += 1
     if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
@@ -1525,7 +1560,8 @@ def main():
   layer_of = {ways[i][0]: v for i, v in levels(nodes, [(a, b) for _, a, b, _ in ways]).items()}
   print(f"{len(layer_of)} ways over others as bridges (up to layer {max(layer_of.values(), default=0)})")
 
-  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey) if survey else []
+  yellow = paint_survey.yellow_lines(args.survey_lines) if args.survey_lines else None
+  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow) if survey else []
   info, parent, widen, piece_bays, applied = split_tapers(nodes, info, tapers, set(left_bays) | opened, arrows_at, bay_to,
                                                                recounted)
   if parent:
@@ -1571,21 +1607,42 @@ def main():
     bays = piece_bays.get(wid, (b in bay_to[parent.get(wid, wid)], a in bay_to[parent.get(wid, wid)]))
     tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, bays, None if wid in piece_bays else painted.get(wid)),
             **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
-    for key, (s0, s1) in widen.get(wid, {}).items():  # the turn lane widening from nothing where it opens
-      if f'width:lanes:{key}' not in tags:
-        continue
-      widths = tags[f'width:lanes:{key}'].split('|')
-      full = float(widths[0])
-      tags[f'width:lanes:{key}:start'] = '|'.join([metres(full * s0), *widths[1:]])
-      tags[f'width:lanes:{key}:end'] = '|'.join([metres(full * s1), *widths[1:]])
-    if wid in widen:  # placement by the opening lane would move the line along the way: the middle of the road, where it's there
-      plain = {k: v for k, v in tags.items() if not k.startswith('placement')}
-      if abs(WayLanes.from_tags(plain).line - WayLanes.from_tags(tags).line) < 0.05:
-        tags = plain
-    if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED:
+    if wid in widen or (wid in piece_bays and all(bays)):
+      # the turn lanes in the median, widening from nothing where they open: each its share of the median at each end,
+      # halved where both ways' are open at once
+      share = {key: widen.get(wid, {}).get(key, (1.0, 1.0) if bay else (0.0, 0.0)) for key, bay in zip(KEYS, bays, strict=True)}
+      scale = [1.0 / max(share['forward'][e] + share['backward'][e], 1.0) for e in (0, 1)]
+      room = 2 * layout(lf, back, freeway)[1]
+      fuller = max((0, 1), key=lambda e: (share['forward'][e] + share['backward'][e]) * scale[e])
+      full = dict(tags)  # as lane_tags lays the bays out, at their full widths
+      for key, bay in zip(KEYS, bays, strict=True):
+        if not bay or f'width:lanes:{key}' not in tags:
+          continue
+        widths = tags[f'width:lanes:{key}'].split('|')
+        at = [room * share[key][e] * scale[e] for e in (0, 1)]
+        tags[f'width:lanes:{key}'] = '|'.join([metres(at[fuller]), *widths[1:]])
+        if abs(at[0] - at[1]) > 1e-3:
+          tags[f'width:lanes:{key}:start'] = '|'.join([metres(at[0]), *widths[1:]])
+          tags[f'width:lanes:{key}:end'] = '|'.join([metres(at[1]), *widths[1:]])
+      if any(k.endswith(':start') for k in tags):
+        # placement by a lane that widens along the way would move the line with it: the middle of the road where the
+        # bays' full widths put it there, else midway between the lanes either side of the median and its bays
+        plain = {k: v for k, v in tags.items() if not k.startswith('placement')}
+        if abs(WayLanes.from_tags(plain).line - WayLanes.from_tags(full).line) < 0.05:
+          tags = plain
+        else:
+          tags = {**plain, 'placement:forward': f'left_of:{1 + int(bays[0])}', 'placement:backward': f'left_of:{1 + int(bays[1])}'}
+    median = any(WayLanes.from_tags(tags, at=end).gaps for end in ('', 'start', 'end'))
+    if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED and not median:
       tags.setdefault('divider', 'double_solid_line')  # how GTA paints most two-lane roads' centre (OSM reads dashed)
     if wid in centre_kinds and 'lane_markings' not in tags:
       tags['divider'] = centre_kinds[wid]
+    if median and (kinds := median_kinds.get(parent.get(wid, wid))) and 'lane_markings' not in tags:
+      left, right = kinds  # seen along the way: beside the backward lanes, beside the forward ones
+      if left == right and left:
+        tags['divider'] = left
+      elif left != right:
+        tags.update({k: v for k, v in (('divider:forward', right), ('divider:backward', left)) if v})
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:

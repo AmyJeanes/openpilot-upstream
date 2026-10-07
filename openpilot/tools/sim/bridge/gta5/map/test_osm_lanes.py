@@ -252,12 +252,49 @@ def test_split_tapers():
                                                        (2, 'S', (TAPER_NODE_AREA, 2), 3), (5, (TAPER_NODE_AREA, 2), 'Q', 3), (3, 'Q', 'J', 3)]
   assert parent == {4: 1, 5: 2} and nodes[(TAPER_NODE_AREA, 1)]['y'] == -80.0
   assert widen == {4: {'forward': (0.0, 0.8)}, 2: {'forward': (0.8, 1.0)}}
-  assert arrows[4]['turn:lanes:forward'] == 'left|through|through;right' and arrows[1]['turn:lanes:forward'] == 'through|through;right'
+  # arrows into S, before the lane's junction J: the new lane goes on through there
+  assert arrows[4]['turn:lanes:forward'] == 'through|through|through;right' and arrows[1]['turn:lanes:forward'] == 'through|through;right'
   assert bays[1] == (False, False) and bays[4] == (True, False)
   # restrictions on to the pieces: from the piece at the via node, every piece of a via way in order
   ends = {r[0]: (r[1], r[2]) for r in rows}
   got = remap_restrictions([('no_u_turn', 1, [('n', 'S')], 1), ('no_left_turn', 1, [('w', 2)], 3)], ends, {1: [1, 4], 2: [2, 5]})
   assert got == [('no_u_turn', 4, [('n', 'S')], 4), ('no_left_turn', 4, [('w', 2), ('w', 5)], 3)]
+
+
+def test_back_to_back_bays():
+  # a median shared by both ways' bays (a diamond): the forward one opens 45-55 m along towards D, the backward one 60-70 m
+  # from D towards A, each from its own end
+  from collections import defaultdict
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import TAPER_NODE_AREA, split_tapers
+
+  def node(x, y):
+    return {'x': x, 'y': y, 'z': 0.0, 'f': [0, 0, 0, 0, 0], 'st': 0}
+  nodes = {'A': node(0, -100), 'B': node(0, -60), 'C': node(0, -40), 'D': node(0, 0)}
+  road = flags(2, 2, 6, False)
+  info = [[1, 'A', 'B', 2, 3, 'primary', 40, None, road], [2, 'B', 'C', 2, 2, 'primary', 40, None, road],
+          [3, 'C', 'D', 3, 2, 'primary', 40, None, road]]
+  ahead = ([('A', 'B'), ('B', 'C'), ('C', 'D')], [0.0, 40.0, 60.0, 100.0], 45.0, 55.0)
+  behind = ([('D', 'C'), ('C', 'B'), ('B', 'A')], [0.0, 40.0, 60.0, 100.0], 60.0, 70.0)
+  bay_to = defaultdict(set, {1: {'A'}, 3: {'D'}})
+  rows, parent, widen, bays, applied = split_tapers(nodes, info, [ahead, behind], {('C', 'D'), ('B', 'A')}, {}, bay_to)
+  n = [(TAPER_NODE_AREA, k) for k in (1, 2, 3)]
+  assert applied == 2 and [r[:5] for r in rows] == [[1, 'A', n[0], 2, 3], [4, n[0], 'B', 2, 3], [2, 'B', n[1], 2, 2],
+                                                     [5, n[1], n[2], 3, 2], [6, n[2], 'C', 3, 2], [3, 'C', 'D', 3, 2]]
+  assert nodes[n[0]]['y'] == -70.0 and widen == {4: {'backward': (1.0, 0.0)}, 5: {'forward': (0.0, 1.0)}}
+  assert bays[4] == (False, True) and bays[5] == (True, False) and bays[2] == (False, False)
+
+
+def test_median_edge_kinds():
+  base = {'highway': 'primary', 'lanes': '4', 'lanes:forward': '2', 'lanes:backward': '2', 'width': '27.4',
+          'width:lanes:forward': '5.5|5.5', 'width:lanes:backward': '5.5|5.5'}
+
+  def kinds(tags, direction=FORWARD):
+    return [line.style for line in WayLanes.from_tags(tags).lines(direction) if line.kind == MEDIAN]
+  assert kinds(base) == ['solid', 'solid']  # one line each by default
+  assert kinds({**base, 'divider': 'double_solid_line'}) == ['double_solid', 'double_solid']
+  sides = {**base, 'divider:forward': 'solid_line', 'divider:backward': 'double_solid_line'}
+  assert kinds(sides) == ['double_solid', 'solid']  # left to right: beside the oncoming lanes, beside ours
+  assert kinds(sides, BACKWARD) == ['solid', 'double_solid']
 
 
 def test_median_turn_lane():
