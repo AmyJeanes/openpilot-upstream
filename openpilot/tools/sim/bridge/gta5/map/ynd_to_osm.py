@@ -1053,7 +1053,10 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
       continue
     for p in into[j]:
       n, only = lanes_to[(p, j)], (p, j) in only_left
-      median = (p, j) in medians and not only
+      # not beside a bay GTA lays as its own link (one not folded in): that's the turn lane
+      median = (p, j) in medians and not only and not any(
+        q != p and lanes_to[(q, j)] == 1 and not lanes_to[(j, q)] and 'f' in nodes[q] and lane_node(nodes[q]) and
+        abs(wrap(heading(q, j) - heading(p, j))) < STRAIGHT for q in into[j])
       if junction(p) or (n < 2 and not only and not median):
         continue
       chain, q, nxt, dist = [(p, j)], p, j, length(p, j)
@@ -1168,8 +1171,6 @@ def main():
       row[3 if along else 4] += 1
       a, b = (row[1], row[2]) if along else (row[2], row[1])
       bay_to[row[0]].add(b)
-      if b != j:  # GTA forbids turning left from the road's own lanes before the bay's junction: they're its lanes now
-        nodes[b] = {**nodes[b], 'f': [nodes[b]['f'][0] & ~128, *nodes[b]['f'][1:]]}
       left_bays.add((a, b))
   info = [row for r, row in enumerate(info) if r not in gone]
   used = sorted({k for _, a, b, *_ in info for k in (a, b)})
@@ -1239,7 +1240,11 @@ def main():
   restrictions = [('no_u_turn', *r) for r in no_u_turns(nodes, ways)]
   u_turns = len(restrictions)
   turns, skipped, dead_ends = turn_restrictions(nodes, ways, toward, flags)
-  restrictions += turns
+  # the road a turn bay was folded into may turn left from it now: the moves are its lanes' and its bay's together
+  bay_roads = {wid for wid, ends in bay_to.items() if ends}
+  folded = [r for r in turns if r[0] == 'no_left_turn' and ({r[1]} | {ref for t, ref in r[2] if t == 'w'}) & bay_roads]
+  restrictions += [r for r in turns if r not in folded]
+  print(f"{len(folded)} no-left turns from roads now with their bay as a lane dropped")
   medians = set()  # two-way links (node, next node) with room for a turn lane in their median, and no turn bay that way
   for wid, a, b, fwd, back, *_, lf in info:
     if back and 2 * layout(lf, back)[1] >= BAY_MIN:
@@ -1260,6 +1265,8 @@ def main():
     bay_to[row[0]].add(q)
   print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
   painted, why, skipped = {}, Counter(), 0
+  # where the game files' paint covers the map, the camera's survey only checks it
+  from_files = any(d.get('src') == paint_survey.GAMEFILES for ds in survey.values() for d in ds)
   for wid, a, b, fwd, back, *_, lf in info:
     if (samples := paint_survey.along(survey, a, b)) is None:
       continue
@@ -1272,7 +1279,11 @@ def main():
       painted[wid], reason = paint_survey.correct_oneway(samples, fwd, (-fwd * w / 2, fwd * w / 2))
       why[reason or 'measured one-way (game files)'] += 1
       continue
-    use, other = paint_survey.sources(samples)
+    use, other = paint_survey.sources(samples, camera_corrects=not from_files)
+    if not use:
+      why['no game files (camera a check only)'] += 1
+      skipped += 1
+      continue
     kerbs = (-(offset + back * w), offset + fwd * w)
     painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs)
     why[reason or ('measured (game files)' if use[0].get('src') == paint_survey.GAMEFILES else 'measured (camera)')] += 1

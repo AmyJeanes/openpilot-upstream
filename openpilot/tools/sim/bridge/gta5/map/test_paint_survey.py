@@ -56,6 +56,7 @@ def test_game_files_first_with_their_kerbs():
            for s in (0, 3, 6, 9)]
   use, other = sources(camera + files)
   assert use == files and other == camera
+  assert sources(camera) == (camera, []) and sources(camera, camera_corrects=False) == ([], camera)
   got, _ = correct(use, 2, 2, (-11.0, 11.0))
   assert got == {'forward': [5.4, 5.4], 'backward': [5.4, 5.4], 'median': 0.0}  # out to the asphalt's edges, 10.8 m
   assert disagree(got, correct(other, 2, 2, (-11.0, 11.0))[0])

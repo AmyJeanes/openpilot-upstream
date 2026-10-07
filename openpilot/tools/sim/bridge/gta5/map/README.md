@@ -102,8 +102,8 @@ shown or a level changes.
     the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.
   - These widths are class rules, right on average. `--survey <file.jsonl> ...` corrects them where the game's paint
     was surveyed (format and rules in `paint_survey.py`): read from the game files' road meshes and marking decals
-    (`"src": "gamefiles"`, exact to a few cm, the primary source), else from the map audit's top-down camera, which
-    also cross-checks them. On a two-way link whose samples agree with each other and with GTA's lane counts, the
+    (`"src": "gamefiles"`, exact to a few cm, the primary source); the map audit's top-down camera survey only
+    cross-checks them, and corrects links itself only when no game-file survey is given. On a two-way link whose samples agree with each other and with GTA's lane counts, the
     lanes take the measured widths out to the kerbs (the game files' asphalt edges where they're symmetric, else the
     layout's), so a centre line off GTA's link line is said by the lanes' widths (the way's line stays on GTA's nodes,
     the middle of the road); `source:width=survey` marks them. The game files' painted arrows replace `turn:lanes` on

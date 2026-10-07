@@ -62,12 +62,16 @@ def node_key(s: str) -> tuple[int, int]:
 
 
 def load(paths) -> dict[tuple, list[dict]]:
-  """{(a, b): [sample]} by link, each sample's offsets seen travelling a -> b; junction and bay sections left out."""
+  """{(a, b): [sample]} by link, each sample's offsets seen travelling a -> b; junction and bay sections left out, and
+  lines that aren't whole JSON (a survey still being written)."""
   out = defaultdict(list)
   for path in paths:
     with open(path) as f:
       for line in f:
-        d = json.loads(line)
+        try:
+          d = json.loads(line)
+        except ValueError:
+          continue
         if d.get('junction') or d.get('bay'):
           continue
         a, b = node_key(d['a']), node_key(d['b'])
@@ -92,11 +96,14 @@ def along(samples: dict, a, b) -> list[dict] | None:
   return out or None
 
 
-def sources(samples: list[dict]) -> tuple[list[dict], list[dict]]:
-  """(the samples to use, the others to cross-check them): the game files' where there are enough."""
+def sources(samples: list[dict], camera_corrects: bool = True) -> tuple[list[dict], list[dict]]:
+  """(the samples to use, the others to cross-check them): the game files' where there are enough, else the camera's
+  if `camera_corrects` (none where the game files cover the map: the camera is then only a check)."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
   camera = [d for d in samples if d.get('src') != GAMEFILES]
-  return (files, camera) if len(files) >= MIN_SAMPLES else (camera, files)
+  if len(files) >= MIN_SAMPLES:
+    return files, camera
+  return (camera, files) if camera_corrects else ([], camera)
 
 
 def clusters(values: list[tuple[int, float]], tol: float = AGREE) -> list[tuple[float, int]]:
