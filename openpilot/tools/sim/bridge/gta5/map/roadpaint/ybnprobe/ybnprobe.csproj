@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>disable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- -p:CodeWalker=<a clone of https://github.com/dexyfex/CodeWalker>, whose current source reads the Enhanced build -->
+    <ProjectReference Include="$(CodeWalker)\CodeWalker.Core\CodeWalker.Core.csproj" />
+  </ItemGroup>
+</Project>
