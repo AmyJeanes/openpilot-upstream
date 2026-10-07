@@ -157,6 +157,7 @@ class Paths:
     self.exact: dict[tuple[int, int], list[int]] = defaultdict(list)
     for i, (x, y) in enumerate(self.xy):
       self.exact[(round(x), round(y))].append(i)
+    self.path = path  # the file it was read from, for caches built from it
     self.cells: dict[tuple[int, int], set[tuple[int, int]]] | None = None
     self._toward: dict[int, set[int]] | None = None  # stop line -> the nodes on from it towards its junction
 
