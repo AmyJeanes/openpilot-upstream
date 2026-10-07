@@ -142,6 +142,12 @@ class Route:
       a, b = nodes[k], nodes[k + 1]
       if a is not None and b is not None:
         self.links[k] = paths.links.get((a, b))
+    # the map's own nodes along GTA's links (where a lane's taper starts or ends): the link they're on
+    gta = [k for k, i in enumerate(nodes) if i is not None]
+    for k0, k1 in zip(gta, gta[1:], strict=False):
+      if k1 > k0 + 1 and (link := paths.links.get((nodes[k0], nodes[k1]))) is not None:
+        for k in range(k0, k1):
+          self.links[k] = link
     for k, i in ((0, start), (len(pts) - 1, end)):
       if i is not None:  # the end's height along its link
         j = nodes[1] if k == 0 else nodes[-2]
@@ -151,9 +157,10 @@ class Route:
     known = ~np.isnan(self.z)
     if known.any() and not known.all():
       self.z = np.interp(self.along, self.along[known], self.z[known])
-    for k in range(1, len(pts) - 1):
-      prev, i, nxt = nodes[k - 1], nodes[k], nodes[k + 1]
-      if prev is None or i is None or nxt is None or prev == i or i == nxt:
+    for n, k in enumerate(gta[1:-1], 1):  # GTA's nodes in turn, past any of the map's own between them
+      prev, i, nxt = nodes[gta[n - 1]], nodes[k], nodes[gta[n + 1]]
+      if prev == i or i == nxt or (k - gta[n - 1] > 1 and (prev, i) not in paths.links) or \
+         (gta[n + 1] - k > 1 and (i, nxt) not in paths.links):
         continue
       fork = self._fork(paths, prev, i, nxt, float(self.along[k]))
       if fork is not None:

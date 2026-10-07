@@ -104,8 +104,16 @@ shown or a level changes.
     Real maps make it a lane of the road (osm_lanes.md P3), and so does ours (`detached_bays`): the bay's links are
     dropped, the road's links from the split to the junction get one more lane that way (filling the median, as GTA
     paints it: the median tapers away where the bay opens) with `turn:lanes` such as `left|through|through;right` from
-    there, and the left turn GTA forbade from the road's own lanes is allowed from it. osm_lanes widens the new lane
-    from nothing over 30 m where the lane count rises. Every other link stays as GTA has it.
+    there, and the left turn GTA forbade from the road's own lanes is allowed from it. Every other link stays as GTA has
+    it.
+  - Where the game files paint a bay opening (`--survey`: the median's right edge swinging across to its left edge,
+    `paint_survey.opening_taper`), the road's links are split where the taper starts and ends (nodes added along the
+    link, ids from `TAPER_NODE_AREA`; the router and lane parity skip them as GTA's), the lane count changes there in
+    whole steps instead of at GTA's split, and the links in between widen the new lane from nothing with
+    `width:lanes:forward:start` / `:end` (`:backward`; the widths at the way's first and last node). Not along links
+    whose lane counts come from the paint, which already count the lane where it's painted. osm_lanes draws lines and
+    lane centres between those sections, so the median's edge kinks across, and nav's lane slots open the lane where
+    it's wide. Elsewhere osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
   - Where a two-way road's median (2.5 m or more) runs in to a junction it may turn left at and GTA has no bay link,
     the game paints the median as a left-turn lane on the approach (seen on 4 of 4 such approaches): its links within
     the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.

@@ -183,7 +183,9 @@ class WayLanes:
       x += lane.width
 
   @classmethod
-  def from_tags(cls, tags: dict, drive_on_right: bool = True, defaults: Defaults = GTA) -> 'WayLanes':
+  def from_tags(cls, tags: dict, drive_on_right: bool = True, defaults: Defaults = GTA, at: str = '') -> 'WayLanes':
+    """`at` 'start' or 'end': the lanes at the way's first or last node, where width:lanes(:forward|:backward):start
+    / :end (and width:start / :end) say they widen or narrow along it, as a lane opening in a taper."""
     highway, oneway = tags.get('highway', ''), oneway_of(tags)
     fwd, back, both = lane_counts(tags)
     backs = [(BACKWARD, k) for k in reversed(range(back))]  # seen along the way, backward lanes run from the far one
@@ -191,9 +193,12 @@ class WayLanes:
       [*((FORWARD, k) for k in range(fwd)), *((BOTH_WAYS, k) for k in range(both)), *backs]
     own = {d: {k: i for i, (dd, k) in enumerate(order) if dd == d} for d in (FORWARD, BACKWARD, BOTH_WAYS)}
 
+    def get(key):  # a width at the way's end where it says one
+      return tags.get(f'{key}:{at}', tags.get(key)) if at else tags.get(key)
+
     def per_lane(key):
       out: list[str | None] = [None] * len(order)
-      plain = tags.get(f'{key}:lanes')
+      plain = get(f'{key}:lanes') if key == 'width' else tags.get(f'{key}:lanes')
       if plain is not None:
         items = plain.split('|')
         if oneway:
@@ -204,7 +209,7 @@ class WayLanes:
         elif len(items) == len(order):
           out = list(items)
       for suffix, d in ((':forward', FORWARD), (':backward', BACKWARD), (':both_ways', BOTH_WAYS)):
-        v = tags.get(f'{key}:lanes{suffix}')
+        v = get(f'{key}:lanes{suffix}') if key == 'width' else tags.get(f'{key}:lanes{suffix}')
         if v is not None and len(items := v.split('|')) == len(own[d]):
           for k, item in enumerate(items):
             out[own[d][k]] = item
@@ -212,13 +217,13 @@ class WayLanes:
 
     widths = [metres(v) for v in per_lane('width')]
     parking = (parking_lane(tags, 'left'), parking_lane(tags, 'right'))
-    width = metres(tags.get('width'))
+    width = metres(get('width'))
     if width:
       width = max(width - sum(parking), 0.0)  # the carriageway's width includes its parking lanes
-    known, unknown = sum(w for w in widths if w), sum(not w for w in widths)
+    known, unknown = sum(w for w in widths if w is not None), sum(w is None for w in widths)  # a lane opening from 0 m
     if unknown:
       share = (width - known) / unknown if width and width - known > EPS * unknown else defaults.lane_width(highway)
-      widths = [w or share for w in widths]
+      widths = [share if w is None else w for w in widths]
     lanes_w = sum(widths)
     spare = width - lanes_w if width and width - lanes_w > EPS else 0.0
     width = lanes_w + spare + sum(parking)
@@ -297,29 +302,35 @@ class WayLanes:
     """The lines on the road left to right: its edges, white lines between lanes one way (solid where change:lanes
     forbids crossing), and the centre line between the directions or the edges of a median (divider=*; by default
     dashed with one lane each way, else double solid), and where a parking lane meets the lanes."""
+    return [line for _, line in self.keyed_lines(direction)]
+
+  def keyed_lines(self, direction: int = FORWARD, gaps=frozenset()) -> list[tuple[tuple, Line]]:
+    """lines(), each with where it runs on the section (line_offset): ('edge', 0 | 1), ('parking', 0 | 1), ('lane', i)
+    on the right of span i, ('median', i, 0 | 1) the edges of a median between spans i and i + 1. `gaps`: the spans i
+    to give median edges where there's no median, as on a road whose median opens or closes along it (a taper)."""
     sec = self.section(direction)
     lo, hi = self.edges(direction)
     parking = self.parking_lanes(direction)
-    out = [Line(EDGE, lo, None)] + [Line(PARKING, b, None) for a, b in parking if a == lo]
+    out = [(('edge', 0), Line(EDGE, lo, None))] + [(('parking', 0), Line(PARKING, b, None)) for a, b in parking if a == lo]
     if self.markings:
       wide = max(self.counts[:2]) >= 2
       centre = DIVIDERS.get(self.divider, 'solid') if self.divider else ('double_solid' if wide else 'dashed')
-      for a, b in zip(sec, sec[1:], strict=False):
+      for i, (a, b) in enumerate(zip(sec, sec[1:], strict=False)):
         if a.heading == b.heading != 0:
           a_may = a.lane.change_right if a.heading == 1 else a.lane.change_left
           b_may = b.lane.change_left if b.heading == 1 else b.lane.change_right
           style = {(True, True): 'dashed', (False, False): 'solid', (True, False): 'dashed_solid', (False, True): 'solid_dashed'}[(a_may, b_may)]
-          out.append(Line(DIVIDER, a.right, style))
+          out.append((('lane', i), Line(DIVIDER, a.right, style)))
         elif 0 in (a.heading, b.heading):  # a centre turn lane's edge: dashed on its side
-          out.append(Line(CENTRE, a.right, 'dashed_solid' if a.heading == 0 else 'solid_dashed'))
+          out.append((('lane', i), Line(CENTRE, a.right, 'dashed_solid' if a.heading == 0 else 'solid_dashed')))
         elif centre is None:
           continue
-        elif b.left - a.right > EPS:
-          out += [Line(MEDIAN, a.right, centre), Line(MEDIAN, b.left, centre)]
+        elif b.left - a.right > EPS or i in gaps:
+          out += [(('median', i, 0), Line(MEDIAN, a.right, centre)), (('median', i, 1), Line(MEDIAN, b.left, centre))]
         else:
-          out.append(Line(CENTRE, a.right, centre))
-    out += [Line(PARKING, a, None) for a, b in parking if b == hi]
-    out.append(Line(EDGE, hi, None))
+          out.append((('lane', i), Line(CENTRE, a.right, centre)))
+    out += [(('parking', 1), Line(PARKING, a, None)) for a, b in parking if b == hi]
+    out.append((('edge', 1), Line(EDGE, hi, None)))
     return out
 
   def centres(self, points, direction: int = FORWARD) -> list[np.ndarray]:
@@ -489,6 +500,9 @@ class OsmLanes:
     for k, (px, py) in enumerate(self.xy):
       self.cells.setdefault((int(px // self.CELL), int(py // self.CELL)), []).append(k)
     self._lanes: dict[int, WayLanes] = {}
+    self._ends: dict[tuple[int, str], WayLanes] = {}
+    self._at: dict[int, list[int]] | None = None  # node -> the ways at it
+    self._tapers: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
@@ -504,6 +518,122 @@ class OsmLanes:
 
   def node_xy(self, node: int) -> np.ndarray:
     return self.xy[int(self.data.index([node])[0])]
+
+  def has_ends(self, way: int) -> bool:
+    """Whether the way's lanes widen or narrow along it (width:lanes...:start / :end), as in a taper."""
+    return any(k.startswith('width') and k.endswith((':start', ':end')) for k in self.ways[way][0])
+
+  def lanes_at(self, way: int, end: str) -> WayLanes:
+    """The way's lanes at its first node (`end` 'start') or last ('end')."""
+    if not self.has_ends(way):
+      return self.lanes(way)
+    if (way, end) not in self._ends:
+      self._ends[(way, end)] = WayLanes.from_tags(self.ways[way][0], self.drive_on_right, self.defaults, at=end)
+    return self._ends[(way, end)]
+
+  def length(self, way: int) -> float:
+    return float(np.hypot(*np.diff(self.way_points(way), axis=0).T).sum())
+
+  def _other(self, way: int, node: int) -> tuple[int, int] | None:
+    """The one other way at a node where a road just carries on (two ways), and its direction away from the node
+    reversed: the direction travelling it into the node (FORWARD where it ends there)."""
+    if self._at is None:
+      self._at = {}
+      for w, (_, refs) in self.ways.items():
+        for n in {refs[0], refs[-1]}:
+          self._at.setdefault(n, []).append(w)
+    if self.degree.get(node) != 2:
+      return None
+    others = [w for w in self._at.get(node, ()) if w != way]
+    if len(others) != 1:
+      return None
+    return others[0], FORWARD if self.ways[others[0]][1][-1] == node else BACKWARD
+
+  def _boundary(self, way: int, d: int, ahead: bool) -> tuple[float, 'Section'] | None:
+    """Back (or on) from a way travelled d, while the road carries on with its layout: how far to where its lanes
+    change, and the cross-section beyond (seen travelling d); None past TAPER_M, a junction, or a tapered way."""
+    key = Section.of(self.lanes(way), d).key
+    w, wd, dist = way, d, 0.0
+    for _ in range(64):
+      refs = self.ways[w][1]
+      node = (refs[-1] if wd == FORWARD else refs[0]) if ahead else (refs[0] if wd == FORWARD else refs[-1])
+      found = self._other(w, node)
+      if found is None:
+        return None
+      nb, nd = found
+      if ahead:
+        nd = -nd  # travelling away from the node
+      if self.has_ends(nb):
+        return None
+      sec = Section.of(self.lanes(nb), nd)
+      if sec.key != key:
+        return dist, sec
+      dist += self.length(nb)
+      if dist >= TAPER_M:
+        return None
+      w, wd = nb, nd
+    return None
+
+  def taper(self, way: int) -> tuple[int, list[tuple[float, 'Section']]] | None:
+    """Where the way's lanes change along it: (the direction it's seen in, [(m along it that way, its cross-section
+    there)], the cross-section varying linearly between). From its width:lanes:start / :end tags; else, a lane a road
+    gains (or loses) at a node where it just carries on widens from (narrows to) nothing over TAPER_M from there, also
+    across the ways after it with the same lanes. None where its lanes don't change."""
+    if way in self._tapers:
+      return self._tapers[way]
+    out = None
+    length = self.length(way)
+    if self.has_ends(way):
+      out = FORWARD, [(0.0, Section.of(self.lanes_at(way, 'start'))), (length, Section.of(self.lanes_at(way, 'end')))]
+    else:
+      for d in (FORWARD, BACKWARD):
+        many = Section.of(self.lanes(way), d)
+        for ahead in (False, True):
+          found = self._boundary(way, d, ahead)
+          if found is None or not (_taperable(found[1], many) and found[1].lanes < many.lanes):
+            continue
+          dist, few = found
+
+          def state(along, dist=dist, few=few, many=many, ahead=ahead):
+            return _blend(few, many, (dist + (length - along if ahead else along)) / TAPER_M)
+          reach = TAPER_M - dist  # m of the way the taper runs into
+          knots = [0.0, min(reach, length)] if not ahead else [max(length - reach, 0.0), length]
+          knots = sorted({0.0, length, *knots})
+          out = d, [(v, state(v)) for v in knots]
+          break
+        if out:
+          break
+    self._tapers[way] = out
+    return out
+
+  def line_geometry(self, way: int) -> list[tuple['Line', np.ndarray]]:
+    """The lines painted along a way (WayLanes.lines), where they run: through a taper (taper()) the lines move with
+    the lanes, the median's edge swinging across as a lane opens in it, and the line between an opening lane and the
+    next one starts where it has opened."""
+    road, pts = self.lanes(way), self.way_points(way)
+    found = self.taper(way)
+    if found is None:
+      return road.line_geometry(pts)
+    d, knots = found
+    p = pts if d == FORWARD else pts[::-1]
+    along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(p, axis=0).T))))
+    ks = np.array([v for v, _ in knots])
+    extra = [v for v in ks if np.abs(along - v).min() > 0.05]
+    s2 = np.sort(np.concatenate((along, extra)))
+    p2 = np.stack([np.interp(s2, along, p[:, 0]), np.interp(s2, along, p[:, 1])], axis=1)
+    secs = [sec for _, sec in knots]
+    gaps = {i for sec in secs for i in range(len(sec.spans) - 1) if sec.spans[i + 1].left - sec.spans[i].right > EPS}
+    opening = {i for sec in secs for i, sp in enumerate(sec.spans) if sp.right - sp.left < OPENED}
+    out = []
+    for key, line in road.keyed_lines(d, gaps):
+      if key[0] == 'lane' and line.kind == DIVIDER and {key[1], key[1] + 1} & opening:
+        continue
+      if key[0] == 'parking':
+        offs = np.full(len(s2), line.offset)
+      else:
+        offs = np.interp(s2, ks, [line_offset(key, sec) for sec in secs])
+      out.append((line, offset_line(p2, offs)))
+    return out
 
   def way_points(self, way: int) -> np.ndarray:
     return self.xy[self.data.index(self.ways[way][1])]
@@ -656,12 +786,15 @@ class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
-               junctions=None):
+               junctions=None, explicit: dict | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
     self.arrows: list[tuple[float, list[frozenset[str]]]] = arrows or []  # (m along where they end, each lane's)
     self.tapers: dict[int, tuple[Section, Section]] = tapers or {}  # first segment of a way: (lanes before, after)
+    # segments of a way whose lanes widen or narrow along it (width:lanes...:start / :end): its cross-sections where the
+    # route enters and leaves it, and m along there
+    self.explicit: dict[int, tuple[Section, Section, float, float]] = explicit or {}
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     self._corners: list[tuple[float, float]] | None = None
@@ -685,15 +818,24 @@ class RouteLanes:
     arrows: list[tuple[float, list[frozenset[str]]]] = []
     tapers: dict[int, tuple[Section, Section]] = {}
     degree = [osm.degree.get(n[0], 0) if (n := osm.nodes_at(p)) else 0 for p in pts]
+    explicit: dict[int, tuple[Section, Section, float, float]] = {}
+    for w, fwd, i0, i1 in ways_along:
+      if osm.has_ends(w):
+        d = FORWARD if fwd else BACKWARD
+        first, last = (Section.of(osm.lanes_at(w, e), d) for e in (('start', 'end') if fwd else ('end', 'start')))
+        k0, k1 = max(i0, 0), min(i1, len(ways))
+        for k in range(k0, k1):
+          explicit[k] = (first, last, float(along[k0]), float(along[k1]))
     for k, sec in enumerate(sections):
       nxt = sections[k + 1] if k + 1 < len(sections) else None
       if sec is not None and any(sec.turns) and not (nxt is not None and any(nxt.turns) and nxt.lanes == sec.lanes):
         arrows.append((float(along[k + 1]), sec.turns))  # the end of a run of ways with arrows: the junction
       prev = sections[k - 1] if k else None
-      if prev is not None and sec is not None and ways[k - 1] != ways[k] and degree[k] == 2 and _taperable(prev, sec):
+      if prev is not None and sec is not None and ways[k - 1] != ways[k] and degree[k] == 2 and _taperable(prev, sec) and \
+         k not in explicit and k - 1 not in explicit:
         tapers[k] = (prev, sec)
     junctions = [float(along[k]) for k in range(1, len(pts) - 1) if degree[k] >= 3]
-    return cls(pts, sections, arrows, tapers, junctions)
+    return cls(pts, sections, arrows, tapers, junctions, explicit)
 
   @property
   def corners(self) -> list[tuple[float, float]]:
@@ -743,19 +885,30 @@ class RouteLanes:
   def segment(self, s: float) -> int:
     return int(min(max(np.searchsorted(self.along, s, side='right') - 1, 0), max(len(self.sections) - 1, 0)))
 
+  def _run(self, k: int) -> tuple[int, int]:
+    """The segments either side of k on the same road layout (Section.key), the road carrying on across ways."""
+    key = self.sections[k].key
+    k0, k1 = k, k
+    while k0 > 0 and (p := self.sections[k0 - 1]) is not None and k0 - 1 not in self.explicit and p.key == key:
+      k0 -= 1
+    while k1 + 1 < len(self.sections) and (n := self.sections[k1 + 1]) is not None and k1 + 1 not in self.explicit and n.key == key:
+      k1 += 1
+    return k0, k1
+
   def section_at(self, s: float, k: int | None = None) -> Section | None:
-    """The cross-section s m along (on segment k, where s is at a point segments share), a lane widening from nothing
-    over TAPER_M where a way's lane count has risen, or narrowing to nothing before it falls."""
+    """The cross-section s m along (on segment k, where s is at a point segments share): along a way whose lanes widen
+    or narrow (width:lanes...:start / :end) as they do along it; else a lane widening from nothing over TAPER_M where the
+    road's lane count has risen, or narrowing to nothing before it falls."""
     k = self.segment(s) if k is None else k
     sec = self.sections[k] if 0 <= k < len(self.sections) else None
-    if sec is None or not self.tapers:
+    if sec is None:
       return sec
-    k0 = k
-    while k0 > 0 and self.sections[k0 - 1] is sec:
-      k0 -= 1
-    k1 = k
-    while k1 + 1 < len(self.sections) and self.sections[k1 + 1] is sec:
-      k1 += 1
+    if k in self.explicit:
+      first, last, s0, s1 = self.explicit[k]
+      return _lerp(first, last, (s - s0) / max(s1 - s0, EPS))
+    if not self.tapers:
+      return sec
+    k0, k1 = self._run(k)
     if k0 in self.tapers and s - self.along[k0] < TAPER_M and self.tapers[k0][0].lanes < sec.lanes:
       return _blend(self.tapers[k0][0], sec, (s - self.along[k0]) / TAPER_M)
     if k1 + 1 in self.tapers and self.along[k1 + 1] - s < TAPER_M and self.tapers[k1 + 1][1].lanes < sec.lanes:
@@ -764,16 +917,21 @@ class RouteLanes:
 
   def opening(self, k: int) -> tuple[float, int, bool] | None:
     """Where lanes begin on the way segment k is on, as its lane count rises: (m along where they are fully there, how
-    many, whether on the left of ours); None where none begin. Fully there at the end of their taper, or half way
-    along a way shorter than one."""
+    many, whether on the left of ours); None where none begin. Fully there at the end of a way they widen along
+    (width:lanes...:start / :end), else of their taper, or half way along a road shorter than one."""
     sec = self.sections[k] if 0 <= k < len(self.sections) else None
-    if sec is None or not self.tapers:
+    if sec is None:
       return None
-    k0, k1 = k, k
-    while k0 > 0 and self.sections[k0 - 1] is sec:
-      k0 -= 1
-    while k1 + 1 < len(self.sections) and self.sections[k1 + 1] is sec:
-      k1 += 1
+    if k in self.explicit:
+      first, _, _, s1 = self.explicit[k]
+      ours = first.ours
+      shut = [i for i, sp in enumerate(ours) if sp.right - sp.left < OPENED]
+      if not shut or len(shut) == len(ours):
+        return None
+      return s1, len(shut), shut[0] == 0
+    if not self.tapers:
+      return None
+    k0, k1 = self._run(k)
     if k0 not in self.tapers or self.tapers[k0][0].lanes >= sec.lanes:
       return None
     run = self.along[k1 + 1] - self.along[k0]
@@ -868,6 +1026,32 @@ class RouteLanes:
     xy, sv = np.concatenate(out_xy), np.concatenate(out_s)
     keep = np.concatenate(([True], (np.diff(sv) > 1e-6) & (np.hypot(*np.diff(xy, axis=0).T) > 1e-3)))
     return xy[keep], sv[keep]
+
+
+OPENED = 0.5  # m: a lane narrower than this is still opening, the line beside it not yet painted
+DOUBLE_LINE = 0.15  # m from a double line's middle to each line: a closing median's edges come no nearer each other
+
+
+def line_offset(key: tuple, sec: Section) -> float:
+  """m right of the line of a keyed line (WayLanes.keyed_lines) on a cross-section."""
+  kind = key[0]
+  if kind == 'edge':
+    return sec.edges[key[1]]
+  if kind == 'lane':
+    return sec.spans[key[1]].right
+  a, b = sec.spans[key[1]].right, sec.spans[key[1] + 1].left
+  mid = (a + b) / 2
+  return min(a, mid - DOUBLE_LINE) if key[2] == 0 else max(b, mid + DOUBLE_LINE)
+
+
+def _lerp(a: Section, b: Section, t: float) -> Section:
+  """A cross-section t (0-1) of the way from a to b, two of one road's with the same lanes."""
+  if len(a.spans) != len(b.spans):
+    return b if t >= 0.5 else a
+  t = min(max(t, 0.0), 1.0)
+  spans = [Span(m.lane, o.left + (m.left - o.left) * t, o.right + (m.right - o.right) * t, m.heading)
+           for o, m in zip(a.spans, b.spans, strict=True)]
+  return Section(spans, tuple(o + (m - o) * t for o, m in zip(a.edges, b.edges, strict=True)))
 
 
 def _taperable(a: Section, b: Section) -> bool:

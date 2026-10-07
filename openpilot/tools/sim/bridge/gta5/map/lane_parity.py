@@ -12,7 +12,7 @@ from collections import Counter
 import osmium
 
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes
-from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import FREEWAY, layout
+from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import FREEWAY, TAPER_NODE_AREA, layout
 
 TOL = 0.05  # m
 
@@ -90,9 +90,12 @@ def main():
           twice.add(key)
         records[key] = d['f']
 
-  checked, surveyed, bad = 0, 0, Counter()
+  checked, surveyed, pieces, bad = 0, 0, 0, Counter()
   for way in osmium.FileProcessor(args.osm, osmium.osm.WAY):
     a, b = way.nodes[0].ref, way.nodes[-1].ref
+    if max(a, b) >= node_id(TAPER_NODE_AREA, 0):  # part of a link split where a lane's taper starts or ends
+      pieces += 1
+      continue
     if (a, b) not in records and (b, a) not in records:
       bad[('no GTA link', 'way', way.id)] += 1
       continue
@@ -107,7 +110,8 @@ def main():
       checked += 1
       if (why := compare(road, direction, fp, records.get((q, p)) or swapped(fp), {p, q} <= freeway)) is not None:
         bad[(*kind(fp), why + (', GTA has two differing records' if {(p, q), (q, p)} & twice else ''))] += 1
-  print(f"{checked} directed ways checked ({surveyed} ways with surveyed widths left out), {sum(bad.values())} differ from GTA's links' layout")
+  print(f"{checked} directed ways checked ({surveyed} ways with surveyed widths and {pieces} pieces of split links left out), " +
+        f"{sum(bad.values())} differ from GTA's links' layout")
   for k, n in sorted(bad.items(), key=lambda kv: -kv[1]):
     print(f"  {n:6d}  {k}")
   return 1 if bad else 0

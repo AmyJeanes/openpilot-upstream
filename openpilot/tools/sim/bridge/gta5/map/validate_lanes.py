@@ -76,22 +76,23 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
     out.append(('lanes', f'lanes={lanes} but forward {fwd} + backward {back} + both ways {both or 0}'))
   f, b, w = lane_counts(tags)
   want = {'': f if oneway == 1 else b if oneway == -1 else f + b + w, ':forward': f, ':backward': b, ':both_ways': w}
-  for key in PER_LANE:
-    for suffix in SUFFIXES:
-      tag = f'{key}:lanes{suffix}'
-      if tag not in tags:
-        continue
-      items = tags[tag].split('|')
-      if len(items) != want[suffix]:
-        out.append(('count', f'{tag} has {len(items)} lanes, the road {want[suffix]}'))
-      if key == 'turn':
-        unknown = {t for item in items for t in item.split(';') if t and t not in TURNS}
-        if unknown:
-          out.append(('turn', f'{tag}: {", ".join(sorted(unknown))}'))
-      elif key == 'change' and (unknown := {v for v in items if v and v not in CHANGES}):
-        out.append(('change', f'{tag}: {", ".join(sorted(unknown))}'))
-      elif key == 'width' and any(v and not metres(v) for v in items):
-        out.append(('width', f'{tag}={tags[tag]}'))
+  # and the widths at the way's ends where its lanes widen or narrow along it
+  keys = [(k, s, '') for k in PER_LANE for s in SUFFIXES] + [('width', s, e) for s in SUFFIXES for e in (':start', ':end')]
+  for key, suffix, end in keys:
+    tag = f'{key}:lanes{suffix}{end}'
+    if tag not in tags:
+      continue
+    items = tags[tag].split('|')
+    if len(items) != want[suffix]:
+      out.append(('count', f'{tag} has {len(items)} lanes, the road {want[suffix]}'))
+    if key == 'turn':
+      unknown = {t for item in items for t in item.split(';') if t and t not in TURNS}
+      if unknown:
+        out.append(('turn', f'{tag}: {", ".join(sorted(unknown))}'))
+    elif key == 'change' and (unknown := {v for v in items if v and v not in CHANGES}):
+      out.append(('change', f'{tag}: {", ".join(sorted(unknown))}'))
+    elif key == 'width' and any(v and metres(v) is None for v in items):
+      out.append(('width', f'{tag}={tags[tag]}'))
   if 'width' in tags and not metres(tags['width']):
     out.append(('width', f"width={tags['width']}"))
   if 'divider' in tags and tags['divider'] not in DIVIDERS and not set(tags['divider'].split(';')) <= PHYSICAL_DIVIDERS:

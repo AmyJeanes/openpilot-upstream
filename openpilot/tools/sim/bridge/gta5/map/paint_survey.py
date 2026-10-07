@@ -130,7 +130,7 @@ def load(paths, lines: dict[int, str] | None = None) -> dict[tuple, list[dict]]:
 
 def _flip(d: dict) -> dict:
   kerbs = d.get('kerbs') or {}
-  return {**d,
+  return {**d, **({'s': d['len'] - d['s']} if 'len' in d and 's' in d else {}),
           'marks': [{**m, 'offset': -m['offset'], 'pair': [-v for v in m['pair']][::-1] if m.get('pair') else None,
                      'type': HALVES_SWAPPED.get(m['type'], m['type'])} for m in d['marks']],
           **{key: [{**a, 'offset': -a['offset'], 'dir': 'oncoming' if a.get('dir') in ('ab', 'ahead') else 'ab'} if 'offset' in a else a
@@ -143,6 +143,60 @@ def along(samples: dict, a, b) -> list[dict] | None:
   """A link's samples seen travelling a -> b, also from those seen the other way."""
   out = list(samples.get((a, b), [])) + [_flip(d) for d in samples.get((b, a), [])]
   return out or None
+
+
+TAPER_EDGE = 0.08  # of the way across: a median's right edge this near where it was (or ends up) is out of the taper
+TAPER_LENGTH = (3.0, 80.0)  # m: a taper shorter or longer than these is misread
+MEDIAN_SEEN = 2.0  # m at least the median's right edge swings across
+ARRIVED = 0.6  # m: the edge this near the median's left edge has arrived, the two lines a double yellow
+
+
+def opening_taper(sections: list[tuple[float, dict]], median: float) -> tuple[float, float] | None:
+  """Where a turn lane opens in a two-way road's median, from the game files' sections along the road ([(m along it,
+  the section seen travelling it)]): the median's right edge swings across to its left edge, the oncoming lanes', the
+  lane opening behind it, as GTA paints its bays. (m along where the edge leaves its place, where it arrives),
+  interpolated between the sections either side; None where the sections don't show one."""
+  rows = []  # (m along, the rightmost yellow line: the median's right edge, or once across its left edge, its polyline)
+  seen = []  # each row's yellow polylines
+  for d, sample in sorted(sections, key=lambda r: r[0]):
+    if sample.get('src') != GAMEFILES:
+      continue
+    ys = [(sum(m['pair']) / 2 if m.get('pair') else m['offset'], m.get('line')) for m in sample['marks']
+          if m['colour'] == 'yellow' and m['conf'] >= CONF and abs(m['offset']) <= median / 2 + 1.5]
+    if ys:
+      y, line = max(ys, key=lambda v: v[0])
+      rows.append((d, y, line if isinstance(line, int) else None))
+      seen.append({i for _, v in ys for i in (v if isinstance(v, list) else [v]) if isinstance(i, int)})
+  if len(rows) < 4:
+    return None
+  y0, y1 = float(np.median([y for _, y, _ in rows[:3]])), float(np.median([y for _, y, _ in rows[-3:]]))
+  if y0 - y1 < MEDIAN_SEEN:  # no edge swinging across
+    return None
+  pts = [(d, float(np.clip((y0 - y) / (y0 - y1), 0.0, 1.0))) for d, y, _ in rows]
+  # the swinging edge is often dashed: sections through its gaps, between where it's seen, read it as across already
+  for line in {line for (_, p), (_, _, line) in zip(pts, rows, strict=True) if line is not None and TAPER_EDGE < p < 1 - TAPER_EDGE}:
+    on = [k for k, s in enumerate(seen) if line in s]
+    gaps = {k for k in range(on[0], on[-1]) if line not in seen[k]}
+    pts, seen = [pt for k, pt in enumerate(pts) if k not in gaps], [s for k, s in enumerate(seen) if k not in gaps]
+  # where the edge leaves its place and where it arrives, between the sections either side
+  across = 1 - max(TAPER_EDGE, ARRIVED / (y0 - y1))
+  arrive = next((k for k, (_, p) in enumerate(pts) if p >= across), None)
+  if not arrive:
+    return None
+  leave = max((k for k in range(arrive) if pts[k][1] <= TAPER_EDGE), default=None)
+  if leave is None:
+    return None
+
+  def cross(k, level):  # m along where the edge passes `level` between sections k and k + 1
+    (d0, p0), (d1, p1) = pts[k], pts[k + 1]
+    return d0 + (d1 - d0) * min(max((level - p0) / (p1 - p0), 0.0), 1.0) if p1 != p0 else d0
+  start = cross(leave, TAPER_EDGE)
+  end = cross(arrive - 1, across)
+  # it opens once: shut before, open after (but for a stray line or two, as at a crossing)
+  shut, open_ = [p for d, p in pts if d < start - 3.0], [p for d, p in pts if d > end + 3.0]
+  if sum(p > 0.5 for p in shut) > 0.1 * len(shut) or sum(p < 0.5 for p in open_) > 0.1 * len(open_):
+    return None
+  return (float(start), float(end)) if TAPER_LENGTH[0] <= end - start <= TAPER_LENGTH[1] else None
 
 
 def sources(samples: list[dict], camera_corrects: bool = True) -> tuple[list[dict], list[dict]]:
