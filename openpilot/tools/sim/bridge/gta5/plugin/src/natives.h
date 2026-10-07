@@ -196,6 +196,11 @@ inline void SET_CAM_NEAR_CLIP(Cam c, float d) { Invoke(0xC7848EFCCC545182, c, d)
 inline void HARD_ATTACH_CAM_TO_ENTITY(Cam c, Entity e, float xr, float yr, float zr, float x, float y, float z, BOOL relative) {
   Invoke(0x202A5ED9CE01D6E7, c, e, xr, yr, zr, x, y, z, relative);
 }
+inline void SET_CAM_COORD(Cam c, float x, float y, float z) { Invoke(0x4D41783FB745E42E, c, x, y, z); }
+inline void SET_CAM_ROT(Cam c, float x, float y, float z, int order) { Invoke(0x85973643155D0B07, c, x, y, z, order); }
+inline void HIDE_HUD_AND_RADAR_THIS_FRAME() { Invoke(0x719FF505F097FD20); }
+inline void SET_FOCUS_POS_AND_VEL(float x, float y, float z, float vx, float vy, float vz) { Invoke(0xBB7454BAFF08FE25, x, y, z, vx, vy, vz); }
+inline void CLEAR_FOCUS() { Invoke(0x31B73D1EA9F01DA2); }
 inline void RENDER_SCRIPT_CAMS(BOOL render, BOOL ease, int easeTime, BOOL p3, BOOL p4, int p5) { Invoke(0x07E5B515DB0636FC, render, ease, easeTime, p3, p4, p5); }
 inline void FREEZE_MICROPHONE() { Invoke(0xD57AAAE0E2214D11); }
 inline void DISPLAY_RADAR(BOOL on) { Invoke(0xA0EBB943C300E693, on); }
