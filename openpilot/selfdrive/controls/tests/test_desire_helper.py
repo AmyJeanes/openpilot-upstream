@@ -71,11 +71,11 @@ class TestTurnDesireFlush(OpenpilotTestCase):
     self.DH = DesireHelper()
     self.DH.turn_flush = True
 
-  def flushes(self, seconds, v_ego=5.0, left=True, right=False):
+  def flushes(self, seconds, v_ego=5.0, left=True, right=False, yaw_rate=0.0):
     CS = car.CarState.new_message(vEgo=v_ego, leftBlinker=left, rightBlinker=right)
     count = 0
     for _ in range(round(seconds / DT_MDL)):
-      self.DH.update(CS, True, 0.0)
+      self.DH.update(CS, True, 0.0, yaw_rate)
       count += self.DH.flush
     return count
 
@@ -95,3 +95,20 @@ class TestTurnDesireFlush(OpenpilotTestCase):
   def test_not_while_the_blinker_stays_on(self):
     self.flushes(3.0)
     assert self.flushes(3.0, v_ego=25.0) == 0
+
+  def test_waits_until_the_car_stops_turning(self):
+    self.flushes(3.0, yaw_rate=0.4)
+    assert self.flushes(2.0, left=False, yaw_rate=0.4) == 0  # the blinker went off part-way round
+    assert self.flushes(0.4, left=False) == 0
+    assert self.flushes(0.3, left=False) == 1
+
+  def test_not_once_the_model_has_forgotten_it(self):
+    self.flushes(3.0, yaw_rate=0.4)
+    assert self.flushes(10.0, left=False, yaw_rate=0.4) == 0
+    assert self.flushes(3.0, left=False) == 0
+
+  def test_not_after_a_new_turn(self):
+    self.flushes(3.0, yaw_rate=0.4)
+    self.flushes(1.0, left=False, yaw_rate=0.4)
+    self.flushes(1.0, left=False, right=True, yaw_rate=0.4)  # the next turn, the other way
+    assert self.flushes(3.0, left=False) == 1  # only as that one ends

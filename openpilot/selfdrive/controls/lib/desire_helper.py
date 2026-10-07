@@ -33,8 +33,13 @@ TURN_STOP_STARTED = math.radians(30.)  # after a stop, asked again unless turned
 TURN_STOPPED_SPEED = 0.3  # m/s
 TURN_MOVING_SPEED = 1.0  # m/s
 # The model keeps each desire pulse in its history for 6.6 s, so a turn that ends sooner is still wanted after it,
-# swinging the car on past the road out. With TurnDesireFlush, modeld clears it from that history as the blinker goes off.
+# swinging the car on past the road out. With TurnDesireFlush, modeld clears it from that history once the car has
+# stopped turning after the blinker goes off: a blinker can go off well before the turn is done, and clearing the turn
+# then makes the model give it up.
 TURNS = (log.Desire.turnLeft, log.Desire.turnRight)
+FLUSH_YAW_RATE = 0.08  # rad/s, below which the car has stopped turning; a junction turn is ~0.4
+FLUSH_SETTLED = 0.5  # s below it
+FLUSH_MAX_WAIT = 6.6  # s, by when the model has forgotten the turn anyway
 
 
 class NavDesire:
@@ -78,6 +83,8 @@ class DesireHelper:
     self.turn_refresh = self.nav.params.get_bool("TurnDesireRefresh")
     self.turn_flush = self.nav.params.get_bool("TurnDesireFlush")
     self.flush = False  # for modeld to clear the turn from the model's desire history
+    self.flush_wait = -1.0  # s since the turn's blinker went off, while waiting to flush it; -1 when not
+    self.flush_settled = 0.0  # s turning less than FLUSH_YAW_RATE
     self.refresh = False  # for modeld to give the model the turn desire's pulse again
     self.refresh_count = 0  # in the turn desire under way
     self.turn_timer = 0.0  # since the turn was last asked for
@@ -107,6 +114,22 @@ class DesireHelper:
       self.turn_timer = 0.0
       self.refresh_count += 1
     return refresh
+
+  def update_flush(self, yaw_rate, turn_ended):
+    if turn_ended:
+      self.flush_wait, self.flush_settled = 0.0, 0.0
+    elif self.flush_wait < 0.0:
+      return False
+    elif self.desire in TURNS or self.flush_wait > FLUSH_MAX_WAIT:  # a new turn asked for, or nothing left to clear
+      self.flush_wait = -1.0
+      return False
+    self.flush_wait += DT_MDL
+    self.turn_angle += yaw_rate * DT_MDL
+    self.flush_settled = self.flush_settled + DT_MDL if abs(yaw_rate) < FLUSH_YAW_RATE else 0.0
+    if self.flush_settled >= FLUSH_SETTLED:
+      self.flush_wait = -1.0
+      return True
+    return False
 
   def update(self, carstate, lateral_active, lane_change_prob, yaw_rate=0.0, desire_state=None):
     v_ego = carstate.vEgo
@@ -162,7 +185,7 @@ class DesireHelper:
     prev_desire = self.desire
     self.desire = lane_turn_desire(carstate, nav)
     self.refresh = False
-    self.flush = self.turn_flush and prev_desire in TURNS and not one_blinker
+    self.flush = self.turn_flush and self.update_flush(yaw_rate, prev_desire in TURNS and not one_blinker)
     if self.turn_refresh and self.desire in TURNS:
       turn_prob = desire_state[self.desire] if desire_state is not None and len(desire_state) > self.desire else 1.0
       self.refresh = self.update_turn_refresh(v_ego, yaw_rate, turn_prob, self.desire != prev_desire)
