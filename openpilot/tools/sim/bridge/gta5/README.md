@@ -57,8 +57,8 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 
 ## Navigation
 Set a waypoint on the game's map while engaged and the car follows GTA's GPS route to it: the plugin sends the route (a
-point every 5 m for 500 m) and the bridge (`gta5_nav.py`) finds the turns in it, lowers the set speed to 12 mph for
-each (16 mph for a gentler one; the car reports a lower cruise speed, as a car's own navigation would), and signals
+point every 5 m for 500 m) and navd's planner finds the turns in it, lowers the set speed to 12 mph for each (16 mph for
+a gentler one; the car reports a lower cruise speed, as a car's own navigation would), and signals
 it, which below 19 mph asks the driving model for the turn. The model takes that request as a pulse when the blinker
 comes on, and forgets it after several seconds and at a stop, so the bridge drops the blinker briefly for openpilot
 (not the car's lights) every 2.5 s until the turn starts, when the car pulls away again, or when the model stops
@@ -107,7 +107,7 @@ can't tell, and waits for the gas, as on the real car; nor does it go while traf
 
 Nav's turn parameters (speeds by turn angle, where slowing starts and ends, when to signal, re-pulsing, lane change
 lead) can come from a JSON file, `GTA5_NAVTUNE`, read again whenever it changes, for sweeps with `e2e.py sweep`; keys
-left out keep the defaults (`gta5_nav.Tune`). With `"signal_mode": "entry"` a turn is signalled at
+left out keep the defaults (`selfdrive/navd/planner.py` Tune). With `"signal_mode": "entry"` a turn is signalled at
 `signal_entry_offset` m past its junction's entry (GTA's stop line, else its junction nodes), as a driver signals on
 entering the junction, rather than 5 s before it. How far the model turns depends on its speed in the turn, so the
 turn's speed holds through the arc until the car heads its way out and is straight (`turn_release`, `turn_release_m`)
@@ -119,14 +119,30 @@ and no turning to take it stops, so a turn is signalled only within 50 m of one.
 
 With a map of the game's roads built ([map/README.md](map/README.md)), nav can route over it with a standard router
 instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a map view of the car and its route.
-On that route the bridge also writes a route input for route-conditioned driving models (`gta5_route_input.py`, trained
+On that route the bridge also writes a route input for route-conditioned driving models (`selfdrive/navd/route_input.py`, trained
 by gta5-train `--route`) to shared memory, which modeld feeds only to a model with a `route` input; it is zero off the
 route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without it.
 `OPENPILOT_PREFIX=gta5 GALLIUM_DRIVER=d3d12 python openpilot/tools/sim/bridge/gta5/watch_route.py` (in the venv) shows that input live.
-Below it, it previews route input v2's lane slots (`gta5_lane_slots.py`: the road here and the road out of the next
+Below it, it previews route input v2's lane slots (`selfdrive/navd/lane_slots.py`: the road here and the road out of the next
 maneuver, counted from the kerb, with the lanes the route needs), which the bridge writes to a shared-memory file of
 their own (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats (route input v2);
 a model trained on v1's 173 reads only the start of it.
+
+### navd and the GTA layer
+Navigation is being moved out of the bridge into a game-agnostic navd (`selfdrive/navd/`), which is to plan from only
+what a real car and device give it (GNSS, the car's state, the model's outputs, an OSM map and router), so it ports to
+the road. So far it holds the planner (`planner.py`, which takes `NavInputs` and returns a cap, NavDesire changes and
+requests to the driver, `inputs.py`), the route input encoder and lane slots; it still runs inside the bridge, and its
+inputs still carry the game's true pose and lane (`truth_*`). The bridge's side of it:
+- `gta5_navd.py`: the planner's inputs from the game's state and our route, and the destination: the game's waypoint or
+  a map view pick, written to the `NavDestination` param as lat/lon.
+- `gta5_driver.py`: the simulated driver, who approves every request: works the stalk (the game's indicator) for turns
+  and lane changes, nudges the wheel to start a lane change, cancels the indicator after a turn, cancels cruise on
+  arriving and pulls away at green lights.
+- `gta5_gnss.py`: GNSS from the car's position as a comma 3X publishes it (`gpsLocation`, 1 Hz, with noise and delay;
+  `GTA5_GPS=qcom3x|ublox|perfect|off`, `GTA5_GPS_SEED`).
+- `nav_replay.py`: replays e2e trips (bridge log and traces) through the bridge's nav into decision logs, to check that
+  a refactor leaves every decision as it was.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map

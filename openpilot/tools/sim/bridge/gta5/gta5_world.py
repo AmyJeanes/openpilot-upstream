@@ -21,6 +21,7 @@ from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
 from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
+from openpilot.tools.sim.bridge.gta5 import gta5_gnss
 from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
@@ -123,6 +124,8 @@ class GTA5World(World):
     self.log = open(LOG, "a", buffering=1) if LOG else None
     self.params = Params()
     self._init_nav()
+    self.gnss = gta5_gnss.from_env()
+    self.publishes_gps = self.gnss is not None
     self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
@@ -300,6 +303,9 @@ class GTA5World(World):
     fwd_accel = state["aMeas"] + g * math.sin(grade)
     simulator_state.imu.accelerometer = vec3(g * math.cos(grade) * math.cos(bank), -lat_accel, -fwd_accel)
     simulator_state.imu.gyroscope = vec3(yaw_rate, 0, 0)
+    if self.gnss is not None:
+      p = state["pos"]
+      self.gnss.update(time.monotonic(), p[0], p[1], p[2], simulator_state.velocity.x, simulator_state.velocity.y)
 
     user = state.get("user") or {}
     # driver input while engaged: gas overrides; the brake and steering disengage, since the game's steering has no torque
