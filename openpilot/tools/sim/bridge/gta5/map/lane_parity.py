@@ -59,6 +59,12 @@ def compare(road: WayLanes, direction: int, ab, ba, freeway: bool = False) -> st
   got_oncoming = [(s.left, s.right) for s in road.oncoming(direction)]
   if road.single_track:
     got_oncoming = got_ours  # its one lane is both ways'
+  # a turn bay folded into the road (ynd_to_osm.detached_bays): one more lane on the inside of a direction, beside its
+  # lanes as GTA has them, in a two-way road's median or left of a one-way road's
+  if ours and len(got_ours) == len(ours) + 1 and abs(got_ours[0][1] - ours[0][0]) <= TOL:
+    got_ours = got_ours[1:]
+  if oncoming and len(got_oncoming) == len(oncoming) + 1 and abs(got_oncoming[-1][0] - oncoming[-1][1]) <= TOL:
+    got_oncoming = got_oncoming[:-1]
   if (len(got_ours), len(got_oncoming)) != (len(ours), len(oncoming)):
     return f'lanes {len(got_ours)}+{len(got_oncoming)}, GTA {len(ours)}+{len(oncoming)}'
   err = max((abs(x - y) for got, want in ((got_ours, ours), (got_oncoming, oncoming))

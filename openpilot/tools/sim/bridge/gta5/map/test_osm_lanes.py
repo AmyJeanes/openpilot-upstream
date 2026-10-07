@@ -190,6 +190,38 @@ def test_parking_lane():
   assert road.parking_lanes() == [] and road.edges() == (-5.5, 5.5)
 
 
+def test_lane_tags_fold_a_bay_into_the_median():
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_tags
+
+  def spans_of(fwd, back, f, bays):
+    return spans(WayLanes.from_tags({'highway': 'primary', **lane_tags(fwd, back, f, False, bays)}))
+  # narrow 2 + 2 with 6 steps of median (2.7 m either side): the bay fills the median, the lanes stay where they were
+  assert spans_of(3, 2, flags(2, 2, 6, True), (True, False)) == \
+    [(-1, -11.5, -7.1), (-1, -7.1, -2.7), (1, -2.7, 2.7), (1, 2.7, 7.1), (1, 7.1, 11.5)]
+  assert spans_of(3, 3, flags(2, 2, 6, True), (True, True))[2:4] == [(1, 0.0, 2.7), (-1, -2.7, 0.0)][::-1]
+  assert spans_of(3, 0, flags(2, 0, 0, False), (True, False)) == [(1, -11.0, -5.5), (1, -5.5, 0.0), (1, 0.0, 5.5)]
+
+
+def test_detached_bays():
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import detached_bays
+
+  def node(x, y, slip=False):
+    return {'x': x, 'y': y, 'z': 0.0, 'f': [0, 1 if slip else 0, 0, 0, 0]}
+
+  def find(bay_x):
+    nodes = {'P': node(0, -100), 'S': node(0, -60), 'Q': node(0, -30), 'J': node(0, 0), 'B1': node(bay_x, -40, True),
+             'B2': node(bay_x, -15, True), 'W': node(-50, 0), 'E': node(50, 0), 'N': node(0, 50)}
+    road = flags(2, 2, 6, False)
+    rows = [('P', 'S', 2, 2, road), ('S', 'Q', 2, 2, road), ('Q', 'J', 2, 2, road),  # northbound lanes forward
+            ('S', 'B1', 1, 0, flags(1, 0, 0, False)), ('B1', 'B2', 1, 0, flags(1, 0, 0, False)), ('B2', 'J', 1, 0, flags(1, 0, 0, False)),
+            ('W', 'J', 1, 1, flags(1, 1, 0, False)), ('J', 'E', 1, 1, flags(1, 1, 0, False)), ('J', 'N', 2, 2, road)]
+    return detached_bays(nodes, rows, lambda k: k == 'J')
+  # in the median, just left of the line: folded, from where it splits off to the junction
+  assert find(-0.3) == [([3, 4, 5], [(1, True), (2, True)], 'S', 'J')]
+  assert find(-9.0) == []  # in the oncoming lanes
+  assert find(6.0) == []  # on the right: a slip lane, not a bay
+
+
 if __name__ == '__main__':
   for name, test in list(globals().items()):
     if name.startswith('test_'):

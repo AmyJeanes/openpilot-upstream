@@ -90,6 +90,13 @@ shown or a level changes.
     give the lanes, and what's left is centred between them (`divider=double_solid_line`).
   - A two-lane two-way street's centre is `divider=double_solid_line`, as GTA paints most of them (OSM's default
     reading is a dashed line); not on service roads and tracks.
+  - GTA lays a left-turn bay as a one-way link of its own (through its slip lane or left turn only nodes) from where
+    it splits off its road to the junction ahead, over a two-way road's median or beside a one-way road's left lane.
+    Real maps make it a lane of the road (osm_lanes.md P3), and so does ours (`detached_bays`): the bay's links are
+    dropped, the road's links from the split to the junction get one more lane that way (filling the median, as GTA
+    paints it: the median tapers away where the bay opens) with `turn:lanes` such as `left|through|through;right` from
+    there, and the left turn GTA forbade from the road's own lanes is allowed from it. osm_lanes widens the new lane
+    from nothing over 30 m where the lane count rises. Every other link stays as GTA has it.
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
