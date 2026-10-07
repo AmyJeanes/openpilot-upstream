@@ -100,6 +100,14 @@ shown or a level changes.
   - Where a two-way road's median (2.5 m or more) runs in to a junction it may turn left at and GTA has no bay link,
     the game paints the median as a left-turn lane on the approach (seen on 4 of 4 such approaches): its links within
     the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.
+  - These widths are class rules, right on average. `--survey <file.jsonl> ...` corrects them where the game's paint
+    was surveyed (format and rules in `paint_survey.py`): read from the game files' road meshes and marking decals
+    (`"src": "gamefiles"`, exact to a few cm, the primary source), else from the map audit's top-down camera, which
+    also cross-checks them. On a two-way link whose samples agree with each other and with GTA's lane counts, the
+    lanes take the measured widths out to the kerbs (the game files' asphalt edges where they're symmetric, else the
+    layout's), so a centre line off GTA's link line is said by the lanes' widths (the way's line stays on GTA's nodes,
+    the middle of the road); `source:width=survey` marks them. The game files' painted arrows replace `turn:lanes` on
+    approaches with an arrow per lane. Lane counts don't change; the log counts the links whose paint disagrees.
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for

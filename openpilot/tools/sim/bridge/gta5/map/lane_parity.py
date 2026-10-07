@@ -90,11 +90,14 @@ def main():
           twice.add(key)
         records[key] = d['f']
 
-  checked, bad = 0, Counter()
+  checked, surveyed, bad = 0, 0, Counter()
   for way in osmium.FileProcessor(args.osm, osmium.osm.WAY):
     a, b = way.nodes[0].ref, way.nodes[-1].ref
     if (a, b) not in records and (b, a) not in records:
       bad[('no GTA link', 'way', way.id)] += 1
+      continue
+    if way.tags.get('source:width') == 'survey':  # measured paint, not the layout
+      surveyed += 1
       continue
     road = WayLanes.from_tags(dict(way.tags))
     for direction, (p, q) in ((FORWARD, (a, b)), (BACKWARD, (b, a))):
@@ -104,7 +107,7 @@ def main():
       checked += 1
       if (why := compare(road, direction, fp, records.get((q, p)) or swapped(fp), {p, q} <= freeway)) is not None:
         bad[(*kind(fp), why + (', GTA has two differing records' if {(p, q), (q, p)} & twice else ''))] += 1
-  print(f"{checked} directed ways checked, {sum(bad.values())} differ from GTA's links' layout")
+  print(f"{checked} directed ways checked ({surveyed} ways with surveyed widths left out), {sum(bad.values())} differ from GTA's links' layout")
   for k, n in sorted(bad.items(), key=lambda kv: -kv[1]):
     print(f"  {n:6d}  {k}")
   return 1 if bad else 0

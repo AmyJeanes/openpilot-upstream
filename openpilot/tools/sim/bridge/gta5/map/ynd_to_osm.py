@@ -7,10 +7,11 @@ link becomes a way with OSM lane tags; GTA flags with no OSM equivalent keep a g
 import argparse
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import osmium
 
+from openpilot.tools.sim.bridge.gta5.map import paint_survey
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
   wrap
@@ -933,7 +934,7 @@ def layout(lf, back, freeway=False):
   return w, steps * MEDIAN_STEP / 2 if back and steps > 0 else steps / 14 * w
 
 
-def lane_tags(fwd, back, lf, freeway=False, bays=(False, False)):
+def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
   """The lanes of a link as GTA paints them (layout), in standard tags that osm_lanes.py reads back to the same layout:
   each direction's lanes starting `offset` right of the link, or a one-way link's centred on it and moved by the offset.
   - Offset 0: the line is the boundary between the directions, the middle of the road unless the counts differ
@@ -945,6 +946,9 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False)):
   - A turn bay folded into the road (`bays`, forward and backward: detached_bays) is that direction's leftmost lane. On
     a two-way road it fills the median, as GTA paints it (the median tapers away where the bay opens), so the line runs
     down its middle; bays both ways share the median, the line between them. Beside a one-way road it is a lane wide.
+  - Where the paint was surveyed (`painted`: paint_survey.correct's widths each way and median), its lanes take the
+    measured widths, kerbs where the layout has them; the line is the middle of the road between them, or the centre's
+    with more lanes one way (`source:width=survey`).
   `lf` is the link's flags and `freeway` whether its nodes are a freeway's (a one-way freeway's lanes are wider);
   returns the tags."""
   w, offset = layout(lf, back, freeway)
@@ -957,6 +961,14 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False)):
     return tags
   if steps == -7 and fwd == back == 1:
     return {'lanes': '1', 'width': metres(w), 'lane_markings': 'no'}
+  if painted:
+    wf, wb = painted['forward'], painted['backward']
+    tags = {'lanes': str(fwd + back), 'lanes:forward': str(fwd), 'lanes:backward': str(back),
+            'width': metres(sum(wf) + sum(wb) + painted['median']), 'width:lanes:forward': '|'.join(map(metres, wf)),
+            'width:lanes:backward': '|'.join(map(metres, wb)), 'divider': 'double_solid_line', 'source:width': 'survey'}
+    if fwd != back:
+      tags['placement:forward'] = tags['placement:backward'] = 'left_of:1'
+    return tags
   bay = 2 * offset / (bf + bb) if bf + bb else 0.0
   tags = {'lanes': str(fwd + back), 'lanes:forward': str(fwd), 'lanes:backward': str(back),
           'width': metres((fwd + back - bf - bb) * w + 2 * offset)}
@@ -991,7 +1003,8 @@ def arrows(n, kinds, fewer_left=False):
   return ['left'] * left + ['right'] * (n - left)
 
 
-def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions, left_bays=frozenset(), medians=frozenset()):
+def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions, left_bays=frozenset(), medians=frozenset(),
+               painted=None):
   """turn:lanes on the lanes into GTA's junctions where roads cross (see arrows), from the ways out of each, a move
   turning more than TURN_FLAG being a left or right turn, as for GTA's turn flags, less those the restrictions forbid.
   Marked on every way along the approach from APPROACH m before the junction while the road runs on with the same
@@ -1002,8 +1015,10 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
   opens. On a two-way road with a median (`medians`, its links (node, next node) where the median has room for a lane)
   running in to a junction it may turn left at, GTA paints the median as a left-turn lane without a link of its own
   (measured on 4 of 4 such approaches): one more lane, `left`, on the approach's links within the median, if they are
-  at least MEDIAN_LANE_MIN long. `ways` is [(way id, a, b, two_way)], `left_only` GTA's left turn only lane nodes,
-  `restrictions` [(kind, from way, via, to way)] as written; returns {way id: {tag: value}}, how many approaches got
+  at least MEDIAN_LANE_MIN long. Arrows painted on the approach (`painted`, by link (node, next node):
+  paint_survey.arrows) replace these where there are as many as lanes and the junction has their ways out. `ways` is
+  [(way id, a, b, two_way)], `left_only` GTA's left turn only lane nodes, `restrictions` [(kind, from way, via, to way)]
+  as written; returns {way id: {tag: value}}, how many approaches got
   arrows, how many were left out for bending, and the links (node, next node) given a median lane."""
   way_of, out, into = graph(ways)
   drawn = {wid: (a, two_way) for wid, a, _, two_way in ways}
@@ -1069,6 +1084,9 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
         opened.update(chain)
       elif n < 2 and not only:
         continue
+      seen = next((painted[e] for e in chain if e in (painted or {})), None)
+      if seen and len(seen) == len(lanes) and all(set(k.split(';')) <= allowed for k in seen):
+        lanes = seen
       if all(lane == 'through' for lane in lanes):
         continue
       approaches += 1
@@ -1090,6 +1108,8 @@ def main():
   p.add_argument('out', help='.osm or .osm.pbf')
   p.add_argument('--sidecar', help="the roads as arrays for the bridge's map matching (.npz)")
   p.add_argument('--minimap', help="ynddump's minimap.jsonl: minor links GTA's minimap draws as roads become roads")
+  p.add_argument('--survey', nargs='*', default=[], help="surveys of the game's road paint (paint_survey.py): the lane "
+                 "widths where they were measured")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -1214,8 +1234,14 @@ def main():
   for wid, a, b, fwd, back, *_, lf in info:
     if back and 2 * layout(lf, back)[1] >= BAY_MIN:
       medians.update(e for e in ((a, b), (b, a)) if e[1] not in bay_to[wid])
+  survey = paint_survey.load(args.survey) if args.survey else {}
+  painted_arrows = {}  # (node, next node) -> the lanes' painted turn arrows that way, left to right
+  for _, a, b, *_ in info:
+    if (samples := paint_survey.along(survey, a, b)) is not None:
+      for key, e in paint_survey.arrows(samples).items():
+        painted_arrows[(a, b) if key == 'forward' else (b, a)] = e
   arrows_at, approaches, bent, opened = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions,
-                                                   left_bays, medians)
+                                                   left_bays, medians, painted_arrows)
   row_of = {row[0]: row for row in info}
   way_of = graph(ways)[0]
   for p, q in opened:
@@ -1223,6 +1249,23 @@ def main():
     row[3 if row[2] == q else 4] += 1
     bay_to[row[0]].add(q)
   print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
+  painted, why = {}, Counter()
+  for wid, a, b, fwd, back, *_, lf in info:
+    if (samples := paint_survey.along(survey, a, b)) is None:
+      continue
+    w, offset = layout(lf, back)
+    if not back or offset < 0 or bay_to[wid]:  # bays fill medians: what the survey reads there isn't the road's
+      why['one-way' if not back else 'turn bay' if bay_to[wid] else 'lanes overlap'] += 1
+      continue
+    use, other = paint_survey.sources(samples)
+    kerbs = (-(offset + back * w), offset + fwd * w)
+    painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs)
+    why[reason or ('measured (game files)' if use[0].get('src') == paint_survey.GAMEFILES else 'measured (camera)')] += 1
+    if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
+      why['sources disagree' if paint_survey.disagree(painted[wid], check) else 'sources agree'] += 1
+  if survey:
+    print(f"paint survey of {len(painted) + why['one-way'] + why['turn bay'] + why['lanes overlap']} links: " +
+          ', '.join(f'{n} {k}' for k, n in why.most_common()))
   print(f"{approaches} approaches to junctions with turn arrows, on {len(arrows_at)} ways ({bent} bending into theirs left out)")
   layer_of = {ways[i][0]: v for i, v in levels(nodes, [(a, b) for _, a, b, _ in ways]).items()}
   print(f"{len(layer_of)} ways over others as bridges (up to layer {max(layer_of.values(), default=0)})")
@@ -1239,8 +1282,8 @@ def main():
                                        tags={'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
       continue
     freeway = bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2
-    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, (b in bay_to[wid], a in bay_to[wid])), **arrows_at.get(wid, {}),
-            'maxspeed': f'{limit} mph'}
+    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, (b in bay_to[wid], a in bay_to[wid]), painted.get(wid)),
+            **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
     if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED:
       tags['divider'] = 'double_solid_line'  # how GTA paints a two-lane road's centre (OSM's default reading is dashed)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
