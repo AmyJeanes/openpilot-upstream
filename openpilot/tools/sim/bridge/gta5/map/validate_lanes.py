@@ -3,7 +3,8 @@
 - lanes: counts are counts, and lanes = lanes:forward + lanes:backward + lanes:both_ways;
 - count: every *:lanes value (turn, width, change, destination, access, ...) has as many lanes as the road that way;
 - turn / change / width / divider / lane_markings: values OSM knows;
-- width: width:lanes fit in width;
+- width: width:lanes fit in width (less its parking lanes);
+- parking: parking:left|right|both values OSM knows, their widths metres;
 - placement: well formed, its lane is on the road, and given both ways the two agree but for the median;
 - transition: placement=transition only on ways up to TRANSITION_MAX long;
 - connectivity: type=connectivity relations have from, via and to, and their lanes are on those roads;
@@ -25,6 +26,7 @@ from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CHANGES, DIVIDERS, PER
 ROADS = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track',
          'living_street', 'road', 'busway', 'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'}
 PHYSICAL_DIVIDERS = {'barrier', 'kerb', 'grass_verge', 'rumble_strip', 'flexible_posts', 'hatched'}
+PARKING = {'lane', 'street_side', 'on_kerb', 'half_on_kerb', 'shoulder', 'no', 'separate'}  # parking:<side>=*, OSM Street parking
 METRES_PER_DEGREE = 6378137.0 * math.pi / 180
 REACH = 100.0  # m on along the road from a way with arrows to the junction they're for
 JUNCTION_SPAN = 20.0  # m across a junction's straight short ways, as to a divided road's far side
@@ -96,6 +98,11 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
     out.append(('divider', f"divider={tags['divider']}"))
   if tags.get('lane_markings', 'yes') not in ('yes', 'no'):
     out.append(('lane_markings', f"lane_markings={tags['lane_markings']}"))
+  for side in ('left', 'right', 'both'):
+    if tags.get(f'parking:{side}', 'no') not in PARKING:
+      out.append(('parking', f"parking:{side}={tags[f'parking:{side}']}"))
+    if f'parking:{side}:width' in tags and not metres(tags[f'parking:{side}:width']):
+      out.append(('parking', f"parking:{side}:width={tags[f'parking:{side}:width']}"))
 
   road = WayLanes.from_tags(tags, drive_on_right)
   width, known, unknown = road.tagged

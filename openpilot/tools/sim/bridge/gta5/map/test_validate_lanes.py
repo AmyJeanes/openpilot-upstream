@@ -57,6 +57,14 @@ def test_values():
   assert checks({**road, 'divider': 'painted'}) == {'divider'}
   assert checks({**road, 'divider': 'barrier'}) == set()
   assert checks({**road, 'width': 'wide'}) == {'width'}
+  assert checks({**road, 'parking:right': 'kerbside'}) == {'parking'}
+  assert checks({**road, 'parking:both': 'lane', 'parking:both:width': 'some'}) == {'parking'}
+
+
+def test_parking_in_width():
+  road = {'highway': 'primary', 'lanes': '2', 'width': '13.3', 'width:lanes:forward': '5.5', 'width:lanes:backward': '5.5'}
+  assert checks({**road, 'parking:right': 'lane', 'parking:right:width': '2.3'}) == set()
+  assert checks({**road, 'parking:both': 'lane', 'parking:both:width': '2.3'}) == {'width'}  # 15.6 m doesn't fit
 
 
 def test_widths():

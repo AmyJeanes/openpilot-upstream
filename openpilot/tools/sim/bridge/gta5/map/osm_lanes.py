@@ -12,8 +12,11 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   where the way's line runs, by that direction's lanes numbered from the left (backward ones as seen travelling
   backward). Without it the line is the middle of the road. Given both ways, it's midway between the two: they differ by
   the median between the directions.
-- `width`: kerb to kerb, metres. Without `width:lanes` it's shared out evenly; on a two-way way, what's left after
-  `width:lanes` is a median centred between the directions.
+- `width`: kerb to kerb, metres, parking lanes on the carriageway included. Without `width:lanes` it's shared out
+  evenly; on a two-way way, what's left after `width:lanes` is a median centred between the directions.
+- `parking:left|right|both=lane` (with `parking:<side>:width`, else by `:orientation`): a parking lane on the
+  carriageway between that kerb and the lanes; it isn't a lane. Without placement the line is the middle of the lanes
+  (and median) between the parking lanes.
 - `divider`: the marking between the directions. `lane_markings=no`: no lines between lanes at all.
 - Missing tags fall back to OSM's defaults, then to `Defaults` by road class: lanes 1 each way (2 on a one-way motorway
   or trunk), a single track on tracks, the line in the middle.
@@ -42,8 +45,10 @@ TRANSITION_MAX = 40.0  # m: placement=transition is for the short way where a li
 UNMARKED = {'residential', 'unclassified', 'service', 'track', 'living_street'}  # without lanes=*, no lines painted
 EPS = 0.01  # m
 
-# line kinds: a road's edge (kerb), between lanes one way, between the directions, a median's edge
-EDGE, DIVIDER, CENTRE, MEDIAN = 'edge', 'divider', 'centre', 'median'
+# line kinds: a road's edge (kerb), between lanes one way, between the directions, a median's edge, and where a parking
+# lane on the carriageway meets the lanes
+EDGE, DIVIDER, CENTRE, MEDIAN, PARKING = 'edge', 'divider', 'centre', 'median', 'parking'
+PARKING_LANE = {'parallel': 2.3, 'diagonal': 4.5, 'perpendicular': 5.0}  # m wide by orientation, where no width is mapped
 
 
 class Defaults:
@@ -117,6 +122,17 @@ def oneway_of(tags: dict) -> int:
   return 0
 
 
+def parking_lane(tags: dict, side: str) -> float:
+  """How wide the parking lane on the carriageway on one side of the way ('left' or 'right', seen along it) is:
+  `parking:<side>=lane` (or `parking:both`), `parking:<side>:width` wide, else by its orientation; 0 for none, or for
+  parking off the carriageway (street_side bays, on the kerb, a shoulder)."""
+  def tag(key):
+    return tags.get(f'parking:{side}{key}', tags.get(f'parking:both{key}'))
+  if tag('') != 'lane':
+    return 0.0
+  return metres(tag(':width')) or PARKING_LANE.get(tag(':orientation') or 'parallel', PARKING_LANE['parallel'])
+
+
 def lane_counts(tags: dict) -> tuple[int, int, int]:
   """Lanes (forward, backward, both ways). A single track road is (0, 0, 1)."""
   highway, oneway = tags.get('highway', ''), oneway_of(tags)
@@ -146,17 +162,19 @@ def lane_counts(tags: dict) -> tuple[int, int, int]:
 
 class WayLanes:
   """A way's lanes, left to right as seen along it."""
-  def __init__(self, lanes: list[Lane], width: float, median: float, margin: float, markings: bool, divider: str | None):
+  def __init__(self, lanes: list[Lane], width: float, median: float, margin: float, markings: bool, divider: str | None,
+               parking: tuple[float, float] = (0.0, 0.0)):
     self.lanes = lanes
     self.width = width  # m, kerb to kerb
-    self.line = width / 2  # m from the left kerb to the way's line
-    self.margin = margin  # m between each kerb and its outer lane
+    self.parking = parking  # m of parking lane on the carriageway between the left and the right kerb and the lanes
+    self.line = parking[0] + (width - parking[0] - parking[1]) / 2  # m from the left kerb to the way's line
+    self.margin = margin  # m between each kerb (or parking lane) and its outer lane
     self.markings, self.divider = markings, divider
     self.placed: dict[str, float] = {}  # where each placement tag puts the line, m from the left kerb
     self.tagged: tuple[float | None, float, int] = (None, 0.0, 0)  # width=*, the lanes' width:lanes total, lanes without
     self.single_track = all(lane.direction == BOTH_WAYS for lane in lanes)
     turns = [i for i in range(1, len(lanes)) if lanes[i - 1].direction != lanes[i].direction]
-    x, self.x, self.gaps = margin, [], []  # each lane's left edge and the median (either side of any centre lanes)
+    x, self.x, self.gaps = parking[0] + margin, [], []  # each lane's left edge and the median (either side of any centre lanes)
     for i, lane in enumerate(lanes):
       if median and i in turns:
         self.gaps.append((x, x + median / len(turns)))
@@ -193,14 +211,17 @@ class WayLanes:
       return out
 
     widths = [metres(v) for v in per_lane('width')]
+    parking = (parking_lane(tags, 'left'), parking_lane(tags, 'right'))
     width = metres(tags.get('width'))
+    if width:
+      width = max(width - sum(parking), 0.0)  # the carriageway's width includes its parking lanes
     known, unknown = sum(w for w in widths if w), sum(not w for w in widths)
     if unknown:
       share = (width - known) / unknown if width and width - known > EPS * unknown else defaults.lane_width(highway)
       widths = [w or share for w in widths]
     lanes_w = sum(widths)
     spare = width - lanes_w if width and width - lanes_w > EPS else 0.0
-    width = lanes_w + spare
+    width = lanes_w + spare + sum(parking)
     two_way = bool(fwd or both) and bool(back or both) and not (fwd == back == 0)
     turns, changes, destinations = per_lane('turn'), per_lane('change'), per_lane('destination')
     closed = [any(v in ('no', 'private') for v in vs) for vs in zip(*(per_lane(k) for k in ('access', 'motor_vehicle', 'vehicle')), strict=True)]
@@ -211,7 +232,7 @@ class WayLanes:
       lanes.append(Lane(d, widths[i], frozenset(t for t in (turns[i] or '').split(';') if t in TURNS and t != 'none'),
                         left, right, not (closed[i] or bus[i]), destinations[i] or None))
     markings = tags.get('lane_markings') != 'no' and not (tags.get('lanes') is None and highway in UNMARKED)
-    road = cls(lanes, width, spare if two_way else 0.0, 0.0 if two_way else spare / 2, markings, tags.get('divider'))
+    road = cls(lanes, width, spare if two_way else 0.0, 0.0 if two_way else spare / 2, markings, tags.get('divider'), parking)
 
     def place(value, d):  # m from the left kerb
       m = PLACEMENT.fullmatch(value or '')
@@ -233,7 +254,8 @@ class WayLanes:
         road.placed[key] = at
     if road.placed:
       road.line = sum(road.placed.values()) / len(road.placed)
-    road.tagged = (metres(tags.get('width')), known, unknown)
+    tagged = metres(tags.get('width'))
+    road.tagged = (tagged - sum(parking) if tagged else None, known, unknown)  # width=* less its parking lanes
     return road
 
   @property
@@ -260,6 +282,12 @@ class WayLanes:
     """The kerbs, m right of the line."""
     return (-self.line, self.width - self.line) if direction == FORWARD else (self.line - self.width, self.line)
 
+  def parking_lanes(self, direction: int = FORWARD) -> list[tuple[float, float]]:
+    """The parking lanes on the carriageway, m right of the line, left to right seen travelling `direction`."""
+    lo, hi = self.edges(direction)
+    left, right = self.parking if direction == FORWARD else self.parking[::-1]
+    return [s for s in ((lo, lo + left), (hi - right, hi)) if s[1] - s[0] > EPS]
+
   def medians(self, direction: int = FORWARD) -> list[tuple[float, float]]:
     """The median between the directions, m right of the line: in two halves either side of a centre turn lane."""
     out = [(a - self.line, b - self.line) for a, b in self.gaps]
@@ -268,10 +296,11 @@ class WayLanes:
   def lines(self, direction: int = FORWARD) -> list[Line]:
     """The lines on the road left to right: its edges, white lines between lanes one way (solid where change:lanes
     forbids crossing), and the centre line between the directions or the edges of a median (divider=*; by default
-    dashed with one lane each way, else double solid)."""
+    dashed with one lane each way, else double solid), and where a parking lane meets the lanes."""
     sec = self.section(direction)
     lo, hi = self.edges(direction)
-    out = [Line(EDGE, lo, None)]
+    parking = self.parking_lanes(direction)
+    out = [Line(EDGE, lo, None)] + [Line(PARKING, b, None) for a, b in parking if a == lo]
     if self.markings:
       wide = max(self.counts[:2]) >= 2
       centre = DIVIDERS.get(self.divider, 'solid') if self.divider else ('double_solid' if wide else 'dashed')
@@ -289,6 +318,7 @@ class WayLanes:
           out += [Line(MEDIAN, a.right, centre), Line(MEDIAN, b.left, centre)]
         else:
           out.append(Line(CENTRE, a.right, centre))
+    out += [Line(PARKING, a, None) for a, b in parking if b == hi]
     out.append(Line(EDGE, hi, None))
     return out
 

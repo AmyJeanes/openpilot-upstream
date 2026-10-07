@@ -1,14 +1,14 @@
 """osm_lanes.py's cross-sections, lines and lane geometry, on the fixtures and on tags; and ynd_to_osm.py's lane tags,
-which osm_lanes must read back to GTA's own layout (paths.Link) for every kind of link. No pytest in the venv:
-`python test_osm_lanes.py` runs them all."""
+which osm_lanes must read back to the layout of GTA's links as painted (ynd_to_osm.layout) for every kind of link. No
+pytest in the venv: `python test_osm_lanes.py` runs them all."""
 import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.lane_parity import compare, swapped
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, UK, US, WayLanes, \
-  lane_counts, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, UK, US, \
+  WayLanes, lane_counts, offset_line
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
 
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -175,6 +175,19 @@ def test_painted_layout():
     assert [round(v, 2) for s in road.ours() for v in (s.left, s.right)][::2] + [round(road.ours()[-1].right, 2)] == edges
   road = WayLanes.from_tags({'highway': 'motorway', **lane_tags(3, 0, flags(3, 0, 0, False), True)})
   assert np.allclose(road.edges(), (-9.15, 9.15))
+
+
+def test_parking_lane():
+  road = WayLanes.from_tags({'highway': 'residential', 'lanes': '2', 'width': '13.3', 'parking:right': 'lane',
+                             'parking:right:width': '2.3'})
+  assert spans(road) == [(-1, -5.5, 0.0), (1, 0.0, 5.5)]  # not a lane, and the line stays between the lanes
+  assert np.allclose(road.edges(), (-5.5, 7.8)) and np.allclose(road.parking_lanes(), [(5.5, 7.8)])
+  assert lines(road) == [(EDGE, -5.5, None), (CENTRE, 0.0, 'dashed'), (PARKING, 5.5, None), (EDGE, 7.8, None)]
+  assert lines(road, BACKWARD) == [(EDGE, -7.8, None), (PARKING, -5.5, None), (CENTRE, 0.0, 'dashed'), (EDGE, 5.5, None)]
+  road = WayLanes.from_tags({'highway': 'primary', 'lanes': '2', 'oneway': 'yes', 'parking:both': 'lane'})
+  assert spans(road) == [(1, -5.5, 0.0), (1, 0.0, 5.5)] and np.allclose(road.edges(), (-7.8, 7.8))
+  road = WayLanes.from_tags({'highway': 'primary', 'lanes': '2', 'parking:left': 'street_side'})  # bays off the carriageway
+  assert road.parking_lanes() == [] and road.edges() == (-5.5, 5.5)
 
 
 if __name__ == '__main__':

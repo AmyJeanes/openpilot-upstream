@@ -90,6 +90,10 @@ shown or a level changes.
     give the lanes, and what's left is centred between them (`divider=double_solid_line`).
   - A two-lane two-way street's centre is `divider=double_solid_line`, as GTA paints most of them (OSM's default
     reading is a dashed line); not on service roads and tracks.
+  - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
+    scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
+    middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
+    them and no measured road showed one, so our map has none; real maps do.
   - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
     no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
   - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it

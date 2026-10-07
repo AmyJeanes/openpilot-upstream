@@ -21,13 +21,15 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
 # lanes.json's kinds: a road's edge (kerb), white lines between lanes one way, yellow lines between the directions,
-# stop lines, give way lines, crossings, and the paths of the moves through junctions from lane to lane by their turn
+# stop lines, give way lines, crossings, the paths of the moves through junctions from lane to lane by their turn, and
+# parking lanes on the carriageway (along their middle)
 KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way', 'crossing', 'guide_left', 'guide_through',
-         'guide_right']
+         'guide_right', 'parking']
+PARKING_STRIP = 'parking_strip'  # a parking lane's middle, in a road's lines
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
 CELL = 50.0  # m
 
@@ -180,7 +182,8 @@ def main():
             round(hi - lo, 1), round((lo + hi) / 2, 1), wid in junctions.inside, *levels[wid])
     roads.append((kind, tags.get('oneway') == 'yes', refs))
     if wid not in junctions.inside:
-      lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or road.markings)
+      lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or (road.markings
+                    and ln.kind != PARKING)) + tuple((PARKING_STRIP, round((a + b) / 2, 2), None) for a, b in road.parking_lanes(FORWARD))
       layouts.append(((levels[wid][0], lines), True, refs))  # lines are offsets along a way's direction: join only ways going on
 
   def trim(a, b):  # how far the road from node a on to b is trimmed back at a
@@ -257,7 +260,8 @@ def main():
     ways = {osm.pairs[(a, b)][0] for a, b in zip(nodes[:-1], nodes[1:], strict=True)}
     for kind, offset, style in sig:
       # a median's edges one line each, as maps paint it, rather than the divider's double line on both
-      for k, off in [(0, 0.0)] if kind == EDGE else marks('solid' if kind == MEDIAN else style, kind == DIVIDER):
+      for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
+          marks('solid' if kind == MEDIAN else style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE)):
           add(k, piece, layer, z_along(piece, pts, z) if high else None)
