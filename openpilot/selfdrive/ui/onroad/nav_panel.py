@@ -2,7 +2,7 @@
 route ahead, and the arrival. Lane change requests show as openpilot's own alerts in the camera view."""
 import pyray as rl
 
-from openpilot.selfdrive.ui.nav.draw import draw_dashed_rect, draw_lane_arrow, draw_maneuver_icon
+from openpilot.selfdrive.ui.nav.draw import draw_corner_masks, draw_dashed_rect, draw_lane_arrow, draw_maneuver_icon
 from openpilot.selfdrive.ui.nav.nav_map import NavMap
 from openpilot.selfdrive.ui.nav.nav_state import Guidance, Lane, NavState, format_arrival, format_distance, format_duration
 from openpilot.selfdrive.ui.nav.text import lane_caption, maneuver_road, then_text
@@ -154,9 +154,9 @@ class NavPanel(Widget):
       box = rl.Rectangle(rect.x + 24, rect.y + 21, min(size.x + 54, rect.width - 48), size.y + 30)
       rl.draw_rectangle_rounded(box, 24 / (box.height / 2), 10, CHIP)
       self._text(self._bold, fit_text(self._bold, chip, CHIP_SIZE, box.width - 54), CHIP_SIZE, box.x + 27, box.y + 15, TEXT)
+    # round the map's corners: cover what the square clip let past them, inside the card's own box
+    draw_corner_masks(rect, RADIUS, rl.BLACK)
     rl.end_scissor_mode()
-    # round the map's corners: cover what the square clip let past them, within the gap around the card
-    rl.draw_rectangle_rounded_lines_ex(rect, RADIUS / (min(rect.width, rect.height) / 2), 12, GAP - 1, rl.BLACK)
 
   def _draw_footer(self, rect: rl.Rectangle, g: Guidance, metric: bool) -> None:
     """Arrival time, then the time and distance left, and the destination in what's left of the width."""

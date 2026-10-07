@@ -195,3 +195,14 @@ def draw_dashed_rect(rect: rl.Rectangle, radius: float, dash: float, thickness: 
   for cx, cy, a in ((x0 + radius, y0 + radius, 180), (x1 - radius, y0 + radius, 270), (x1 - radius, y1 - radius, 0),
                     (x0 + radius, y1 - radius, 90)):
     rl.draw_ring(rl.Vector2(cx, cy), radius - thickness / 2, radius + thickness / 2, a + 30, a + 60, 4, color)
+
+
+
+def draw_corner_masks(rect: rl.Rectangle, radius: float, color: rl.Color, segments: int = 10) -> None:
+  """Fills each corner of rect outside its rounding of `radius`, to round off content clipped square to rect."""
+  x0, y0, x1, y1 = rect.x, rect.y, rect.x + rect.width, rect.y + rect.height
+  # each corner, the centre of its rounding, and where the rounding's quarter circle starts (screen degrees, y down)
+  for (cx, cy), (ox, oy), a in (((x0, y0), (x0 + radius, y0 + radius), 180), ((x1, y0), (x1 - radius, y0 + radius), 270),
+                                ((x1, y1), (x1 - radius, y1 - radius), 0), ((x0, y1), (x0 + radius, y1 - radius), 90)):
+    fan = [(cx, cy), *arc(ox, oy, radius, a + 90, a, segments)]  # this winding faces the camera: raylib culls the other
+    rl.draw_triangle_fan([rl.Vector2(px, py) for px, py in fan], len(fan), color)

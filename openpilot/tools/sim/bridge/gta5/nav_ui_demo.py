@@ -131,6 +131,7 @@ class Openpilot:
     self.pm = messaging.PubMaster(self.SERVICES)
     self.v = 12.0
     self.alert: tuple[str, str, str] | None = None  # text1, text2, size
+    self.engaged = True
 
   def send(self):
     msgs = {s: messaging.new_message(s, valid=True) for s in self.SERVICES if s != 'pandaStates'}
@@ -141,7 +142,8 @@ class Openpilot:
     ps.pandaStates[0].pandaType = log.PandaState.PandaType.tres
     msgs['pandaStates'] = ps
     ss = msgs['selfdriveState'].selfdriveState
-    ss.enabled, ss.active, ss.state = True, True, log.SelfdriveState.OpenpilotState.enabled
+    ss.enabled = ss.active = self.engaged
+    ss.state = log.SelfdriveState.OpenpilotState.enabled if self.engaged else log.SelfdriveState.OpenpilotState.disabled
     if self.alert:
       ss.alertText1, ss.alertText2, ss.alertSize = self.alert
       ss.alertStatus = log.SelfdriveState.AlertStatus.normal
@@ -189,6 +191,7 @@ def main():
   ap.add_argument("--dest", type=int)
   ap.add_argument("--metric", action="store_true")
   ap.add_argument("--fps", type=int, default=10)
+  ap.add_argument("--disengaged", action="store_true", help="openpilot disengaged (the grey-blue border); names end _disengaged")
   ap.add_argument("--scenes", default="turn,lanes,arrive,idle", help="any of turn, lanes, arrive, idle, at=<m>:<lane>")
   args = ap.parse_args()
   osm = load_map()
@@ -223,6 +226,7 @@ def main():
   frame = nv12(CAMERA, W, H)
 
   op = Openpilot()
+  op.engaged = not args.disengaged
   nav = NavMessages()
   gui_app.init_window("nav ui demo", fps=args.fps)
   MainLayout()
@@ -272,7 +276,8 @@ def main():
       rl.rl_draw_render_batch_active()
       img = rl.load_image_from_texture(gui_app._render_texture.texture)
       rl.image_flip_vertical(img)
-      out = os.path.join(args.out, f"navui_{scenes[k].replace('=', '_').replace(':', '_')}.png")
+      name = scenes[k].replace('=', '_').replace(':', '_') + ("_disengaged" if args.disengaged else "")
+      out = os.path.join(args.out, f"navui_{name}.png")
       rl.export_image(img, out)
       rl.unload_image(img)
       print(f"saved {out} at {s:.0f} m; UI render {1000 * np.mean(cpu):.1f} ms mean, {1000 * np.max(cpu):.1f} max", flush=True)

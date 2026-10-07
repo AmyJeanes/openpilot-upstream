@@ -34,5 +34,6 @@ class NavSplitView(Widget):
       return
     split = round(rect.width * CAMERA_SHARE)
     self.road_view.render(rl.Rectangle(rect.x, rect.y, split, rect.height))
-    self.panel.render(rl.Rectangle(rect.x + split, rect.y + UI_BORDER_SIZE, rect.width - split - UI_BORDER_SIZE,
-                                   rect.height - 2 * UI_BORDER_SIZE))
+    # clear of the camera view's border, and in from the screen's edges, by the border's width
+    self.panel.render(rl.Rectangle(rect.x + split + UI_BORDER_SIZE, rect.y + UI_BORDER_SIZE,
+                                   rect.width - split - 2 * UI_BORDER_SIZE, rect.height - 2 * UI_BORDER_SIZE))
