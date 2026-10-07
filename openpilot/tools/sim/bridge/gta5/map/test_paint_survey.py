@@ -4,7 +4,7 @@ import os
 import tempfile
 
 from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrows, centre_kind, correct, correct_oneway, disagree, \
-  line_kinds, load, sources, strips
+  line_kinds, load, opening_taper, sources, strips
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -140,6 +140,18 @@ def test_cleaning_the_game_files_lines():
   assert [(m['offset'], m['type']) for m in _clean(d, kinds)['marks']] == [(2.0, 'solid'), (0.1, 'dashed')]
   centre = sample([{**mark(0.1, kind='dashed'), 'line': 3}, mark(5.3, kind='edge_line')], src='gamefiles')
   assert centre_kind([_clean(centre, kinds)] * 2, 0.0, 0.4) == 'dashed_line'  # no yellow: the white centre
+
+
+def test_opening_taper():
+  # a 5.4 m median's right edge at +2.7 swinging across to -2.7 between 40 and 60 m along, a stray line at the end
+  def edge(d):
+    return 2.7 - 5.4 * min(max((d - 40.0) / 20.0, 0.0), 1.0)
+  sections = [(d, sample([mark(edge(d), 'yellow', 'double_solid')], src='gamefiles')) for d in range(1, 100, 3)]
+  sections.append((99.0, sample([mark(2.5, 'yellow')], src='gamefiles')))
+  start, end = opening_taper(sections, 5.4)
+  assert abs(start - 41.6) < 1.0 and abs(end - 58.4) < 1.0
+  assert opening_taper([(d, sample([mark(2.7, 'yellow')], src='gamefiles')) for d in range(1, 100, 3)], 5.4) is None
+  assert opening_taper([(d, {**s, 'src': None}) for d, s in sections], 5.4) is None  # the game files' only
 
 
 def test_arrows_from_features():

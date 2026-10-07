@@ -13,6 +13,7 @@ import osmium
 
 from openpilot.tools.sim.bridge.gta5.map import paint_survey
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import WayLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
   wrap
 
@@ -793,6 +794,213 @@ def detached_bays(nodes, rows, junction):
   return found
 
 
+MINOR = {'service', 'track', 'unclassified'}  # roads too minor to end the road a turn lane opens along
+TAPER_BACK = 100.0  # m back from where a turn lane's link began that its taper is looked for
+TAPER_SNAP = 1.0  # m: a taper starting or ending this near a node starts or ends there, no node added
+TAPER_NODE_AREA = 4096  # GTA's areas are below this: the nodes added where tapers start and end are (this, n)
+
+
+def lane_tapers(nodes, info, lane_links, junction, survey):
+  """Where the turn lanes folded into roads (detached_bays) or painted in medians (lane_turns) open, from the game
+  files' paint (paint_survey.opening_taper): the median's right edge swings across over the taper. `lane_links` are the
+  links (node, next node) carrying such a lane, `info` the rows [way id, a, b, fwd, back, ...]; returns [(the links
+  along the road to the junction [(a, b)], m along to each one's start, the taper's start and end m along)], the road
+  reaching back up to TAPER_BACK before the lane's links, across minor roads (service roads and tracks) meeting it."""
+  import numpy as np
+  rows = {}
+  at = defaultdict(list)
+  out_of = defaultdict(list)  # node -> [(next node, lanes that way, two-way)]
+  for row in info:
+    _, a, b, fwd, back = row[:5]
+    rows[(a, b)] = rows[(b, a)] = row
+    at[a].append(row)
+    at[b].append(row)
+    if fwd:
+      out_of[a].append(b)
+    if back:
+      out_of[b].append(a)
+  into = defaultdict(list)
+  for a, nxt in out_of.items():
+    for b in nxt:
+      into[b].append(a)
+
+  def length(p, q):
+    return math.hypot(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  found = []
+  for p, j in sorted(lane_links):
+    if not junction(j):
+      continue
+    chain = [(p, j)]
+    while (prev := [q for q in into[chain[0][0]] if (q, chain[0][0]) in lane_links and (q, chain[0][0]) not in chain]):
+      chain.insert(0, (prev[0], chain[0][0]))
+    if not all(rows[e][4] and rows[e][3] for e in chain):  # in a two-way road's median
+      continue
+    back = 0.0
+    def minor(n, s1):  # where only minor roads meet the road
+      return all(r[5] in MINOR for r in at[n] if s1 not in (r[1], r[2]) and rows.get((n, s1)) is not r and
+                 not (abs(wrap(heading(r[1] if r[2] == n else r[2], n) - heading(n, s1))) < STRAIGHT))
+
+    while back < TAPER_BACK and (len(at[chain[0][0]]) == 2 or minor(*chain[0])):  # the road just carrying on
+      s0, s1 = chain[0]
+      prev = [q for q in into[s0] if q != s1 and abs(wrap(heading(q, s0) - heading(s0, s1))) < STRAIGHT and rows[(q, s0)][3] and
+              rows[(q, s0)][4] and 2 * layout(rows[(q, s0)][8], rows[(q, s0)][4])[1] >= BAY_MIN]  # with a median to open in
+      if len(prev) != 1 or (prev[0], s0) in chain or (s0, prev[0]) in lane_links:  # not into the other way's bay
+        break
+      chain.insert(0, (prev[0], s0))
+      back += length(prev[0], s0)
+    starts = np.concatenate(([0.0], np.cumsum([length(a, b) for a, b in chain])))
+    sections = []
+    for (a, b), d0 in zip(chain, starts, strict=False):
+      for sample in paint_survey.along(survey, a, b) or []:
+        if 's' in sample:
+          sections.append((d0 + sample['s'], sample))
+    row = rows[chain[-1]]
+    median = 2 * layout(row[8], row[4])[1]
+    if median < BAY_MIN or (taper := paint_survey.opening_taper(sections, median)) is None:
+      continue
+    start, end = taper
+    if start < 0.5 or end > starts[-1] - 5.0:  # not seen opening, or opening into the junction
+      continue
+    found.append((chain, starts, start, end))
+  return found
+
+
+def split_tapers(nodes, info, tapers, lane_links, arrows_at, bay_to, recounted=frozenset()):
+  """The roads' rows with the turn lanes of `tapers` (lane_tapers) from where they open: a lane added to the links of
+  the road before the lane's links where it opens earlier, taken off those where it opens later, links split where it
+  starts and ends opening (a node added there, along the link, unless one is within TAPER_SNAP), and the links where it
+  opens widening it from nothing (width:lanes...:start / :end). Returns the new rows, {new way id: the way it was split
+  from}, {way id: {'forward' | 'backward': (lane width share at its first node, at its last)}} for the widening, and
+  {way id: (a bay forward, a bay backward)} for lane_tags of the rows it changes, and how many tapers were applied: one
+  a way and direction, none where a bay the other way shares the median or along links whose lane counts are the
+  paint's (`recounted`: those count the lane where it's painted). The rows' arrows (arrows_at) follow their lanes."""
+  rows = {row[0]: row for row in info}
+  head = {}  # (a, b) -> way id
+  for row in info:
+    head[(row[1], row[2])] = head[(row[2], row[1])] = row[0]
+  cuts, effects = defaultdict(set), defaultdict(list)
+  taken, applied = set(), 0  # (way id, forward)
+  for chain, starts, start, end in tapers:
+    start, end = (next((float(d) for d in starts if abs(d - at) <= TAPER_SNAP), at) for at in (start, end))
+    # one taper a way and direction; none where a bay the other way shares the median; no lanes taken off down to none;
+    # none changing links whose lanes are counted from the paint
+    sides = [(head[(a, b)], rows[head[(a, b)]][1] == a, (a, b) in lane_links,
+              (d0 < end and d1 > start) or ((a, b) in lane_links) != ((d0 + d1) / 2 > start))
+             for (a, b), d0, d1 in zip(chain, starts, starts[1:], strict=False)]
+    if any((wid, fwd) in taken or (changed and wid in recounted) or (rows[wid][1] if fwd else rows[wid][2]) in bay_to[wid] or
+           (carried and rows[wid][3 if fwd else 4] < 2) for wid, fwd, carried, changed in sides):
+      continue
+    taken.update((wid, fwd) for wid, fwd, *_ in sides)
+    applied += 1
+    template = None
+    for a, b in chain:
+      wid = head[(a, b)]
+      row = rows[wid]
+      key = 'forward' if row[1] == a else 'backward'
+      tag = arrows_at.get(wid, {}).get(f'turn:lanes:{key}')
+      if template is None and (a, b) in lane_links and tag:
+        template = tag
+    for k, (a, b) in enumerate(chain):
+      wid = head[(a, b)]
+      row = rows[wid]
+      forward = row[1] == a
+      d0, d1 = starts[k], starts[k + 1]
+      for at in (start, end):
+        if d0 + TAPER_SNAP < at < d1 - TAPER_SNAP:
+          cuts[wid].add(round((at - d0) / (d1 - d0) if forward else (d1 - at) / (d1 - d0), 4))
+      # m along the road at the row's first and last node
+      effects[wid].append((forward, d0 if forward else d1, d1 if forward else d0, start, end, (a, b) in lane_links, template))
+  out, parent, widen, bays = [], {}, {}, {}
+  next_id = max(rows) + 1
+  synthetic = 0
+  for row in info:
+    wid = row[0]
+    if wid not in effects:
+      out.append(row)
+      continue
+    ts = [0.0, *sorted(cuts[wid]), 1.0]
+    original = dict(arrows_at.get(wid, {}))
+    ends = [row[1]]
+    for t in ts[1:-1]:
+      a, b = nodes[row[1]], nodes[row[2]]
+      synthetic += 1
+      k = (TAPER_NODE_AREA, synthetic)
+      nodes[k] = {'a': k[0], 'i': k[1], 'x': a['x'] + (b['x'] - a['x']) * t, 'y': a['y'] + (b['y'] - a['y']) * t,
+                  'z': a['z'] + (b['z'] - a['z']) * t, 'f': [0, 0, 0, 0, 0], 'st': a['st'], 'sp': a.get('sp', 1)}
+      ends.append(k)
+    ends.append(row[2])
+    for n, (t0, t1) in enumerate(zip(ts, ts[1:], strict=False)):
+      pid = wid if n == 0 else next_id
+      if n:
+        next_id += 1
+        parent[pid] = wid
+      piece = [pid, ends[n], ends[n + 1], *row[3:]]
+      tags = dict(original)
+      fb = [row[2] in bay_to[wid], row[1] in bay_to[wid]]  # bays this way that open elsewhere
+      for forward, da, db, start, end, carried, template in effects[wid]:
+        key = 'forward' if forward else 'backward'
+        p0, p1 = da + (db - da) * t0, da + (db - da) * t1  # m along the road at the piece's ends
+        carries = (p0 + p1) / 2 > start
+        lanes = piece[3 if forward else 4] - carried + carries
+        piece[3 if forward else 4] = lanes
+        arrows = tags.get(f'turn:lanes:{key}')
+        if carries and not carried and arrows:  # (arrows only on the ways into the junction, as lane_turns)
+          arrows = template if template and len(template.split('|')) == lanes else 'left|' + arrows
+        elif carried and not carries and arrows:
+          arrows = '|'.join(arrows.split('|')[1:]) or None
+        if arrows and len(arrows.split('|')) == lanes:
+          tags[f'turn:lanes:{key}'] = arrows
+        else:
+          tags.pop(f'turn:lanes:{key}', None)
+        fb[0 if forward else 1] = carries
+        if carries:
+          share = [min(max((p - start) / max(end - start, 1e-6), 0.0), 1.0) for p in (p0, p1)]
+          if min(share) < 1.0 - 1e-3:
+            widen.setdefault(pid, {})[key] = tuple(share)
+      if len(ts) > 2 or pid in widen or piece[3:5] != row[3:5]:
+        arrows_at[pid] = tags
+        bays[pid] = tuple(fb)
+      out.append(piece)
+  return out, parent, widen, bays, applied
+
+
+def remap_restrictions(restrictions, ends_of, pieces):
+  """Restrictions on ways split into pieces (`pieces`: way id -> its pieces' ids, first node to last) on to the pieces
+  they run along: the from way's piece at the via, the to way's, and every piece of a via way. `ends_of`: way id ->
+  (first node, last node), pieces included."""
+  def touching(wid, nodes):
+    return next((p for p in pieces[wid] if set(ends_of[p]) & nodes), pieces[wid][0])
+
+  def along(wid, from_nodes):  # a via way's pieces in the order travelled, from the node it is entered at
+    ps = pieces[wid]
+    return ps if ends_of[ps[0]][0] in from_nodes else ps[::-1]
+
+  out = []
+  for kind, wf, via, wt in restrictions:
+    if wf not in pieces and wt not in pieces and not any(t == 'w' and ref in pieces for t, ref in via):
+      out.append((kind, wf, via, wt))
+      continue
+    vias = [ref for t, ref in via if t == 'w']
+    if not vias:
+      n = {via[0][1]}
+      out.append((kind, touching(wf, n) if wf in pieces else wf, via, touching(wt, n) if wt in pieces else wt))
+      continue
+    shared_in = set(ends_of[pieces[wf][0] if wf in pieces else wf]) | set(ends_of[pieces[wf][-1] if wf in pieces else wf])
+    new_via, at = [], shared_in
+    for v in vias:
+      ps = along(v, at) if v in pieces else [v]
+      new_via += ps
+      at = {ends_of[ps[-1]][1], ends_of[ps[-1]][0]}
+    fn = set(ends_of[new_via[0]])
+    tn = set(ends_of[new_via[-1]])
+    out.append((kind, touching(wf, fn) if wf in pieces else wf, [('w', v) for v in new_via], touching(wt, tn) if wt in pieces else wt))
+  return out
+
+
 def stop_directions(nodes, rows, toward):
   """Which way each stop line faces: tagged direction=forward, every two-way way at it is drawn towards its junction,
   so this turns ways round. `rows` is [(a, b, two_way)], `toward` {stop line node: nodes on from it towards its
@@ -1264,7 +1472,7 @@ def main():
       for key, e in paint_survey.arrows(samples).items():
         painted_arrows[(a, b) if key == 'forward' else (b, a)] = e
   row_of = {row[0]: row for row in info}
-  painted, why, skipped, centre_kinds = {}, Counter(), 0, {}
+  painted, why, left_out, centre_kinds, recounted = {}, Counter(), 0, {}, set()
   # where the game files' paint covers the map, the camera's survey only checks it
   from_files = any(d.get('src') == paint_survey.GAMEFILES for ds in survey.values() for d in ds)
   for wid, a, b, fwd, back, *_, lf in info:
@@ -1273,7 +1481,7 @@ def main():
     w, offset = layout(lf, back, bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2)
     if (back and offset < 0) or (not back and offset) or bay_to[wid]:  # bays fill medians: not the road's paint there
       why['turn bay' if bay_to[wid] else 'lanes overlap' if back else 'one-way, off-centre'] += 1
-      skipped += 1
+      left_out += 1
       continue
     if not back:
       painted[wid], reason = paint_survey.correct_oneway(samples, fwd, (-fwd * w / 2, fwd * w / 2))
@@ -1282,7 +1490,7 @@ def main():
     use, other = paint_survey.sources(samples, camera_corrects=not from_files)
     if not use:
       why['no game files (camera a check only)'] += 1
-      skipped += 1
+      left_out += 1
       continue
     kerbs = (-(offset + back * w), offset + fwd * w)
     files = use[0].get('src') == paint_survey.GAMEFILES
@@ -1294,6 +1502,7 @@ def main():
         why[f"lanes from the paint: {len(got['backward'])}+{len(got['forward'])} where GTA has {back}+{fwd}"] += 1
         row = row_of[wid]
         row[3], row[4] = len(got['forward']), len(got['backward'])
+        recounted.add(wid)
         lanes_to[(a, b)], lanes_to[(b, a)] = row[3], row[4]
     why[reason or ('measured (game files)' if files else 'measured (camera)')] += 1
     if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
@@ -1310,26 +1519,69 @@ def main():
     bay_to[row[0]].add(q)
   print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
   if survey:
-    print(f"paint survey of {len(painted) + skipped} links: " +
+    print(f"paint survey of {len(painted) + left_out} links: " +
           ', '.join(f'{n} {k}' for k, n in why.most_common()))
   print(f"{approaches} approaches to junctions with turn arrows, on {len(arrows_at)} ways ({bent} bending into theirs left out)")
   layer_of = {ways[i][0]: v for i, v in levels(nodes, [(a, b) for _, a, b, _ in ways]).items()}
   print(f"{len(layer_of)} ways over others as bridges (up to layer {max(layer_of.values(), default=0)})")
 
+  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey) if survey else []
+  info, parent, widen, piece_bays, applied = split_tapers(nodes, info, tapers, set(left_bays) | opened, arrows_at, bay_to,
+                                                               recounted)
+  if parent:
+    for pid, wid in parent.items():  # a piece is its way's but for its lanes
+      for d in (layer_of, destination):
+        if wid in d:
+          d[pid] = d[wid]
+      if wid in drawn:
+        drawn.add(pid)
+      if wid in centre_kinds:
+        centre_kinds[pid] = centre_kinds[wid]
+    pieces = defaultdict(list)
+    for wid in [r[0] for r in info]:
+      pieces[parent.get(wid, wid)].append(wid)
+    pieces = {wid: ps for wid, ps in pieces.items() if len(ps) > 1}
+    ends_of = {r[0]: (r[1], r[2]) for r in info}
+    row_of_piece = {r[0]: r for r in info}
+    restrictions = remap_restrictions(restrictions, ends_of, pieces)
+    for ps in pieces.values():  # no turning back at the nodes added along a two-way link, which had none
+      for p in ps:
+        a, b = ends_of[p]
+        row = row_of_piece[p]
+        for n in (a, b):
+          if n[0] == TAPER_NODE_AREA and row[3] and row[4]:
+            restrictions.append(('no_u_turn', p, [('n', n)], p))
+    used = sorted({k for _, a, b, *_ in info for k in (a, b)})
+    info.sort(key=lambda r: r[0])  # osmium readers want ways in order of their ids
+  for wid in widen:
+    painted.pop(wid, None)
+  print(f"{len(tapers)} turn lanes opening where the game files paint it, {applied} widening from there: {len(parent)} links split")
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:
     n = nodes[k]
     lat, lon = to_lat_lon(n['x'], n['y'])
-    w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat),
-                                       tags={**node_tags(n, stop.get(k, 'both')), 'ele': f"{n['z']:.1f}"}))
+    tags = {} if k[0] == TAPER_NODE_AREA else node_tags(n, stop.get(k, 'both'))
+    w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat), tags={**tags, 'ele': f"{n['z']:.1f}"}))
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
     if wid in crossings:
       w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)],
                                        tags={'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
       continue
     freeway = bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2
-    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, (b in bay_to[wid], a in bay_to[wid]), painted.get(wid)),
+    bays = piece_bays.get(wid, (b in bay_to[parent.get(wid, wid)], a in bay_to[parent.get(wid, wid)]))
+    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, bays, None if wid in piece_bays else painted.get(wid)),
             **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
+    for key, (s0, s1) in widen.get(wid, {}).items():  # the turn lane widening from nothing where it opens
+      if f'width:lanes:{key}' not in tags:
+        continue
+      widths = tags[f'width:lanes:{key}'].split('|')
+      full = float(widths[0])
+      tags[f'width:lanes:{key}:start'] = '|'.join([metres(full * s0), *widths[1:]])
+      tags[f'width:lanes:{key}:end'] = '|'.join([metres(full * s1), *widths[1:]])
+    if wid in widen:  # placement by the opening lane would move the line along the way: the middle of the road, where it's there
+      plain = {k: v for k, v in tags.items() if not k.startswith('placement')}
+      if abs(WayLanes.from_tags(plain).line - WayLanes.from_tags(tags).line) < 0.05:
+        tags = plain
     if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED:
       tags.setdefault('divider', 'double_solid_line')  # how GTA paints most two-lane roads' centre (OSM reads dashed)
     if wid in centre_kinds and 'lane_markings' not in tags:

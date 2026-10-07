@@ -231,6 +231,35 @@ def test_lanes_open_beside_a_bay():
   assert _opens_left(one, bay) and not _opens_left(bay, wider) and not _opens_left(one, section(['', 'right']))
 
 
+def test_split_tapers():
+  from collections import defaultdict
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import TAPER_NODE_AREA, remap_restrictions, split_tapers
+
+  def node(x, y):
+    return {'x': x, 'y': y, 'z': 0.0, 'f': [0, 0, 0, 0, 0], 'st': 0}
+  nodes = {'P': node(0, -100), 'S': node(0, -60), 'Q': node(0, -30), 'J': node(0, 0)}
+  road = flags(2, 2, 6, False)
+  info = [[1, 'P', 'S', 2, 2, 'primary', 40, None, road], [2, 'S', 'Q', 3, 2, 'primary', 40, None, road],
+          [3, 'Q', 'J', 3, 2, 'primary', 40, None, road]]
+  lane_links = {('S', 'Q'), ('Q', 'J')}
+  arrows = {1: {'turn:lanes:forward': 'through|through;right'}, 2: {'turn:lanes:forward': 'left|through|through;right'},
+            3: {'turn:lanes:forward': 'left|through|through;right'}}
+  bay_to = defaultdict(set, {2: {'Q'}, 3: {'J'}})
+  # the bay opens 20 m before S and is open 5 m after it
+  chain = [('P', 'S'), ('S', 'Q'), ('Q', 'J')]
+  rows, parent, widen, bays, _ = split_tapers(nodes, info, [(chain, [0.0, 40.0, 70.0, 100.0], 20.0, 45.0)], lane_links, arrows, bay_to)
+  assert [(r[0], r[1], r[2], r[3]) for r in rows] == [(1, 'P', (TAPER_NODE_AREA, 1), 2), (4, (TAPER_NODE_AREA, 1), 'S', 3),
+                                                       (2, 'S', (TAPER_NODE_AREA, 2), 3), (5, (TAPER_NODE_AREA, 2), 'Q', 3), (3, 'Q', 'J', 3)]
+  assert parent == {4: 1, 5: 2} and nodes[(TAPER_NODE_AREA, 1)]['y'] == -80.0
+  assert widen == {4: {'forward': (0.0, 0.8)}, 2: {'forward': (0.8, 1.0)}}
+  assert arrows[4]['turn:lanes:forward'] == 'left|through|through;right' and arrows[1]['turn:lanes:forward'] == 'through|through;right'
+  assert bays[1] == (False, False) and bays[4] == (True, False)
+  # restrictions on to the pieces: from the piece at the via node, every piece of a via way in order
+  ends = {r[0]: (r[1], r[2]) for r in rows}
+  got = remap_restrictions([('no_u_turn', 1, [('n', 'S')], 1), ('no_left_turn', 1, [('w', 2)], 3)], ends, {1: [1, 4], 2: [2, 5]})
+  assert got == [('no_u_turn', 4, [('n', 'S')], 4), ('no_left_turn', 4, [('w', 2), ('w', 5)], 3)]
+
+
 def test_median_turn_lane():
   from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_turns
   xy = {'P': (0, -100), 'Q': (0, -60), 'R': (0, -30), 'J': (0, 0), 'W': (-50, 0), 'E': (50, 0), 'N': (0, 50)}
