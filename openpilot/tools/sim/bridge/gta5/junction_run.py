@@ -160,8 +160,9 @@ class PlanPicker:
             "start": (a["start"]["x"], a["start"]["y"]), "dest": tuple(e["dest"]), "area": t["split"],
             "length": e["length"], "time": e["time"] or round(e["length"] / 8.0), "maneuvers": e["maneuvers"],
             "classes": [e["kind"]], "junctions": 1, "familiar": 0.0, "geom": e["geom"][::2],
+            "world": t.get("world") or {},
             "plan": {"approach": t["approach"], "exit": t["exit"], "pass": t["pass"], "split": t["split"], "lane": t["lane"],
-                     "kind": e["kind"], "junction": a["junction"], "extra": t["extra"]}}
+                     "kind": e["kind"], "junction": a["junction"], "extra": t["extra"], "freeway": bool(a.get("freeway"))}}
 
   def record(self, rec: dict):
     with self.cv:
@@ -198,7 +199,8 @@ class JunctionRun(rr.Run):
 
   def drive(self, c: dict, settings: list[str], world: dict) -> dict:
     write_manifest(self.args.runs, self.args.name, self.plan_path)
-    rec = super().drive(c, settings, world)
+    # the plan's time of day and weather for this trip (set after randomise's), unless --hours-of-day / --weathers
+    rec = super().drive(c, settings, world or c.get("world") or {})
     rec["plan_trip"], rec["plan"] = c["plan_trip"], c["plan"]
     self.picker.record(rec)
     rr.say(f"junction: {rec['plan_trip']} ({c['plan']['split']}, {c['plan']['kind']}): {rec['outcome']}; plan {self.picker.progress()}")
@@ -208,6 +210,17 @@ class JunctionRun(rr.Run):
 def write_rec_line(path: str, rec: dict):
   with open(path, "a") as f:
     f.write(json.dumps(rec) + "\n")
+
+
+def scene(rec: dict) -> dict | None:
+  """What gta5_cmd randomise picked for a trip (its `randomise {json}` line): car, mount, traffic; the world the plan's."""
+  text = rec.get("randomise") or ""
+  k = text.find("randomise {")
+  try:
+    s = json.JSONDecoder().raw_decode(text[k + len("randomise "):])[0] if k >= 0 else None
+  except ValueError:
+    return None
+  return {key: s[key] for key in ("vehicle", "mount", "traffic") if key in s} if isinstance(s, dict) else None
 
 
 def manifest(runs: str, name: str, plan_path: str | None) -> dict:
@@ -243,8 +256,8 @@ def manifest(runs: str, name: str, plan_path: str | None) -> dict:
                        "trips_arrived": sum(len(w["arrived"]) for w in ways if w["split"] == split)}
   return {"run": name, "written": time.strftime("%Y-%m-%dT%H:%M:%S"), "plan": plan_path, "plan_made": plan.get("made"),
           "map": plan.get("map"), "outcomes": dict(Counter(r["outcome"] for r in recs)), "by_split": by_split,
-          "trips": [{k: r.get(k) for k in ("id", "plan_trip", "plan", "started", "outcome", "detail", "duration", "distance",
-                                           "segments", "randomise_seed")} for r in recs],
+          "trips": [{**{k: r.get(k) for k in ("id", "plan_trip", "plan", "started", "outcome", "detail", "duration", "distance",
+                                              "segments", "world", "randomise_seed")}, "scene": scene(r)} for r in recs],
           "segments": [{**s, "plan_trip": run_to_plan.get(s.get("trip"))} for s in segs],
           "approaches": approaches, "ways": ways}
 
