@@ -36,11 +36,10 @@ def street_map() -> DestinationSnapper:
 
 
 def test_driveway():
-  # a building at the end of a drive faces the street: arrive northbound, the building on the right
+  # a building at the end of a drive: to the street just short of the drive, northbound to turn right into it
   s = street_map().snap((32.0, 2.0))
-  assert s.way in (10, 11) and s.highway == 'residential'
-  assert abs(s.point[0]) < 1e-6 and abs(s.point[1]) <= 3.0
-  assert s.heading == 0.0 and s.kerb_side and not s.as_is
+  assert s.way == 20 and np.allclose(s.drive, (0.0, 0.0))
+  assert np.allclose(s.point, (0.0, -3.0)) and s.heading == 0.0 and s.kerb_side and not s.as_is
   assert street_map().stub(int(np.flatnonzero(street_map().way == 20)[0]))
 
 
@@ -51,21 +50,52 @@ def test_alley():
 
 
 def test_on_a_car_park_aisle():
-  # clearly in the car park, far from the street: the aisle it's on
+  # in the car park: its entrance, coming northbound up the street to turn right in
   s = street_map().snap((45.0, 60.5))
-  assert s.way == 30 and s.heading is None and s.as_is
+  assert np.allclose(s.drive, (0.0, 60.0)) and np.allclose(s.point, (0.0, 57.0)) and s.heading == 0.0
+
+
+def test_drive_entrance_one_can_drive_in_by():
+  # a drive joining two streets, the nearer join exit only: the other one
+  nodes = {1: (0.0, -100.0), 2: (0.0, 100.0), 3: (100.0, -100.0), 4: (100.0, 100.0), 5: (0.0, 0.0), 6: (100.0, 0.0),
+           7: (30.0, 0.0)}
+  ways = {1: (STREET, [1, 5, 2]), 2: (STREET, [3, 6, 4]), 3: ({**SERVICE, 'oneway': 'yes'}, [7, 5]),
+          4: (SERVICE, [6, 7])}
+  snapper = DestinationSnapper(make_map(nodes, ways))
+  assert np.allclose(snapper.snap((30.0, 8.0)).drive, (100.0, 0.0))
+  ways[3] = (SERVICE, [7, 5])
+  s = DestinationSnapper(make_map(nodes, ways)).snap((30.0, 8.0))
+  assert np.allclose(s.drive, (0.0, 0.0)) and s.heading == 0.0  # northbound on the west street turns right, east
+  # traffic on the left: southbound turns left into it from the kerb side
+  assert DestinationSnapper(make_map(nodes, ways, drive_on_right=False)).snap((30.0, 8.0)).heading == 180.0
 
 
 def test_beside_a_car_park():
-  # off the aisles, nearer the street than the aisles allow for: the street
+  # beside the car park's aisles, a little nearer the street: still the car park's entrance
   s = street_map().snap((14.0, 45.0))
-  assert s.way == 11 and s.heading == 0.0
+  assert np.allclose(s.drive, (0.0, 60.0)) and s.heading == 0.0
+  # well clear of any drive: the street's kerb
+  s = street_map().snap((8.0, 20.0))
+  assert s.drive is None and s.way == 11 and s.heading == 0.0
 
 
-def test_no_side_in_a_car_park_or_past_a_dead_end():
-  # beside an aisle, far from the street: the aisle, either way
-  s = street_map().snap((45.0, 67.0))
-  assert s.way == 30 and s.heading is None and not s.kerb_side
+def test_drive_a_little_farther_than_the_street():
+  # a house whose drive is a few metres farther than the street's kerb: its drive
+  nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (0.0, 100.0), 4: (12.0, 0.0)}
+  ways = {1: (STREET, [1, 2, 3]), 2: ({**SERVICE, 'service': 'driveway'}, [2, 4])}
+  s = DestinationSnapper(make_map(nodes, ways)).snap((13.0, -12.0))
+  assert np.allclose(s.drive, (0.0, 0.0)) and s.heading == 0.0
+
+
+def test_named_service_stub_is_a_drive():
+  # GTA names a house's drive for its street: a named service stub is still a drive
+  nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (0.0, 100.0), 4: (20.0, 0.0)}
+  ways = {1: (STREET, [1, 2, 3]), 2: ({**SERVICE, 'name': 'Goma St'}, [2, 4])}
+  s = DestinationSnapper(make_map(nodes, ways)).snap((24.0, 4.0))
+  assert np.allclose(s.drive, (0.0, 0.0))
+
+
+def test_no_side_past_a_dead_end():
   # past the end of a long cul-de-sac (test_cul_de_sac): no side to arrive on
   nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (0.0, 100.0), 4: (75.0, 0.0), 5: (150.0, 0.0)}
   s = DestinationSnapper(make_map(nodes, {1: (STREET, [1, 2, 3]), 2: (STREET, [2, 4, 5])})).snap((158.0, 3.0))
@@ -88,7 +118,9 @@ def test_on_the_street():
 
 def test_drive_on_left():
   snapper = DestinationSnapper(make_map(NODES, WAYS, drive_on_right=False))
-  assert snapper.snap((32.0, 2.0)).heading == 180.0
+  assert snapper.snap((-18.0, -50.0)).heading == 0.0  # the alley case: the kerb is on the left
+  s = snapper.snap((32.0, 2.0))
+  assert s.heading == 180.0 and np.allclose(s.point, (0.0, 3.0))  # southbound, turning left into the drive
 
 
 def test_divided_road():

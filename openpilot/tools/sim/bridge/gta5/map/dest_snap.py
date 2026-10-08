@@ -1,8 +1,15 @@
 """Where a destination meets the road: the road a map waypoint faces, and the way to arrive along it.
 
 A waypoint is usually put on a building, a car park or a petrol station beside its street, so the nearest road is often
-a car park aisle, a driveway or an alley next to the street meant. This picks the road by how far the waypoint is from
-its kerb, plus a penalty for roads one doesn't arrive by:
+a car park aisle, a driveway or an alley next to the street meant.
+
+A property with a drive (a waypoint within DRIVE_NEAR of a driveway, car park aisle, forecourt, private road or a named
+service stub, not much farther from it than from any street and with no street between) is arrived at by its drive: the route ends on the street just before
+the drive joins it, the nearest join along the drives from the waypoint that one may drive in by, coming the way that
+turns into it from the kerb side where the street allows.
+
+Otherwise the car parks at the kerb of the road the waypoint faces, picked by how far the waypoint is from its kerb,
+plus a penalty for roads one doesn't arrive by:
 - minor roads (`highway=service` with any `service=*`, `track`, private access): a driveway, car park aisle or alley,
   unless the waypoint is on one and no ordinary road is about as near (half the penalty for a named service road with
   no `service=*`, often a street);
@@ -16,6 +23,7 @@ side (the right where traffic drives on the right), unless the waypoint is on th
 the road is a minor one (either side of a car park aisle will do). On a divided road the carriageway nearer the
 waypoint is the one on its side. The router may still arrive the other way where the kerb side is a long way round.
 It reads only standard OSM tags (osm_lanes.OsmLanes), so it works the same on a real map."""
+import heapq
 import math
 from dataclasses import dataclass
 
@@ -35,6 +43,10 @@ STUB_PENALTY = 25.0  # m
 LEVEL_PENALTY = 10.0  # m: a bridge or tunnel
 BEHIND_PENALTY = 30.0  # m: an ordinary road lies between the waypoint and this one
 END_GAP = 3.0  # m from a segment's ends, so the router can't take the destination for a road meeting there
+DRIVE_NEAR = 15.0  # m from a drive's kerb: the waypoint is on the property it serves ...
+DRIVE_SLACK = 10.0  # m: ... unless a street's kerb is nearer by more than this
+DRIVE_MAX = 200.0  # m along the drive from the waypoint to where it joins a street
+NOT_DRIVES = frozenset({'alley', 'emergency_access'})
 
 
 @dataclass
@@ -47,6 +59,7 @@ class Snap:
   off: float  # m from the waypoint to the road's kerb
   score: float  # m, the kerb distance plus penalties
   as_is: bool  # the waypoint is on its nearest road: a router's nearest road is this one
+  drive: np.ndarray | None = None  # where the drive serving the waypoint joins the street, when it's that
 
 
 def bearing(d) -> float:
@@ -66,6 +79,9 @@ class DestinationSnapper:
     self.a = osm.xy[osm.data.index(self.na)] if len(a) else np.zeros((0, 2))
     self.b = osm.xy[osm.data.index(self.nb)] if len(b) else np.zeros((0, 2))
     self._stub: dict[int, bool] = {}
+    self.first: dict[int, int] = {}  # way -> its first segment
+    for k, wid in enumerate(way):
+      self.first.setdefault(wid, k)
 
   def neighbours(self, node: int) -> set[int]:
     return set(self.osm.links.get(node, ()))
@@ -124,6 +140,21 @@ class DestinationSnapper:
     return tags.get('highway') in MINOR or 'service' in tags or \
       any(tags.get(k) in ('private', 'no') for k in ('access', 'vehicle', 'motor_vehicle', 'motorcar'))
 
+  @classmethod
+  def drive(cls, tags: dict) -> bool:
+    """A drive into a property: a driveway, car park aisle, forecourt or private road, not an alley or a street."""
+    return cls.minor(tags) and tags.get('highway') != 'track' and tags.get('service') not in NOT_DRIVES and       not cls.street(tags)
+
+  def drive_way(self, wid: int) -> bool:
+    """A drive, or a named service road that is a stub (a drive named for its street, as GTA's are)."""
+    tags = self.osm.ways[wid][0]
+    return self.drive(tags) or (self.street(tags) and self.stub(self.first[wid]))
+
+  def public(self, wid: int) -> bool:
+    """A street one can stop beside or turn off: not a drive, alley or track."""
+    tags = self.osm.ways[wid][0]
+    return (not self.minor(tags) or self.street(tags)) and not self.drive_way(wid)
+
   @staticmethod
   def street(tags: dict) -> bool:
     """A named service road with no kind of service given: as likely a street mapped as minor as a car park."""
@@ -177,12 +208,97 @@ class DestinationSnapper:
     assert best is not None
     return best, best_key[0]
 
+  def _entrance(self, c: dict) -> tuple[int, int, float] | None:
+    """From c's foot along drives (each way as one may drive in) to the nearest node where one meets a street: that
+    node, the drive's node next to it, and how far along the drive it is; None within DRIVE_MAX."""
+    k = c['k']
+    a, b = int(self.na[k]), int(self.nb[k])
+    oneway = oneway_of(c['tags'])
+    heap, n = [], 0
+    for node, d, enters in ((a, c['t'] * c['length'], oneway >= 0), (b, (1 - c['t']) * c['length'], oneway <= 0)):
+      if enters:  # driving in from this node towards the foot
+        heap.append((d, n, node, b if node == a else a))
+        n += 1
+    heapq.heapify(heap)
+    done = set()
+    while heap:
+      d, _, node, inner = heapq.heappop(heap)
+      if node in done:
+        continue
+      done.add(node)
+      if any(self.public(w) for w in self._ways_at(node)):
+        return node, inner, d
+      for nxt in self.neighbours(node):
+        wid, along = self.osm.pairs[(nxt, node)]
+        o = oneway_of(self.osm.ways[wid][0])
+        if not self.drive_way(wid) or nxt in done or (o == 1 and not along) or (o == -1 and along):
+          continue  # driving in is nxt -> node
+        dn = d + float(np.hypot(*(self.osm.node_xy(nxt) - self.osm.node_xy(node))))
+        if dn <= DRIVE_MAX:
+          heapq.heappush(heap, (dn, n, nxt, node))
+          n += 1
+    return None
+
+  def _ways_at(self, node: int) -> set[int]:
+    return {self.osm.pairs[(node, m)][0] for m in self.neighbours(node)}
+
+  def _arrive_at(self, join: int, inner: int) -> tuple[np.ndarray, float] | None:
+    """Where on a street just short of `join` to arrive so as to turn into the drive (towards `inner`), and the heading:
+    turning towards the kerb side where the street allows it."""
+    xy = self.osm.node_xy(join)
+    into = self.osm.node_xy(inner) - xy
+    options = []
+    for prev in self.neighbours(join):
+      wid, along = self.osm.pairs[(prev, join)]
+      tags = self.osm.ways[wid][0]
+      o = oneway_of(tags)
+      if not self.public(wid) or (o == 1 and not along) or (o == -1 and along):
+        continue
+      d = xy - self.osm.node_xy(prev)
+      length = float(np.hypot(*d))
+      if length < 1e-6:
+        continue
+      right = float(d[0] * into[1] - d[1] * into[0]) < 0  # the drive leaves to the right
+      kerb = right == self.osm.drive_on_right
+      t = max(1.0 - END_GAP / length, 0.5)
+      options.append((not kerb, self.minor(tags), -length, self.osm.node_xy(prev) + d * t, bearing(d)))
+    if not options:
+      return None
+    best = min(options, key=lambda o: o[:3])
+    return best[3], best[4]
+
+  def _drive(self, p: np.ndarray, cands: list[dict]) -> Snap | None:
+    """Where the drive serving the waypoint's property joins the street, if it's on one: the waypoint is near a drive,
+    not much farther from it than from any street, with no street between."""
+    nearest_street = min((c['off'] for c in cands if self.public(c['way'])), default=math.inf)
+    if nearest_street <= ON_ROAD:
+      return None  # on the street itself
+    drives = sorted((c for c in cands if c['off'] <= min(DRIVE_NEAR, nearest_street + DRIVE_SLACK) and
+                     self.drive_way(c['way'])), key=lambda c: c['off'])
+    for c in drives:
+      if self._behind(p, c, cands):
+        continue
+      found = self._entrance(c)
+      if found is None:
+        continue
+      join, inner, _ = found
+      at = self._arrive_at(join, inner)
+      if at is None:
+        continue
+      point, heading = at
+      return Snap(point, c['way'], heading, True, c['tags'].get('highway', ''), c['off'], c['off'], False,
+                  self.osm.node_xy(join))
+    return None
+
   def snap(self, dest, search: float = SEARCH) -> Snap | None:
     """The road the destination faces, where on it to arrive and which way; None with no road within `search` m."""
     p = np.asarray(dest, float)[:2]
     cands = self.candidates(p, search)
     if not cands:
       return None
+    drive = self._drive(p, cands)
+    if drive is not None:
+      return drive
     best, score = self.best(p, cands)
     k, tags = best['k'], best['tags']
     on = best['off'] <= ON_ROAD
