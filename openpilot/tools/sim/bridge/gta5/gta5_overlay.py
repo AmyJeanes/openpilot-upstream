@@ -774,6 +774,38 @@ def route_z(route, along: np.ndarray, fallback: float) -> np.ndarray:
   return np.interp(along, route.along, z)
 
 
+HEIGHT_WINDOW = 40.0  # m along the route either side of a point's guess its height is looked for
+
+
+def route_heights(route, xy: np.ndarray, guess: np.ndarray, fallback: float, window: float = HEIGHT_WINDOW) -> np.ndarray:
+  """The route's height at the place on it nearest each point [N, 2] in plan, looked for within window m of its guess
+  [N] (m along the route): a lane line runs beside the route and is shorter or longer round its corners, so heights
+  read by its own length drift along the route, metres off over a crest or a dip."""
+  z = getattr(route, "z", None)
+  if z is None or not len(z) or np.isnan(z).any():
+    return np.full(len(xy), fallback)
+  pts, along = np.asarray(route.points, np.float64), np.asarray(route.along, np.float64)
+  lo = max(int(np.searchsorted(along, guess.min() - window)) - 1, 0)
+  hi = min(int(np.searchsorted(along, guess.max() + window)) + 1, len(pts))
+  out = np.interp(guess, along, z)
+  if hi - lo < 2:
+    return out
+  a, ab = pts[lo:hi - 1], np.diff(pts[lo:hi], axis=0)
+  za, dz, sa = z[lo:hi - 1], np.diff(z[lo:hi]), along[lo:hi - 1]
+  seg = np.hypot(ab[:, 0], ab[:, 1])
+  ab2 = np.maximum(seg * seg, 1e-9)
+  for b in range(0, len(xy), 256):
+    q, g = xy[b:b + 256, :2], guess[b:b + 256]
+    t = np.clip(np.einsum("qsk,sk->qs", q[:, None] - a[None], ab) / ab2, 0.0, 1.0)
+    d = np.hypot(*(a[None] + ab[None] * t[..., None] - q[:, None]).transpose(2, 0, 1))
+    d[np.abs(sa[None] + t * seg[None] - g[:, None]) > window] = np.inf
+    k = np.argmin(d, axis=1)
+    rows = np.arange(len(q))
+    found = np.isfinite(d[rows, k])
+    out[b:b + 256] = np.where(found, za[k] + dz[k] * t[rows, k], out[b:b + 256])
+  return out
+
+
 def ribbon_line(pts: np.ndarray, gap: float = RIBBON_GAP, max_turn: float = RIBBON_TURN) -> np.ndarray:
   """The route's line [N, 3] for the plugin's ribbon: points at least gap m apart, and no corner sharper than max_turn
   deg (the corner's point is dropped while it is), so GTA's sideways jogs between lanes don't make it jagged."""
@@ -866,7 +898,7 @@ class Ribbon:
     car, _ = nearest_along(lane, s, pos, LANE_SEARCH)
     start = min(car + lead, float(s[-1]))
     # its heights by the route's, from the car's place on both
-    z = route_z(route, route.at + s - car, road_z) if route is not None else np.full(len(s), road_z)
+    z = route_heights(route, lane, route.at + s - car, road_z) if route is not None else np.full(len(s), road_z)
     line = np.column_stack([lane, z])
     self._extend_trail(line, s, start)
     if ("r" in layers or "n" in layers) and s[-1] - start > RIBBON_GAP:
