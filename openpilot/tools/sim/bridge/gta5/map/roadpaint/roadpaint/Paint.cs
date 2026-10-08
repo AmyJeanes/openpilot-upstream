@@ -127,6 +127,38 @@ public static class Paint
     return res;
   }
 
+  // A decal drawn as strips of line paint (a sheet of white and yellow lines, each strip mapped onto its own road
+  // line) rather than a road surface: its opaque texels are mostly paint coloured and the opacity changes in whole
+  // columns (lines along v) or rows (along u). Its lines are in the alpha, not in the colour, which is flat underneath.
+  public static (bool v, bool u) Strips(byte[] bgra, int W, int H)
+  {
+    var op = new bool[W * H];
+    int nop = 0, npaint = 0;
+    for (int i = 0; i < W * H; i++)
+    {
+      if (bgra[4 * i + 3] <= 128) continue;
+      op[i] = true; nop++;
+      float b = bgra[4 * i] / 255f, g = bgra[4 * i + 1] / 255f, r = bgra[4 * i + 2] / 255f;
+      float mx = Math.Max(r, Math.Max(g, b)), mn = Math.Min(r, Math.Min(g, b));
+      if (Yellowish(r, g, b) || (mx > 0.5f && mx - mn < 0.15f)) npaint++;
+    }
+    float f = nop / (float)(W * H);
+    if (f < 0.03f || f > 0.75f || npaint < 0.7f * nop) return (false, false);
+    float Split(bool cols)
+    {
+      int A = cols ? W : H, B = cols ? H : W, ok = 0;
+      for (int a = 0; a < A; a++)
+      {
+        int n = 0;
+        for (int b = 0; b < B; b++) if (op[cols ? b * W + a : a * W + b]) n++;
+        float fr = n / (float)B;
+        if (fr > 0.6f || fr < 0.15f) ok++;
+      }
+      return ok / (float)A;
+    }
+    return (Split(true) > 0.7f, Split(false) > 0.7f);
+  }
+
   // Decals: opaque, bright texels are paint (opened by a 3x3 square so specks drop out).
   public static void Decal(Tex t, byte[] bgra)
   {
@@ -166,7 +198,7 @@ public static class Paint
   }
 
   // Line bands of a decal atlas cell whose strips run along `axis`: columns (or rows) mostly painted within the cell.
-  public static void DecalBands(Tex t, float u0, float u1, float v0, float v1, char axis)
+  public static void DecalBands(Tex t, float u0, float u1, float v0, float v1, char axis, bool wraps = false)
   {
     int W = t.W, H = t.H;
     int a0, a1, b0, b1, A, B;  // across range, along range (texels), across/along sizes
@@ -196,7 +228,17 @@ public static class Paint
         for (int q = a; q < e; q++) { var p = P(q, b); if (p > 0) { c++; n++; if (p == 2) ny++; } }
         painted[b] = c * 2 > len;
       }
-      var band = new Band { Axis = axis, Pos = (a + len / 2f) / A, Width = len / (float)A, Colour = (byte)(ny * 2 > n ? 2 : 1), Wraps = false };
+      // worn paint: gaps shorter than a twelfth of the cell are cracks, and a line painted over 70% of it is solid
+      int ext = b1 - b0, gap = Math.Max(ext / 12, 2);
+      for (int b = b0; b < b1; b++)
+      {
+        if (painted[b] || b == b0 || !painted[b - 1]) continue;
+        int e2 = b;
+        while (e2 < b1 && !painted[e2]) e2++;
+        if (e2 < b1 && e2 - b <= gap) for (int q = b; q < e2; q++) painted[q] = true;
+      }
+      if (Enumerable.Range(b0, ext).Count(b => painted[b]) > 0.7f * ext) for (int b = b0; b < b1; b++) painted[b] = true;
+      var band = new Band { Axis = axis, Pos = (a + len / 2f) / A, Width = len / (float)A, Colour = (byte)(ny * 2 > n ? 2 : 1), Wraps = wraps };
       band.Painted = Runs(painted);
       if (band.Painted.Count > 0) t.Bands.Add(band);
     }

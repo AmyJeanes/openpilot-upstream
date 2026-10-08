@@ -198,6 +198,7 @@ inline void HARD_ATTACH_CAM_TO_ENTITY(Cam c, Entity e, float xr, float yr, float
 }
 inline void SET_CAM_COORD(Cam c, float x, float y, float z) { Invoke(0x4D41783FB745E42E, c, x, y, z); }
 inline void SET_CAM_ROT(Cam c, float x, float y, float z, int order) { Invoke(0x85973643155D0B07, c, x, y, z, order); }
+inline Vector3 GET_FINAL_RENDERED_CAM_COORD() { return Invoke<Vector3>(0xA200EB1EE790F448); }
 inline void HIDE_HUD_AND_RADAR_THIS_FRAME() { Invoke(0x719FF505F097FD20); }
 inline void SET_FOCUS_POS_AND_VEL(float x, float y, float z, float vx, float vy, float vz) { Invoke(0xBB7454BAFF08FE25, x, y, z, vx, vy, vz); }
 inline void CLEAR_FOCUS() { Invoke(0x31B73D1EA9F01DA2); }

@@ -27,10 +27,14 @@
   gta5_cmd.py expert route L1 [speed=12 ...]    put the car at an e2e trip's start (a name in ~/gta5test/e2e/*.txt, or
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
   gta5_cmd.py expert status                     the control file
-  gta5_cmd.py debug on [layers=edges,dividers,stops,junctions,route,nav,points,fill|all] [force=1] [ground=1] [lift=0.1]
-                                                the map debug overlay in the world, from the player's camera (gta5_overlay.py;
-                                                F7 toggles it); off while recording unless force=1; ground=1 puts the lines
-                                                on the game's ground rather than the map's heights; debug off
+  gta5_cmd.py debug on [layers=edges,dividers,stops,junctions,arrows,crossings,parking,tapers,flags,route,nav,points,fill|all]
+             [width=1] [widths=e:2,d:1.5] [dist=120] [grow=40] [ground=1] [lift=0.05] [casing=1] [thin=0] [sides=1] [force=1]
+                                                the map debug overlay in the world, on the player's frames only (never in
+                                                openpilot's; gta5_overlay.py, core.cpp DrawDebug; F7 toggles it): strips of
+                                                each kind's own width on the game's ground (ground=0: at the map's heights),
+                                                width/widths scale them (all, or by layer letter), dist m drawn, grow m from
+                                                the camera they start widening to stay visible (0 off), thin=1 the old 1-px
+                                                lines; off while recording unless force=1; debug off
   gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16 take=1]
                                                 our route on the minimap and map as a custom GPS route, the map's waypoint held
                                                 off it meanwhile (take=0 leaves it); gpsroute off

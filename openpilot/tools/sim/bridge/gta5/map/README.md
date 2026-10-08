@@ -140,7 +140,7 @@ shown or a level changes.
     where its paint has other counts than GTA's (Eclipse Blvd's 3 + 2; arrows are then laid out for the painted
     lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
-    lanes between their painted edges, and the painted arrows as `turn:lanes` where there's one per lane. GTA's lane
+    lanes between their painted edges. GTA's lane
     counts stay on one-way links. A freeway GTA draws as parallel links is painted as one carriageway: each link takes
     the painted lanes about its line (`paint_survey.correct_carriageway`), placed by `placement` on the nearest lane
     edge or middle (the lines move up to 1 m to fit), with `change:lanes` from the lines between them and the next
@@ -149,6 +149,15 @@ shown or a level changes.
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
     rp_all/polylines.jsonl`.
+  - Where a link's lanes stay the class layout (the survey didn't correct them, turn bays folded in included), its
+    lines still come from the game files' (`paint_survey.lane_lines`): each line between two lanes one way is the
+    white line painted nearest it, less than halfway across the lanes beside it, in half the sections, and a solid one
+    (or solid on one side) is `change:lanes` (the line beside a left-turn bay, approaches' solid lines). Where the files
+    show no line between two lanes the line stays dashed: they miss thin dashed lane lines the game paints (Vinewood
+    Blvd's, seen from above in the game), so no direction is left unmarked from them. Residential roads, service roads
+    and tracks of two lanes or more the files show unpainted in 90% of 3 sections or more (the asphalt's edges read,
+    so not a gap in the files) are `lane_markings=no` (the Vinewood Hills' streets, car parks); major and unclassified
+    roads keep their lines there, being more likely gaps in the files (the Great Ocean Hwy, some freeways, Blaine roads).
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
@@ -156,10 +165,16 @@ shown or a level changes.
   - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
     no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
   - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it
-    less those the restrictions forbid: every lane the same way at a forced turn, else the outer lanes also turn (GTA's
-    cars turn from the outermost) and the others go through, or half each way at a T. On every way from 30 m before
-    the junction (Valhalla reads them from the way into it), not on one-lane approaches other than GTA's left turn
-    only lanes, and not where the road bends into the junction, which leaves which way is through moot.
+    less those the restrictions forbid. Each lane takes the arrow the game files paint in it up to 90 m before the
+    junction (`--survey-features rp_all/features.jsonl`, placed in the lanes by position), less any move the junction
+    has no way out for (through also where the road goes on skewed up to 55°). Lanes without paint take GTA's usual
+    painting (that of 2 in 3 approaches it paints every lane of): every lane the same way at a forced turn, else the
+    left lane left only, the right lane through and right, the others through, or half each way at a T; never turning
+    across a painted lane. GTA lays many approaches as a link per lane, each with its own turn flags: each is its own
+    approach, so a lane's arrows are the moves its own link has. On every way from 30 m before the junction, or from
+    the furthest painted arrow (Valhalla reads them from the way into it); not on one-lane approaches other than GTA's
+    left turn only lanes and those whose painted arrow covers every move they have, and not where the road bends into
+    the junction, which leaves which way is through moot.
   - One link (offset -2/14 lane) has lanes overlapping that OSM can't describe: its kerbs are kept.
 - Road classes are guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
   and alleys (nodes switched off for traffic, or without GPS), track off-road. GTA splits a road's lanes into separate
@@ -205,6 +220,14 @@ shown or a level changes.
   drawn towards the junction; one with no junction ahead, as on a one-way link leaving one, is left out. Valhalla 3.9
   reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav's own
   stop list follows it (`paths.py`, `GTA5_STOP_DIRECTION=1`).
+- GTA's stop line nodes are 12-24 m before their junction's node, often metres off the painted line. With
+  `--survey-lines` (and `--survey-features rp_all/features.jsonl` for the painted crossings) the map's stop lines go where the game files
+  paint them (`stop_paint.py`): on each approach to a junction (junctions.py's), the thick white line across its
+  lanes towards the junction (the far edge of a crossing painted there, which GTA paints as the stop line), as a node
+  splitting the way there (ids as for tapers) that takes the signal or sign and its direction from GTA's node. An
+  approach with a painted stop line and none in the map gets one (`traffic_signals` at a junction with signals, else
+  `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. GTA's node stays the
+  stop line where nothing is painted. Nav's stop list still comes from GTA's nodes.
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /
@@ -215,7 +238,13 @@ shown or a level changes.
 - openpilot's driving model can't turn back on itself, so every move that turns back more than 135 degrees is a
   `no_u_turn` restriction: at a node, and through up to four short links (40 m) as through a median gap or a turning
   loop. GTA's nodes allow them everywhere. The short two-way links joining a divided road's carriageways away from
-  junctions are left out. A trip from a dead end then has no route.
+  junctions are left out. A trip from a dead end then has no route. A move with no other way on at any node along it
+  is the road, not a U-turn: a hairpin bend, or the only way out of an acute junction.
+- No restriction may cut road off that GTA's links join to the rest of the map (`traps.py`: a car on a way that way
+  could not be routed out, or a way could not be routed to either way). Where restrictions do, the generator changes
+  the least turning forbidden move out of or into each such area, U-turn bans before GTA's flags, until none is left:
+  out of a trap the move is forbidden from the ways on to the trap's way instead (a car there may leave, but no route
+  goes in to turn back); in to cut-off road it is allowed. It stops if the restrictions it writes cut any road off.
 - Ped nodes and boat nodes are left out. The links GTA marks "don't use for navigation" stay in (`gta:no_nav`): without
   them most of the map is cut off from the rest.
 - Game coordinates (metres) map to degrees about (0, 0), so the map sits on the equator: `gta5_map.py`.

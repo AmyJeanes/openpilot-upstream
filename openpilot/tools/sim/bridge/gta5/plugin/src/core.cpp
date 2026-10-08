@@ -9,12 +9,14 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "capture.h"
@@ -213,6 +215,8 @@ uint64_t g_frameViews = 0;  // recent frames' camera, 4 bits each, newest lowest
 double g_wideAt = -1;       // when to render the wide view that completes a road view, or -1
 int g_ticks = 0, g_opCount = 0;
 double g_drawSum = 0, g_drawMax = 0;  // s the map debug overlay took to draw, over the interleave stats period
+double g_probeSum = 0;                // of which its ground probes
+int g_debugPolys = 0;                 // its draw calls in the last frame
 double g_statsT = 0;
 float g_camPitch = 0, g_camYaw = 0;  // degrees, for checks against known rotations
 int g_indicator = 0;  // 0 off, 1 left, 2 right
@@ -487,8 +491,10 @@ int UpdateCameraFrame(double now, float dt, bool split) {
       if (g_statsT)
         Log("interleave: " + std::to_string(g_ticks) + " ticks, " + std::to_string(g_opCount) + " openpilot frames in 10 s, ticks apart" + hist +
             ", game ms apart mean " + Num(1000 * mean) + " sd " + Num(1000 * sd) + " max " + Num(1000 * gapMax) +
-            (g_drawSum > 0 ? ", overlay draw ms per tick mean " + Num(1000 * g_drawSum / std::max(g_ticks, 1)) + " max " + Num(1000 * g_drawMax) : std::string()));
-      g_drawSum = g_drawMax = 0;
+            (g_drawSum > 0 ? ", overlay draw ms per tick mean " + Num(1000 * g_drawSum / std::max(g_ticks, 1)) + " max " + Num(1000 * g_drawMax) +
+                                 " (ground probes mean " + Num(1000 * g_probeSum / std::max(g_ticks, 1)) + "), " + std::to_string(g_debugPolys) + " polys"
+                           : std::string()));
+      g_drawSum = g_drawMax = g_probeSum = 0;
       std::fill(std::begin(gapTicks), std::end(gapTicks), 0);
       gapSum = gapSq = gapMax = 0;
       g_ticks = g_opCount = 0;
@@ -988,46 +994,199 @@ struct P3 {
 };
 
 struct DebugLine {
-  char kind;  // gta5_overlay.py's: e edge, d/w lane divider (dashed/solid), c/y centre line (solid/dashed), l/s stop
-              // line (light/sign), j junction, r/b route (ahead/behind), n nav's lane plan, m next turn, g where its
-              // signal comes on
+  char kind;  // gta5_overlay.py's: e edge, d/w lane divider (dashed/solid), c/y centre line (solid/dashed), p parking
+              // lane's edge, l/s/k stop line (light/sign/give way), x crossing, j junction, L/T/R lane arrow (left,
+              // through, right), t a taper's lane, q lane count flag, r/b route (ahead/behind), n nav's lane plan,
+              // m next turn, g where its signal comes on
   std::vector<P3> pts;
 };
 
 // The map around the car from the bridge, drawn into the world every player frame while on (debug command, key_debug)
 struct DebugOverlay {
-  bool on = false, force = false, ground = false;
-  std::string layers = "edsjrnm";  // e d s j r n m as above (s both stop lines, r both route parts, m both points), f fills
-  float lift = 0.1f;               // m above the road
+  bool on = false, force = false;
+  bool ground = true;   // strips on the game's ground under each point (else at the map's heights)
+  bool thin = false;    // 1-px lines as before the strips
+  bool casing = true;   // white and yellow strips edged dark
+  std::string layers = "edsjrnmaxptq";  // layer letters (DebugLayer); f fills junction areas
+  float lift = 0.05f;   // m above the ground, added to each kind's own
+  float width = 1.0f;   // every kind's width scaled
+  float layerWidth[128];  // and each layer's, by its letter
+  float dist = 120.0f;  // m from the camera drawn
+  float grow = 40.0f;   // m from the camera strips widen beyond, to keep about as many pixels wide; 0: never
+  int sides = 1;        // 1: each triangle wound to face up (seen from above); 2: both windings; flip: down only
+  bool flip = false;
+  int maxPolys = 16000;  // draw calls per frame
+  int probes = 100;      // ground probes per frame
   std::vector<DebugLine> lines;
   int vertices = 0;
+  size_t probeLine = 0, probePt = 0;  // how far the ground probes have got through the lines
+  int grounded = 0, offGround = 0;    // points put on the ground, and left at the map's height (no ground near it)
+  int polys = 0;                      // drawn last frame
   bool recording = false;  // the bridge is recording: drawn only when forced
   double t = -1e9;         // when the lines came
+  DebugOverlay() { std::fill(std::begin(layerWidth), std::end(layerWidth), 1.0f); }
 } g_debug;
 std::atomic<int> g_debugPresses{0};
-constexpr double DEBUG_STALE = 3.0;    // s without new lines: the bridge stopped sending them
-constexpr int DEBUG_MAX_SEGMENTS = 6000;  // drawn per frame
+constexpr double DEBUG_STALE = 3.0;  // s without new lines: the bridge stopped sending them
+constexpr float DEBUG_DENSE = 3.0f;  // m at most between a strip's points, so it follows the ground between them
+constexpr float PROBE_ABOVE = 2.0f, PROBE_MAX_DZ = 2.5f;  // m above a point the ground is looked for from, and kept within
+constexpr float GROW_MAX = 4.0f;  // times its width a strip widens to at most
 
 char DebugLayer(char kind) {
-  return kind == 'l' ? 's' : kind == 'b' ? 'r' : kind == 'g' ? 'm' : kind == 'w' || kind == 'c' || kind == 'y' ? 'd' : kind;
+  switch (kind) {
+    case 'l': case 'k': return 's';
+    case 'b': return 'r';
+    case 'g': return 'm';
+    case 'w': case 'c': case 'y': return 'd';
+    case 'L': case 'T': case 'R': return 'a';
+    default: return kind;
+  }
 }
 
-// the map preview's colours (gta5_train maprender.preview), but nav's plan, which runs on the route
+// Each kind's look: colour, width (m), dash and gap (m; 0: solid), and lift (m) over the ground, so kinds that overlap
+// don't fight. Lane lines, centre lines, stop lines, crossings and arrows' turns as the map view (map/view.html) colours
+// them; kerbs green, which shows against both the asphalt and the white paint.
+struct KindStyle {
+  char kind;
+  int r, g, b, a;
+  float width, on, off, lift;
+};
+constexpr KindStyle STYLES[] = {
+    {'e', 40, 230, 90, 235, 0.35f, 0, 0, 0.02f},       // kerb
+    {'d', 245, 245, 245, 235, 0.20f, 3, 6, 0.03f},     // lane line, dashed
+    {'w', 245, 245, 245, 235, 0.20f, 0, 0, 0.03f},     // lane line, solid
+    {'y', 242, 194, 0, 235, 0.20f, 3, 6, 0.03f},       // centre line, dashed
+    {'c', 242, 194, 0, 235, 0.20f, 0, 0, 0.03f},       // centre line or a median's edge, solid
+    {'p', 175, 120, 255, 220, 0.15f, 1, 1, 0.03f},     // a parking lane's edge along the lanes
+    {'l', 255, 50, 50, 235, 0.60f, 0, 0, 0.04f},       // stop line at lights
+    {'s', 255, 140, 0, 235, 0.60f, 0, 0, 0.04f},       // stop line at a stop sign
+    {'k', 255, 140, 0, 235, 0.45f, 0.6f, 0.6f, 0.04f}, // give way line
+    {'x', 235, 235, 235, 120, 3.0f, 0.5f, 0.6f, 0.01f},// crossing, its stripes
+    {'j', 40, 110, 255, 235, 0.15f, 0, 0, 0.02f},      // junction area's outline
+    {'L', 77, 163, 255, 240, 0.30f, 0, 0, 0.05f},      // lane arrow turning left
+    {'T', 235, 235, 235, 240, 0.30f, 0, 0, 0.05f},     // through
+    {'R', 255, 169, 64, 240, 0.30f, 0, 0, 0.05f},      // right
+    {'t', 0, 220, 255, 110, 1.20f, 0, 0, 0.01f},       // the middle of a lane opening or closing along a taper
+    {'r', 255, 25, 25, 100, 1.75f, 0, 0, 0.0f},        // route ahead
+    {'b', 140, 15, 15, 100, 1.75f, 0, 0, 0.0f},        // route behind
+    {'n', 255, 255, 255, 235, 0.25f, 2, 1.5f, 0.06f},  // nav's lane plan, over the route
+};
+constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
+
+const KindStyle &StyleOf(char kind) {
+  for (const KindStyle &s : STYLES)
+    if (s.kind == kind) return s;
+  return OTHER_STYLE;
+}
+
+// the colour of the kinds drawn as markers
 void DebugColour(char kind, int &r, int &g, int &b) {
   switch (kind) {
-    case 'e': r = 0, g = 255, b = 0; break;
-    case 'd':
-    case 'w': r = 255, g = 255, b = 255; break;
-    case 'c':
-    case 'y': r = 255, g = 200, b = 0; break;
-    case 'l': r = 255, g = 230, b = 0; break;
-    case 's': r = 255, g = 140, b = 0; break;
-    case 'j': r = 40, g = 110, b = 255; break;
-    case 'r': r = 255, g = 25, b = 25; break;
-    case 'b': r = 140, g = 15, b = 15; break;
-    case 'n': r = 255, g = 255, b = 255; break;  // dashed over the route's ribbon
+    case 'm': r = 255, g = 255, b = 255; break;
     case 'g': r = 255, g = 190, b = 0; break;
-    default: r = 255, g = 255, b = 255;
+    case 'q': r = 255, g = 0, b = 255; break;
+    default: {
+      const KindStyle &s = StyleOf(kind);
+      r = s.r, g = s.g, b = s.b;
+    }
+  }
+}
+
+bool IsMarker(char kind) { return kind == 'm' || kind == 'g' || kind == 'q'; }
+
+// points added along a strip's line no more than DEBUG_DENSE m apart (heights along it), so it can follow the ground
+void Densify(DebugLine &l) {
+  if (IsMarker(l.kind) || l.pts.size() < 2) return;
+  std::vector<P3> out;
+  out.reserve(l.pts.size() * 2);
+  out.push_back(l.pts[0]);
+  for (size_t i = 1; i < l.pts.size(); i++) {
+    const P3 &a = l.pts[i - 1], &c = l.pts[i];
+    float len = std::hypot(c.x - a.x, c.y - a.y);
+    int n = std::isfinite(len) ? std::min(static_cast<int>(std::ceil(len / DEBUG_DENSE)), 400) : 1;
+    for (int k = 1; k < n; k++) {
+      float t = float(k) / n;
+      out.push_back({a.x + (c.x - a.x) * t, a.y + (c.y - a.y) * t, a.z + (c.z - a.z) * t});
+    }
+    out.push_back(c);
+  }
+  l.pts.swap(out);
+}
+
+// The game's ground under points, kept by where they are (to the decimetre, and their height to 2 m): the bridge sends
+// the same points again with each message. No ground found is kept a while, then looked for again (it may not have
+// streamed in yet).
+struct GroundHit {
+  float z;  // NaN: none near
+  double t;
+};
+std::unordered_map<uint64_t, GroundHit> g_ground;
+constexpr double GROUND_RETRY = 5.0;  // s
+constexpr size_t GROUND_KEEP = 300000;
+
+uint64_t GroundKey(const P3 &p) {
+  auto q = [](float v) { return uint64_t(std::llround(v) & 0x1FFFFF); };
+  return (q(p.x * 10) << 42) | (q(p.y * 10) << 21) | q(p.z * 0.5f);
+}
+
+// Douglas-Peucker in 3D: the points of a line on the ground that its strip needs, the rest (Densify's, where the ground
+// is flat and the line straight) dropped, for fewer draw calls
+constexpr float GROUND_SIMPLIFY = 0.03f;  // m a dropped point may be off the line
+void SimplifyLine(std::vector<P3> &pts) {
+  size_t n = pts.size();
+  if (n <= 2) return;
+  std::vector<uint8_t> keep(n, 0);
+  keep[0] = keep[n - 1] = 1;
+  std::vector<std::pair<size_t, size_t>> stack{{0, n - 1}};
+  while (!stack.empty()) {
+    auto [i, j] = stack.back();
+    stack.pop_back();
+    if (j <= i + 1) continue;
+    const P3 &a = pts[i], &b = pts[j];
+    float abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z, ab2 = abx * abx + aby * aby + abz * abz;
+    size_t worstAt = i;
+    float worst = -1;
+    for (size_t k = i + 1; k < j; k++) {
+      float px = pts[k].x - a.x, py = pts[k].y - a.y, pz = pts[k].z - a.z;
+      float t = ab2 > 1e-12f ? std::clamp((px * abx + py * aby + pz * abz) / ab2, 0.0f, 1.0f) : 0.0f;
+      float dx = px - t * abx, dy = py - t * aby, dz = pz - t * abz, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > worst) worst = d2, worstAt = k;
+    }
+    if (worst > GROUND_SIMPLIFY * GROUND_SIMPLIFY) {
+      keep[worstAt] = 1;
+      stack.push_back({i, worstAt});
+      stack.push_back({worstAt, j});
+    }
+  }
+  size_t m = 0;
+  for (size_t k = 0; k < n; k++)
+    if (keep[k]) pts[m++] = pts[k];
+  pts.resize(m);
+}
+
+// moves the lines' points onto the game's ground, up to probes new ones a frame, the bridge's order (nearest first by
+// kind), and drops the points a line on the ground doesn't need
+void GroundStep(DebugOverlay &d, double now) {
+  int probes = 0;
+  if (g_ground.size() > GROUND_KEEP) g_ground.clear();
+  for (; d.probeLine < d.lines.size(); d.probeLine++, d.probePt = 0) {
+    DebugLine &l = d.lines[d.probeLine];
+    if (l.kind == 'm' || l.kind == 'g') continue;
+    for (; d.probePt < l.pts.size(); d.probePt++) {
+      P3 &p = l.pts[d.probePt];
+      uint64_t key = GroundKey(p);
+      auto it = g_ground.find(key);
+      if (it == g_ground.end() || (!std::isfinite(it->second.z) && now - it->second.t > GROUND_RETRY)) {
+        if (probes >= d.probes) return;
+        probes++;
+        float z = 0;
+        bool hit = GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + PROBE_ABOVE, &z, FALSE, FALSE) && std::fabs(z - p.z) < PROBE_MAX_DZ;
+        it = g_ground.insert_or_assign(key, GroundHit{hit ? z : NAN, now}).first;
+      }
+      if (std::isfinite(it->second.z)) p.z = it->second.z, d.grounded++;
+      else d.offGround++;
+    }
+    if (!IsMarker(l.kind)) SimplifyLine(l.pts);
   }
 }
 
@@ -1052,58 +1211,115 @@ void ParseDebugGeo(const std::string &s, float ox, float oy, float oz, std::vect
     while (c < end && *c != ';') c++;
     if (c < end) c++;
     vertices += static_cast<int>(line.pts.size());
-    if (!line.pts.empty()) out.push_back(std::move(line));
+    if (!line.pts.empty()) {
+      Densify(line);
+      out.push_back(std::move(line));
+    }
   }
 }
 
-// onto the game's ground under each point, where it's near the map's height
-void SnapToGround(std::vector<DebugLine> &lines) {
-  for (DebugLine &l : lines)
-    for (P3 &p : l.pts) {
-      float z = 0;
-      if (GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + 1.5f, &z, FALSE, FALSE) && std::fabs(z - p.z) < 3.0f) p.z = z;
-    }
+// A triangle as DRAW_POLY draws it, which shows from one side only: in both windings, or (sides 1) the one flip picks.
+// Returns the draw calls used.
+int DrawTri(const P3 &a, const P3 &b, const P3 &c, int r, int g, int bl, int alpha) {
+  const DebugOverlay &d = g_debug;
+  if (d.sides >= 2 || !d.flip) DRAW_POLY(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, r, g, bl, alpha);
+  if (d.sides >= 2 || d.flip) DRAW_POLY(a.x, a.y, a.z, c.x, c.y, c.z, b.x, b.y, b.z, r, g, bl, alpha);
+  return d.sides >= 2 ? 2 : 1;
 }
 
-// a triangle seen from above and below: DRAW_POLY shows from one side only
-void DrawTriangle(const P3 &a, const P3 &b, const P3 &c, int r, int g, int bl, int alpha) {
-  DRAW_POLY(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, r, g, bl, alpha);
-  DRAW_POLY(a.x, a.y, a.z, c.x, c.y, c.z, b.x, b.y, b.z, r, g, bl, alpha);
+// where the strips are seen from: the camera (in plan), how far they're drawn, and from where they widen
+struct DebugView {
+  float x, y, dist, grow;
+};
+
+// How much wider (and higher) a strip is drawn at a point, to keep about the pixels it has at grow m from the camera
+// further off (a 0.2 m line is a pixel or two wide at 100 m) and stay above the ground there; and the point's distance.
+float Grow(const DebugView &v, const P3 &p, float &dist) {
+  dist = std::hypot(p.x - v.x, p.y - v.y);
+  return v.grow > 0 ? std::clamp(dist / v.grow, 1.0f, GROW_MAX) : 1.0f;
 }
 
-// A band ROUTE_RIBBON m wide along a polyline, lying on the road: a quad per segment, square to it, and a bevel filling
-// the outside of each corner (mitred corners spike at sharp turns). Returns the draw calls used.
-constexpr float ROUTE_RIBBON = 1.75f;
-int DrawRibbon(const std::vector<P3> &pts, float lift, int r, int g, int b, int budget) {
-  constexpr int ALPHA = 90;
-  constexpr float HALF = ROUTE_RIBBON / 2;
-  int used = 0;
-  bool havePrev = false;
-  float pnx = 0, pny = 0;  // the previous segment's half-width offset to the right
-  for (size_t i = 1; i < pts.size() && used + 6 <= budget; i++) {
-    const P3 &a = pts[i - 1], &c = pts[i];
-    float dx = c.x - a.x, dy = c.y - a.y, len = std::hypot(dx, dy);
-    if (!(len > 0.05f)) continue;  // also NaN
-    float nx = dy / len * HALF, ny = -dx / len * HALF;
-    P3 aL{a.x - nx, a.y - ny, a.z + lift}, aR{a.x + nx, a.y + ny, a.z + lift}, cL{c.x - nx, c.y - ny, c.z + lift}, cR{c.x + nx, c.y + ny, c.z + lift};
-    DrawTriangle(aL, aR, cR, r, g, b, ALPHA);
-    DrawTriangle(aL, cR, cL, r, g, b, ALPHA);
-    used += 4;
-    if (havePrev) {
-      // the outside of the corner at a: right of the line (+ the offsets) where it turns left
-      float turn = pnx * ny - pny * nx, s = turn > 0 ? 1.0f : -1.0f;
-      if (std::fabs(turn) > 1e-4f) {
-        P3 o{a.x, a.y, a.z + lift}, p{a.x + s * pnx, a.y + s * pny, a.z + lift}, q{a.x + s * nx, a.y + s * ny, a.z + lift};
-        DrawTriangle(o, p, q, r, g, b, ALPHA);
-        used += 2;
+// A strip `width` m wide lying along a polyline, `lift` m above it, both scaled by Grow; solid ones mitred at their
+// corners, dashed ones in dashes of the style's on m and off m gaps along the whole line. Dashes go by their index
+// along it, so every pass of the inner loop moves on a dash (a float phase stepped by what's left of a dash can stop
+// moving at rounding, which hung the game's script thread). Segments with both ends beyond the view's distance are left
+// out. With inner (0-1), only its edges are drawn, from inner of the half width out, in colour rgba: a casing round a
+// narrower strip drawn alone, which keeps the two from fighting for the same pixels. Returns the draw calls used.
+int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float lift, const DebugView &v, int budget,
+              const int *rgba = nullptr, float inner = 0) {
+  size_t n = pts.size();
+  if (n < 2) return 0;
+  static std::vector<float> half, up, dist;
+  static std::vector<P3> nrm, mitre;  // each segment's unit normal to its right (z: its length, 0 if degenerate), each point's mitre
+  half.resize(n), up.resize(n), dist.resize(n), nrm.resize(n), mitre.resize(n);
+  for (size_t i = 0; i < n; i++) {
+    float g = Grow(v, pts[i], dist[i]);
+    half[i] = 0.5f * width * g, up[i] = lift * g;
+  }
+  nrm[0] = {0, 0, 0};
+  for (size_t i = 1; i < n; i++) {
+    float dx = pts[i].x - pts[i - 1].x, dy = pts[i].y - pts[i - 1].y, len = std::hypot(dx, dy);
+    nrm[i] = len > 1e-3f && len < 1e4f ? P3{dy / len, -dx / len, len} : P3{0, 0, 0};  // also NaN
+  }
+  int used = 0, per = (g_debug.sides >= 2 ? 4 : 2) * (inner > 0 ? 2 : 1);
+  auto out = [&](size_t i) { return dist[i] > v.dist; };
+  const int cr = rgba ? rgba[0] : s.r, cg = rgba ? rgba[1] : s.g, cb = rgba ? rgba[2] : s.b, ca = rgba ? rgba[3] : s.a;
+  // a piece of the strip from end 0 to end 1 (corner(end, side), side -1 its left edge to 1 its right), whole or its edges
+  auto piece = [&](auto corner) {
+    auto quad = [&](float lo, float hi) {
+      P3 a0 = corner(0, lo), a1 = corner(0, hi), c1 = corner(1, hi), c0 = corner(1, lo);
+      used += DrawTri(a0, a1, c1, cr, cg, cb, ca);
+      used += DrawTri(a0, c1, c0, cr, cg, cb, ca);
+    };
+    if (inner > 0) quad(-1, -inner), quad(inner, 1);
+    else quad(-1, 1);
+  };
+  if (s.on <= 0) {
+    for (size_t i = 0; i < n; i++) {
+      P3 a = nrm[i], b = i + 1 < n ? nrm[i + 1] : nrm[i];
+      if (a.z == 0) a = b;
+      if (b.z == 0) b = a;
+      float mx = a.x + b.x, my = a.y + b.y, ml = std::hypot(mx, my);
+      if (!(ml > 1e-3f)) {
+        mitre[i] = {b.x, b.y, 0};
+        continue;
       }
+      mx /= ml, my /= ml;
+      float c = std::max(mx * b.x + my * b.y, 0.5f);  // a mitre no longer than twice the half width
+      mitre[i] = {mx / c, my / c, 0};
     }
-    pnx = nx, pny = ny, havePrev = true;
+    auto at = [&](size_t i, float side) { return P3{pts[i].x + side * mitre[i].x * half[i], pts[i].y + side * mitre[i].y * half[i], pts[i].z + up[i]}; };
+    for (size_t i = 1; i < n && used + per <= budget; i++) {
+      if (nrm[i].z == 0 || (out(i - 1) && out(i))) continue;
+      piece([&](int end, float side) { return at(i - 1 + end, side); });
+    }
+    return used;
+  }
+  const double period = double(s.on) + s.off;
+  double base = 0;  // m along the line to the segment's start
+  for (size_t i = 1; i < n && used + per <= budget; i++) {
+    double len = nrm[i].z;
+    if (len == 0) continue;
+    if (out(i - 1) && out(i)) {
+      base += len;
+      continue;
+    }
+    const P3 &a = pts[i - 1], &c = pts[i];
+    auto at = [&](double t, float side) {
+      float h = float(half[i - 1] + (half[i] - half[i - 1]) * t), u = float(up[i - 1] + (up[i] - up[i - 1]) * t);
+      return P3{float(a.x + (c.x - a.x) * t) + side * nrm[i].x * h, float(a.y + (c.y - a.y) * t) + side * nrm[i].y * h, float(a.z + (c.z - a.z) * t) + u};
+    };
+    for (long k = long(std::floor(base / period)), last = long(std::floor((base + len) / period)); k <= last && used + per <= budget; k++) {
+      double t0 = std::max(0.0, (k * period - base) / len), t1 = std::min(1.0, (k * period + s.on - base) / len);
+      if (t1 - t0 < 1e-4) continue;
+      piece([&](int end, float side) { return at(end ? t1 : t0, side); });
+    }
+    base += len;
   }
   return used;
 }
 
-// a line in DASH_ON m dashes with DASH_OFF m gaps, so it reads over the route's ribbon; returns the draw calls used
+// thin=1: a 1-px line in DASH_ON m dashes with DASH_OFF m gaps; returns the draw calls used
 constexpr float DASH_ON = 2.0f, DASH_OFF = 1.5f;
 // Dashes by their index along the whole line, so every pass of the inner loop moves on a dash (a float phase stepped
 // by what's left of a dash can stop moving at rounding, which hung the game's script thread).
@@ -1130,16 +1346,33 @@ int DrawDashed(const std::vector<P3> &pts, float lift, int r, int g, int b, int 
   return used;
 }
 
+// Draws the bridge's lines on the player's frames: each kind as a strip of its own width and colour on the ground
+// (DrawStrip, GroundStep), or with thin as 1-px lines, and the next turn and the lane count flags as markers.
 void DrawDebug(double now) {
-  const DebugOverlay &d = g_debug;
+  DebugOverlay &d = g_debug;
   if (!d.on) return;
   bool stale = now - d.t > DEBUG_STALE, held = d.recording && !d.force;
-  std::string status = "MAP DEBUG " + d.layers + (stale ? " (no map from the bridge)" : held ? " (off while recording)" : " " + std::to_string(d.vertices) + " pts");
+  if (!stale && !held && d.ground && !d.thin) {
+    double t0 = QpcSeconds();
+    GroundStep(d, now);
+    g_probeSum += QpcSeconds() - t0;
+  }
+  int probed = d.grounded + d.offGround;
+  std::string status = "MAP DEBUG " + d.layers +
+                       (stale  ? " (no map from the bridge)"
+                        : held ? " (off while recording)"
+                               : " " + std::to_string(d.vertices) + " pts " + std::to_string(d.polys) + " polys" +
+                                     (d.ground && !d.thin && probed ? " " + std::to_string(100 * d.grounded / probed) + "% on ground" : ""));
   DrawText(status, 0.985f, 0.70f, 0.35f, 255, 255, 255);
-  if (stale || held) return;
+  if (stale || held) {
+    d.polys = g_debugPolys = 0;
+    return;
+  }
   auto has = [&](char layer) { return d.layers.find(layer) != std::string::npos; };
   bool fill = has('f');
-  int budget = DEBUG_MAX_SEGMENTS;
+  Vector3 cam = GET_FINAL_RENDERED_CAM_COORD();
+  DebugView view{cam.x, cam.y, d.dist, d.thin ? 0.0f : d.grow};
+  int budget = d.maxPolys;
   float lift = d.lift;
   for (const DebugLine &l : d.lines) {
     int r, g, b;
@@ -1155,35 +1388,66 @@ void DrawDebug(double now) {
         DRAW_MARKER(0, p0.x, p0.y, p0.z + top, 0, 0, 0, 0, 0, 0, 1.0f, 1.0f, 1.0f, r, g, b, 200, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
       continue;
     }
+    if (l.kind == 'q') {  // a post with a cone over it, to be seen from well off
+      float dist = 0;
+      Grow(view, p0, dist);
+      if (!has('q') || dist > view.dist) continue;
+      DRAW_MARKER(1, p0.x, p0.y, p0.z, 0, 0, 0, 0, 0, 0, 0.8f, 0.8f, 3.5f, r, g, b, 170, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+      DRAW_MARKER(0, p0.x, p0.y, p0.z + 4.5f, 0, 0, 0, 0, 0, 0, 1.2f, 1.2f, 1.2f, r, g, b, 220, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+      continue;
+    }
     if (l.kind == 'j' && fill && l.pts.size() >= 4) {
-      // a fan from the first corner of the hull, both windings so it shows from above and below
-      for (size_t i = 2; i + 1 < l.pts.size() && budget > 0; i++, budget -= 2) {
+      // a fan from the first corner of the area's outline
+      float up = StyleOf('j').lift + lift;
+      P3 o{p0.x, p0.y, p0.z + up};
+      for (size_t i = 2; i + 1 < l.pts.size() && budget >= 2; i++) {
         const P3 &a = l.pts[i - 1], &c = l.pts[i];
-        DRAW_POLY(p0.x, p0.y, p0.z + lift, a.x, a.y, a.z + lift, c.x, c.y, c.z + lift, r, g, b, 60);
-        DRAW_POLY(p0.x, p0.y, p0.z + lift, c.x, c.y, c.z + lift, a.x, a.y, a.z + lift, r, g, b, 60);
+        budget -= DrawTri(o, {a.x, a.y, a.z + up}, {c.x, c.y, c.z + up}, r, g, b, 50);
       }
     }
-    if (!has(DebugLayer(l.kind))) continue;
-    if (l.kind == 'r' || l.kind == 'b') {
-      budget -= DrawRibbon(l.pts, lift, r, g, b, budget);
+    char layer = DebugLayer(l.kind);
+    if (!has(layer)) continue;
+    const KindStyle &s = StyleOf(l.kind);
+    if (d.thin && l.kind != 'r' && l.kind != 'b') {
+      if (s.on > 0) {
+        budget -= DrawDashed(l.pts, l.kind == 'n' ? lift + 0.15f : lift, r, g, b, budget);
+        continue;
+      }
+      for (size_t i = 1; i < l.pts.size() && budget > 0; i++, budget--) {
+        const P3 &a = l.pts[i - 1], &c = l.pts[i];
+        DRAW_LINE(a.x, a.y, a.z + lift, c.x, c.y, c.z + lift, r, g, b, 255);
+      }
       continue;
     }
-    if (l.kind == 'n' || l.kind == 'd' || l.kind == 'y') {
-      budget -= DrawDashed(l.pts, l.kind == 'n' ? lift + 0.15f : lift, r, g, b, budget);
-      continue;
+    float width = s.width * d.width * d.layerWidth[layer & 127];
+    if (d.casing && std::strchr("dwycT", l.kind)) {
+      // white and yellow lie on paint of their colour: a dark edge tells ours from the game's
+      static constexpr int CASING_RGBA[4] = {10, 10, 10, 190};
+      constexpr float CASING = 0.05f;  // m each side
+      budget -= DrawStrip(l.pts, s, width + 2 * CASING, s.lift + lift, view, budget, CASING_RGBA, width / (width + 2 * CASING));
     }
-    for (size_t i = 1; i < l.pts.size() && budget > 0; i++, budget--) {
-      const P3 &a = l.pts[i - 1], &c = l.pts[i];
-      DRAW_LINE(a.x, a.y, a.z + lift, c.x, c.y, c.z + lift, r, g, b, 255);
-    }
+    budget -= DrawStrip(l.pts, s, width, s.lift + lift, view, budget);
+  }
+  d.polys = g_debugPolys = d.maxPolys - budget;
+}
+
+// the debug message's widths: "e:2,d:1.5" scales those layers' widths, the rest back to 1
+void ParseLayerWidths(const std::string &s) {
+  std::fill(std::begin(g_debug.layerWidth), std::end(g_debug.layerWidth), 1.0f);
+  for (size_t i = 0; i + 2 < s.size(); i++) {
+    if (s[i + 1] != ':') continue;
+    float v = std::strtof(s.c_str() + i + 2, nullptr);
+    if (v > 0) g_debug.layerWidth[s[i] & 127] = std::min(v, 20.0f);
   }
 }
 
 std::string DebugState(double now) {
   const DebugOverlay &d = g_debug;
   return "\"debug\":{\"on\":" + std::string(d.on ? "true" : "false") + ",\"layers\":\"" + d.layers + "\",\"force\":" + (d.force ? "true" : "false") +
-         ",\"ground\":" + (d.ground ? "true" : "false") + ",\"lines\":" + std::to_string(d.lines.size()) + ",\"vertices\":" + std::to_string(d.vertices) +
-         ",\"age\":" + Num(std::min(now - d.t, 1e6)) + "}";
+         ",\"ground\":" + (d.ground ? "true" : "false") + ",\"thin\":" + (d.thin ? "true" : "false") + ",\"width\":" + Num(d.width) +
+         ",\"dist\":" + Num(d.dist) + ",\"grow\":" + Num(d.grow) + ",\"sides\":" + std::to_string(d.sides) + ",\"flip\":" + (d.flip ? "true" : "false") +
+         ",\"lines\":" + std::to_string(d.lines.size()) + ",\"vertices\":" + std::to_string(d.vertices) + ",\"polys\":" + std::to_string(d.polys) +
+         ",\"grounded\":" + std::to_string(d.grounded) + ",\"offGround\":" + std::to_string(d.offGround) + ",\"age\":" + Num(std::min(now - d.t, 1e6)) + "}";
 }
 
 // our route as a custom GPS route on the minimap and map (gpsroute command, gps_route in the ini), from the bridge's
@@ -2038,15 +2302,27 @@ void HandleMessage(const Message &m, double now) {
     if (!layers.empty()) g_debug.layers = layers;
     g_debug.force = MsgBool(m, "force", g_debug.force);
     g_debug.ground = MsgBool(m, "ground", g_debug.ground);
+    g_debug.thin = MsgBool(m, "thin", g_debug.thin);
+    g_debug.casing = MsgBool(m, "casing", g_debug.casing);
     g_debug.lift = std::clamp(static_cast<float>(MsgNum(m, "lift", g_debug.lift)), -1.0f, 3.0f);
+    g_debug.width = std::clamp(static_cast<float>(MsgNum(m, "width", g_debug.width)), 0.1f, 20.0f);
+    g_debug.dist = std::clamp(static_cast<float>(MsgNum(m, "dist", g_debug.dist)), 5.0f, 1000.0f);
+    g_debug.grow = std::clamp(static_cast<float>(MsgNum(m, "grow", g_debug.grow)), 0.0f, 1000.0f);
+    g_debug.sides = MsgNum(m, "sides", g_debug.sides) >= 2 ? 2 : 1;
+    g_debug.flip = MsgBool(m, "flip", g_debug.flip);
+    g_debug.maxPolys = std::clamp(static_cast<int>(MsgNum(m, "max", g_debug.maxPolys)), 0, 200000);
+    g_debug.probes = std::clamp(static_cast<int>(MsgNum(m, "probes", g_debug.probes)), 0, 10000);
+    if (m.count("widths")) ParseLayerWidths(MsgStr(m, "widths"));
     if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
     Log("debug " + std::string(g_debug.on ? "on" : "off") + ", layers " + g_debug.layers + (g_debug.force ? ", forced" : "") +
-        (g_debug.ground ? ", on the ground" : ""));
+        (g_debug.thin ? ", thin" : ", width " + Num(g_debug.width) + (g_debug.ground ? " on the ground" : " at the map's heights")) +
+        ", to " + Num(g_debug.dist) + " m");
   } else if (type == "debugGeo") {
     if (!g_debug.on) return;
     ParseDebugGeo(MsgStr(m, "g"), static_cast<float>(MsgNum(m, "ox")), static_cast<float>(MsgNum(m, "oy")), static_cast<float>(MsgNum(m, "oz")),
                   g_debug.lines, g_debug.vertices);
-    if (g_debug.ground) SnapToGround(g_debug.lines);
+    g_debug.probeLine = g_debug.probePt = 0;
+    g_debug.grounded = g_debug.offGround = 0;
     g_debug.recording = MsgBool(m, "rec");
     g_debug.t = now;
   } else if (type == "roadq") {

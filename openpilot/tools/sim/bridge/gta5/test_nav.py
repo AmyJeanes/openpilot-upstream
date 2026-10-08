@@ -218,6 +218,34 @@ def test_left_turn_into_its_bay():
   assert order == ["bay", "turn"]
 
 
+def test_uncapped_tune_into_a_bay():
+  # the bay test's drive: by default nav slows the car for the bay and the turn; with the turn, lane change and bay
+  # speeds lifted (an end-to-end longitudinal model sets its own speed) it still changes into the bay and signals
+  route = route_to_turn(200.0, "left")
+  for uncapped in (False, True):
+    d = Drive((0, 2), v=6.0)
+    d.nav.tune = nav_mod.Tune("")
+    if uncapped:
+      d.nav.tune.values.update(turn_speed_soft=40.0, turn_speed_square=40.0, turn_speed_sharp=40.0,
+                               lane_change_min_speed=40.0, bay_speed=0.0)
+    y, caps, order = 0.0, [], []
+    while y < 195.0:
+      bay_at = 170.0 - y
+      forks = [[bay_at, "right", 2, 2, False, 0, True]] if bay_at > 0 else []
+      cap, _ = d.step(route, y, {"forks": forks, "routeEnd": 300.0 - y})
+      caps.append(cap)
+      if d.nav.changing == "left" and "bay" not in order:
+        order.append("bay")
+      if d.nav.changing and d.indicator == "left" and "bay" in order and 200.0 - y < 26:
+        d.indicator, d.lane = None, (-1, 2)
+      if d.nav.signaled == "left" and "turn" not in order:
+        order.append("turn")
+      y += d.v * 0.05
+    assert order == ["bay", "turn"]
+    slowed = [c for c in caps if 0 < c < d.v]
+    assert (not slowed) if uncapped else min(slowed) <= nav_mod.BAY_SPEED
+
+
 def test_no_keep_left_on_a_two_way_road():
   # a left fork on a two-way road (L2): keepLeft would take the car over into the oncoming lanes
   route = route_to_turn(300.0)

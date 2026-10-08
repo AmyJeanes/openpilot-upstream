@@ -198,6 +198,7 @@ class Tune:
     # openpilot's lane change carries on into the junction until the model is done with it)
     "lane_change_into_turn": 0.0,
     "lane_change_min_speed": LANE_CHANGE_MIN_SPEED,  # m/s, slowing down for a lane change for a turn to finish before it
+    "bay_speed": BAY_SPEED,  # m/s while changing into a turn's bay (0: no cap)
     "curve_accel": CURVE_ACCEL,  # m/s^2
     # held from signalling a turn through its arc, until the car heads within turn_release deg of its way out and is
     # straight, or is turn_release_m past it; then lifted at release_accel
@@ -718,8 +719,8 @@ class Nav:
       ref = self.entry if t.slow_ref == "entry" else turn.dist
       caps.append(slow_for(turn.speed(t), min(ref - t.slow_done, turn.dist - bay - BAY_SIGNAL), v, t.slow_decel))
       self._enter_bay(turn, bay, v, now)
-      if self.changing is not None and self.driven < self.bay_to:
-        caps.append(BAY_SPEED)
+      if self.changing is not None and self.driven < self.bay_to and t.bay_speed > 0:
+        caps.append(t.bay_speed)
       self._signal(turn, route, indicator, v, now, heading, bay)
     caps.append(self._hold_cap(heading, yaw_rate, v, now))
     if self.turn is not None:

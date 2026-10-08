@@ -5,8 +5,8 @@ import tempfile
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrows, centre_kind, correct, correct_oneway, disagree, \
-  line_kinds, load, median_edges, opening_taper, sources, strips, swing_taper
+from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrow_marks, centre_kind, correct, correct_oneway, disagree, \
+  lane_lines, line_kinds, load, median_edges, opening_taper, sources, strips, swing_taper, unpainted
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -67,16 +67,17 @@ def test_game_files_first_with_their_kerbs():
   assert correct(lopsided, 2, 2, (-11.0, 11.0))[0]['forward'] == [5.4, 5.6]
 
 
-def test_painted_arrows():
-  def arrow(offset, kind, d='ab'):
-    return {'offset': offset, 'kind': kind, 'dir': d, 'conf': 0.95}
-  files = [sample([], s, src='gamefiles', arrows=arrs) for s, arrs in
-           ((0, [arrow(2.4, 'left'), arrow(7.9, 'through'), arrow(13.1, 'through;right')]), (3, [arrow(2.5, 'left')]),
-            (6, [arrow(-5.0, 'through;left', 'oncoming'), arrow(-10.5, 'right', 'oncoming')]))]
-  assert arrows(files) == {'forward': ['left', 'through', 'through;right'], 'backward': ['left;through', 'right']}
-  assert arrows([{**d, 'src': None} for d in files]) == {}  # the camera's arrows aren't read
-  flipped = along({((1, 1), (1, 0)): files}, (1, 0), (1, 1))
-  assert arrows(flipped) == {'forward': ['left;through', 'right'], 'backward': ['left', 'through', 'through;right']}
+def test_arrow_marks():
+  feats = [{'kind': 'arrow', 'arrow': 'through;left', 'x': 1.0, 'y': 2.0, 'z': 3.0, 'heading': 70.0},
+           {'kind': 'arrow', 'arrow': 'right', 'x': 4.0, 'y': 5.0, 'z': 6.0, 'heading': -110.0},
+           {'kind': 'crossing', 'x': 0.0, 'y': 0.0, 'z': 0.0}]
+  with tempfile.NamedTemporaryFile('w', suffix='.jsonl', delete=False) as f:
+    f.write(''.join(json.dumps(d) + '\n' for d in feats))
+  try:
+    # a decal's heading is a quarter turn clockwise (negative) of where it points
+    assert arrow_marks(f.name) == [(1.0, 2.0, 3.0, -20.0, 'left;through'), (4.0, 5.0, 6.0, 160.0, 'right')]
+  finally:
+    os.unlink(f.name)
 
 
 def test_lines_that_cant_be_crossed():
@@ -180,10 +181,29 @@ def test_median_edges():
   assert median_edges([sample([mark(0.1, 'yellow', 'double_solid')], src='gamefiles')] * 3, 5.4) == (None, None)
 
 
-def test_arrows_from_features():
-  feature = {'kind': 'left', 'offset': 2.0, 'dir': 'ab', 'conf': 0.95, 's': 1.0}
-  files = [sample([], 0, src='gamefiles', features=[feature, {**feature, 'kind': 'through;right', 'offset': 7.5}, {'kind': 'stop', 'offset': 5.0}])]
-  assert arrows(files) == {'forward': ['left', 'through;right']}
+def test_lane_lines():
+  # GTA's 2 + 2 with a bay folded in: [bay 5.4][4.4][4.4] forward around the line, [4.4][4.4] backward. The paint: a double
+  # yellow, a solid line beside the bay, nothing read between the through lanes (the files miss thin dashes): dashed
+  section = [(-11.5, -7.1, -1), (-7.1, -2.7, -1), (-2.7, 2.7, 1), (2.7, 7.1, 1), (7.1, 11.5, 1)]
+  marks = [mark(-2.7, 'yellow', 'double_solid', pair=[-2.8, -2.6]), mark(2.7, kind='solid'), mark(11.4, kind='edge_line')]
+  files = [sample(marks, s, src='gamefiles') for s in (1, 4, 7, 10)]
+  assert lane_lines(files, section) == {'forward': ['not_right', 'not_left', 'yes']}
+  # the bay line 1.5 m off the layout's boundary is still its line; dashed ones say nothing
+  off = [sample([mark(1.2, kind='solid'), mark(7.0), mark(-7.2)], s, src='gamefiles') for s in (1, 4, 7, 10)]
+  assert lane_lines(off, section) == {'forward': ['not_right', 'not_left', 'yes']}
+  # seen from the other way: the same lanes
+  flipped = [{**d, 'marks': [{**m, 'offset': -m['offset'], 'pair': None} for m in d['marks']]} for d in off]
+  back = [(-b, -a, -h) for a, b, h in section[::-1]]
+  assert lane_lines(flipped, back) == {'backward': ['not_right', 'not_left', 'yes']}
+  assert lane_lines(files[:1], section) == {}  # one sample says nothing
+
+
+def test_unpainted():
+  edges = {'left': -5.0, 'right': 5.0}
+  assert unpainted([sample([mark(5.0, kind='edge_line')], s, src='gamefiles', kerbs=edges) for s in (1, 4, 7)])
+  assert not unpainted([sample([mark(0.0, 'yellow')], s, src='gamefiles', kerbs=edges) for s in (1, 4, 7)])
+  assert not unpainted([sample([], s, src='gamefiles', kerbs={'left': None, 'right': None}) for s in (1, 4, 7)])  # a gap
+  assert not unpainted([sample([], s, src='gamefiles', kerbs=edges) for s in (1, 4)])  # too few
 
 
 if __name__ == '__main__':

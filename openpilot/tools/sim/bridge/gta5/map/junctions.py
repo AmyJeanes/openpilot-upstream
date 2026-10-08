@@ -17,7 +17,8 @@ map as on our GTA V one.
 - A stop line is at its node (`highway=traffic_signals` / `stop` / `give_way`), across the lanes towards the junction
   the node's direction tag (`traffic_signals:direction`, `direction`) faces, or towards the nearest junction without
   one; no nearer the junction than its mouth, and behind a crossing (`footway=crossing`) near it. Signals on a
-  junction's own node stop every way into it at the mouth.
+  junction's own node stop every way into it at the mouth. A stop line surveyed where it's painted
+  (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that.
 
 Geometry is in metres with y 90 degrees left of x; arms are sorted counterclockwise. "Left" of an arm is on the left
 looking out of the junction along it.
@@ -233,6 +234,15 @@ def bezier(p0, c, p1, step: float = 0.75) -> np.ndarray:
   return (1 - t) ** 2 * p0 + 2 * (1 - t) * t * c + t ** 2 * p1
 
 
+def _faces(tags: dict, m: 'Member', k: int) -> bool:
+  """Whether a stop line node, the member's k-th, is for traffic towards its junction by its direction tag (none: either)."""
+  facing = tags.get('traffic_signals:direction') or tags.get('direction')
+  if facing not in ('forward', 'backward'):
+    return True
+  wanted = facing == 'backward'  # the way runs out of the junction where traffic towards it goes backward
+  return any(m.ways[q][1] == wanted for q in (k - 1, k) if q < len(m.ways))
+
+
 @dataclass
 class Member:
   """One road out of a junction: the ways along it from the junction node [(way, along its direction)], its nodes, its
@@ -278,6 +288,7 @@ class Stop:
   along: float  # m along the member's line from its junction node
   area: np.ndarray  # the whole road from the junction's mouth out to the stop line, where no lane lines are painted
   signal: bool = False  # a traffic light's
+  node: int | None = None  # the node tagged with it
 
 
 @dataclass
@@ -524,7 +535,8 @@ class Junctions:
     if len(arms) < 3:
       return None
     for arm in arms:
-      arm.cap = min([MAX_TRIM] + [caps[k] for m in arm.members if (k := (m.start, m.ways[0][0])) in (caps or {})])
+      arm.cap = min([MAX_TRIM] + [caps[k] for m in arm.members if (k := (m.start, m.ways[0][0])) in (caps or {})] +
+                    [along - STOP_SETBACK for m in arm.members for along in self._surveyed_stops(m)])
     polygon, kerbs = self.outline(arms, self.shape(arms))
     for arm in arms:
       p = arm.line.at(arm.trim)
@@ -654,33 +666,45 @@ class Junctions:
         along = self._along(m, k)
         if along > m.trim + STOP_REACH:
           continue
-        if facing in ('forward', 'backward'):
-          wanted = facing == 'backward'  # the way runs out of the junction where traffic towards it goes backward
-          if not any(m.ways[q][1] == wanted for q in (k - 1, k) if q < len(m.ways)):
-            continue
+        if not _faces(tags, m, k):
+          continue
         found.append((along, j, m))
       for along, j, m in sorted(found, key=lambda f: f[0])[:1 if facing not in ('forward', 'backward') else None]:
-        self._add_stop(j, m, kind, along, tags['highway'] == 'traffic_signals')
+        self._add_stop(j, m, kind, along, tags['highway'] == 'traffic_signals', node)
     for j in self.junctions:
-      tags = next((tags_of[n] for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', ''))), None)
-      if tags is not None:
+      node = next((n for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', ''))), None)
+      if node is not None:
+        tags = tags_of[node]
         for arm in j.arms:
           for m in arm.members:
             if not any(s.member is m for s in j.stops):
-              self._add_stop(j, m, STOPS[tags['highway']], 0.0, tags['highway'] == 'traffic_signals')
+              self._add_stop(j, m, STOPS[tags['highway']], 0.0, tags['highway'] == 'traffic_signals', node)
+
+  def _surveyed_stops(self, m: Member) -> list[float]:
+    """m along the member to the stop lines on it towards its junction that were surveyed where they're painted
+    (`source:position=survey`): its road ends there, and its stop line is drawn there."""
+    tags_of = self.osm.data.node_tags
+    out = []
+    for k, node in enumerate(m.nodes[1:], 1):
+      tags = tags_of.get(node, {})
+      if tags.get('source:position') == 'survey' and STOPS.get(tags.get('highway', '')) and _faces(tags, m, k):
+        if (along := self._along(m, k)) <= MAX_TRIM + STOP_SETBACK:
+          out.append(along)
+    return out
 
   @staticmethod
   def _along(m: Member, k: int) -> float:
     pts = m.line.p[1:-1]
     return float(np.hypot(*np.diff(pts[:k + 1], axis=0).T).sum()) if k else 0.0
 
-  def _add_stop(self, j: Junction, m: Member, kind: str, along: float, signal: bool = False):
+  def _add_stop(self, j: Junction, m: Member, kind: str, along: float, signal: bool = False, node: int | None = None):
     w, fwd = m.ways[0]
     spans = self.osm.lanes(w).ours(BACKWARD if fwd else FORWARD)  # the lanes towards the junction
     if not spans:
       return
-    s = max(along, m.trim + STOP_SETBACK)
-    for c in self._near(self.crossings, self._crossing_cells, m.line.at(s)):  # a stop line goes before a crossing
+    surveyed = node is not None and self.osm.data.node_tags.get(node, {}).get('source:position') == 'survey'
+    s = max(along, m.trim) if surveyed else max(along, m.trim + STOP_SETBACK)
+    for c in [] if surveyed else self._near(self.crossings, self._crossing_cells, m.line.at(s)):  # a stop line goes before a crossing
       hit = crossing(Poly(c, 0.0, 0.0), m.line, math.inf, max(s, m.trim + CROSSING_REACH) + CROSSING_WIDTH)
       if hit is not None and hit[1] > m.trim - CROSSING_WIDTH:
         s = max(s, hit[1] + CROSSING_WIDTH / 2 + STOP_SETBACK)
@@ -692,7 +716,7 @@ class Junctions:
     q = m.line.at(m.trim)
     uq = _left(m.line.tangent(m.trim))
     area = np.array([q - uq * e_hi, p + right * (-e_hi), p + right * (-e_lo), q - uq * e_lo])
-    j.stops.append(Stop(kind, line, m, s, area, signal))
+    j.stops.append(Stop(kind, line, m, s, area, signal, node))
 
   # *** movements ***
 
@@ -812,7 +836,8 @@ def forbidden(restricted: dict, m_in: Member, m_out: Member) -> bool:
 def lane_moves(turns: list[frozenset[str]], exits: list[tuple[float, int]]) -> list[list[tuple[int, int]]]:
   """For each way out ((deg turned, its lanes)), the moves [(lane in, lane out)] to it of the lanes in, given each lane's
   turn:lanes arrows (empty for none). With arrows, a lane takes the ways out they point along, or the nearest one on
-  that side where none does. Without, the leftmost lane also turns left, the rightmost right, and the rest go through
+  that side where none does (through: the nearest straight, as on a skewed junction). Without, the leftmost lane also
+  turns left, the rightmost right, and the rest go through
   (at a T, half each way). The lanes taking a way out go to its lanes in order from the side they turn to (through,
   spread evenly)."""
   n = len(turns)
@@ -826,7 +851,7 @@ def lane_moves(turns: list[frozenset[str]], exits: list[tuple[float, int]]) -> l
         lo, hi = ARROWS[turn]
         hit = [k for k, (t, _) in enumerate(exits) if lo <= t <= hi]
         if not hit:
-          side = [k for k, (t, _) in enumerate(exits) if (t > 0) == (lo + hi > 0)]
+          side = [k for k, (t, _) in enumerate(exits) if lo + hi == 0 or (t > 0) == (lo + hi > 0)]
           hit = [min(side, key=lambda k: abs(exits[k][0] - (lo + hi) / 2))] if side else []
         take[i] |= set(hit)
   elif n == 1:

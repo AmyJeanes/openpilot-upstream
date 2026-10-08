@@ -21,12 +21,20 @@ its junction.
 GPS route: while the plugin's gpsroute is on, our route ahead, decimated to the points GTA's custom GPS route takes,
 whenever the route changes or the car nears the end of what was sent.
 
+On a lane-tagged map it also sends what the tags say beyond the lines, so map errors show while driving: each lane's
+turn:lanes arrows painted on it before its junction, crossings, the lane opening or closing along a taper (or a bay's),
+the inner edge of parking lanes, and a flag where a road's lane count changes at a node with no taper to get there.
+The plugin draws each kind as a strip of its own width and colour lying on the game's ground (core.cpp DrawDebug).
+
 Message formats (the plugin parses flat JSON only, so the geometry is one string):
 - debugGeo: ox, oy, oz (m, the origin), rec (recording), g: polylines separated by ';', each a kind letter then
   comma-separated decimetres from the origin, the first point x,y,z and the rest the change from the point before.
-  Kinds: e road edge, d lane divider (white, dashed), w solid lane divider (white), c centre line (yellow, solid; a
-  double line is two), y dashed centre line (yellow), l stop line (light), s stop line (sign), j junction outline
-  (closed), r route ahead, b route behind, n nav's lane plan, m the next turn, g where its signal comes on.
+  Kinds: e road edge (kerb), d lane divider (white, dashed), w solid lane divider (white), c centre line (yellow, solid;
+  a double line is two), y dashed centre line (yellow), p where a parking lane meets the lanes, l stop line (light),
+  s stop line (sign), k give way line, x crossing, j junction outline (closed), L T R a lane's arrow turning left (or
+  back), through (or merging), right, t the middle of a lane opening or closing along a taper, q a lane count change
+  with no taper (one point), r route ahead, b route behind, n nav's lane plan, m the next turn, g where its signal
+  comes on.
 - gpsPoints: p, "x,y,z;x,y,z;..." in metres (empty clears)."""
 import argparse
 import contextlib
@@ -41,7 +49,8 @@ from collections import defaultdict
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, offset_line as offset_polyline
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, DIVIDER, EDGE, FORWARD, OPENED, PARKING, Section, \
+  offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
 ROUTE_EVERY = 0.1  # s between the route's updates, with the roads as last sent
@@ -54,8 +63,8 @@ TRAIL_JUMP = 10.0  # m off the lane plan line the route behind ends: it starts a
 RADIUS = 150.0  # m around the car
 LEVEL = 40.0  # m above or below the car: tunnels and bridges further off are left out
 BEHIND = 30.0  # m of route behind the car
-MAX_POINTS = 2500  # vertices per update, nearest first by layer priority
-MAX_CHARS = 60000
+MAX_POINTS = 3500  # vertices per update, nearest first by layer priority
+MAX_CHARS = 90000
 SIMPLIFY = 0.15  # m a dropped vertex may be off the line
 AREA_SIMPLIFY = 0.5  # m, for a junction area's outline (its kerbs are drawn to SIMPLIFY): it's drawn before them
 RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
@@ -66,12 +75,18 @@ CELL = 50.0  # m: node index cells
 LIGHT = 15  # node special: a traffic light's stop line
 CAR_HEIGHT = 0.6  # paths.CAR_HEIGHT
 # drawn first when over budget
-PRIORITY = "mgnrbljscywde"
-LAYER_OF = {"e": "e", "d": "d", "w": "d", "c": "d", "y": "d", "l": "s", "s": "s", "j": "j", "r": "r", "b": "r", "n": "n",
-            "m": "m", "g": "m"}
+PRIORITY = "mgnrbqlskLTRjtcywdepx"
+LAYER_OF = {"e": "e", "d": "d", "w": "d", "c": "d", "y": "d", "l": "s", "s": "s", "k": "s", "j": "j", "r": "r", "b": "r",
+            "n": "n", "m": "m", "g": "m", "p": "p", "x": "x", "L": "a", "T": "a", "R": "a", "t": "t", "q": "q"}
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
-LAYERS = {"edges": "e", "dividers": "d", "stops": "s", "junctions": "j", "route": "r", "nav": "n", "points": "m", "fill": "f"}
-DEFAULT_LAYERS = "edsjrnm"
+LAYERS = {"edges": "e", "dividers": "d", "stops": "s", "junctions": "j", "route": "r", "nav": "n", "points": "m", "fill": "f",
+          "arrows": "a", "crossings": "x", "parking": "p", "tapers": "t", "flags": "q"}
+DEFAULT_LAYERS = "edsjrnmaxptq"
+# turn:lanes arrows: deg each turns (left positive), and m out from a lane's stop line (else its junction's mouth) to
+# the middle of each arrow painted on it
+ARROW_TURN = {"through": 0.0, "slight_left": 45.0, "left": 90.0, "sharp_left": 135.0, "reverse": 180.0, "slight_right": -45.0,
+              "right": -90.0, "sharp_right": -135.0, "merge_to_left": 25.0, "merge_to_right": -25.0}
+ARROW_AT = (4.0, 20.0)
 GPS_MAX = 100  # points: GTA's custom GPS route limit isn't documented; the plugin clamps to its own max too
 GPS_SIMPLIFY = 3.0  # m
 GPS_RESEND_BEFORE = 300.0  # m before the end of a capped route sent, the next part goes
@@ -79,7 +94,7 @@ ENABLED = os.getenv("GTA5_OVERLAY", "1") != "0"
 # the lane tags' lines (road_marks) between bridge starts; empty: built each start
 CACHE_DIR = os.path.expanduser(os.getenv("GTA5_OVERLAY_CACHE", "~/.cache/gta5_overlay"))
 CACHE_KEEP = 3  # files
-MARKS_VERSION = 2  # the cache's format
+MARKS_VERSION = 3  # the cache's format
 # map/ modules road_marks depends on, as this one
 MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py", "junctions.py", "osm_to_roads.py", "side_by_side.py")
 
@@ -279,6 +294,8 @@ def marking_kinds(line) -> list[tuple[str, float]]:
   """An osm_lanes.Line as the overlay's kinds and their offsets (m right of it): [(kind, offset)]."""
   if line.kind == EDGE:
     return [("e", 0.0)]
+  if line.kind == PARKING:
+    return [("p", 0.0)]
   dashed, solid = ("d", "w") if line.kind == DIVIDER else ("y", "c")
   return {"dashed": [(dashed, 0.0)], "solid": [(solid, 0.0)], "double_solid": [(solid, -DOUBLE), (solid, DOUBLE)],
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
@@ -297,6 +314,119 @@ def gta_at(paths, q) -> tuple[int, float] | None:
     if off < 0.5 and (best is None or off < best[0]):
       best = (off, i if t < 0.5 else j, float(paths.z[i] + (paths.z[j] - paths.z[i]) * t))
   return (best[1], best[2]) if best else None
+
+
+def near_node(paths, q) -> int | None:
+  """GTA's nearest node to a point, among those of the links near it."""
+  best = None
+  for i, j in paths._near(q):
+    for n in (i, j):
+      d = float(np.hypot(*(paths.xy[n] - q)))
+      if best is None or d < best[0]:
+        best = (d, n)
+  return best[1] if best else None
+
+
+def node_heights(osm, refs, z0: float, z1: float, pts: np.ndarray) -> np.ndarray:
+  """A way's height at each of its nodes (`ele`, GTA's node heights in ynd_to_osm's maps), where a node has none by
+  arc length between the way's ends' heights z0 and z1."""
+  tags = osm.data.node_tags
+  z = np.full(len(refs), np.nan)
+  for k, n in enumerate(refs):
+    with contextlib.suppress(KeyError, ValueError):
+      z[k] = float(tags[n]["ele"])
+  if np.isnan(z).any():
+    s = arc(pts)
+    z = np.where(np.isnan(z), z0 + (z1 - z0) * s / max(float(s[-1]), 1e-6), z)
+  return z
+
+
+def arrow_strokes(turns) -> list[tuple[str, np.ndarray]]:
+  """A lane's turn:lanes arrows as strokes [N, 2] in the lane's own frame (x m right, y m ahead, from the arrow's
+  middle): a shaft, then a branch and its head for each turn; kind L turning left (or back), R right, T through or
+  merging, the shaft by its one turn (T for more)."""
+  angles = sorted({ARROW_TURN[t] for t in turns if t in ARROW_TURN})
+  if not angles:
+    return []
+
+  def kind(a):
+    return "L" if a > 30 else "R" if a < -30 else "T"
+  top = np.array([0.0, 0.4])
+  out = [(kind(angles[0]) if len(angles) == 1 else "T", np.array([[0.0, -2.2], top]))]
+  for a in angles:
+    if a == 180.0:
+      path = np.array([top, [0.0, 1.3], [-1.1, 1.3], [-1.1, 0.0]])
+    else:
+      r = np.radians(a)
+      path = np.array([top, top + (2.0 if a == 0 else 1.6) * np.array([-np.sin(r), np.cos(r)])])
+    tip, d = path[-1], path[-1] - path[-2]
+    d = d / np.hypot(*d)
+    barbs = [tip - 0.8 * np.array([d[0] * np.cos(b) - d[1] * np.sin(b), d[0] * np.sin(b) + d[1] * np.cos(b)]) for b in np.radians([35.0, -35.0])]
+    out += [(kind(a), path), (kind(a), np.array([barbs[0], tip, barbs[1]]))]
+  return out
+
+
+def member_way(m, s: float) -> tuple[int, bool] | None:
+  """The way (and whether it runs out of the junction) s m along a junction member's line from its junction node."""
+  pts = m.line.p[1:-1]
+  k = int(np.searchsorted(arc(pts), s, side="right")) - 1
+  return m.ways[k] if 0 <= k < len(m.ways) else None
+
+
+def taper_middles(osm, wid: int, pts: np.ndarray, z: np.ndarray) -> list[np.ndarray]:
+  """The middle [N, 3] of each lane opening or closing along a tapered way (OsmLanes.taper), over where its width
+  changes."""
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import z_along
+  found = osm.taper(wid)
+  if found is None:
+    return []
+  d, knots = found
+  secs = [sec for _, sec in knots]
+  if len({len(sec.spans) for sec in secs}) != 1:
+    return []
+  p = pts if d == FORWARD else pts[::-1]
+  along = arc(p)
+  ks = np.array([v for v, _ in knots])
+  s2 = np.unique(np.concatenate((along, ks)))
+  p2 = np.stack([np.interp(s2, along, p[:, 0]), np.interp(s2, along, p[:, 1])], axis=1)
+  out = []
+  for i in range(len(secs[0].spans)):
+    widths = np.array([sec.spans[i].right - sec.spans[i].left for sec in secs])
+    if widths.min() >= OPENED or widths.max() - widths.min() < 1.0:
+      continue
+    changing = [k for k in range(len(ks) - 1) if abs(widths[k + 1] - widths[k]) > 0.05]
+    lo, hi = ks[changing[0]], ks[changing[-1] + 1]
+    sel = (s2 >= lo - 1e-6) & (s2 <= hi + 1e-6)
+    if sel.sum() < 2:
+      continue
+    geom = offset_polyline(p2[sel], np.interp(s2[sel], ks, [sec.spans[i].centre for sec in secs]))
+    out.append(np.column_stack([geom, z_along(p2[sel], pts, z)]))
+  return out
+
+
+def lane_count_flags(osm, skip=frozenset()) -> list[int]:
+  """The nodes where a road carries on from one way to the next (only the two meet) with more or fewer lanes either way
+  but neither way tapers between them (OsmLanes.taper): a lane appearing or vanishing at a point, which real roads
+  don't do. A road becoming one-way there isn't one."""
+  flagged: set[int] = set()
+  for wid, (_, refs) in osm.ways.items():
+    if wid in skip:
+      continue
+    for node in {refs[0], refs[-1]}:
+      found = osm._other(wid, node)
+      if found is None or node in flagged or found[0] in skip:
+        continue
+      other = found[0]
+      d_in = FORWARD if refs[-1] == node else BACKWARD  # along wid into the node, then along other away from it
+      d_out = FORWARD if osm.ways[other][1][0] == node else BACKWARD
+      a, b = osm.lanes(wid), osm.lanes(other)
+      ours = [Section.of(a, d_in).lanes, Section.of(b, d_out).lanes]
+      theirs = [Section.of(a, -d_in).lanes, Section.of(b, -d_out).lanes]
+      if (theirs[0] == 0) != (theirs[1] == 0) or (ours[0] == ours[1] and theirs[0] == theirs[1]):
+        continue
+      if osm.taper(wid) is None and osm.taper(other) is None:
+        flagged.add(node)
+  return sorted(flagged)
 
 
 def road_marks(paths, osm) -> dict:
@@ -337,13 +467,15 @@ def road_marks(paths, osm) -> dict:
       continue
     (a, za), (b, zb) = gta
     layer = level(osm.ways[wid][0])[0]
+    zpts = node_heights(osm, osm.ways[wid][1], za, zb, pts)
+    for middle in taper_middles(osm, wid, pts, zpts):
+      add("t", middle, (a, b))
     geometry = osm.line_geometry(wid)
     right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
     for line, base in geometry:
       if np.hypot(*(base[0] - pts[0])) > np.hypot(*(base[-1] - pts[0])):
         base = base[::-1]  # drawn the other way (OsmLanes.taper)
-      along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(base, axis=0).T))))
-      z = za + (zb - za) * along / max(along[-1], 1e-6)
+      z = zpts if len(base) == len(pts) else z_along(base, pts, zpts)
       for kind, off in marking_kinds(line):
         geom = offset_polyline(base, off) if off else base
         if len(geom) != len(base):
@@ -377,7 +509,32 @@ def road_marks(paths, osm) -> dict:
         add("e", np.column_stack([piece, np.full(len(piece), z)]), (g, g))
     shape("j", simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), z, g)
     for s in j.stops:
-      shape("l" if s.signal else "s", s.line, z, g)
+      shape("l" if s.signal else "k" if s.kind == "give_way" else "s", s.line, z, g)
+    # each lane's arrows on the road into the junction, out from its stop line
+    stop_at = {id(s.member): s.along for s in j.stops}
+    for arm in j.arms:
+      for m in arm.members:
+        for out in ARROW_AT:
+          s = stop_at.get(id(m), m.trim) + out
+          way = member_way(m, s)
+          if s > m.line.length - 1.0 or way is None or way[0] in junctions.inside:
+            break
+          spans = osm.lanes(way[0]).ours(BACKWARD if way[1] else FORWARD)  # towards the junction
+          p, u = m.line.at(s), m.line.tangent(s)
+          ahead, right = -u, np.array([-u[1], u[0]])
+          for sp in spans:
+            for kind, xy in arrow_strokes(sp.lane.turns):
+              q = p + right * sp.centre + xy[:, :1] * right + xy[:, 1:] * ahead
+              add(kind, np.column_stack([q, np.full(len(q), z)]), (g, g))
+  for c in junctions.crossing_lines():
+    g = near_node(paths, c.mean(0))
+    if g is not None:
+      add("x", np.column_stack([c, np.full(len(c), paths.z[g])]), (g, g))
+  for node in lane_count_flags(osm, junctions.inside):
+    xy = osm.node_xy(node)
+    found = gta_at(paths, xy)
+    if found is not None:
+      shape("q", xy[None], found[1], found[0])
   return {"segs": np.concatenate(ends) if ends else np.zeros((0, 2, 3)), "kinds": np.array(kinds, "<U1"),
           "nodes": np.array(nodes, np.int64).reshape(-1, 2),
           "shape_pts": np.concatenate(shape_pts) if shape_pts else np.zeros((0, 3)),

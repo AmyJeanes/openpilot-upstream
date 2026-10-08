@@ -11,9 +11,9 @@ from collections import Counter, defaultdict
 
 import osmium
 
-from openpilot.tools.sim.bridge.gta5.map import paint_survey
+from openpilot.tools.sim.bridge.gta5.map import paint_survey, traps
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import WayLanes
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
   wrap
 
@@ -54,6 +54,9 @@ APPROACH = 30.0  # m before a junction that its lanes' turn arrows are marked (G
 APPROACH_HEADING = 15.0  # m: a junction's ways out turn from the road's heading over this far before it
 RESTRICTION_REACH = 60.0  # m back from an approach that a restriction on it can start (from a stop line or turn flag)
 APPROACH_BEND = 20.0  # deg: where the way into a junction turns more than this from that, which way is through is moot
+ARROW_REACH = 90.0  # m before a junction that the arrows painted in its approach's lanes are theirs (9 in 10 are within 80 m)
+ARROW_ALIGN, ARROW_DZ, ARROW_SPILL = 30.0, 2.5, 0.5  # deg, m above or below, m outside a lane: a painted arrow is in it
+THROUGH_SKEW = 55.0  # deg: a road going on this skewed is painted through (validate_lanes' through reaches 60)
 # m: lanes as painted, measured in the game (CodeWalker's 5.5 / 4.0 m are the AI's lanes, not the paint: narrow lanes are
 # painted 4.2-4.5 m, freeway lanes 5.9-6.5 m), and the painted median per step of a two-way link's offset (5.2-5.5 m
 # at 6 steps on narrow and normal links alike)
@@ -602,6 +605,8 @@ def node_tags(n, stop='both'):
 
 def no_u_turns(nodes, ways):
   """OSM no_u_turn restrictions for every move at a node that turns back by more than U_TURN: GTA's nodes allow them.
+  Turning back on to another way is a U-turn only where the move leaves some other way on: where no node along it has
+  one, it is the road itself, bending back round a hairpin or out of an acute junction.
   `ways` is [(way id, a, b, two_way)] with a -> b the way's direction."""
   arrive, leave = defaultdict(list), defaultdict(list)  # node -> [(way id, heading)]
   for wid, a, b, two_way in ways:
@@ -614,11 +619,14 @@ def no_u_turns(nodes, ways):
   def turn(h0, h1):
     return (h1 - h0 + 180) % 360 - 180
 
+  def choice(n, w_in, w_on):  # a way on from n other than w_on, arriving on w_in (and not back along it)
+    return any(w not in (w_in, w_on) for w, _ in leave[n])
+
   out = []
   for n, ins in arrive.items():
     for wi, hi in ins:
       for wo, ho in leave[n]:
-        if abs(turn(hi, ho)) > U_TURN:
+        if abs(turn(hi, ho)) > U_TURN and (wo == wi or choice(n, wi, wo)):
           out.append((wi, [('n', n)], wo))
   # and through short links, as through a median gap or a junction: in, along them, out, turning back
   length = {wid: math.hypot(nodes[b]['x'] - nodes[a]['x'], nodes[b]['y'] - nodes[a]['y']) for wid, a, b, _ in ways}
@@ -631,18 +639,19 @@ def no_u_turns(nodes, ways):
         short_from[b].append((wid, a, h + 180))
   for n, ins in arrive.items():
     for wi, hi in ins:
-      stack = [(n, [], 0.0, hi, 0.0)]  # summing the turns, as a loop can come round past 180 deg
+      stack = [(n, [], 0.0, hi, 0.0, False)]  # summing the turns, as a loop can come round past 180 deg
       while stack:
-        p, via, dist, h, turned = stack.pop()
+        p, via, dist, h, turned, left = stack.pop()
         for wv, q, hv in short_from[p]:
           if wv == wi or wv in via or dist + length[wv] > GAP:
             continue
           chain, turned_v = via + [wv], turned + turn(h, hv)
+          left_v = left or choice(p, via[-1] if via else wi, wv)
           for wo, ho in leave[q]:
-            if wo != wi and wo not in chain and abs(turned_v + turn(hv, ho)) > U_TURN:
+            if wo != wi and wo not in chain and abs(turned_v + turn(hv, ho)) > U_TURN and (left_v or choice(q, wv, wo)):
               out.append((wi, [('w', v) for v in chain], wo))
           if len(chain) < GAP_LINKS:
-            stack.append((q, chain, dist + length[wv], hv, turned_v))
+            stack.append((q, chain, dist + length[wv], hv, turned_v, left_v))
   return out
 
 
@@ -1095,10 +1104,21 @@ def junction_exits(nodes, junction, h_in, h_road, seen, out, way_of):
   return exits
 
 
+def road_on(turns):
+  """Which of a junction's ways out (deg turned, left positive) go on through it: those turning up to TURN_FLAG, else
+  the nearest straight up to THROUGH_SKEW, a skewed junction's road on, which GTA paints through and its turn flags
+  leave open."""
+  on = {k for k, t in enumerate(turns) if abs(t) <= TURN_FLAG}
+  if not on and turns and abs(turns[k := min(range(len(turns)), key=lambda k: abs(turns[k]))]) <= THROUGH_SKEW:
+    on = {k}
+  return on
+
+
 def turn_restrictions(nodes, ways, toward, flags):
   """GTA's no left / no right turn flags, and its left turn only lanes, as OSM restrictions at the junction ahead of
   the node: from the way into the junction's node (from the node, along the ways to it, where lanes join on the way),
-  through the junction's own nodes, to each way out turning that way by more than TURN_FLAG; and at the node itself.
+  through the junction's own nodes, to each way out turning that way by more than TURN_FLAG but the road on (road_on);
+  and at the node itself.
   `ways` is [(way id, a, b, two_way)], `toward` {node: {next node: nodes on to the junction}}, `flags` {node: (no
   left, no right, a left turn only lane)}; returns [(restriction, from way, via, to way)], via [('n', node)] or
   [('w', way id), ...]; how many were left out for going through more than MAX_VIA ways; and how many approaches were
@@ -1132,7 +1152,8 @@ def turn_restrictions(nodes, ways, toward, flags):
       joined = any(set(into[n]) - {path[k + 1]} != {path[k - 1]} for k, n in enumerate(path[1:-1], 1))
       lead = [way_of[(p, q)] for p, q in zip(path[:-1], path[1:], strict=True)] if joined else [way_of[(path[-2], junction)]]
       exits = junction_exits(nodes, junction, h_in, h_road, set(path), out, way_of)
-      kinds = [kind_of(turn, *flags[i]) for turn, *_ in exits]
+      on = road_on([turn for turn, *_ in exits])
+      kinds = [kind_of(0.0 if k in on else turn, *flags[i]) for k, (turn, *_) in enumerate(exits)]
       if all(kinds):
         dead_ends += 1  # GTA's flags leave no way out: forbid none
         continue
@@ -1243,17 +1264,42 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
   return tags
 
 
+# minor roads the game may leave unpainted (not unclassified: Blaine's country roads, where the files may miss paint)
+UNPAINTED_CLASSES = {'residential', 'service', 'track'}
+
+
+def painted_lines(tags, cls, two_way, samples, why):
+  """A way's tags with the game files' lane lines where its lanes are the class layout's (paint_survey.lane_lines,
+  .unpainted): `lane_markings=no` (and no divider) on a minor road they show unpainted, else `change:lanes`
+  (`:forward` / `:backward`) where a painted line between its lanes is solid (or solid on one side). Major roads keep
+  their lines where the files show none: those are more likely gaps in the files (the Great Ocean Hwy, some freeways)
+  than unpainted."""
+  road = WayLanes.from_tags(tags)
+  if len(road.lanes) < 2:  # no lines to draw
+    return tags
+  if cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples):
+    why['unpainted'] += 1
+    return {**{k: v for k, v in tags.items() if not k.startswith('divider')}, 'lane_markings': 'no'}
+  out = dict(tags)
+  if not any(k.startswith('change:lanes') for k in tags):
+    for key, change in paint_survey.lane_lines(samples, [(s.left, s.right, s.heading) for s in road.section()]).items():
+      out[f'change:lanes:{key}' if two_way else 'change:lanes'] = '|'.join(change)
+      why['lines not to cross'] += 1
+  return out
+
+
 def arrows(n, kinds, fewer_left=False):
-  """The turn arrows of n lanes into a junction whose ways out turn `kinds` ways (left, through, right): every lane
-  the same way at a forced turn; else the outer lanes also turn, from the outermost as GTA's cars do, and the others
-  go through; with no way through, half turn each way, the fewer on the side with fewer lanes out."""
+  """The turn arrows of n lanes into a junction whose ways out turn `kinds` ways (left, through, right), as GTA paints
+  most approaches it paints every lane of: every lane the same way at a forced turn; else the left lane turns left only
+  (2 in 3 such approaches), the right lane also turns right, and the others go through; with no way through, half turn
+  each way, the fewer on the side with fewer lanes out."""
   order = [k for k in ('left', 'through', 'right') if k in kinds]
   if n == 1 or len(order) == 1:
     return [';'.join(order)] * n
   if 'through' in order:
     out = ['through'] * n
     if 'left' in order:
-      out[0] = 'left;through'
+      out[0] = 'left'
     if 'right' in order:
       out[-1] = 'through;right'
     return out
@@ -1261,20 +1307,75 @@ def arrows(n, kinds, fewer_left=False):
   return ['left'] * left + ['right'] * (n - left)
 
 
+def with_paint(lanes, seen, allowed):
+  """Lanes' turn arrows (`lanes`, turn:lanes values) with those painted on them (`seen`, {lane: value}) where the
+  junction has a way out they point along (`allowed`), less any move that isn't. A lane without paint keeps those of
+  its own that don't cross a painted lane's (none further left than a painted lane on its left, none further right than
+  one on its right), else through or the junction's other moves between theirs."""
+  order = {'left': 0, 'through': 1, 'right': 2}
+  painted = [set(seen[k].split(';')) & allowed if k in seen else set() for k in range(len(lanes))]
+  out = list(painted)
+  for k, lane in enumerate(lanes):
+    if out[k]:
+      continue
+    lo = max((order[m] for i in range(k) for m in painted[i]), default=0)
+    hi = min((order[m] for i in range(k + 1, len(lanes)) for m in painted[i]), default=2)
+    own, between = set(lane.split(';')), {m for m in allowed if lo <= order[m] <= hi}
+    out[k] = {m for m in own if lo <= order[m] <= hi} or between & {'through'} or between or own
+  return [';'.join(t for t in ('left', 'through', 'right') if t in kinds) for kinds in out]
+
+
+class PaintedArrows:
+  """The game files' painted turn arrows (paint_survey.arrow_marks) by where they are."""
+  CELL = 25.0  # m
+
+  def __init__(self, marks):
+    self.grid = defaultdict(list)
+    for m in marks:
+      self.grid[(int(m[0] // self.CELL), int(m[1] // self.CELL))].append(m)
+
+  def on(self, a, b, spans):
+    """The arrows painted in the lanes of a link from node a to node b pointing along it, `spans` its lanes' (left,
+    right) m right of it, left to right: [(lane, m before b, turn:lanes value)]."""
+    dx, dy = b['x'] - a['x'], b['y'] - a['y']
+    length = math.hypot(dx, dy)
+    if length < 1e-6 or not spans:
+      return []
+    ux, uy, h = dx / length, dy / length, game_heading(dx, dy)
+    steps = int(length // self.CELL) + 1
+    cells = {(int((a['x'] + dx * t / steps) // self.CELL) + i, int((a['y'] + dy * t / steps) // self.CELL) + k)
+             for t in range(steps + 1) for i in (-1, 0, 1) for k in (-1, 0, 1)}
+    out = []
+    for c in cells:
+      for x, y, z, heading, kind in self.grid.get(c, ()):
+        s, right = (x - a['x']) * ux + (y - a['y']) * uy, (x - a['x']) * uy - (y - a['y']) * ux
+        if not 0.0 <= s < length or abs(wrap(heading - h)) > ARROW_ALIGN or \
+           abs(z - (a.get('z', z) + (b.get('z', z) - a.get('z', z)) * s / length)) > ARROW_DZ:
+          continue
+        lane = min(range(len(spans)), key=lambda k: abs(right - (spans[k][0] + spans[k][1]) / 2))
+        if spans[lane][0] - ARROW_SPILL <= right <= spans[lane][1] + ARROW_SPILL:
+          out.append((lane, length - s, kind))
+    return out
+
+
 def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions, left_bays=frozenset(), medians=frozenset(),
-               painted=None):
+               painted=None, spans=None):
   """turn:lanes on the lanes into GTA's junctions where roads cross (see arrows), from the ways out of each, a move
-  turning more than TURN_FLAG being a left or right turn, as for GTA's turn flags, less those the restrictions forbid.
-  Marked on every way along the approach from APPROACH m before the junction while the road runs on with the same
-  lanes (Valhalla reads them from the way into the junction). None where every lane only goes through, or where the
+  turning more than TURN_FLAG but the road on (road_on) being a left or right turn, as for GTA's turn flags, less
+  those the restrictions forbid.
+  Marked on every way along the approach from APPROACH m before the junction, or from the furthest arrow painted
+  there, while the road runs on with the same lanes (Valhalla reads them from the way into the junction). None where every lane only goes through, or where the
   road bends into the junction (APPROACH_BEND), which leaves which way is through moot. A one-lane approach gets none,
-  as real mappers leave them out, unless it's GTA's left turn only lane; on a wider road that lane is the left one. A
+  as real mappers leave them out, unless it's GTA's left turn only lane or its painted arrow says every move it has;
+  on a wider road that lane is the left one. A
   turn bay folded into its road (`left_bays`, its road's links) is its left lane, marked from where it opens, also
   where the road gains lanes on the way (`left|through` before that). On a two-way road with a median (`medians`, its links (node, next node) where the median has room for a lane)
   running in to a junction it may turn left at, GTA paints the median as a left-turn lane without a link of its own
   (measured on 4 of 4 such approaches): one more lane, `left`, on the approach's links within the median, if they are
-  at least MEDIAN_LANE_MIN long. Arrows painted on the approach (`painted`, by link (node, next node):
-  paint_survey.arrows) replace these where there are as many as lanes and the junction has their ways out. `ways` is
+  at least MEDIAN_LANE_MIN long. Each lane takes the arrow painted on it up to ARROW_REACH m before the junction
+  (`painted`: PaintedArrows, found in the lanes `spans` gives each link (node, next node): their (left, right) m right
+  of it) where the junction has a way out it points along (with_paint), a skewed road on painted through or as a
+  turn that way. `ways` is
   [(way id, a, b, two_way)], `left_only` GTA's left turn only lane nodes, `restrictions` [(kind, from way, via, to way)]
   as written; returns {way id: {tag: value}}, how many approaches got
   arrows, how many were left out for bending, and the links (node, next node) given a median lane."""
@@ -1295,7 +1396,27 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
     return any(tuple(seq[k + 1:k + 1 + len(via)]) == via and seq[k + 1 + len(via):k + 2 + len(via)] == [wt]
                for k, w in enumerate(seq) for via, wt in banned.get(w, ()))
 
-  only_left = {(path[-2], path[-1]) for i in left_only for path in toward.get(i, {}).values()} | set(left_bays)
+  def painted_on(chain, n):
+    """The arrow painted in each lane of an approach (its links back from the junction, `chain`, and the road's on
+    back with its n lanes), {lane: turn:lanes value}: the one most seen there up to ARROW_REACH m before the junction;
+    and the links from the junction back to the furthest painted."""
+    far, total, (q, nxt) = list(chain), sum(length(*e) for e in chain), chain[-1]
+    while total < ARROW_REACH and not junction(q) and len(prev := [r for r in into[q] if r != nxt]) == 1 and \
+          set(out[q]) - {prev[0]} == {nxt} and lanes_to[(prev[0], q)] == n:
+      q, nxt = prev[0], q
+      far.append((q, nxt))
+      total += length(q, nxt)
+    votes, before, last = defaultdict(Counter), 0.0, 0
+    for k, e in enumerate(far):
+      if lanes_to[e] == n and len(spans.get(e, ())) == n:
+        for lane, m, kind in painted.on(nodes[e[0]], nodes[e[1]], spans[e]):
+          if m + before <= ARROW_REACH:
+            votes[lane][kind] += 1
+            last = k
+      before += length(*e)
+    return {lane: v.most_common(1)[0][0] for lane, v in votes.items()}, far[:last + 1]
+
+  only_left ={(path[-2], path[-1]) for i in left_only for path in toward.get(i, {}).values()} | set(left_bays)
   tags, approaches, bent, opened = defaultdict(dict), 0, 0, set()
   for j in sorted(into):
     if not junction(j):
@@ -1306,7 +1427,7 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
       median = (p, j) in medians and not only and not any(
         q != p and lanes_to[(q, j)] == 1 and not lanes_to[(j, q)] and 'f' in nodes[q] and lane_node(nodes[q]) and
         abs(wrap(heading(q, j) - heading(p, j))) < STRAIGHT for q in into[j])
-      if junction(p) or (n < 2 and not only and not median):
+      if junction(p) or (n < 2 and not only and not median and painted is None):
         continue
       chain, q, nxt, dist = [(p, j)], p, j, length(p, j)
       start = p if dist >= APPROACH_HEADING else None
@@ -1322,33 +1443,43 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
           start = q
       h_in = heading(start or chain[-1][0], j)
       if abs(wrap(heading(p, j) - h_in)) > APPROACH_BEND:
-        bent += 1
+        bent += n > 1 or only or median
         continue
       lead, back = [way_of[e] for e in chain[::-1]], 0.0  # and the road further back, where restrictions can start
       while back < RESTRICTION_REACH and len(prev := [r for r in into[q] if r != nxt]) == 1:
         q, nxt = prev[0], q
         lead.insert(0, way_of[(q, nxt)])
         back += length(q, nxt)
-      exits = [('left' if t > TURN_FLAG else 'right' if t < -TURN_FLAG else 'through', lanes_to[e])
-               for t, inner, w, e in junction_exits(nodes, j, h_in, h_in, {k for e in chain for k in e}, out, way_of)
-               if not forbidden(lead + inner + [w])]
+      found = junction_exits(nodes, j, h_in, h_in, {k for e in chain for k in e}, out, way_of)
+      on = road_on([t for t, *_ in found])
+      kept = [k for k, (_, inner, w, _) in enumerate(found) if not forbidden(lead + inner + [w])]
+      exits = [('through' if k in on else 'left' if found[k][0] > 0 else 'right', lanes_to[found[k][3]]) for k in kept]
       allowed = {k for k, _ in exits}
       if not allowed:
         continue
+      # GTA paints a skewed road on as through or as a turn that way
+      paintable = allowed | {'left' if found[k][0] > 0 else 'right' for k in kept if k in on and abs(found[k][0]) > TURN_FLAG}
       fewer_left = max((m for k, m in exits if k == 'left'), default=0) < max((m for k, m in exits if k == 'right'), default=0)
       lanes = arrows(n, allowed, fewer_left)
       if only and n > 1 and 'left' in allowed and allowed - {'left'}:
         lanes = ['left', *arrows(n - 1, allowed - {'left'}, fewer_left)]
+      seen, reach = painted_on(chain, n) if painted is not None else ({}, chain)
       inside = next((k for k, e in enumerate(chain) if e not in medians), len(chain))  # the median runs in to the junction
+      shift = 0
       if median and 'left' in allowed and allowed - {'left'} and sum(length(*e) for e in chain[:inside]) >= MEDIAN_LANE_MIN:
         chain = chain[:inside]
-        lanes = ['left', *arrows(n, allowed - {'left'}, fewer_left)]
+        lanes, shift = ['left', *arrows(n, allowed - {'left'}, fewer_left)], 1
         opened.update(chain)
-      elif n < 2 and not only:
+      if painted is not None:
+        seen = {lane + shift: kind for lane, kind in seen.items()}
+        lanes = with_paint(lanes, seen, paintable)
+        if n < 2 and not only and not shift and (not any(set(k.split(';')) & paintable for k in seen.values()) or
+                                                 set(lanes[0].split(';')) != allowed):
+          continue  # a one-lane approach: only where its paint says all it has
+        if not shift and any(set(k.split(';')) & paintable for k in seen.values()):
+          chain += reach[len(chain):]  # and back to where they're painted
+      elif n < 2 and not only and not shift:
         continue
-      seen = next((painted[e] for e in chain if e in (painted or {})), None)
-      if seen and len(seen) == len(lanes) and all(set(k.split(';')) <= allowed for k in seen):
-        lanes = seen
       if all(lane == 'through' for lane in lanes):
         continue
       approaches += 1
@@ -1365,6 +1496,35 @@ def node_id(k):
   return k[0] * 65536 + k[1] + 1
 
 
+def painted_stop_lines(path, lines_path, features_path, nodes, info):
+  """The map at `path` written again with its stop lines where the game files paint them (stop_paint.py); returns the
+  rows and nodes used with the ways split for them."""
+  from openpilot.tools.sim.bridge.gta5.map import stop_paint
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  placed, counts = stop_paint.stop_lines(path, lines_path, features_path, to_game)
+  synthetic = [max((k[1] for k in nodes if k[0] == TAPER_NODE_AREA), default=0)]
+
+  def new_node_id():
+    synthetic[0] += 1
+    return node_id((TAPER_NODE_AREA, synthetic[0]))
+  new_nodes, pieces = stop_paint.rewrite(path, placed, new_node_id, to_lat_lon, remap_restrictions)
+  key_of = {node_id(k): k for k in nodes}
+  for nid, (x, y, z) in new_nodes.items():
+    k = ((nid - 1) // 65536, (nid - 1) % 65536)
+    nodes[k] = {'a': k[0], 'i': k[1], 'x': x, 'y': y, 'z': z, 'f': [0, 0, 0, 0, 0], 'st': 0, 'sp': 1}
+    key_of[nid] = k
+  out = []
+  for row in info:
+    if row[0] not in pieces:
+      out.append(row)
+      continue
+    out += [[pid, key_of[a], key_of[b], *row[3:]] for pid, a, b in pieces[row[0]]]
+  out.sort(key=lambda r: r[0])
+  told = ', '.join(f'{n} {k}' for k, n in sorted(counts.items(), key=lambda c: -c[1]))
+  print(f"stop lines from the game files' paint: {told}; {len(new_nodes)} nodes added, {len(pieces)} ways split")
+  return out, sorted({k for _, a, b, *_ in out for k in (a, b)})
+
+
 def main():
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument('dump', help="ynddump's paths.jsonl")
@@ -1374,7 +1534,9 @@ def main():
   p.add_argument('--survey', nargs='*', default=[], help="surveys of the game's road paint (paint_survey.py): the lane "
                  "widths where they were measured")
   p.add_argument('--survey-lines', help="the game files' paint as polylines (polylines.jsonl): each line's kind by its "
-                 "whole length, for the survey's sections")
+                 "whole length, for the survey's sections, and the stop lines where they're painted")
+  p.add_argument('--survey-features', help="the game files' painted features (features.jsonl): crossings, for the stop "
+                 "lines added where the map has none, and turn arrows, for the lanes' turn:lanes")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -1496,17 +1658,16 @@ def main():
   folded = [r for r in turns if r[0] == 'no_left_turn' and ({r[1]} | {ref for t, ref in r[2] if t == 'w'}) & bay_roads]
   restrictions += [r for r in turns if r not in folded]
   print(f"{len(folded)} no-left turns from roads now with their bay as a lane dropped")
+  restrictions, freed, earlier = traps.free_traps(nodes, ways, restrictions, MAX_VIA)
+  print(f"{len(freed)} restrictions that cut road off left out (" +
+        ', '.join(f'{n} {k}' for k, n in Counter(r[0] for r in freed).most_common()) +
+        f"), {len(earlier)} from the ways on to a trap instead")
   medians = set()  # two-way links (node, next node) with room for a turn lane in their median, and no turn bay that way
   for wid, a, b, fwd, back, *_, lf in info:
     if back and 2 * layout(lf, back)[1] >= BAY_MIN:
       medians.update(e for e in ((a, b), (b, a)) if e[1] not in bay_to[wid])
   lines = paint_survey.line_kinds(args.survey_lines) if args.survey_lines else None
   survey = paint_survey.load(args.survey, lines) if args.survey else {}
-  painted_arrows = {}  # (node, next node) -> the lanes' painted turn arrows that way, left to right
-  for _, a, b, *_ in info:
-    if (samples := paint_survey.along(survey, a, b)) is not None:
-      for key, e in paint_survey.arrows(samples).items():
-        painted_arrows[(a, b) if key == 'forward' else (b, a)] = e
   row_of = {row[0]: row for row in info}
   painted, why, left_out, centre_kinds, recounted, median_kinds = {}, Counter(), 0, {}, {}, {}
   # where the game files' paint covers the map, the camera's survey only checks it
@@ -1551,8 +1712,18 @@ def main():
     if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
       centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
   print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
+  painted_arrows, spans = None, {}  # (node, next node) -> its lanes' (left, right), m right of it, left to right
+  if args.survey_features:
+    painted_arrows = PaintedArrows(paint_survey.arrow_marks(args.survey_features))
+    for wid, a, b, fwd, back, *_, lf in info:
+      freeway = bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2
+      road = WayLanes.from_tags(lane_tags(fwd, back, lf, freeway, (b in bay_to[wid], a in bay_to[wid]), painted.get(wid)))
+      if road.single_track:  # one lane both ways has no turn:lanes each way
+        continue
+      for e, d in (((a, b), FORWARD), ((b, a), BACKWARD)):
+        spans[e] = [(s.left, s.right) for s in road.ours(d)]
   arrows_at, approaches, bent, opened = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions,
-                                                   left_bays, medians, painted_arrows)
+                                                   left_bays, medians, painted_arrows, spans)
   way_of = graph(ways)[0]
   for p, q in opened:
     row = row_of[way_of[(p, q)]]
@@ -1568,8 +1739,19 @@ def main():
 
   yellow = paint_survey.yellow_lines(args.survey_lines) if args.survey_lines else None
   tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow) if survey else []
+  link_ends = {r[0]: (r[1], r[2]) for r in info}  # GTA's links, before any are split
   info, parent, widen, piece_bays, applied = split_tapers(nodes, info, tapers, set(left_bays) | opened, arrows_at, bay_to,
                                                                recounted)
+
+  def link_samples(wid, a, b):  # the survey's samples on a way, a piece of a split link only those along it
+    a0, b0 = link_ends[parent.get(wid, wid)]
+    samples = paint_survey.along(survey, a0, b0) or []
+    if (a, b) == (a0, b0):
+      return samples
+    pa, pb = nodes[a], nodes[b]
+    dx, dy = pb['x'] - pa['x'], pb['y'] - pa['y']
+    return [d for d in samples if 'x' in d and
+            0.0 <= ((d['x'] - pa['x']) * dx + (d['y'] - pa['y']) * dy) / max(dx * dx + dy * dy, 1e-9) <= 1.0]
   if parent:
     for pid, wid in parent.items():  # a piece is its way's but for its lanes
       for d in (layer_of, destination):
@@ -1595,9 +1777,15 @@ def main():
             restrictions.append(('no_u_turn', p, [('n', n)], p))
     used = sorted({k for _, a, b, *_ in info for k in (a, b)})
     info.sort(key=lambda r: r[0])  # osmium readers want ways in order of their ids
+  final = [(wid, a, b, bool(back)) for wid, a, b, _, back, *_ in info if wid not in crossings]
+  cut = [x - y for x, y in zip(traps.cut_off(final, restrictions), traps.cut_off(final, []), strict=True)]
+  if any(cut):
+    raise SystemExit(f"restrictions cut road off: {len(cut[0])} directed ways trapped, {len(cut[1])} unreachable, " +
+                     f"e.g. {sorted(cut[0] | cut[1])[:5]}")
   for wid in widen:
     painted.pop(wid, None)
   print(f"{len(tapers)} turn lanes opening where the game files paint it, {applied} widening from there: {len(parent)} links split")
+  lines_why = Counter()
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:
     n = nodes[k]
@@ -1649,6 +1837,9 @@ def main():
         tags['divider'] = left
       elif left != right:
         tags.update({k: v for k, v in (('divider:forward', right), ('divider:backward', left)) if v})
+    if survey and 'lane_markings' not in tags and tags.get('source:width') != 'survey' and \
+        not any(k.endswith((':start', ':end')) for k in tags) and (samples := link_samples(wid, a, b)):
+      tags = painted_lines(tags, cls, bool(back), samples, lines_why)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:
@@ -1664,11 +1855,15 @@ def main():
     if lf[2] & 1:
       tags['gta:no_nav'] = 'yes'
     w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)], tags=tags))
+  if survey:
+    print("lane lines from the game files' paint: " + ', '.join(f'{n} {k}' for k, n in lines_why.most_common()))
   for i, (kind, wi, via, wo) in enumerate(restrictions):
     via = [(t, node_id(ref) if t == 'n' else ref, 'via') for t, ref in via]
     w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': kind},
                                                members=[('w', wi, 'from'), *via, ('w', wo, 'to')]))
   w.close()
+  if args.survey_lines:
+    info, used = painted_stop_lines(args.out, args.survey_lines, args.survey_features, nodes, info)
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")

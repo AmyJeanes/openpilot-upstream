@@ -312,6 +312,38 @@ def test_median_turn_lane():
   assert turns(set()) == (None, set())  # no median: one lane, no arrows
 
 
+def test_painted_turn_lanes():
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import PaintedArrows, arrows, lane_turns, road_on, with_paint
+  everything = {'left', 'through', 'right'}
+  assert road_on([10.0, 90.0, -40.0]) == {0, 2}
+  assert road_on([89.0, 51.0, -77.0, -126.0]) == {1}  # a skewed junction's road on
+  assert road_on([60.0, -90.0]) == set()  # a T
+  assert arrows(3, everything) == ['left', 'through', 'through;right']  # as GTA paints most it paints whole
+  assert arrows(2, {'left', 'right'}) == ['left', 'right']
+  # a painted lane's own arrow, less moves the junction hasn't; the lanes between don't cross it
+  assert with_paint(['left', 'through', 'through;right'], {1: 'right'}, everything) == ['left', 'right', 'right']
+  assert with_paint(['left', 'through;right'], {0: 'left;through'}, {'through', 'right'}) == ['through', 'through;right']
+
+  # a 3-lane one-way approach from the south into a crossroads
+  xy = {'P': (0, -100), 'Q': (0, -30), 'J': (0, 0), 'W': (-50, 0), 'E': (50, 0), 'N': (0, 50)}
+  nodes = {k: {'x': x, 'y': y} for k, (x, y) in xy.items()}
+  ways = [(1, 'P', 'Q', False), (2, 'Q', 'J', False), (3, 'J', 'W', True), (4, 'J', 'E', True), (5, 'J', 'N', True)]
+  lanes_to = {e: 1 for _, a, b, two_way in ways for e in ((a, b), (b, a)) if two_way}
+  lanes_to.update({('P', 'Q'): 3, ('Q', 'J'): 3, ('Q', 'P'): 0, ('J', 'Q'): 0})
+  spans = {e: [(-8.25, -2.75), (-2.75, 2.75), (2.75, 8.25)] for e in (('P', 'Q'), ('Q', 'J'))}
+
+  def turns(marks):
+    painted = PaintedArrows(marks) if marks is not None else None
+    tags = lane_turns(nodes, ways, lanes_to, lambda k: k == 'J', {}, set(), [], painted=painted, spans=spans)[0]
+    return tags.get(2, {}).get('turn:lanes')
+  assert turns(None) == 'left|through|through;right'
+  # painted right only in the right lane 20 m out, through in the middle one 60 m out; one pointing the other way
+  marks = [(5.5, -20.0, 0.0, 0.0, 'right'), (0.0, -60.0, 0.0, 0.0, 'through'), (-5.5, -20.0, 0.0, 180.0, 'right')]
+  assert turns(marks) == 'left|through|right'
+  assert turns([(-5.5, -20.0, 0.0, 0.0, 'left;through')]) == 'left;through|through|through;right'
+  assert turns([(5.5, -95.0, 0.0, 0.0, 'right')]) == 'left|through|through;right'  # beyond ARROW_REACH
+
+
 if __name__ == '__main__':
   for name, test in list(globals().items()):
     if name.startswith('test_'):

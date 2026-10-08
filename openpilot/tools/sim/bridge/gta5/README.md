@@ -134,20 +134,34 @@ from a route it finds over the map itself (its docstring says how).
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
-problems while driving (`gta5_overlay.py`): lane edges green, dividers cyan, stop lines yellow (lights) and orange
-(signs), junction areas blue, the route a 1.75 m translucent red band on the road (darker behind the car, where it
-was drawn as the car passed), nav's lane plan a dashed white line 0.25 m up (2 m on, 1.5 m off) so it reads over the
-route, the next turn a white cylinder and where its signal comes on an amber cone, all within 150 m and lifted 0.1 m
-off the road. Lane edges and dividers stop at
-junctions (from the stop line in, and inside junction areas and the circles round them). The route's band is a quad per
-segment with bevelled corners, along the route's line thinned to 1 m and cleared of short sideways jogs. Lines are
-DRAW_LINE's, 1 px wide. The bridge sends
-them every 0.5 s, and the route alone every 0.1 s between, from where the car will be as it is drawn, while the
-plugin's debug is on (`GTA5_OVERLAY=0` stops it); they come from GTA's roads with `GTA5_MAP`/`GTA5_ROUTER`.
-`layers=` picks some of edges, dividers, stops, junctions, route, nav, points and fill
-(translucent junction areas); `ground=1` puts the lines on the game's ground rather than at the map's heights, which
-hides height errors in the map. The plugin draws them only on the player's frames, never on the openpilot camera's
-(they're the ones with the capture marker), and not at all while the bridge records unless `force=1`.
+problems while driving (`gta5_overlay.py`, drawn by `core.cpp` DrawDebug). Each kind is a strip of its own width lying
+on the game's ground, colours as the map view's where it has them:
+
+| Layer (`layers=`) | Kinds |
+|---|---|
+| edges `e` | kerbs (the road's edge, kerbed or not), green, 0.35 m |
+| dividers `d` | lane lines white, centre lines and median edges yellow, 0.2 m, edged dark so they show over the game's own paint (`casing=0` drops it); dashed ones in 3 m dashes, 6 m gaps (the map has no dash phase, so they needn't line up with the paint's); a double line is two 0.3 m apart |
+| parking `p` | where a parking lane meets the lanes, purple, dashed |
+| stops `s` | stop lines 0.6 m, red at lights, orange at stop signs; give way lines orange, dashed |
+| crossings `x` | zebra stripes, 3 m |
+| junctions `j` | junction areas' outlines, blue (`fill` `f`: the areas, translucent) |
+| arrows `a` | each lane's turn:lanes arrows, painted 4 and 20 m out from its stop line: blue left (and U-turns), white through, orange right |
+| tapers `t` | the middle of a lane opening or closing along a taper or bay, translucent cyan, 1.2 m |
+| flags `q` | a magenta post where a road's lane count changes at a node with no taper (suspect map data) |
+| route `r`, nav `n`, points `m` | the route a 1.75 m translucent red band (darker behind the car, where it was drawn as the car passed), nav's lane plan a dashed white line over it, the next turn a white cylinder and where its signal comes on an amber cone |
+
+Strips widen and lift with distance beyond `grow=` m (40; up to 4x) so a 0.2 m line stays a few pixels wide; they're
+drawn to `dist=` m (120; the bridge sends 150). `width=` scales them all, `widths=e:2,d:1.5` some layers; `ground=0`
+draws them at the map's heights instead, which shows height errors in the map; `thin=1` gives back the 1-px lines.
+The ground under each point comes from GET_GROUND_Z_FOR_3D_COORD, up to `probes=` (100) new points a frame, kept by
+place, and the points a line on the ground doesn't need are then dropped; the status line shows the points, draw calls
+and the share on the ground. At a busy freeway interchange that's ~4000 draw calls and 0.7 ms of the script thread a
+frame, as much as `thin=1`. Lane edges and dividers stop at junctions (from the stop line in, and inside junction
+areas). The bridge sends them every 0.5 s, and the route alone
+every 0.1 s between, from where the car will be as it is drawn, while the plugin's debug is on (`GTA5_OVERLAY=0` stops
+it); on a lane-tagged map they're all from its tags (built once and cached, `GTA5_OVERLAY_CACHE`), else from GTA's
+lane bands. The plugin draws them only on the player's frames, never on the openpilot camera's (they're the ones with
+the capture marker), and not at all while the bridge records unless `force=1`.
 
 `gta5_cmd.py gpsroute on` (or `gps_route=1` in gta5op.ini) shows our route on the minimap and pause map as GTA's own
 purple GPS line (a custom GPS route, `colour=` a HUD colour, `max=` points, 100 by default as GTA's limit isn't
