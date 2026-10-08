@@ -150,6 +150,14 @@ shown or a level changes.
     the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median. Not
     where the game files paint the median's edge on our side on into the junction with no arrow of ours in it
     (`paint_survey.median_runs_in`): there the median stays a median, often with the other way's bay opening in it.
+  - Where GTA runs both carriageways of a divided road through one node in its median (a side road meeting it at a gap
+    in the median; 84 junctions, each carriageway bent about 7 m across the median into it), each carriageway gets a
+    node of its own on its line between its neighbours, joined by a two-way link across the median of the road's class
+    (`split_shared`; node ids from `SPLIT_NODE_AREA`, tagged with GTA's `gta:node`). The other links go to the
+    carriageway on their side; a turn lane in the median keeps GTA's node, which the link across runs through, so GTA's
+    turn flags read as before. junctions.py makes the carriageways' nodes one junction, square across the median's
+    noses. Left as GTA has them: two divided roads crossing at the node, lanes going on through between the
+    carriageways, U-turn-only gaps, and carriageways more than 20 m apart (`JUNCTION_SPAN`).
   - These widths are class rules, right on average. `--survey <file.jsonl> ...` corrects them where the game's paint
     was surveyed (format and rules in `paint_survey.py`): read from the game files' road meshes and marking decals
     (`"src": "gamefiles"`, exact to a few cm, the primary source); the map audit's top-down camera survey only
