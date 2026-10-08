@@ -23,6 +23,7 @@ from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5 import gta5_gnss
+from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
@@ -168,7 +169,7 @@ class GTA5World(World):
     ready_recv, ready_send = multiprocessing.Pipe(duplex=False)
     self.rx = multiprocessing.Process(name="gta5 rx", daemon=True, target=rx_main,
                                       args=(port, frames_send, controls_recv, ready_send, {n: m.name for n, m in self.shm.items()},
-                                            self.rx_latest))
+                                            self.rx_latest, display_from_env()))
     self.rx.start()
     error = ready_recv.recv() if ready_recv.poll(10) else "timed out"
     if error is not None:

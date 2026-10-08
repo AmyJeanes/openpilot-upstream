@@ -38,6 +38,9 @@
   gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16 take=1]
                                                 our route on the minimap and map as a custom GPS route, the map's waypoint held
                                                 off it meanwhile (take=0 leaves it); gpsroute off
+                                                the bridge keeps the last debug and gpsroute settings and sets them again each
+                                                time the game connects (a core reload, a GTA restart); GTA5_DEBUG_OVERLAY and
+                                                GTA5_GPSROUTE (e.g. "on layers=all") give them from the bridge's start
   gta5_cmd.py gtadirs <x> <y> <z>               GTA's own GPS directions from the car to a point (its next turn and the
                                                 distance to it), printed from the state; gtadirs off stops asking
   gta5_cmd.py state [/tmp/gta5state.json]       save and print the plugin's next state
@@ -187,25 +190,55 @@ def randomise(argv: list[str]) -> None:
 
 def on_off(argv: list[str]) -> int:
   if not argv or argv[0] not in ("on", "off"):
-    sys.exit(__doc__)
+    raise ValueError(f"expected on or off, not {' '.join(argv)!r}")
   return int(argv[0] == "on")
 
 
-def debug(argv: list[str]) -> None:
+def debug_cmd(argv: list[str]) -> dict:
   cmd = {"type": "debug", "on": on_off(argv), **options(argv[1:])}
   if "layers" in cmd:
     names = str(cmd["layers"])
     letters = set(gta5_overlay.LAYERS.values())
     cmd["layers"] = "".join(letters) if names == "all" else \
       "".join(gta5_overlay.LAYERS.get(n, n if n in letters else "") for n in names.split(","))
+  return cmd
+
+
+def gpsroute_cmd(argv: list[str]) -> dict:
+  return {"type": "gpsroute", "on": on_off(argv), **options(argv[1:])}
+
+
+DISPLAY_ENV = {"GTA5_DEBUG_OVERLAY": debug_cmd, "GTA5_GPSROUTE": gpsroute_cmd}
+
+
+def display_from_env(env=os.environ) -> list[dict]:
+  """The debug overlay and GPS route the bridge sets whenever the game connects, from GTA5_DEBUG_OVERLAY and GTA5_GPSROUTE,
+  each written as this script's arguments after debug or gpsroute ("on layers=all width=2", "off")."""
+  out = []
+  for name, build in DISPLAY_ENV.items():
+    if env.get(name, "").strip():
+      try:
+        out.append(build(env[name].split()))
+      except ValueError as e:
+        print(f"gta5: ignored {name}: {e}", flush=True)
+  return out
+
+
+def display(build, argv: list[str]) -> None:
+  try:
+    cmd = build(argv)
+  except ValueError:
+    sys.exit(__doc__)
   print(json.dumps(cmd))
   send(cmd)
+
+
+def debug(argv: list[str]) -> None:
+  display(debug_cmd, argv)
 
 
 def gpsroute(argv: list[str]) -> None:
-  cmd = {"type": "gpsroute", "on": on_off(argv), **options(argv[1:])}
-  print(json.dumps(cmd))
-  send(cmd)
+  display(gpsroute_cmd, argv)
 
 
 def read_state(path: str = STATE_FILE, wait: float = 2.0) -> dict | None:

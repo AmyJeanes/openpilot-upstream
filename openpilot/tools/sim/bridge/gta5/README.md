@@ -207,6 +207,12 @@ alone (both lines show; `colour=` tells them apart). `gta5_cmd.py gtadirs x y z`
 point (its next turn and the distance to it), and `compare_dirs.py <trips>` compares them with our router's at e2e trips'
 starts (it places the car, so run it only with nothing else driving).
 
+Both reset when the plugin's core reloads (a DLL swap, a GTA restart), so the bridge keeps them: it merges every
+`debug` and `gpsroute` command sent through it, takes up what the plugin's state shows (settings from before the bridge
+started, F7), and sets them again each time the game connects, which a reload does. `GTA5_DEBUG_OVERLAY` and
+`GTA5_GPSROUTE`, written as `gta5_cmd.py`'s arguments after `debug` or `gpsroute` (`GTA5_DEBUG_OVERLAY="on layers=all"`,
+`GTA5_GPSROUTE=on`), set them from the bridge's start; unset, the bridge sets nothing until told or the state shows one on.
+
 Checking that none of it reaches openpilot: with interleaving on, turn the overlay on with `force=1` and gpsroute on,
 check the lines sit on the road from the player's camera at a few known places (the L7 X junction, a freeway: X1),
 then `gta5_cmd.py snap /tmp/dbg` and record a minute (`GTA5_RECORD`) and look through the road and wide frames: no
