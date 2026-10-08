@@ -1622,14 +1622,15 @@ def main():
     fwd, back, lf = es[k]
     es[k] = (max(fwd, back), 0, lf) if ab else (0, max(fwd, back), lf)
   used = sorted({k for e in es for k in e})
-  print(f"{len(used)} nodes, {len(es)} ways ({len(cross)} carriageway crossovers dropped, {len(changes)} two-way lane "
-        "changes made one-way)")
+  print(f"{len(used)} nodes, {len(es)} ways ({len(cross)} carriageway crossovers dropped, {len(changes)} lane changes one-way)")
 
   info = []  # (way id, a, b, fwd, back, class, limit, name, link flags)
   for i, ((a, b), (fwd, back, lf)) in enumerate(sorted(es.items())):
+    # a lane change keeps its two-way link's class: as a freeway's, routers announce each one taken as a fork
+    cls = highway(nodes, a, b, 1, 1) if (a, b) in changes else None
     if not fwd:  # one-way the other way: draw it in its direction of travel
       a, b, fwd, back = b, a, back, fwd
-    cls = highway(nodes, a, b, fwd, back)
+    cls = cls or highway(nodes, a, b, fwd, back)
     st = nodes[a]['st'] if nodes[a]['st'] == nodes[b]['st'] else 0
     info.append([i + 1, a, b, fwd, back, cls, speed_limit(nodes, a, b, cls, fwd, back), streets.get(st), lf])
   out, into = defaultdict(list), defaultdict(list)
