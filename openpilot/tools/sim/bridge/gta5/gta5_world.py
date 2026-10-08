@@ -55,6 +55,10 @@ OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's label
 # route input v2's lane slots (navd/lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
+# Navigate on openpilot: "on" (the default, so test runs drive as ever) nav drives; "param" follows the
+# NavigateOnOpenpilot param the UI's nav button sets (off: guidance only); "off" guidance only
+NOO = os.getenv("GTA5_NOO", "on")
+NOO_CHECK = 0.5  # s between reads of the param
 # GTA has no speed limits; a guess from the street's name, mph: freeways, highways and routes, then anything else
 SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
 CITY_SPEED_LIMIT = 35
@@ -179,6 +183,20 @@ class GTA5World(World):
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
     self.cap = 0.0
     self.gps_route: list = []
+    self.noo, self.noo_t = NOO != "off", 0.0
+
+  def _nav_drives(self) -> bool:
+    """Navigate on openpilot: nav drives, rather than only guiding."""
+    if NOO != "param":
+      return NOO != "off"
+    now = time.monotonic()
+    if now - self.noo_t > NOO_CHECK:
+      self.noo_t = now
+      try:
+        self.noo = self.params.get_bool("NavigateOnOpenpilot")
+      except Exception:  # params built before the key existed
+        self.noo = True
+    return self.noo
 
   def _frame_reader(self):
     last_release = 0.0
@@ -341,7 +359,8 @@ class GTA5World(World):
       self._update_map(state, bearing, v)
       simulator_state.valid = True
       return
-    out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic()))
+    drives = self._nav_drives()
+    out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic(), drives))
     self.driver.act(out)
     for d in out.desires:
       self._set_nav_desire(d)
@@ -431,7 +450,7 @@ class GTA5World(World):
     """The driving model's route input for the route and the car's place on it; zero off it."""
     if self.route_writer is None:
       return
-    if self.route is None or self.route.off > OFF_ROUTE_INPUT:
+    if self.route is None or self.route.off > OFF_ROUTE_INPUT or not self._nav_drives():  # guiding only: no route for the model
       self.route_writer.write(np.zeros(ROUTE_LEN, np.float32))
       return
     enc = self._route_encoder(self.route)
