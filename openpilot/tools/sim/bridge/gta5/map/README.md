@@ -42,6 +42,10 @@ GTA5_MAP=~/gta5map GTA5_ROUTER=http://localhost:8002 ./openpilot/tools/sim/run_b
 Without `GTA5_ROUTER`, nav follows the game's GPS as before. A waypoint set on the game's map, or a tap on the map view
 ("Navigate here"), sets the destination; the later one wins, and the map view's isn't passed to the game's GPS.
 The route sets off the way the car faces, and when the car leaves it nav routes again from where the car is.
+With the map's `gta5.osm.pbf` in `GTA5_MAP`, the route ends on the road the destination faces rather than the router's
+nearest road, which is often a drive, car park aisle or alley beside it (`dest_snap.py`; `GTA5_DEST_SNAP=0` turns it
+off): on a two-way road it arrives with the destination on the kerb side unless that's over 30 s longer. A destination
+on its nearest road is routed as before.
 With ynddump's `paths.jsonl` in `GTA5_MAP` too, the bridge reads GTA's own roads (`paths.py`): a route starts from the
 road at the car's height and heading (from that road's next node, so not on a road passing over or under it), the car
 counts as off the route on another level or heading the other way, and nav gets the forks along the route, its stop
