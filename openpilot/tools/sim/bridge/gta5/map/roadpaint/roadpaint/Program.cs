@@ -7,7 +7,8 @@
 //   decals.jsonl         world-space geometry of the atlas decals that carry features (arrows, text, markers) and of
 //                        crossings, for feature typing from the atlas cell table
 //   textures.tsv         every texture used, its class and line bands
-// Env: RP_THREADS (default 4), RP_ATLAS (atlas cell table JSON), RP_DUMPTEX=1 (also write the textures' pixels).
+// Env: RP_THREADS (default 4), RP_ATLAS (atlas cell table JSON), RP_DUMPTEX=1 (also write the textures' pixels),
+//      RP_TRACE="x,y;x,y" (log every geometry over these points, any LOD, kept or not, and every raster write there).
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -33,6 +34,8 @@ if (args.Length >= 6) (bx0, by0, bx1, by1) = (float.Parse(args[2]), float.Parse(
 int threads = int.Parse(Environment.GetEnvironmentVariable("RP_THREADS") ?? "4");
 bool dumpTex = Environment.GetEnvironmentVariable("RP_DUMPTEX") == "1";
 var atlasPath = Environment.GetEnvironmentVariable("RP_ATLAS");
+var trace = (Environment.GetEnvironmentVariable("RP_TRACE") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries).Select(q => q.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray()).ToList();
+TileRaster.Trace = trace;
 Directory.CreateDirectory(Path.Combine(outDir, "tiles"));
 if (dumpTex) Directory.CreateDirectory(Path.Combine(outDir, "tex"));
 var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -129,7 +132,9 @@ Tex GetTex(string name, bool decal, int cls, DrawableBase dr, uint td)
   if (decal && akey != null && excludeKeys.Contains(akey)) return null;
   // road surfaces drawn as decals (rural roads over terrain, patches): their own surface and baked-in lines
   bool surfaceDecal = decal && !markingRe.IsMatch(name) && akey == null && cls == ROAD;
-  if (decal && !surfaceDecal && !markingRe.IsMatch(name) && akey == null) return null;
+  (bool v, bool u) strips = surfaceDecal ? Paint.Strips(px, t.W, t.H) : (false, false);
+  if (strips.v || strips.u) { surfaceDecal = false; Log($"line-strip decal {name.ToLowerInvariant()} ({(strips.v ? "v" : "")}{(strips.u ? "u" : "")})"); }
+  if (decal && !surfaceDecal && !(strips.v || strips.u) && !markingRe.IsMatch(name) && akey == null) return null;
   if (decal && akey != null && featureKeys.Contains(akey)) featureTex.Add(name.ToLowerInvariant());
   if (surfaceDecal)
   {
@@ -142,6 +147,8 @@ Tex GetTex(string name, bool decal, int cls, DrawableBase dr, uint td)
   {
     Paint.Decal(t, px);
     if (akey != null && lineCells.TryGetValue(akey, out var cells)) foreach (var c in cells) Paint.DecalBands(t, c.u0, c.u1, c.v0, c.v1, c.axis);
+    if (strips.v) Paint.DecalBands(t, 0, 1, 0, 1, 'v', true);
+    if (strips.u) Paint.DecalBands(t, 0, 1, 0, 1, 'u', true);
     if (!t.Paint.Any(p => p > 0) && !featureTex.Contains(t.Name) && !crossingRe.IsMatch(t.Name)) return null; // decals without paint don't matter
   }
   else if (cls == ROAD) Paint.Surface(t, px);
@@ -170,7 +177,8 @@ foreach (var (h, fe) in byExt[".ymap"])
   foreach (var en in ym.AllEntities)
   {
     var lod = en._CEntityDef.lodLevel;
-    if (lod != rage__eLodType.LODTYPES_DEPTH_HD && lod != rage__eLodType.LODTYPES_DEPTH_ORPHANHD) continue;
+    bool hd = lod == rage__eLodType.LODTYPES_DEPTH_HD || lod == rage__eLodType.LODTYPES_DEPTH_ORPHANHD;
+    if (!hd && trace.Count == 0) continue;
     var an = en._CEntityDef.archetypeName;
     if (!arch.TryGetValue(an.Hash, out var a)) continue;
     var p = en.Position;
@@ -196,13 +204,15 @@ foreach (var (h, fe) in byExt[".ymap"])
         if (pl?.Parameters != null)
           for (int i = 0; i < pl.Parameters.Length; i++)
             if (pl.Parameters[i].Data is TextureBase tb && (pl.Hashes[i].ToString().ToLowerInvariant() is "diffusesampler" or "diffusetex" or "texturesampler_layer0" or "diffusetexture_layer0")) { diff = tb.Name; break; }
-        if (diff == null) continue;
-        bool decal = sh.Name.ToString().ToLowerInvariant().Contains("decal");
-        int cls = ClassOf(diff);
+        bool decal = (sh?.Name.ToString() ?? "").ToLowerInvariant().Contains("decal");
+        int cls = diff == null ? NONE : ClassOf(diff);
+        if (trace.Count > 0) TraceGeometry(g, en, p, $"ent={ans} lod={lod} shader={sh?.Name} tex={diff} decal={decal} cls={cls}");
         if (!decal && cls == NONE) continue;
+        if (diff == null || !hd) continue;
         var vd = g.VertexData; var ib = g.IndexBuffer?.Indices;
         if (vd == null || ib == null) continue;
         var t = GetTex(diff, decal, cls, dr, a.TextureDict.Hash);
+        if (t == null && trace.Count > 0) Console.Error.WriteLine($"TRACEDROP ent={ans} tex={diff} decal={decal} cls={cls}");
         if (t == null) { if (decal) dropped[diff.ToLowerInvariant()] = dropped.GetValueOrDefault(diff.ToLowerInvariant()) + 1; continue; }
         bool hasCol = (vd.Info.Flags & (1u << 4)) != 0;
         var V = new float[vd.VertexCount * 6];
@@ -302,6 +312,20 @@ using (var gw = new StreamWriter(Path.Combine(outDir, "geoms.tsv")))
 Log("done");
 return 0;
 
+// RP_TRACE: one line per traced point that this geometry's triangles cover
+void TraceGeometry(DrawableGeometry g, YmapEntityDef en, Vector3 p, string what)
+{
+  var tv = g.VertexData; var ti = g.IndexBuffer?.Indices;
+  if (tv == null || ti == null) return;
+  foreach (var tp in trace)
+    for (int k = 0; k + 2 < (int)g.IndicesCount; k += 3)
+    {
+      var q = Enumerable.Range(0, 3).Select(j => p + en.Orientation.Multiply(tv.GetVector3(ti[k + j], 0) * en.Scale)).ToArray();
+      var d = Enumerable.Range(0, 3).Select(j => (q[(j + 1) % 3].X - q[j].X) * (tp[1] - q[j].Y) - (q[(j + 1) % 3].Y - q[j].Y) * (tp[0] - q[j].X)).ToArray();
+      if (d.All(v => v >= 0) || d.All(v => v <= 0)) { Console.Error.WriteLine($"TRACEGEO {tp[0]},{tp[1]} {what} z={q[0].Z:F2}"); break; }
+    }
+}
+
 // only the vanilla archives: skip mod folders (e.g. a disabled NaturalVision install) that sit beside them
 static bool Vanilla(string p) { var l = p.ToLowerInvariant(); return l.StartsWith("x64") || l.StartsWith("update\\") || l.StartsWith("common"); }
 
@@ -319,6 +343,7 @@ public class Geo
 // and interchanges), each its top surface's class and paint (code = class | paint << 3) and height.
 public class TileRaster
 {
+  public static List<float[]> Trace = new();
   readonly float x0, y1, res;
   readonly int n, maxl;
   public readonly byte[] Code, Count;
@@ -361,6 +386,10 @@ public class TileRaster
         int tv = (int)Math.Floor(v * H) % H; if (tv < 0) tv += H;
         byte paint = T.Paint[tv * W + tu];
         int p = r * n + c;
+        if (Trace.Count > 0)
+          foreach (var tp in Trace)
+            if ((int)((tp[0] - x0) / res) == c && (int)((y1 - tp[1]) / res) == r)
+              Console.Error.WriteLine($"TRACEPX {tp[0]},{tp[1]} {G.Ent} {T.Name} decal={G.Decal} sdecal={T.SurfaceDecal} paint={paint} texA={(T.Alpha != null ? T.Alpha[tv * W + tu] : -1)} vA={(l0 * V[i0 + 5] + l1 * V[i1 + 5] + l2 * V[i2 + 5]):F0} z={z:F2} uv={u:F3},{v:F3} before=" + string.Join(",", Enumerable.Range(0, Count[p]).Select(l => $"{Code[l * n * n + p]}@{Z[l * n * n + p]:F2}")));
         int cnt = Count[p];
         if (G.Decal)
         {
@@ -373,7 +402,13 @@ public class TileRaster
             for (int l = 0; l < cnt; l++)
             {
               float zl = Z[l * nn + p];
-              if (Math.Abs(z - zl) < 0.6f) { Code[l * nn + p] = sc; Z[l * nn + p] = Math.Max(z, zl); on = true; break; }
+              if (Math.Abs(z - zl) < 0.6f)
+              {
+                // a part-transparent overlay (dirt, damage, a blend's fade) leaves the road's paint showing through
+                byte old = Code[l * nn + p];
+                Code[l * nn + p] = paint == 0 && al < 0.9f && (old & 7) == 1 ? old : sc;
+                Z[l * nn + p] = Math.Max(z, zl); on = true; break;
+              }
             }
             if (!on && cnt < maxl) { Z[cnt * nn + p] = z; Code[cnt * nn + p] = sc; Count[p] = (byte)(cnt + 1); }
             continue;
