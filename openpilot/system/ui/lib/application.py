@@ -1,5 +1,7 @@
 import atexit
 import cffi
+import ctypes
+import importlib.util
 import math
 import os
 import queue
@@ -164,9 +166,40 @@ class MouseState:
     self._prev_mouse_event: list[MouseEvent | None] = [None] * MAX_TOUCH_SLOTS
 
     self._rk = Ratekeeper(MOUSE_THREAD_RATE, print_delay_threshold=None)
+    self._clicks: list[int] | None = None  # the left button's GLFW actions since the last frame, with latch_clicks
+    self._glfw_callbacks: tuple = ()
     self._lock = threading.Lock()
     self._exit_event = threading.Event()
     self._thread = None
+
+  def latch_clicks(self) -> None:
+    """On the desktop, a click whose press and release both reach the window between two frames (as a remote desktop
+    such as WSLg delivers them) never shows in raylib's button state, which keeps only the latest; GLFW's own callback
+    sees both, so chain one in front of raylib's to catch them."""
+    spec = importlib.util.find_spec("raylib._raylib_cffi_desktop")
+    if spec is None or spec.origin is None:
+      return
+    callback_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int)
+    lib = ctypes.CDLL(spec.origin)
+    lib.glfwSetMouseButtonCallback.restype = ctypes.c_void_p
+    lib.glfwSetMouseButtonCallback.argtypes = [ctypes.c_void_p, callback_type]
+    lib.glfwGetCurrentContext.restype = ctypes.c_void_p
+    raylibs: list = []
+
+    def on_button(window, button, action, mods):
+      if button == 0 and self._clicks is not None:
+        self._clicks.append(action)
+      if raylibs:
+        raylibs[0](window, button, action, mods)
+    ours = callback_type(on_button)
+    window = lib.glfwGetCurrentContext()  # the GLFW window (raylib's GetWindowHandle gives the X11 one)
+    if not window:
+      return
+    old = lib.glfwSetMouseButtonCallback(window, ours)
+    if old:
+      raylibs.append(callback_type(old))
+    self._glfw_callbacks = (ours, raylibs)  # kept alive while GLFW holds them
+    self._clicks = []
 
   def get_events(self) -> list[MouseEvent]:
     with self._lock:
@@ -196,10 +229,19 @@ class MouseState:
     #  Polling at 140Hz with time.monotonic() causes timing jitter that makes scroll
     #  velocity oscillate (alternating high/low). Real timestamps would also let us
     #  detect swipe-stop-lift via event gaps instead of the fragile decel heuristic.
+    clicks, self._clicks = self._clicks, ([] if self._clicks is not None else None)
     for slot in range(MAX_TOUCH_SLOTS):
       mouse_pos = rl.get_touch_position(slot)
       x = mouse_pos.x / self._scale if self._scale != 1.0 else mouse_pos.x
       y = mouse_pos.y / self._scale if self._scale != 1.0 else mouse_pos.y
+      if slot == 0 and clicks and 1 in clicks and 0 in clicks[clicks.index(1):] and not (
+          rl.is_mouse_button_pressed(0) or rl.is_mouse_button_released(0)):  # noqa: TID251
+        # a whole click since the last frame, which raylib missed: its press and release
+        now = time.monotonic()
+        with self._lock:
+          self._events.append(MouseEvent(MousePos(x, y), 0, True, False, True, now))
+          self._events.append(MouseEvent(MousePos(x, y), 0, False, True, False, now))
+        self._prev_mouse_event[0] = self._events[-1]
       ev = MouseEvent(
         MousePos(x, y),
         slot,
@@ -316,6 +358,8 @@ class GuiApplication:
       needs_render_texture = self._scale != 1.0 or BURN_IN_MODE or RECORD
       if self._scale != 1.0:
         rl.set_mouse_scale(1 / self._scale, 1 / self._scale)
+      if PC:
+        self._mouse.latch_clicks()
       if needs_render_texture:
         self._render_texture = rl.load_render_texture(self._scaled_width, self._scaled_height)
         rl.set_texture_filter(self._render_texture.texture, rl.TextureFilter.TEXTURE_FILTER_BILINEAR)
