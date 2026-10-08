@@ -31,6 +31,14 @@ Every maneuver on the route is scored: done, or missed (a reroute near it), with
 nav's signal and the model's desire probabilities over the approach. Gas presses are only the test driver's, after the
 car has stood still for a while (the model won't pull away from a stop by itself).
 
+A trips file line may carry per-trip options after the spec, key=value (sub-values key:value, comma-separated):
+world=hour:23,weather:RAIN,rain:0.8 (time and weather, held; default noon, EXTRASUNNY), traffic=vehicles:1.5,peds:1,parked:1
+(density multipliers; default --traffic), lead=dist:30,speed:9 (a test car that far ahead once the car is placed: speed
+0 parks it, otherwise it drives on and stops at lights), xm=1 (openpilot's Experimental mode for that trip; card reads
+the param live) and mode=long (not a short trip under --short: the timeout from the route's time, and a missed maneuver
+reroutes instead of ending the trip). A "[A1]"-style tag in a line's comment is kept as the trip's category, and
+scensum reports per category and, for long trips, interventions per km.
+
 Time in the oncoming lanes is read two ways: by the game's lane reading (the route's and the plugin's) and by the map's
 lane tags alone outside junctions (map/lane_match.py: also one-ways driven the wrong way and the other direction's turn
 bays). safe() counts either (oncoming_any_*); oncoming_s / oncoming_max are the game's alone, as before. With lane tags,
@@ -526,6 +534,27 @@ def parse_spec(s: str):
   return (*start[:4], dx, dy), (int(start[4]) if len(start) > 4 else None)
 
 
+def parse_opts(tokens: list[str]) -> dict:
+  """A trips line's options after the spec: key=value, a value of key:value pairs becoming a dict (numbers as floats)."""
+  def num(v: str):
+    try:
+      return float(v)
+    except ValueError:
+      return v
+  out: dict = {}
+  for t in tokens:
+    k, _, v = t.partition('=')
+    out[k] = {a: num(b) for a, _, b in (p.partition(':') for p in v.split(','))} if ':' in v else num(v)
+  return out
+
+
+def opts_for(args, tid: str) -> dict:
+  """The options of the trips-file line trip tid came from (ids get -rep and -tag suffixes)."""
+  known = getattr(args, 'trip_opts', None) or {}
+  base = max((b for b in known if tid == b or tid.startswith(b + '-')), key=len, default=None)
+  return known.get(base, {}) if base is not None else {}
+
+
 def pick_trips(m: Map, mode: str, n: int, seed: int) -> list[tuple]:
   rng = random.Random(seed)
   starts = [s for s in m.starts if mode != 'city' or in_city(s[0], s[1])]
@@ -755,6 +784,8 @@ class Trip:
     self.alert = ''
     self.landing: list[dict] = []  # turns scored done whose landing lane is still to be read
     self.miss_t: float | None = None  # when a short trip missed a maneuver
+    self.opts = opts_for(args, trip_id)
+    self.short = getattr(args, 'short', False) and self.opts.get('mode') != 'long'
 
   def write_tune(self) -> bool:
     """Writes nav's turn parameters for this trip; whether the bridge logged reading them."""
@@ -790,8 +821,12 @@ class Trip:
       return 'could not disengage'
     post_json(f"{MAP_VIEW}/destination", {})
     cmd("waypoint", off=1)
-    cmd("world", hour=12, weather="EXTRASUNNY", freeze=1)
-    cmd("traffic", on=int(self.args.traffic))
+    world = self.opts.get('world') or {}
+    cmd("world", **{"hour": 12, "weather": "EXTRASUNNY", "rain": -1, **world}, freeze=1)
+    traffic = self.opts.get('traffic')
+    # density multipliers hold until reset: a trip without its own goes back to the game's
+    cmd("traffic", on=1, **traffic) if isinstance(traffic, dict) else cmd("traffic", on=int(self.args.traffic), reset=1)
+    self.rig.params.put_bool("ExperimentalMode", bool(self.opts.get('xm')), block=True)
     cmd("lead", remove=1)
     kw = {"x": x, "y": y, "z": z, "heading": h, "lane": self.lane, "fix": 1}
     # at the middle of the start lane by the map: the game's own lanes from a road node can put the car on a centre line
@@ -818,12 +853,16 @@ class Trip:
       ss = rig.sm['selfdriveState']
       return f"not engageable after {ENGAGEABLE_WAIT:.0f} s: {ss.alertText1} {ss.alertText2}".strip()
     self.engageable_after = round(time.monotonic() - t, 1)
+    lead = self.opts.get('lead')
+    if isinstance(lead, dict):
+      cmd("lead", **lead)
+      rig.wait(2.0)
     return None
 
   def run(self) -> dict:
     rig, (x, y, z, h, dx, dy) = self.rig, self.spec
     self.t0 = time.monotonic()
-    rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': 'short' if getattr(self.args, 'short', False) else self.args.mode,
+    rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': 'short' if self.short else self.args.mode, 'opts': self.opts,
            'car': self.args.car or 'current',
            'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'stack': STACK, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
     if self.tune is not None:
@@ -856,7 +895,7 @@ class Trip:
     cmd("gas", secs=START_GAS)  # the model won't pull away from a stop
     self.t0 = time.monotonic()
     self.pending = 1 if self.route['maneuvers'] and self.route['maneuvers'][0]['type'] in (1, 2, 3) else 0
-    timeout = SHORT_TIMEOUT if getattr(self.args, 'short', False) else max(180.0, 2.5 * self.route['time'] + 120)
+    timeout = SHORT_TIMEOUT if self.short else max(180.0, 2.5 * self.route['time'] + 120)
     outcome, detail = None, ''
     rig.take_contacts()
     health0 = s.get('bodyHealth')
@@ -948,6 +987,10 @@ class Trip:
     if rig.engaged:
       rig.set_engaged(False)
     post_json(f"{MAP_VIEW}/destination", {})
+    if self.opts.get('xm'):
+      rig.params.put_bool("ExperimentalMode", False, block=True)
+    if isinstance(self.opts.get('lead'), dict):
+      cmd("lead", remove=1)
     s = rig.state
     rec.update({
       'outcome': outcome, 'detail': detail, 'clean': outcome == 'arrived' and not self.reroutes and not self.nudges,
@@ -1063,7 +1106,7 @@ class Trip:
     if rr['maneuver'] is not None:
       rr['kind'] = ms[nxt]['kind']
       self._score(nxt, 'missed')
-      if getattr(self.args, 'short', False) and self.miss_t is None:
+      if self.short and self.miss_t is None:
         self.miss_t = time.monotonic()
     self.reroutes.append(rr)
     self.event('reroute', **{k: rr[k] for k in ('street', 'lane', 'maneuver', 'maneuver_dist')}, kind=rr.get('kind'))
@@ -1323,10 +1366,17 @@ def read_trips(args, roads) -> list[tuple[str, tuple, int | None]]:
       spec, lane = parse_spec(t)
       trips.append((f"trip-{hashlib.sha1(t.encode()).hexdigest()[:6]}", spec, lane))
   elif args.trips:
+    args.trip_opts = {}
     for line in open(args.trips):
-      line = line.split('#')[0].split()
-      if len(line) == 2:  # id spec
+      body, _, comment = line.partition('#')
+      line = body.split()
+      if len(line) >= 2 and '>' in line[1]:  # id spec [key=value ...]
         trips.append((line[0], *parse_spec(line[1])))
+        opts = parse_opts(line[2:])
+        cat = re.search(r"\[([A-Z]\d)\]", comment)
+        if cat:
+          opts['cat'] = cat[1]
+        args.trip_opts[line[0]] = opts
   elif args.replay:
     known = {r['id']: (r['spec'], r.get('lane')) for r in load_results([])}
     for rid in args.replay:
@@ -1483,6 +1533,43 @@ def cmd_summary(args):
       miss = [f"{m['kind']}({','.join(tag_miss(m))})" for m in r.get('maneuvers', []) if m['result'] == 'missed']
       print(f"  {r['id']:16s} {r['outcome']:10s} {r.get('detail', '')[:40]:40s} rr={sum(not rr.get('repeat') for rr in r.get('reroutes', []))} "
             f"nudge={r.get('nudges', 0)} {' '.join(miss)}  [{r['spec']}]")
+
+
+def trip_cat(r: dict) -> str:
+  """A scenario trip's category: its line's [A1] tag, else the id's leading letter and digit (A1a-ft4c-0 -> A1)."""
+  m = re.match(r"([A-Z]\d)", r['id'])
+  return (r.get('opts') or {}).get('cat') or (m[1] if m else '?')
+
+
+def interventions(r: dict) -> int:
+  """What a driver would have had to do on a trip: take over (disengaged, crash, stuck, off road, fell), press the gas
+  for a car that wouldn't pull away, and each reroute after a wrong turn."""
+  return int(r['outcome'] not in ('arrived', 'timeout', 'infra', 'setup', 'no_engage', 'missed')) + r.get('nudges', 0) + \
+    sum(not rr.get('repeat') for rr in r.get('reroutes', []))
+
+
+def cmd_scensum(args):
+  rs = [r for r in load_results(args.files) if r['outcome'] not in ('infra', 'setup')]
+  by = defaultdict(list)
+  for r in rs:
+    by[trip_cat(r)].append(r)
+  print(f"{len(rs)} scenario trips")
+  print(f"  {'cat':4s} {'n':>3s} {'arrived':>8s} {'clean':>6s} {'safe':>5s} {'missed':>7s} {'coll':>5s} {'onc_s':>6s} {'km':>6s} {'int/km':>7s}")
+  for cat in sorted(by):
+    g = by[cat]
+    n = len(g)
+    km = sum(r.get('distance', 0) for r in g) / 1000
+    ints = sum(interventions(r) for r in g)
+    miss = sum(m['result'] == 'missed' for r in g for m in r.get('maneuvers', []) if m.get('real'))
+    onc = sum(r.get('oncoming_any_s', r.get('oncoming_s', 0)) or 0 for r in g)
+    print(f"  {cat:4s} {n:3d} {sum(r['outcome'] == 'arrived' for r in g):8d} {sum(bool(r.get('clean')) for r in g):6d} " +
+          f"{sum(safe(r) for r in g):5d} {miss:7d} {sum(r.get('collisions', 0) for r in g):5d} {onc:6.1f} {km:6.2f} " +
+          f"{ints / km if km > 0.05 else float('nan'):7.2f}")
+  print("trips:")
+  for r in rs:
+    print(f"  {r['id']:22s} {trip_cat(r):3s} {r['outcome']:10s} {r.get('distance', 0):5d} m int {interventions(r)} " +
+          f"rr={sum(not rr.get('repeat') for rr in r.get('reroutes', []))} nudge={r.get('nudges', 0)} coll={r.get('collisions', 0)} " +
+          f"{r.get('detail', '')[:40]}")
 
 
 def turn_speeds(hist: list[dict], t0: float) -> dict | None:
@@ -1732,12 +1819,14 @@ def main():
   sh = sub.add_parser('shorten')
   sh.add_argument('--trips', action='append', help='a trips file (repeatable)')
   sh.add_argument('--results', action='append', help='a results file: every turn on its routes')
+  sc = sub.add_parser('scensum', help='scenario trips by category ([A1] tags), with interventions per km')
+  sc.add_argument('files', nargs='*')
   sm = sub.add_parser('summary')
   sm.add_argument('files', nargs='*')
   sm.add_argument('--backfill', action='store_true', help="read turns' landing lanes from the traces of older results")
   args = p.parse_args()
   {'run': cmd_run, 'sweep': cmd_sweep, 'sweepsum': cmd_sweepsum, 'pick': cmd_pick, 'summary': cmd_summary,
-   'shorten': cmd_shorten}[args.command](args)
+   'shorten': cmd_shorten, 'scensum': cmd_scensum}[args.command](args)
 
 
 if __name__ == '__main__':
