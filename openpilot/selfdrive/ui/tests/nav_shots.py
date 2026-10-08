@@ -18,7 +18,8 @@ os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 
 STEP = 0.05  # s of virtual time a frame
 LONG_PRESS = 6  # frames a slide's finger moves over
-NAMES = ("none", "start", "open", "slide", "end", "split", "split_start", "turn", "alert", "drag", "long", "arrive", "metric")
+NAMES = ("none", "start", "open", "slide", "end", "split", "split_start", "turn", "alert", "drag", "long", "arrive", "metric",
+         "drive")
 
 
 def scenarios(c):
@@ -46,6 +47,10 @@ def scenarios(c):
     "long": [(0.0, c.scene("approach", road="long")), (1.5, c.shot("long_name"))],
     "arrive": [(0.0, c.scene("arrive")), (1.5, c.shot("arrive"))],
     "metric": [(0.0, c.metric()), (0.0, c.scene("approach")), (1.5, c.shot("metric"))],
+    # driving from 450 m before the turn: the card opens for it by itself, then closes after it
+    "drive": [(0.0, c.drive(450.0)), (5.0, c.shot("drive_cruise")), (21.0, c.shot("drive_opening")),
+              (25.0, c.shot("drive_lanes")), (36.8, c.shot("drive_turn")), (39.0, c.shot("drive_after_turn")),
+              (41.0, c.shot("drive_closed"))],
   }
 
 
@@ -73,6 +78,12 @@ class Context:
   def scene(self, name: str, road: str = "short"):
     def f(_):
       self.nav.scene, self.nav.road = name, road
+    return f
+
+  def drive(self, before_turn: float):
+    def f(_):
+      from openpilot.selfdrive.ui.tests.nav_fake import TURN_AT
+      self.nav.scene, self.nav.drive_s = "drive", TURN_AT - before_turn
     return f
 
   def alert(self, text1: str, text2: str, size: str):

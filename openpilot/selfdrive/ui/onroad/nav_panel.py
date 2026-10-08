@@ -55,6 +55,7 @@ MAP_CONTROLS_S = 4.0  # the map's buttons fade away after this long untouched; a
 EXPAND_S = 0.5  # the card's expand/collapse, the lanes' slide, the route's start and end and the layout switch
 NOO_HOLD_S = 2.0  # a tapped Navigate on openpilot shows as set while the param catches up
 LANES_H = 168.0
+NOWHERE = rl.Rectangle(0, 0, 0, 0)  # a hit area with nothing drawn
 END_MOVED = 50.0  # m the destination moves for a route that was ended to count as a new one
 
 
@@ -354,9 +355,9 @@ class NavCard:
     """Draws the card and its button; returns the camera view's rect for the alerts (beside the open card)."""
     now, rect = self._now, self._rect
     pr = self.present.value(now)
-    if pr <= 0.001 and self.present.b < 0.5:  # no route: no card
+    if pr <= 0.001:  # no card: the HUD draws its own button (still, on a route's first frame)
       self.hit_exp = self.hit_layout = (0.0, 0.0, 0.0)
-      self.hit_card, self.hit_eta, self.hit_map = rl.Rectangle(0, 0, 0, 0), rl.Rectangle(0, 0, 0, 0), rl.Rectangle(0, 0, 0, 0)
+      self.hit_card = self.hit_eta = self.hit_map = NOWHERE
       return content
     dist, road, kind, left, eta = self._guidance_words()
     has_maneuver = self.nav.guidance.maneuver is not None
@@ -462,7 +463,7 @@ class NavCard:
     self._draw_map(map_r, o_fade, behind)
     self.hit_card = card
     self.hit_layout = (0.0, 0.0, 0.0)
-    self.hit_map = map_r if o_fade > 0.5 and map_r.height > 160 else rl.Rectangle(0, 0, 0, 0)
+    self.hit_map = map_r if o_fade > 0.5 and map_r.height > 160 else NOWHERE
     ctrl = self.map_ctrl.value(now)
     if o_fade * ctrl > 0.01 and map_r.height > 160:  # switch between the card and the always-on split
       lcx, lcy = map_r.x + map_r.width - 24 - 48, map_r.y + map_r.height - 24 - 48

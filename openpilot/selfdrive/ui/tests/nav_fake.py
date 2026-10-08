@@ -179,10 +179,10 @@ def nv12(path: str, w: int, h: int) -> bytes:
 
 class FakeNav:
   """navInstruction at 10 Hz and navRoute every 2 s, for a scene."""
-  def __init__(self, scene: str = "cruise", road: str = "short"):
+  def __init__(self, scene: str = "cruise", road: str = "short", drive_from: float = 0.0):
     self.pm = messaging.PubMaster(["navInstruction", "navRoute"])
     self.scene, self.road = scene, road
-    self.drive_s = 0.0
+    self.drive_s = drive_from
     self._route_t = -1e9
 
   def position(self) -> tuple[float | None, float]:
