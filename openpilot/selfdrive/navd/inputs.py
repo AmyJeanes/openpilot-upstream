@@ -18,6 +18,7 @@ CANCEL_SIGNAL = "cancelSignal"
 class NavInputs:
   t: float = 0.0  # s, monotonic
   engaged: bool = False
+  drive: bool = True  # Navigate on openpilot: nav drives (desires, lane changes, speed caps); off, it only guides
   v: float = 0.0  # m/s (carState.vEgo)
   yaw_rate: float = 0.0  # rad/s, left positive
   blinker: str | None = None  # "left" or "right" while the car's turn signal is on (carState blinkers)

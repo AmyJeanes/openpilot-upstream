@@ -602,7 +602,8 @@ class Planner:
   def _update(self, inp: NavInputs) -> tuple[float, bool]:
     """The cruise cap (m/s, 0 for none) and whether the car has arrived."""
     now = self.now = inp.t
-    engaged, indicator, desire = inp.engaged, inp.blinker, inp.desire
+    # guidance only (Navigate on openpilot off) drives nothing, as when disengaged: signals cancelled, NavDesire cleared
+    engaged, indicator, desire = inp.engaged and inp.drive, inp.blinker, inp.desire
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
     self.was_engaged = engaged

@@ -98,6 +98,9 @@ class Params:
   def put(self, key, value):
     self.values[key] = value
 
+  def get(self, key):
+    return self.values.get(key)
+
   def remove(self, key):
     self.values.pop(key, None)
 
@@ -118,3 +121,21 @@ def test_destination_from_the_game_and_the_map_view():
   assert list(dest.update(None, car, ([5.0, 6.0],))) == [5.0, 6.0]
   dest.arrived()
   assert dest.dest is None and sent == [{"type": "waypoint", "off": True}] and "NavDestination" not in params.values
+
+
+def test_destination_ended_by_the_driver():
+  # the UI's slide to end removes NavDestination: the destination goes and the game's waypoint (left set in the game)
+  # is ignored, until the player sets another
+  params, sent = Params(), []
+  dest = Destination(params, sent.append)
+  dest.check_every = 0.0
+  car, wp = np.array([0.0, 0.0]), [1000.0, 2000.0]
+  assert dest.update(wp, car, None) is not None and "NavDestination" in params.values
+  params.remove("NavDestination")
+  assert dest.update(wp, car, None) is None and "NavDestination" not in params.values and sent == []
+  assert dest.update(wp, car, None) is None
+  assert list(dest.update([1500.0, 2000.0], car, None)) == [1500.0, 2000.0] and "NavDestination" in params.values
+  # a map view pick after an ended route counts too, and so does the old waypoint once the game has cleared it
+  params.remove("NavDestination")
+  assert dest.update([1500.0, 2000.0], car, None) is None
+  assert list(dest.update(None, car, ([5.0, 6.0],))) == [5.0, 6.0]

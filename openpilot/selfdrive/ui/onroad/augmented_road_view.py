@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 import numpy as np
 import pyray as rl
 from openpilot.cereal import log
@@ -50,6 +51,8 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer = HudRenderer()
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
+    # drawn over the HUD and under the alerts, unclipped; returns the part of the view left for the alerts
+    self.overlay: Callable[[rl.Rectangle], rl.Rectangle] | None = None
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -84,7 +87,13 @@ class AugmentedRoadView(CameraView):
     # Draw all UI overlays
     self.model_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
-    self.alert_renderer.render(self._content_rect)
+    alert_rect = self._content_rect
+    if self.overlay is not None:
+      rl.end_scissor_mode()
+      alert_rect = self.overlay(self._content_rect)
+      rl.begin_scissor_mode(int(self._content_rect.x), int(self._content_rect.y), int(self._content_rect.width),
+                            int(self._content_rect.height))
+    self.alert_renderer.render(alert_rect)
     self.driver_state_renderer.render(self._content_rect)
 
     # Custom UI extension point - add custom overlays here
@@ -95,6 +104,9 @@ class AugmentedRoadView(CameraView):
 
     # Draw colored border based on driving state
     self._draw_border(rect)
+
+  def set_exp_button_visible(self, visible: bool):
+    self._hud_renderer.show_exp_button = visible
 
   def _handle_mouse_press(self, _):
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:

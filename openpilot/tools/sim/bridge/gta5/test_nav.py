@@ -32,11 +32,12 @@ class Drive:
     self.nav = Planner()
     self.driver = Driver(self._send, lambda: None)
     self.lane, self.v = lane, v
+    self.drives = True  # Navigate on openpilot
 
   def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict) -> tuple[float, bool]:
     """A step from the bridge's state, as the world takes it: the driver's game commands to `sent`, NavDesire to
     `desires`, and the game's waypoint off on arriving."""
-    out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t))
+    out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
     self.driver.act(out)
     self.desires += out.desires
     if out.arrived:
@@ -628,3 +629,25 @@ def test_lane_change_for_a_lane_that_ends():
   for k in range(100):
     d.step(route, k * 0.4, {"laneDrops": [[150.0 - k * 0.4, 1, 1, 2]], "routeEnd": 400.0})
   assert d.nav.changing is None  # already in it
+
+
+def test_guidance_only_drives_nothing():
+  # Navigate on openpilot off: no signals, lane changes, NavDesire or speed caps on the way to a turn; turned on,
+  # nav drives as before, and turned off again mid-way it cancels what it asked for
+  route = route_to_turn(200.0)
+  d = Drive((0, 2), v=7.0)
+  d.drives = False
+  y, caps = 0.0, []
+  while y < 100.0:
+    caps.append(d.step(route, y)[0])
+    y += d.v * 0.05
+  assert d.sent == [] and d.desires == [] and not any(caps)
+  d.drives = True
+  while y < 190.0 and not d.sent:
+    d.step(route, y)
+    y += d.v * 0.05
+  assert d.sent and (signals(d) or "laneChange" in d.desires)
+  d.drives = False
+  for _ in range(20):  # NavDesire is held a moment past a lane change, as openpilot reads it every 0.2 s
+    d.step(route, y)
+  assert d.nav.desire == "" and d.nav.changing is None and d.nav.signaled is None

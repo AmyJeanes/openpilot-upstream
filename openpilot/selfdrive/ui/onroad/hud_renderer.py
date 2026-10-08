@@ -76,6 +76,7 @@ class HudRenderer(Widget):
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
 
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
+    self.show_exp_button = True  # off while navigation's card has the button's spot
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -125,9 +126,10 @@ class HudRenderer(Widget):
 
     self._draw_current_speed(rect)
 
-    button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
-    button_y = rect.y + UI_CONFIG.border_size
-    self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+    if self.show_exp_button:
+      button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
+      button_y = rect.y + UI_CONFIG.border_size
+      self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed
