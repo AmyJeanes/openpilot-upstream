@@ -313,7 +313,12 @@ resuming after the game comes back. gta5-train's `scripts/juncrec_labels.sh` mak
   frame with the previous frame's camera, whether the field of view changes or the active camera does, even when set
   frames ahead; the bridge drops pairs whose wide center doesn't match the road view, which leaves gaps in turns.
 - Frames go uncompressed over TCP (about 140 MB/s at 20 Hz), which the WSL network carries easily; `gta5_rx.py` copies them
-  into shared memory in its own process, so the bridge's 100 Hz threads keep the GIL.
+  into shared memory in its own process, so the bridge's 100 Hz threads keep the GIL. For the same reason the debug
+  overlay is made in a process of its own (`GTA5_OVERLAY_PROCESS=0` puts it back in a thread), and the bridge leaves
+  Python's full garbage collections, which walk the maps' million or so objects for 0.4-0.8 s with the GIL held, until
+  it has been idle for 2 s (no game frames, or on foot). Either stall stopped the camera and sensor threads long enough
+  for modelV2 gaps of 400 ms and locationd errors. `stall_bench.py realtime <trips>` replays recorded trips (nav_replay's
+  inputs) through the bridge's threads on the real clock and reports the main loop's, camera's and car thread's gaps.
 - Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which sets a wheel
   angle and so a path curvature proportional to it. The game turns the wheels less as the speed rises (on the Model 3,
   3.4 1/m per unit bias up to 5 m/s, 2.2 at 11 m/s, 1.3 at 20 m/s, measured with `steertest`), and the low-speed gain
