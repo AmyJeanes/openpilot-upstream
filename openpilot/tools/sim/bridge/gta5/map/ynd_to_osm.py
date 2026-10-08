@@ -1386,6 +1386,35 @@ def node_id(k):
   return k[0] * 65536 + k[1] + 1
 
 
+def painted_stop_lines(path, lines_path, features_path, nodes, info):
+  """The map at `path` written again with its stop lines where the game files paint them (stop_paint.py); returns the
+  rows and nodes used with the ways split for them."""
+  from openpilot.tools.sim.bridge.gta5.map import stop_paint
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  placed, counts = stop_paint.stop_lines(path, lines_path, features_path, to_game)
+  synthetic = [max((k[1] for k in nodes if k[0] == TAPER_NODE_AREA), default=0)]
+
+  def new_node_id():
+    synthetic[0] += 1
+    return node_id((TAPER_NODE_AREA, synthetic[0]))
+  new_nodes, pieces = stop_paint.rewrite(path, placed, new_node_id, to_lat_lon, remap_restrictions)
+  key_of = {node_id(k): k for k in nodes}
+  for nid, (x, y, z) in new_nodes.items():
+    k = ((nid - 1) // 65536, (nid - 1) % 65536)
+    nodes[k] = {'a': k[0], 'i': k[1], 'x': x, 'y': y, 'z': z, 'f': [0, 0, 0, 0, 0], 'st': 0, 'sp': 1}
+    key_of[nid] = k
+  out = []
+  for row in info:
+    if row[0] not in pieces:
+      out.append(row)
+      continue
+    out += [[pid, key_of[a], key_of[b], *row[3:]] for pid, a, b in pieces[row[0]]]
+  out.sort(key=lambda r: r[0])
+  told = ', '.join(f'{n} {k}' for k, n in sorted(counts.items(), key=lambda c: -c[1]))
+  print(f"stop lines from the game files' paint: {told}; {len(new_nodes)} nodes added, {len(pieces)} ways split")
+  return out, sorted({k for _, a, b, *_ in out for k in (a, b)})
+
+
 def main():
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument('dump', help="ynddump's paths.jsonl")
@@ -1395,7 +1424,9 @@ def main():
   p.add_argument('--survey', nargs='*', default=[], help="surveys of the game's road paint (paint_survey.py): the lane "
                  "widths where they were measured")
   p.add_argument('--survey-lines', help="the game files' paint as polylines (polylines.jsonl): each line's kind by its "
-                 "whole length, for the survey's sections")
+                 "whole length, for the survey's sections, and the stop lines where they're painted")
+  p.add_argument('--survey-features', help="the game files' painted features (features.jsonl): crossings, for the stop "
+                 "lines added where the map has none")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -1704,6 +1735,8 @@ def main():
     w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': kind},
                                                members=[('w', wi, 'from'), *via, ('w', wo, 'to')]))
   w.close()
+  if args.survey_lines:
+    info, used = painted_stop_lines(args.out, args.survey_lines, args.survey_features, nodes, info)
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")

@@ -209,6 +209,14 @@ shown or a level changes.
   drawn towards the junction; one with no junction ahead, as on a one-way link leaving one, is left out. Valhalla 3.9
   reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav's own
   stop list follows it (`paths.py`, `GTA5_STOP_DIRECTION=1`).
+- GTA's stop line nodes are 12-24 m before their junction's node, often metres off the painted line. With
+  `--survey-lines` (and `--survey-features rp_all/features.jsonl` for the painted crossings) the map's stop lines go where the game files
+  paint them (`stop_paint.py`): on each approach to a junction (junctions.py's), the thick white line across its
+  lanes towards the junction (the far edge of a crossing painted there, which GTA paints as the stop line), as a node
+  splitting the way there (ids as for tapers) that takes the signal or sign and its direction from GTA's node. An
+  approach with a painted stop line and none in the map gets one (`traffic_signals` at a junction with signals, else
+  `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. GTA's node stays the
+  stop line where nothing is painted. Nav's stop list still comes from GTA's nodes.
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /
