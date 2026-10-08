@@ -190,7 +190,7 @@ The ground under each point comes from GET_GROUND_Z_FOR_3D_COORD, up to `probes=
 place, and the points a line on the ground doesn't need are then dropped; the status line shows the points, draw calls
 and the share on the ground. At a busy freeway interchange that's ~4000 draw calls and 0.7 ms of the script thread a
 frame, as much as `thin=1`. Lane edges and dividers stop at junctions (from the stop line in, and inside junction
-areas). The bridge sends them every 0.5 s, and the route alone
+areas, but for the lines of a road carried straight on past side roads). The bridge sends them every 0.5 s, and the route alone
 every 0.1 s between, from where the car will be as it is drawn, while the plugin's debug is on (`GTA5_OVERLAY=0` stops
 it); on a lane-tagged map they're all from its tags (built once and cached, `GTA5_OVERLAY_CACHE`), else from GTA's
 lane bands. The plugin draws them only on the player's frames, never on the openpilot camera's (they're the ones with

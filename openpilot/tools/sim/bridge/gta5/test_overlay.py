@@ -307,7 +307,8 @@ def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, 
   return msg, dict(overlay.stats)
 
 
-def check_overlay(paths, place, osm=None) -> set:
+def check_overlay(paths, place, osm=None, carried=()) -> set:
+  """`carried`: the centres of the junctions a road's lines are carried across (Junction.carried)."""
   overlay = ov.Overlay(background=False)
   overlay_update(paths, place, overlay, osm)  # builds the road geometry
   msg, stats = overlay_update(paths, place, overlay, osm)
@@ -316,13 +317,16 @@ def check_overlay(paths, place, osm=None) -> set:
   assert {"e", "r"} <= kinds and kinds & set("dwcy"), kinds
   if place == "L7":  # the route turns left at its junction
     assert {"j", "m", "g"} <= kinds, kinds
-  # no lane edges or dividers inside junction areas on their own level (bridges and stacked ramps pass over them)
+  # no lane edges or dividers inside junction areas on their own level (bridges and stacked ramps pass over them), but
+  # the lines of a road carried on through one
   areas = [line[:-1] for k, line in items if k == "j"]
   for k, line in items:
     if k in "edwcy":
       mids = (line[1:] + line[:-1]) / 2
       for area in areas:
         poly = area[:, :2]
+        if k != "e" and any(((poly.min(0) <= c) & (c <= poly.max(0))).all() for c in carried):
+          continue
         e = np.roll(poly, -1, axis=0) - poly
         rel = mids[:, None, :2] - poly[None]
         # well inside every edge: a kerb on the area's outline lies within the outline's simplification of it
@@ -344,9 +348,16 @@ def test_overlay_at_places(paths, place):
 
 
 @pytest.mark.parametrize("place", sorted(PLACES))
-def test_overlay_lines_from_lane_tags(paths, osm, place):
-  kinds = check_overlay(paths, place, osm)
+def test_overlay_lines_from_lane_tags(paths, osm, carried, place):
+  kinds = check_overlay(paths, place, osm, carried)
   assert "d" in kinds and kinds & set("cy" if place == "L7" else "dw"), kinds  # L7: a two-way road, X1 a freeway
+
+
+@pytest.fixture(scope="module")
+def carried(osm):
+  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import drawn
+  return [j.centre for j in Junctions(osm, drawn).junctions if j.carried]
 
 
 @pytest.fixture(scope="module")

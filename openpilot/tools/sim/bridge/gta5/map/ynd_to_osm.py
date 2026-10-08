@@ -1609,7 +1609,7 @@ def main():
   p.add_argument('--survey', nargs='*', default=[], help="surveys of the game's road paint (paint_survey.py): the lane "
                  "widths where they were measured")
   p.add_argument('--survey-lines', help="the game files' paint as polylines (polylines.jsonl): each line's kind by its "
-                 "whole length, for the survey's sections, and the stop lines where they're painted")
+                 "whole length, for the survey's sections, the stop lines where painted, and roads painted across junctions")
   p.add_argument('--survey-features', help="the game files' painted features (features.jsonl): crossings, for the stop "
                  "lines added where the map has none, and turn arrows, for the lanes' turn:lanes")
   args = p.parse_args()
@@ -1955,6 +1955,10 @@ def main():
   w.close()
   if args.survey_lines:
     info, used = painted_stop_lines(args.out, args.survey_lines, args.survey_features, nodes, info)
+    from openpilot.tools.sim.bridge.gta5.map import through_paint
+    from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+    counts = through_paint.priority_roads(args.out, args.survey_lines, to_game)
+    print("roads carried through junctions: " + ', '.join(f'{n} {k}' for k, n in counts.items()))
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")

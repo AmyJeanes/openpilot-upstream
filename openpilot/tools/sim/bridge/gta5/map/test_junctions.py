@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+from openpilot.tools.sim.bridge.gta5.map import through_paint
 from openpilot.tools.sim.bridge.gta5.map.junctions import MERGE_GAP, STOP_SETBACK, Junctions, clip_outside, in_fan, lane_moves
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
@@ -278,6 +279,61 @@ def test_bridge_from_a_junction():
   assert any(a is j.polygon for _, a in paint.near(line, 0, {1}))
   assert any(a is j.polygon for _, a in paint.near(line, 1, {7}))
   assert not any(a is j.polygon for _, a in paint.near(line, 0, {9}))
+
+
+SIDE = {'highway': 'service', 'lanes': '1', 'width': '5', 'lane_markings': 'no'}
+
+
+PRIORITY = {**TWO_WAY, 'priority_road': 'yes_unposted'}
+
+
+def test_carried_through_a_side_road():
+  # a priority road carried straight on past a side road keeps its centre line across the junction (both ways,
+  # whichever way they're drawn); its area still cuts the side road's lines and the road's kerbs
+  arms = {1: (PRIORITY, (-100.0, 0.0)), 2: (PRIORITY, (100.0, 3.0)), 3: (SIDE, (0.0, 100.0))}
+  js = Junctions(cross(arms, into={1}))
+  j = only(js)
+  assert j.through == j.carried == {1: {0.0}, 2: {0.0}}
+  paint = PaintAreas(js)
+  line = np.array([[0.0, 0.0], [-100.0, 0.0]])
+  assert not any(a is j.polygon for _, a in paint.near(line, 0, {1}, offset=0.0))
+  assert any(a is j.polygon for _, a in paint.near(line, 0, {1}, offset=2.75))  # not one of its lines
+  assert any(a is j.polygon for _, a in paint.near(line, 0, {1}, kerbs_only=True))
+  assert any(a is j.polygon for _, a in paint.near(line, 0, {3}, offset=0.0))
+  plain = only(Junctions(cross({**arms, 2: (TWO_WAY, (100.0, 3.0))}, into={1})))  # a priority road one side only
+  assert plain.through == {1: {0.0}, 2: {0.0}} and plain.carried == {}
+
+
+def test_through_only_by_a_road_with_the_way():
+  arms = {1: (PRIORITY, (-100.0, 0.0)), 2: (PRIORITY, (100.0, 0.0)), 3: (SIDE, (0.0, 100.0))}
+  signals = cross(arms)
+  signals.data.node_tags[1] = {'highway': 'traffic_signals'}
+  assert only(Junctions(signals)).through == {}
+  nodes = {1: (0.0, 0.0), 10: (-100.0, 0.0), 11: (100.0, 0.0), 12: (0.0, 100.0), 99: (5.0, 0.0)}
+  ways = {1: (PRIORITY, [10, 1]), 2: (PRIORITY, [1, 99, 11]), 3: (SIDE, [1, 12])}
+  assert only(Junctions(make(nodes, ways, {99: {'highway': 'stop'}}))).through == {}  # a stop sign on the road, 5 m out
+  equals = {**arms, 3: (PRIORITY, (0.0, 100.0)), 4: (PRIORITY, (0.0, -100.0))}
+  assert only(Junctions(cross(equals))).through == {}  # a crossroads of equals: neither has the way
+  minor = {**equals, 3: (SIDE, (0.0, 100.0)), 4: ({**TWO_WAY, 'highway': 'service'}, (0.0, -100.0))}
+  assert only(Junctions(cross(minor))).carried == {1: {0.0}, 2: {0.0}}
+  layouts = {**arms, 2: ({**PRIORITY, 'lanes': '3', 'lanes:forward': '2', 'lanes:backward': '1', 'width': '16'}, (100.0, 0.0))}
+  assert only(Junctions(cross(layouts))).through == {}  # its lines don't meet across the junction
+
+
+def test_painted_across():
+  # through_paint tags the road carried through as a priority road where the game paints its lines across the junction
+  class Paint:
+    def __init__(self, ys):
+      self.ys = ys
+
+    def near(self, p, z):
+      return any(abs(p[1] - y) < 0.6 for y in self.ys)
+  osm = cross({1: (TWO_WAY, (-100.0, 0.0)), 2: (TWO_WAY, (100.0, 0.0)), 3: (SIDE, (0.0, 100.0))})
+  for n in (1, 10, 11, 12):
+    osm.data.node_tags[n] = {'ele': '0'}
+  js = Junctions(osm)
+  assert through_paint.painted_across(osm, js, Paint([0.0]))[0] == {1, 2}
+  assert through_paint.painted_across(osm, js, Paint([]))[0] == set()  # none painted across
 
 
 def test_clip_outside():
