@@ -23,7 +23,7 @@ if not PREFIX or PREFIX == "gta5":
 os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 
 from openpilot.cereal import log, messaging
-from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots
+from openpilot.selfdrive.navd import lane_slots
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages, heading_at, point_at
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, oneway_of
@@ -108,7 +108,7 @@ def find(osm: OsmLanes, n: int = 40, seed: int = 1):
     r = route_of(osm, path)
     if not 900 < r.length < 3000:
       continue
-    slots = gta5_lane_slots.LaneSlots(r)
+    slots = lane_slots.LaneSlots(r)
     targets = sum(1 for s in np.arange(0, r.length, 20.0) if slots.target(float(s), 10.0)[1] is not None)
     turns = len(r.maneuvers) - 2
     print(f"--start {a} --dest {b}: {r.length:.0f} m, {turns} turns, lane targets at {targets} of {int(r.length // 20)} points")
@@ -222,7 +222,7 @@ def main():
   path = shortest(osm, args.start, args.dest)
   assert path is not None, "no route between those nodes"
   route = route_of(osm, path)
-  slots = gta5_lane_slots.LaneSlots(route)
+  slots = lane_slots.LaneSlots(route)
   print(f"route {route.length:.0f} m, maneuvers {[(m['type'], round(float(route.along[m['begin_shape_index']]))) for m in route.maneuvers]}")
 
   from openpilot.common.params import Params

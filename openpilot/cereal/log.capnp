@@ -1084,6 +1084,17 @@ struct ModelDataV2 {
   # e2e lateral planner
   action @26: Action;
 
+  # the lane the car is in, from a model with a current-lane head (gta5-train lane_head); defaults (-1) without one
+  laneHead @28 :LaneHead;
+
+  struct LaneHead {
+    laneIdx @0 :Int8 = -1;  # the most likely lane, from the left of the lanes going our way (0 = leftmost)
+    laneCount @1 :Int8 = -1;  # how many lanes go our way
+    prob @2 :Float32;  # that (count, index)'s probability
+    idxProbs @3 :List(Float32);  # P(index from the left = k), k = 0..7
+    countProbs @4 :List(Float32);  # P(count = k + 1), k = 0..7
+  }
+
   lateralPlannerSolutionDEPRECATED @25: Deprecated.LateralPlannerSolution;
   leadsDEPRECATED @11 :List(LeadDataV2DEPRECATED);
 

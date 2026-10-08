@@ -8,6 +8,7 @@ import urllib.request
 
 import numpy as np
 
+from openpilot.tools.sim.bridge.gta5.map.dest_snap import DestinationSnapper, Snap
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, OsmLanes, RouteLanes, Section, Span, \
   ways_from_nodes
@@ -23,6 +24,10 @@ FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
 LANE_ALIGN = 10.0  # deg
 LANES_NEAR = 60.0  # m from a point to look for a link with its lanes
 JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
+# the destination on the road it faces, rather than the router's nearest road, often a drive or car park (dest_snap.py)
+DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
+DEST_HEADING_TOLERANCE = 45.0  # deg
+SIDE_DETOUR = 30.0  # s: arriving with the destination on the kerb side may take this much longer than across the road
 # a stop line counts only on the way towards its junction, not for a route leaving the junction past it (off: both)
 STOP_DIRECTION = os.getenv("GTA5_STOP_DIRECTION", "0") == "1"
 
@@ -339,16 +344,32 @@ class Route:
 
 
 class Router:
-  def __init__(self, url: str, timeout: float = 2.0, paths: Paths | None = None, osm: OsmLanes | None = None):
+  def __init__(self, url: str, timeout: float = 2.0, paths: Paths | None = None, osm: OsmLanes | None = None,
+               roads: OsmLanes | None = None):
     self.url = url.rstrip('/')
     self.timeout = timeout
     self.paths = paths
     self.osm = osm  # the map's lanes, where it tags them
+    self.roads = roads  # the map's roads, tagged with lanes or not, for destinations (else osm's)
+    self._snapper: DestinationSnapper | None = None
+    self._snapped: tuple[tuple[float, float], Snap | None] | None = None
 
   def _post(self, action: str, request: dict) -> dict:
     req = urllib.request.Request(f"{self.url}/{action}", data=json.dumps(request).encode(), headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=self.timeout) as r:
       return json.loads(r.read())
+
+  def snap(self, dest: np.ndarray) -> Snap | None:
+    """Where on the map's roads to arrive for dest (dest_snap.py); None without the map's roads."""
+    roads = self.roads if self.roads is not None else self.osm
+    if not DEST_SNAP or roads is None:
+      return None
+    key = (float(dest[0]), float(dest[1]))
+    if self._snapper is None or self._snapper.osm is not roads:
+      self._snapper, self._snapped = DestinationSnapper(roads), None
+    if self._snapped is None or self._snapped[0] != key:
+      self._snapped = (key, self._snapper.snap(dest))
+    return self._snapped[1]
 
   def route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None = None) -> Route:
     """From the car, setting off the way it faces (bearing clockwise from north), to dest. Given the car's height,
@@ -364,13 +385,36 @@ class Router:
       start = location(self.paths.xy[snapped[2]], heading=round(-snapped[1]) % 360, heading_tolerance=SNAP_TOLERANCE,
                        node_snap_tolerance=1.0)
     request = {
-      'locations': [start, location(dest)],
       'costing': 'auto',
       # car parks, alleys and drives (GTA's nodes off for traffic or without GPS), which the model doesn't take for roads
       'costing_options': {'auto': {'service_penalty': SERVICE_PENALTY, 'service_factor': SERVICE_FACTOR}},
       'directions_options': {'units': 'kilometers'},
     }
-    trip = self._post('route', request)['trip']
+    # the road the destination faces, arriving its way, else on that road either way, else the router's nearest road
+    snap = self.snap(dest)
+    ends = [location(dest)]
+    if snap is not None and not snap.as_is:
+      # on that road's line, not at a node where the router could take another road meeting there
+      on_road = location(snap.point, node_snap_tolerance=0)
+      ends = [on_road, *ends]
+      if snap.heading is not None:
+        ends.insert(0, {**on_road, 'heading': round(snap.heading) % 360, 'heading_tolerance': DEST_HEADING_TOLERANCE})
+    trip = None
+    for n, end in enumerate(ends):
+      try:
+        trip = self._post('route', {**request, 'locations': [start, end]})['trip']
+        break
+      except urllib.error.HTTPError:
+        if n == len(ends) - 1:
+          raise
+    assert trip is not None
+    if snap is not None and not snap.as_is and snap.kerb_side and n == 0:
+      try:  # either way, if the kerb side means going a long way round
+        either = self._post('route', {**request, 'locations': [start, ends[1]]})['trip']
+        if either['summary']['time'] + SIDE_DETOUR < trip['summary']['time']:
+          trip = either
+      except urllib.error.HTTPError:
+        pass
     points, maneuvers, limits = [], [], []
     for leg in trip['legs']:
       base = len(points)
@@ -431,16 +475,24 @@ class Navigator:
     self.busy = False
     self.lock = threading.Lock()
 
-  def update(self, pos: np.ndarray, bearing: float, dest: np.ndarray | None, now: float, z: float | None = None) -> Route | None:
+  def update(self, pos: np.ndarray, bearing: float, dest: np.ndarray | None, now: float, z: float | None = None,
+             match=None) -> Route | None:
+    """pos and bearing (clockwise from north) are the car's; with a map match (navd's map_match.Match, from GNSS), the
+    car is where the match puts it on its road instead, heading that road's way if the match is sure of the direction
+    (else only its distance from the route counts), and without a height."""
     if dest is None:
       self.dest, self.route = None, None
       return None
     if self.dest is None or np.hypot(*(dest - self.dest)) > 1.0:
       self.dest, self.route, self.next_try = dest, None, 0.0
+    heading: float | None = -bearing
+    if match is not None:
+      pos, z, heading = np.asarray(match.point, float), None, match.heading if match.sure else None
+      bearing = bearing if heading is None else -heading
     with self.lock:
       route = self.route
     if route is not None:
-      off = route.locate(pos, z, -bearing)
+      off = route.locate(pos, z, heading)
       self.off_since = None if off < self.OFF_ROUTE else (self.off_since or now)
       if self.off_since is not None and now - self.off_since > self.OFF_FOR and now >= self.next_try:
         self._start(pos, bearing, dest, now, z)

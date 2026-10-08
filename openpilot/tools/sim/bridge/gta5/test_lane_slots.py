@@ -1,4 +1,4 @@
-"""Route input v2's lane slots (gta5_lane_slots.py) on the map fixtures and small hand-made maps. No pytest needed:
+"""Route input v2's lane slots (navd/lane_slots.py) on the map fixtures and small hand-made maps. No pytest needed:
 `python test_lane_slots.py` runs them all."""
 import os
 import time
@@ -6,9 +6,9 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as ls
-from openpilot.tools.sim.bridge.gta5 import gta5_nav
-from openpilot.tools.sim.bridge.gta5 import gta5_route_input as ri
+from openpilot.selfdrive.navd import lane_slots as ls
+from openpilot.selfdrive.navd import planner
+from openpilot.selfdrive.navd import route_input as ri
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M, OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -201,13 +201,13 @@ def test_nav_lane_reading_waits_for_the_bay():
   # nav's lane (Route.lane) counts a bay only once it's open, so nav never changes towards one before: in the taper
   # the car in the lane beside the oncoming ones is in the left turn's lanes already (lane 0 of 2), then beside the bay
   _, r = bay()
-  arrows = gta5_nav.parse_arrows(r.lane_arrows(r.length, 0.0))
+  arrows = planner.parse_arrows(r.lane_arrows(r.length, 0.0))
   for s, lanes_here, k, want in ((250.0, 2, 0, (0, 0)), (285.0, 3, 1, (0, 0))):
     r.at, r.seg, r.misaligned = s, r.lanes.segment(s), 0.0
     sec = r.lanes.opened_at(s, r.seg)
     r.right = sec.ours[k].centre
-    turn = gta5_nav.Turn(300.0 - s, 'left', 90.0)
-    gta5_nav.aim(turn, [(d - s, lanes) for d, lanes in arrows])
+    turn = planner.Turn(300.0 - s, 'left', 90.0)
+    planner.aim(turn, [(d - s, lanes) for d, lanes in arrows])
     assert r.lane() == [k, lanes_here] and turn.lanes(lanes_here) == want, (s, r.lane())
   r.at, r.seg = 250.0, r.lanes.segment(250.0)
   assert r.section(r.seg).lanes == 3  # the way's own lanes, which nav read before

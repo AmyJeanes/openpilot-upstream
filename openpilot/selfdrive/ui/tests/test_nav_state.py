@@ -3,8 +3,10 @@ import math
 import numpy as np
 
 from openpilot.cereal import messaging
-from openpilot.selfdrive.ui.nav.nav_state import M_PER_DEG, NavState, PoseTracker, Projection, format_duration, instruction_guidance, wrap
-from openpilot.selfdrive.ui.nav.text import lane_caption, maneuver_road, then_text
+from openpilot.selfdrive.ui.nav.draw import maneuver_kind
+from openpilot.selfdrive.ui.nav.nav_state import (M_PER_DEG, CardLane, NavState, PoseTracker, Projection, card_lanes, format_duration,
+                                                  format_trip_distance, instruction_guidance, maneuver_phase, wrap)
+from openpilot.selfdrive.ui.nav.text import maneuver_road
 
 
 def route_msg(points_m: list[tuple[float, float]], lat0: float = 51.5):
@@ -34,7 +36,7 @@ def test_along_route_takes_the_part_driven():
   assert seg == 2 and abs(along - 320.0) < 0.5
 
 
-def test_guidance_and_captions():
+def test_guidance_and_lanes():
   msg = messaging.new_message('navInstruction')
   ni = msg.navInstruction
   ni.valid, ni.maneuverType, ni.maneuverModifier, ni.maneuverPrimaryText, ni.maneuverDistance = True, "turn", "right", "Elm St", 180.0
@@ -48,10 +50,49 @@ def test_guidance_and_captions():
   ni.showFull, ni.laneDistance = True, 60.0
   g = instruction_guidance(ni)
   assert g.show_lanes and maneuver_road(g) == "Elm St"
-  assert lane_caption(g, True) == ("Keep right", "in lane by 60 m")
-  assert then_text(g, True) == "Then left in 400 m"
-  g.lane_open_distance = 300.0
-  assert lane_caption(g, True) == ("Turn lane opens", "from 300 m · in by 60 m")
+  # the oncoming lane left off; the car in the straight one, the turn lit in the other
+  assert card_lanes(g) == ([CardLane("up", False, False), CardLane("right", False, True)], 0)
+  g.secondary = "Exit 3"
+  assert maneuver_road(g) == "Exit 3 · Elm St"
+  g.show_lanes = False
+  assert card_lanes(g) == ([], None)
+
+
+def test_shared_lane_lights_the_branch_taken():
+  msg = messaging.new_message('navInstruction')
+  ni = msg.navInstruction
+  ni.valid, ni.maneuverType, ni.maneuverModifier, ni.maneuverDistance, ni.showFull = True, "turn", "left", 150.0, True
+  lanes = ni.init('lanes', 3)
+  lanes[0].active, lanes[0].directions, lanes[0].activeDirection = True, ["left"], "left"
+  lanes[1].active, lanes[1].directions, lanes[1].activeDirection = True, ["left", "straight"], "left"
+  lanes[2].directions = ["straight"]
+  got, here = card_lanes(instruction_guidance(ni))
+  assert [lane.arrow for lane in got] == ["left", "upleft", "up"] and here is None
+  assert got[1] == CardLane("upleft", False, True) and got[2] == CardLane("up", False, False)
+  lanes[1].activeDirection = "straight"  # the route goes on straight: that branch lit, not the turn
+  assert card_lanes(instruction_guidance(ni))[0][1] == CardLane("upleft", True, False)
+
+
+def test_phase_opens_ahead_and_closes_a_little_later():
+  msg = messaging.new_message('navInstruction')
+  ni = msg.navInstruction
+  ni.valid, ni.maneuverType, ni.maneuverModifier = True, "turn", "right"
+  g = instruction_guidance(ni)
+  for dist, was_open, phase in ((1000.0, False, "cruise"), (190.0, False, "approach"), (220.0, True, "approach"),
+                                (220.0, False, "cruise"), (15.0, True, "turn")):
+    g.maneuver.distance = dist
+    assert maneuver_phase(g, 10.0, was_open) == phase, (dist, was_open)
+  g.maneuver.distance = 400.0
+  assert maneuver_phase(g, 30.0, False) == "approach"  # 15 s ahead at speed
+
+
+def test_maneuver_icons():
+  assert maneuver_kind("turn", "left") == ("right", True)
+  assert maneuver_kind("off ramp", "slight right") == ("exit", False)
+  assert maneuver_kind("fork", "slight left") == ("slight", True)
+  assert maneuver_kind("turn", "uturn") == ("uturn", False)
+  assert maneuver_kind("arrive", "right") == ("arrive", False)
+  assert maneuver_kind("continue", "straight") == ("straight", False)
 
 
 def test_pose_follows_the_yaw_rate_between_fixes():
@@ -95,7 +136,12 @@ def test_pose_keeps_its_place_across_a_new_route():
 
 
 def test_durations():
-  assert format_duration(0.0) == "0 min" and format_duration(20.0) == "1 min" and format_duration(4000.0) == "1 h 7 min"
+  assert format_duration(0.0) == "0 min" and format_duration(20.0) == "1 min" and format_duration(9900.0) == "2h 45m"
+
+
+def test_trip_distances():
+  assert format_trip_distance(4100.0, True) == "4.1 km" and format_trip_distance(1609344.0, True) == "1,609 km"
+  assert format_trip_distance(1609344.0, False) == "1,000 mi" and format_trip_distance(4023.0, False) == "2.5 mi"
 
 
 if __name__ == '__main__':

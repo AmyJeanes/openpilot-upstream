@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import gta5_cmd
-from openpilot.tools.sim.bridge.gta5.gta5_nav import MIN_AHEAD_MAP, find_turn
+from openpilot.selfdrive.navd.planner import MIN_AHEAD_MAP, find_turn
 
 # Valhalla's maneuver types: side and name, for the turns
 VALHALLA = {9: ("right", "slight right"), 10: ("right", "right"), 11: ("right", "sharp right"), 14: ("left", "sharp left"),

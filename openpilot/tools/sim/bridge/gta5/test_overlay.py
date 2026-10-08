@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay as ov
-from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav
+from openpilot.selfdrive.navd.planner import Planner
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths, wrap
@@ -296,11 +296,11 @@ def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, 
   x, y, z, heading = PLACES[place]
   state = {"pos": [x, y, z + ov.CAR_HEIGHT], "heading": heading, "vEgo": 10.0, **route.info(1000.0),
            "route": route.ahead(1000.0, 5.0).round(1).tolist()}
-  nav = Nav(lambda m: None, lambda d: None)
+  nav = Planner()
   nav.v = 10.0
   snap = {"pos": state["pos"], "layers": ov.DEFAULT_LAYERS + "f", "route": route, "paths": paths, "osm": osm,
           "recording": False, "lane_line": route.rest() if lane else None, "v": 10.0, "full": full}
-  points = nav.turn_points(np.array(state["route"]), state)
+  points = nav.turn_points(np.array(state["route"]), state.get("forks"), state.get("stops"), state.get("junctions"))
   if points is not None:
     snap["turn"], snap["signal"] = points
   msg = overlay.make(snap)

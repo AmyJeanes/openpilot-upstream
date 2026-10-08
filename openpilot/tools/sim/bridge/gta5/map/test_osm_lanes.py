@@ -318,8 +318,15 @@ def test_painted_turn_lanes():
   assert road_on([10.0, 90.0, -40.0]) == {0, 2}
   assert road_on([89.0, 51.0, -77.0, -126.0]) == {1}  # a skewed junction's road on
   assert road_on([60.0, -90.0]) == set()  # a T
-  assert arrows(3, everything) == ['left', 'through', 'through;right']  # as GTA paints most it paints whole
-  assert arrows(2, {'left', 'right'}) == ['left', 'right']
+  # lanes taken from the left by the moves' lanes out: through as many as it has, a turn one, the right turn sharing first
+  assert arrows(3, {'left': 1, 'through': 2, 'right': 1}) == ['left', 'through', 'through;right']
+  assert arrows(3, {'left': 1, 'through': 1, 'right': 1}) == ['left', 'through', 'right']
+  assert arrows(2, {'left': 1, 'through': 2, 'right': 1}) == ['left;through', 'through;right']
+  assert arrows(4, {'left': 2, 'through': 1, 'right': 1}) == ['left', 'left', 'through', 'right']  # a turn's spare lanes out
+  assert arrows(2, {'through': 1, 'right': 2}) == ['through', 'right']
+  assert arrows(3, {'left': 1, 'right': 2}) == ['left', 'right', 'right']
+  assert arrows(2, {'left': 1, 'right': 1}) == ['left', 'right']
+  assert arrows(2, {'right': 1}) == ['right', 'right']
   # a painted lane's own arrow, less moves the junction hasn't; the lanes between don't cross it
   assert with_paint(['left', 'through', 'through;right'], {1: 'right'}, everything) == ['left', 'right', 'right']
   assert with_paint(['left', 'through;right'], {0: 'left;through'}, {'through', 'right'}) == ['through', 'through;right']
@@ -332,16 +339,18 @@ def test_painted_turn_lanes():
   lanes_to.update({('P', 'Q'): 3, ('Q', 'J'): 3, ('Q', 'P'): 0, ('J', 'Q'): 0})
   spans = {e: [(-8.25, -2.75), (-2.75, 2.75), (2.75, 8.25)] for e in (('P', 'Q'), ('Q', 'J'))}
 
-  def turns(marks):
+  def turns(marks, ahead=1):
     painted = PaintedArrows(marks) if marks is not None else None
-    tags = lane_turns(nodes, ways, lanes_to, lambda k: k == 'J', {}, set(), [], painted=painted, spans=spans)[0]
+    tags = lane_turns(nodes, ways, {**lanes_to, ('J', 'N'): ahead}, lambda k: k == 'J', {}, set(), [], painted=painted,
+                      spans=spans)[0]
     return tags.get(2, {}).get('turn:lanes')
-  assert turns(None) == 'left|through|through;right'
-  # painted right only in the right lane 20 m out, through in the middle one 60 m out; one pointing the other way
-  marks = [(5.5, -20.0, 0.0, 0.0, 'right'), (0.0, -60.0, 0.0, 0.0, 'through'), (-5.5, -20.0, 0.0, 180.0, 'right')]
-  assert turns(marks) == 'left|through|right'
-  assert turns([(-5.5, -20.0, 0.0, 0.0, 'left;through')]) == 'left;through|through|through;right'
-  assert turns([(5.5, -95.0, 0.0, 0.0, 'right')]) == 'left|through|through;right'  # beyond ARROW_REACH
+  assert turns(None) == 'left|through|right'  # one lane on ahead
+  assert turns(None, ahead=2) == 'left|through|through;right'
+  # painted through;right in the right lane 20 m out, through in the middle one 60 m out; one pointing the other way
+  marks = [(5.5, -20.0, 0.0, 0.0, 'through;right'), (0.0, -60.0, 0.0, 0.0, 'through'), (-5.5, -20.0, 0.0, 180.0, 'right')]
+  assert turns(marks) == 'left|through|through;right'
+  assert turns([(-5.5, -20.0, 0.0, 0.0, 'left;through')]) == 'left;through|through|right'
+  assert turns([(5.5, -95.0, 0.0, 0.0, 'through;right')]) == 'left|through|right'  # beyond ARROW_REACH
 
 
 if __name__ == '__main__':

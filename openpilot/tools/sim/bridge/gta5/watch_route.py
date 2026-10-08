@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Shows the route input the driving model gets (gta5_route_input.py), live from the bridge's shared memory: the NAV
+"""Shows the route input the driving model gets (navd/route_input.py), live from the bridge's shared memory: the NAV
 bins, the route's heading ahead as a path, the next maneuver and the next stop line; and below, a preview of route
-input v2's lane slots (gta5_lane_slots.py), which the bridge writes to a file of their own."""
+input v2's lane slots (navd/lane_slots.py), which the bridge writes to a file of their own."""
 import time
 
 import numpy as np
@@ -10,8 +10,8 @@ import pyray as rl
 from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
-from openpilot.tools.sim.bridge.gta5 import gta5_lane_slots as slots_mod
-from openpilot.tools.sim.bridge.gta5.gta5_route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, V1_LEN, decode
+from openpilot.selfdrive.navd import lane_slots as slots_mod
+from openpilot.selfdrive.navd.route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, V1_LEN, decode
 
 FPS = 10
 NAV_FROM, NAV_TO = BIN_ZERO - 5, 50  # bins shown: 100 m behind to 500 m ahead
