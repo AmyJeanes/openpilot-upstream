@@ -62,6 +62,22 @@ def test_guidance_and_lanes():
   assert card_lanes(g) == ([], None)
 
 
+def test_lanes_always():
+  msg = messaging.new_message('navInstruction')
+  ni = msg.navInstruction
+  ni.valid = True  # no maneuver near and no lane guidance: the road's lanes, none active
+  lanes = ni.init('lanes', 4)
+  lanes[0].oncoming = True
+  for lane in lanes:
+    lane.directions = ["straight"]
+  g = instruction_guidance(ni)
+  car = CarLane(2, 3, True)
+  assert not g.show_lanes and card_lanes(g, car) == ([], None)
+  assert card_lanes(g, car, always=True) == ([CardLane("up", False, False)] * 3, 2)
+  lanes[2].oncoming = lanes[3].oncoming = True  # one lane our way: nothing to choose between
+  assert card_lanes(instruction_guidance(ni), CarLane(0, 1, True), always=True) == ([], None)
+
+
 def test_car_lane_from_the_lane_head():
   lh = messaging.new_message('modelV2').modelV2.laneHead
   assert model_lane(lh) is None  # a model without the head

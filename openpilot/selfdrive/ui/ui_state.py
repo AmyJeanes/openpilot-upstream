@@ -92,6 +92,7 @@ class UIState:
     self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed: bool = self.params.get_bool("ExperimentalModeConfirmed")
     self.navigate_on_openpilot: bool = self.params.get_bool("NavigateOnOpenpilot")
+    self.nav_show_lanes_always: bool = self.params.get_bool("NavShowLanesAlways")
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -253,6 +254,7 @@ class UIState:
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed = self.params.get_bool("ExperimentalModeConfirmed")
     self.navigate_on_openpilot = self.params.get_bool("NavigateOnOpenpilot")
+    self.nav_show_lanes_always = self.params.get_bool("NavShowLanesAlways")
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     now = time.monotonic()

@@ -112,6 +112,11 @@ def instruction_message(s: float | None, road: str = "short", lanes: bool = True
     for o, (dirs, active, use, oncoming, current) in zip(out_lanes, spec, strict=True):
       o.directions, o.active, o.activeDirection, o.oncoming, o.current = dirs, active, use, oncoming, current
     ni.laneDistance = max(TURN_AT - s - 60.0, 0.0)  # the car isn't in a turn lane yet
+  elif lanes and s < TURN_AT:  # farther off, the road's lanes as the bridge sends them with no lane guidance: four our way
+    spec = [(["straight"], True), (["straight"], True)] + [(["straight"], False)] * 4
+    out_lanes = ni.init("lanes", len(spec))
+    for o, (dirs, oncoming) in zip(out_lanes, spec, strict=True):
+      o.directions, o.activeDirection, o.oncoming = dirs, "none", oncoming
   return msg
 
 

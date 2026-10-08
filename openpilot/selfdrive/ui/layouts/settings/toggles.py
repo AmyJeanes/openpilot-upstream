@@ -34,6 +34,10 @@ DESCRIPTIONS = {
     "Start every route with Navigate on openpilot on: openpilot follows the route, changing lanes and taking its turns. " +
     "When off, a route starts with guidance only. The navigation button changes it for the current route."
   ),
+  "NavShowLanesAlways": tr_noop(
+    "Show the road's lanes in the open navigation card whenever it has more than one lane your way, with the lane " +
+    "openpilot thinks you are in, not only when the route needs a particular lane."
+  ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
 }
 
@@ -61,6 +65,12 @@ class TogglesLayout(Widget):
       "NavigateOnOpenpilotDefault": (
         lambda: tr("Always Enable Navigate on openpilot"),
         DESCRIPTIONS["NavigateOnOpenpilotDefault"],
+        "road.png",
+        False,
+      ),
+      "NavShowLanesAlways": (
+        lambda: tr("Always Show Lanes"),
+        DESCRIPTIONS["NavShowLanesAlways"],
         "road.png",
         False,
       ),
