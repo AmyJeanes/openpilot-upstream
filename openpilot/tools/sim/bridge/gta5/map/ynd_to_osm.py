@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 
 import osmium
 
-from openpilot.tools.sim.bridge.gta5.map import paint_survey
+from openpilot.tools.sim.bridge.gta5.map import paint_survey, traps
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import WayLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
@@ -602,6 +602,8 @@ def node_tags(n, stop='both'):
 
 def no_u_turns(nodes, ways):
   """OSM no_u_turn restrictions for every move at a node that turns back by more than U_TURN: GTA's nodes allow them.
+  Turning back on to another way is a U-turn only where the move leaves some other way on: where no node along it has
+  one, it is the road itself, bending back round a hairpin or out of an acute junction.
   `ways` is [(way id, a, b, two_way)] with a -> b the way's direction."""
   arrive, leave = defaultdict(list), defaultdict(list)  # node -> [(way id, heading)]
   for wid, a, b, two_way in ways:
@@ -614,11 +616,14 @@ def no_u_turns(nodes, ways):
   def turn(h0, h1):
     return (h1 - h0 + 180) % 360 - 180
 
+  def choice(n, w_in, w_on):  # a way on from n other than w_on, arriving on w_in (and not back along it)
+    return any(w not in (w_in, w_on) for w, _ in leave[n])
+
   out = []
   for n, ins in arrive.items():
     for wi, hi in ins:
       for wo, ho in leave[n]:
-        if abs(turn(hi, ho)) > U_TURN:
+        if abs(turn(hi, ho)) > U_TURN and (wo == wi or choice(n, wi, wo)):
           out.append((wi, [('n', n)], wo))
   # and through short links, as through a median gap or a junction: in, along them, out, turning back
   length = {wid: math.hypot(nodes[b]['x'] - nodes[a]['x'], nodes[b]['y'] - nodes[a]['y']) for wid, a, b, _ in ways}
@@ -631,18 +636,19 @@ def no_u_turns(nodes, ways):
         short_from[b].append((wid, a, h + 180))
   for n, ins in arrive.items():
     for wi, hi in ins:
-      stack = [(n, [], 0.0, hi, 0.0)]  # summing the turns, as a loop can come round past 180 deg
+      stack = [(n, [], 0.0, hi, 0.0, False)]  # summing the turns, as a loop can come round past 180 deg
       while stack:
-        p, via, dist, h, turned = stack.pop()
+        p, via, dist, h, turned, left = stack.pop()
         for wv, q, hv in short_from[p]:
           if wv == wi or wv in via or dist + length[wv] > GAP:
             continue
           chain, turned_v = via + [wv], turned + turn(h, hv)
+          left_v = left or choice(p, via[-1] if via else wi, wv)
           for wo, ho in leave[q]:
-            if wo != wi and wo not in chain and abs(turned_v + turn(hv, ho)) > U_TURN:
+            if wo != wi and wo not in chain and abs(turned_v + turn(hv, ho)) > U_TURN and (left_v or choice(q, wv, wo)):
               out.append((wi, [('w', v) for v in chain], wo))
           if len(chain) < GAP_LINKS:
-            stack.append((q, chain, dist + length[wv], hv, turned_v))
+            stack.append((q, chain, dist + length[wv], hv, turned_v, left_v))
   return out
 
 
@@ -1493,6 +1499,10 @@ def main():
   folded = [r for r in turns if r[0] == 'no_left_turn' and ({r[1]} | {ref for t, ref in r[2] if t == 'w'}) & bay_roads]
   restrictions += [r for r in turns if r not in folded]
   print(f"{len(folded)} no-left turns from roads now with their bay as a lane dropped")
+  restrictions, freed, earlier = traps.free_traps(nodes, ways, restrictions, MAX_VIA)
+  print(f"{len(freed)} restrictions that cut road off left out (" +
+        ', '.join(f'{n} {k}' for k, n in Counter(r[0] for r in freed).most_common()) +
+        f"), {len(earlier)} from the ways on to a trap instead")
   medians = set()  # two-way links (node, next node) with room for a turn lane in their median, and no turn bay that way
   for wid, a, b, fwd, back, *_, lf in info:
     if back and 2 * layout(lf, back)[1] >= BAY_MIN:
@@ -1589,6 +1599,11 @@ def main():
             restrictions.append(('no_u_turn', p, [('n', n)], p))
     used = sorted({k for _, a, b, *_ in info for k in (a, b)})
     info.sort(key=lambda r: r[0])  # osmium readers want ways in order of their ids
+  final = [(wid, a, b, bool(back)) for wid, a, b, _, back, *_ in info if wid not in crossings]
+  cut = [x - y for x, y in zip(traps.cut_off(final, restrictions), traps.cut_off(final, []), strict=True)]
+  if any(cut):
+    raise SystemExit(f"restrictions cut road off: {len(cut[0])} directed ways trapped, {len(cut[1])} unreachable, " +
+                     f"e.g. {sorted(cut[0] | cut[1])[:5]}")
   for wid in widen:
     painted.pop(wid, None)
   print(f"{len(tapers)} turn lanes opening where the game files paint it, {applied} widening from there: {len(parent)} links split")

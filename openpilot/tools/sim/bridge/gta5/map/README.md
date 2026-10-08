@@ -210,7 +210,13 @@ shown or a level changes.
 - openpilot's driving model can't turn back on itself, so every move that turns back more than 135 degrees is a
   `no_u_turn` restriction: at a node, and through up to four short links (40 m) as through a median gap or a turning
   loop. GTA's nodes allow them everywhere. The short two-way links joining a divided road's carriageways away from
-  junctions are left out. A trip from a dead end then has no route.
+  junctions are left out. A trip from a dead end then has no route. A move with no other way on at any node along it
+  is the road, not a U-turn: a hairpin bend, or the only way out of an acute junction.
+- No restriction may cut road off that GTA's links join to the rest of the map (`traps.py`: a car on a way that way
+  could not be routed out, or a way could not be routed to either way). Where restrictions do, the generator changes
+  the least turning forbidden move out of or into each such area, U-turn bans before GTA's flags, until none is left:
+  out of a trap the move is forbidden from the ways on to the trap's way instead (a car there may leave, but no route
+  goes in to turn back); in to cut-off road it is allowed. It stops if the restrictions it writes cut any road off.
 - Ped nodes and boat nodes are left out. The links GTA marks "don't use for navigation" stay in (`gta:no_nav`): without
   them most of the map is cut off from the rest.
 - Game coordinates (metres) map to degrees about (0, 0), so the map sits on the equator: `gta5_map.py`.
