@@ -70,6 +70,20 @@ def test_too_far_to_move():
   assert placed == [] and counts.get('paint too far from the stop line') == 1
 
 
+def test_line_of_the_junction_behind():
+  # crossroads 36 m apart: the line across the whole road at the south one's mouth is its own, not a stop line for
+  # traffic heading north out of it to the north one
+  nodes = {1: (0.0, 0.0), 2: (0.0, -20.0), 7: (0.0, -36.0), 3: (0.0, -100.0), 4: (-100.0, 0.0), 5: (100.0, 0.0),
+           6: (0.0, 100.0), 8: (-100.0, -36.0), 9: (100.0, -36.0)}
+  ways = {1: (TWO_WAY, [3, 7]), 10: (TWO_WAY, [7, 2]), 2: (TWO_WAY, [2, 1]), 3: (TWO_WAY, [1, 4]), 4: (TWO_WAY, [1, 5]),
+          5: (TWO_WAY, [1, 6]), 11: (TWO_WAY, [7, 8]), 12: (TWO_WAY, [7, 9])}
+  js = Junctions(make(nodes, ways, SIGNALS))
+  south = next(j for j in js.junctions if 7 in j.nodes)
+  mouth = -36.0 + max(m.trim for arm in south.arms for m in arm.members if m.nodes[1] == 2)
+  placed, counts = StopPaint(js, [line(7, -5.4, 5.4, mouth + 1.0)]).place()
+  assert counts.get("lines at another junction's mouth left out") == 1 and not any(p.moved_from == [2] for p in placed)
+
+
 def test_new_stop_lines():
   # no stop line in the map: one added where the paint covers only the lanes into the junction
   placed, counts = place([line(7, 0.3, 5.2, -15.0)])

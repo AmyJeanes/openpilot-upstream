@@ -5,7 +5,9 @@ added on approaches with a painted stop line and none in the map.
 - A painted stop line is a thick (MIN_WIDTH), straight white line, solid or tiled, across an approach's lanes towards
   its junction (junctions.py's members): within ANGLE of square to the road, at its height (DZ), covering most of
   those lanes (COVER), from the junction's node out to STOP_REACH past its mouth. Lines covering only the other
-  direction's lanes are that approach's, not this one's.
+  direction's lanes are that approach's, not this one's, and a line across the whole road with another junction's area
+  behind it about as near as this junction's mouth ahead (OTHER_BEHIND, MOUTH_TIE) is that junction's: traffic
+  leaving a junction doesn't stop as it leaves.
 - GTA paints the far edge of a crossing at a junction as its stop line: from the first line out from the junction, the
   lines behind it within PAIR_GAP, or within CROSSING_SPAN with a painted crossing between or both across the whole
   road (a crossing's edges painted without stripes), go with it, and the outermost is the stop line. Pieces of one
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.junctions import FREEWAY, STOP_REACH, Junctions, _left
+from openpilot.tools.sim.bridge.gta5.map.junctions import FREEWAY, STOP_REACH, Junctions, _left, in_fan
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, oneway_of
 
 MIN_WIDTH = 0.25  # m: stop lines are painted this thick at least (lane lines 0.1-0.2)
@@ -40,6 +42,8 @@ PAIR_GAP = 4.0  # m: lines this near behind the first one out from a junction go
 CROSSING_SPAN = 12.0  # m: as do lines this near with a painted crossing between (its two edges)
 MAX_MOVE = 15.0  # m a map stop line is moved at most to the paint
 NEW_REACH = 15.0  # m past a junction's mouth a new stop line can be
+OTHER_BEHIND = 3.0  # m behind a line across the whole road that another junction's area is looked for
+MOUTH_TIE = 0.5  # m: that area about this much further from the line than this junction's mouth still claims it
 CROSSING_AHEAD = 6.0  # m: a painted crossing this near ahead of a line makes it the crossing's edge, not a new stop line
 MERGE_ALONG, MERGE_GAP = 0.6, 1.5  # m: painted pieces this near along the road, and end to end, are one line
 SNAP = 0.5  # m: a stop line this near a node of its way goes on that node
@@ -121,6 +125,8 @@ class StopPaint:
     self.crossings = crossings or []
     self.crossing_cells = _grid(self.crossings, lambda c: c[0])
     self.ele = {n: float(t['ele']) for n, t in self.osm.data.node_tags.items() if 'ele' in t}
+    self.areas = [(j, float(np.mean([self.ele.get(n, 0.0) for n in j.nodes]))) for j in junctions.junctions]
+    self.area_cells = _grid([j for j, _ in self.areas], lambda j: j.polygon)
 
   def _z(self, m, s: float) -> float | None:
     pts = m.line.p[1:-1]
@@ -211,6 +217,18 @@ class StopPaint:
           return True
     return False
 
+  def _other_junction_behind(self, j, m, s: float, z: float) -> float | None:
+    """How far behind s on the member (out from its junction) another junction's area is, within OTHER_BEHIND."""
+    ds = np.linspace(0.1, OTHER_BEHIND, 28)
+    samples = np.array([m.line.at(s + d) for d in ds])
+    best = None
+    for n in {n for c in _cells_along(samples, 1.0) for n in self.area_cells.get(c, ())}:
+      other, zo = self.areas[n]
+      if other is not j and abs(zo - z) <= DZ + 1.0 and (hit := in_fan(samples, other.centre, other.polygon)).any():
+        d = float(ds[np.argmax(hit)])
+        best = d if best is None else min(best, d)
+    return best
+
   def _one_crossing(self, m, a, b) -> bool:
     """Whether candidate b, behind a, goes with it: near it, or a crossing's far edge (a crossing painted between, or
     both lines across the whole road, as GTA paints a crossing's two edges without stripes)."""
@@ -245,6 +263,12 @@ class StopPaint:
           at_node = [st for st in mine if st.node is not None]
           s_max = min(m.line.length, m.trim + (STOP_REACH if at_node else NEW_REACH))
           found = self.candidates(m, s_max)
+          # a line across the whole road as near another junction's area behind it as this one's mouth is that one's
+          mouths = [c for c in found if (c[2] > OWN_SIDE or c[3] > OWN_SIDE) and
+                    (d := self._other_junction_behind(j, m, c[0], c[1].z)) is not None and d < c[0] - m.trim + MOUTH_TIE]
+          if mouths:
+            counts["lines at another junction's mouth left out"] += len(mouths)
+            found = [c for c in found if c not in mouths]
           if not found:
             counts['no paint' if at_node else 'no stop line, no paint'] += 1
             continue
