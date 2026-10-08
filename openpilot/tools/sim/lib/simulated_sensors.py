@@ -107,7 +107,8 @@ class SimulatedSensors:
   def update(self, simulator_state: 'SimulatorState', world: 'World'):
     now = time.monotonic()
     self.send_imu_message(simulator_state)
-    self.send_gps_message(simulator_state)
+    if not world.publishes_gps:
+      self.send_gps_message(simulator_state)
 
     if (now - self.last_dmon_update) > DT_DMON/2:
       self.send_fake_driver_monitoring()

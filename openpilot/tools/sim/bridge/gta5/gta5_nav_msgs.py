@@ -139,7 +139,7 @@ NO_LANES = LaneGuide([], False, 0.0, 0.0)
 
 
 def lane_guide(slots, s: float, v: float, car_lane: list[int] | None) -> LaneGuide:
-  """The road's lanes at the car s m along, and the ones the route needs (gta5_lane_slots.LaneSlots.target).
+  """The road's lanes at the car s m along, and the ones the route needs (navd lane_slots.LaneSlots.target).
   car_lane is router.Route.lane()'s [lane from the left of ours, of how many]."""
   if slots is None:
     return NO_LANES

@@ -16,15 +16,18 @@ from openpilot.cereal import log, messaging
 from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.route_input import RouteInputWriter
+from openpilot.selfdrive.navd.lane_slots import PREVIEW_LEN, lane_slots_path, preview
+from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
+from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
+from openpilot.tools.sim.bridge.gta5 import gta5_gnss
+from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
-from openpilot.tools.sim.bridge.gta5.gta5_lane_slots import PREVIEW_LEN, lane_slots_path, preview
-from openpilot.tools.sim.bridge.gta5.gta5_nav import Nav, PullAway, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
+from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
-from openpilot.tools.sim.bridge.gta5.gta5_route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
@@ -47,28 +50,20 @@ LANE_LINE_EVERY = 0.5  # s
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
 ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
 ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugin's guess at the road it's on
-# the route input of a route-conditioned driving model (gta5_route_input.py); modeld reads it only if its model has one
+# the route input of a route-conditioned driving model (navd/route_input.py); modeld reads it only if its model has one
 ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the model, to A/B one model with and without
 OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
-# route input v2's lane slots (gta5_lane_slots.py; also in the model's route input), to their own file for watch_route.py
+# route input v2's lane slots (navd/lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 # openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
 NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
-CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
-# openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
-# Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
-NUDGE_TORQUE = 2000
-NUDGE_TIMEOUT = 3.0  # s after the indicator comes on
-TURN_CANCEL_DEG = 60.0  # heading change since the indicator came on that counts as a turn taken
-TURN_CANCEL_YAW_RATE = 0.1  # rad/s, straightened out
 # GTA has no speed limits; a guess from the street's name, mph: freeways, highways and routes, then anything else
 SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
 CITY_SPEED_LIMIT = 35
 # the plugin reads the bridge's address from here when its gta5op.ini doesn't set one
 BRIDGE_FILE = Path(os.getenv("GTA5_BRIDGE_FILE", "/mnt/c/Users/Public/gta5op-bridge.txt"))
 PIN_UI = Path(__file__).parent / "pin_ui.ps1"
-LaneChangeState = log.LaneChangeState
 
 
 def pin_ui() -> subprocess.Popen | None:
@@ -125,39 +120,25 @@ class GTA5World(World):
     self.next_hud = 0.0
     self.VM: VehicleModel | None = None
     self.last_status = 0.0
-    self.indicator: str | None = None
-    self.indicator_t = 0.0
-    self.indicator_heading = 0.0
-    self.lane_changing = False
     self.presses: dict[str, int] = {}
     self.curvature = 0.0  # what the steering is set for
     self.steering = False  # whether the driver was steering
     self.pinner: subprocess.Popen | None = None
     self.log = open(LOG, "a", buffering=1) if LOG else None
     self.params = Params()
-    self.params.remove("NavDesire")  # a killed bridge can leave one
-    self.nav = Nav(self._send, self._set_nav_desire, refresh=self.params.get_bool("TurnDesireRefresh"))
-    self.pull_away = PullAway(self._send)
+    self._init_nav()
+    self.gnss = gta5_gnss.from_env()
+    self.publishes_gps = self.gnss is not None
     self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
     self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
-    self.next_map = 0.0
-    self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
     self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
     self.junction_areas: JunctionAreas | None = None
     if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
       threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
-    self.dest: np.ndarray | None = None
-    self.dest_from_game = False
-    self.game_waypoint: np.ndarray | None = None
-    self.route: Route | None = None
     self.route_writer = RouteInputWriter(ROUTE_LEN) if ROUTE_INPUT else None
     self.nav_msgs = NavMessages() if NAV_MSGS else None
-    self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
     self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
-    self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
-    self.cap = 0.0
-    self.gps_route: list = []
     self.recorder = Recorder(RECORD, self) if RECORD else None
     self.overlay = Overlay()  # the plugin map debug overlay, while it asks for it
     self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
@@ -188,6 +169,20 @@ class GTA5World(World):
       print(f"gta5: waiting for the game at {addr} (written to {BRIDGE_FILE})")
     except OSError as e:
       print(f"gta5: waiting for the game at {addr}; set bridge={addr} in gta5op.ini ({BRIDGE_FILE}: {e})")
+
+  def _init_nav(self):
+    """navd's planner, and the GTA layer's parts around it: the simulated driver and the destination."""
+    self.params.remove("NavDesire")  # a killed bridge can leave one
+    self.nav = Planner(Tune(os.getenv("GTA5_NAVTUNE")), refresh=self.params.get_bool("TurnDesireRefresh"))
+    self.driver = Driver(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")))
+    self.destination = Destination(self.params, self._send)
+    self.next_map = 0.0
+    self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
+    self.route: Route | None = None
+    self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
+    self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
+    self.cap = 0.0
+    self.gps_route: list = []
 
   def _frame_reader(self):
     last_release = 0.0
@@ -312,6 +307,9 @@ class GTA5World(World):
     fwd_accel = state["aMeas"] + g * math.sin(grade)
     simulator_state.imu.accelerometer = vec3(g * math.cos(grade) * math.cos(bank), -lat_accel, -fwd_accel)
     simulator_state.imu.gyroscope = vec3(yaw_rate, 0, 0)
+    if self.gnss is not None:
+      p = state["pos"]
+      self.gnss.update(time.monotonic(), p[0], p[1], p[2], simulator_state.velocity.x, simulator_state.velocity.y)
 
     user = state.get("user") or {}
     # driver input while engaged: gas overrides; the brake and steering disengage, since the game's steering has no torque
@@ -324,7 +322,8 @@ class GTA5World(World):
     self.steering = steering
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
     # set once per step, held until the next: the car thread could read any value set in between
-    simulator_state.user_torque = self._update_indicator(state.get("indicator"), state["heading"], state["yawRate"])
+    simulator_state.user_torque = self.driver.stalk(state.get("indicator"), state["heading"], state["yawRate"],
+                                                    self.sm['modelV2'].meta.laneChangeState, self.nav.signaling)
     desire = self.sm['modelV2'].meta.desireState
     turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
              "keepRight": desire[log.Desire.keepRight]} if len(desire) > log.Desire.keepRight else {}
@@ -350,13 +349,15 @@ class GTA5World(World):
       self._update_map(state, bearing, v)
       simulator_state.valid = True
       return
-    simulator_state.cruise_cap, arrived = self.nav.update(state, self.simulator_state.is_engaged, state.get("indicator"), turns)
-    self.cap = simulator_state.cruise_cap
+    out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic()))
+    self.driver.act(out)
+    for d in out.desires:
+      self._set_nav_desire(d)
+    simulator_state.cruise_cap = self.cap = out.cap
     self._set_blinkers(simulator_state)
-    if arrived:
-      self.q.put(control_cmd_gen("cruise_cancel"))
-      self.dest = None
-    self.pull_away.update(state, self.simulator_state.is_engaged)
+    if out.arrived:
+      self.destination.arrived()
+    self.driver.pull_away.update(state, self.simulator_state.is_engaged)
     self._update_buttons(state)
     self._update_map(state, bearing, v)
     simulator_state.valid = True
@@ -387,25 +388,13 @@ class GTA5World(World):
     """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
     map along it. The destination is whichever was set last of the game map's waypoint and the map view's."""
     pos = np.array(state["pos"][:2], dtype=float)
-    waypoint = np.array(state.get("waypoint") or (0.0, 0.0), dtype=float)
-    if waypoint.any():
-      if self.game_waypoint is None or np.hypot(*(waypoint - self.game_waypoint)) > 1.0:
-        self.dest, self.dest_from_game = waypoint, True
-      self.game_waypoint = waypoint
-    else:
-      self.game_waypoint = None
-      if self.dest_from_game and self.dest is not None and np.hypot(*(self.dest - pos)) > CANCELLED_FROM:
-        self.dest = None
-    if self.map_view is not None:
-      picked = self.map_view.take_destination()
-      if picked is not None:
-        self.dest, self.dest_from_game = (np.array(picked[0], dtype=float) if picked[0] else None), False
-    route = self.navigator.update(pos, bearing, self.dest, time.monotonic(), state["pos"][2])
+    dest = self.destination.update(state.get("waypoint"), pos, self.map_view.take_destination() if self.map_view is not None else None)
+    route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2])
     self.routes += route is not None and route is not self.route
     self.route = route
     self._write_route_input(state)
     self._write_lane_slots(state)
-    state = {**state, "waypoint": self.dest.tolist() if self.dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
+    state = {**state, "waypoint": dest.tolist() if dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
     if self.route is None:
       return state
     on = self.route.off < ON_ROUTE
@@ -499,8 +488,13 @@ class GTA5World(World):
   def _overlay(self, state: dict, v: float) -> list[dict]:
     paths = self.navigator.router.paths if self.navigator is not None else None
     osm = self.navigator.router.osm if self.navigator is not None else None
-    out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), self.nav, self.recorder is not None, osm)
+    out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), lambda: self._turn_points(state),
+                              self.recorder is not None, osm)
     return out + self.gps.update(state, self.route)
+
+  def _turn_points(self, state: dict):
+    """The next turn navd signals and where its signal comes on, for the overlay."""
+    return self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"), state.get("junctions"))
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
@@ -560,36 +554,7 @@ class GTA5World(World):
 
   def _set_blinkers(self, simulator_state: SimulatorState):
     # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between
-    gap = self.nav.blinker_gap
-    simulator_state.left_blinker = self.indicator == "left" and not gap
-    simulator_state.right_blinker = self.indicator == "right" and not gap
-
-  def _update_indicator(self, indicator: str | None, heading: float, yaw_rate: float) -> float:
-    """The plugin's indicator is the blinker stalk: nudge the wheel to start the lane change, and cancel the indicator
-    once it is done, as a car's stalk would. Returns the driver's steering torque: the nudge, else 0."""
-    now = time.monotonic()
-    if indicator != self.indicator:
-      self.indicator, self.indicator_t, self.lane_changing = indicator, now, False
-      self.indicator_heading = heading
-    if indicator is None:
-      return 0.0
-    # a turn: cancel once the car has come round and straightened out
-    turned = abs((heading - self.indicator_heading + 180) % 360 - 180)
-    if turned > TURN_CANCEL_DEG and abs(yaw_rate) < TURN_CANCEL_YAW_RATE:
-      self._send({"type": "indicatorOff"})
-      self.indicator_heading = heading  # once, until the plugin's indicator goes off
-      return 0.0
-    lane_change = self.sm['modelV2'].meta.laneChangeState
-    if lane_change == LaneChangeState.laneChangeStarting:
-      self.lane_changing = True
-    elif self.lane_changing:
-      self.lane_changing = False
-      if not self.nav.signaling:  # a lane change still going as the blinker became the turn's
-        self._send({"type": "indicatorOff"})
-    elif (lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT
-          and not self.nav.signaling):  # a turn on the route, not a lane change
-      return NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE
-    return 0.0
+    simulator_state.left_blinker, simulator_state.right_blinker = self.driver.blinkers(self.nav.blinker_gap(time.monotonic()))
 
   def read_cameras(self):
     pass

@@ -7,7 +7,7 @@ lane from vision.
 The slots are the cross-section at the car as it is there (RouteLanes.opened_at): a turn bay is no lane until its
 taper has ended, so a target is always a lane of ours that exists where the car is, never an oncoming one. A target is
 set only where the route needs particular lanes: the lanes its move is taken from (the map's turn arrows, else nav's
-fallbacks: gta5_nav Turn, Fork and Through .lanes) are a strict subset of the lanes allowed. Before a bay the route
+fallbacks: planner Turn, Fork and Through .lanes) are a strict subset of the lanes allowed. Before a bay the route
 needs has opened, the target is the lane it opens from, and the bay once it has. A shared centre turn lane is the
 target only within CENTRE_LANE_M of the turn, the lane beside it before that.
 
@@ -28,7 +28,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5 import gta5_expert, gta5_nav
+from openpilot.selfdrive.navd import maneuvers, planner
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import LEFTS, RIGHTS, Section
 
 SLOTS = 8
@@ -48,7 +48,7 @@ NEAR = 60.0  # m on to look for a road's lanes from a segment without (inside a 
 EXIT_PAST = 1.0  # m past a maneuver's point where its road out begins
 FORK_NEAR = 15.0  # m between a keep maneuver and GTA's fork in the road
 BAN_BACK = 600.0  # m before a move to look for a stretch where change:lanes bans changing towards its lanes
-# NEXT's choice of the next maneuver (gta5_route_input)
+# NEXT's choice of the next maneuver (route_input.py)
 NEXT_PAST, NEXT_AHEAD, NEXT_SOON = 20.0, 500.0, 60.0
 
 
@@ -61,10 +61,10 @@ class Move:
   """A turn, fork or straight on through a junction, and the lanes of the road into it the route needs."""
   def __init__(self, along: float, nav, sec: Section | None, maneuver: bool):
     self.along = along
-    self.nav = nav  # gta5_nav Turn, Fork or Through, aimed by the map's arrows
-    self.turn = isinstance(nav, gta5_nav.Turn)
-    self.fork = isinstance(nav, gta5_nav.Fork)
-    self.maneuver = maneuver  # one of NEXT's (gta5_expert.maneuvers), not a Through
+    self.nav = nav  # planner Turn, Fork or Through, aimed by the map's arrows
+    self.turn = isinstance(nav, planner.Turn)
+    self.fork = isinstance(nav, planner.Fork)
+    self.maneuver = maneuver  # one of NEXT's (maneuvers.py), not a Through
     self.n = sec.lanes if sec is not None else 0
     self.targets: set[int] = set()  # of the lanes into its junction, numbered from the left of ours
     self.centre = False  # the target is the centre turn lane
@@ -88,9 +88,9 @@ class Move:
   def window(self, v: float, after_free: bool = True) -> tuple[float, float, float]:
     """(show, start, end) m along: where its target shows, where the changes into it may start and where they must
     have ended; with after_free, not before the move before is past (as nav's lane plan)."""
-    t = gta5_nav.TUNE
+    t = planner.TUNE
     free = self.free if after_free else -np.inf
-    last = max(gta5_nav.FORK_LAST_DIST, gta5_nav.FORK_LAST * v) if self.fork else t.lane_change_last
+    last = max(planner.FORK_LAST_DIST, planner.FORK_LAST * v) if self.fork else t.lane_change_last
     end = self.along - last
     for a, b in self.bans:
       if a <= end < b:
@@ -98,9 +98,9 @@ class Move:
     if self.opens is not None:
       end = max(end, self.opens)  # not in it before it's there
     end = min(max(end, free), self.along)
-    early = t.lane_change_early + (t.lane_change_fast_early if v > gta5_nav.FAST else 0.0)
-    lead = max(self.worst * gta5_nav.LANE_LINE_CHANGE,
-               (self.worst * t.lane_change_time + early) * max(v, gta5_nav.LANE_CHANGE_MIN_SPEED))
+    early = t.lane_change_early + (t.lane_change_fast_early if v > planner.FAST else 0.0)
+    lead = max(self.worst * planner.LANE_LINE_CHANGE,
+               (self.worst * t.lane_change_time + early) * max(v, planner.LANE_CHANGE_MIN_SPEED))
     start = min(max(end - lead, free), end)
     return min(max(start - TARGET_SHOW, free), start), start, end
 
@@ -135,7 +135,7 @@ def centre_arrows(sec: Section) -> frozenset[str]:
 
 def centre_lane(sec: Section, nav) -> bool:
   """Whether a turn towards the road's middle is taken from its centre turn lane (lanes:both_ways with that arrow)."""
-  if not isinstance(nav, gta5_nav.Turn) or sec.lanes == 0 or all(s.heading == 0 for s in sec.spans):
+  if not isinstance(nav, planner.Turn) or sec.lanes == 0 or all(s.heading == 0 for s in sec.spans):
     return False
   middle = sec.spans[:sec.first] if sec.first > 0 else sec.spans[sec.first + sec.lanes:]
   return nav.side == ('left' if sec.first > 0 else 'right') and any(s.heading == 0 and s.lane.turns & centre_arrows(sec) for s in middle)
@@ -198,28 +198,28 @@ class LaneSlots:
     arrows = self.lanes.arrows
     gta = any(link is not None for link in route.links)  # GTA's road data, with its forks in the road
     navs = []
-    for m in gta5_expert.maneuvers(route):
+    for m in maneuvers.maneuvers(route):
       side = 'left' if m.desire.endswith('Left') else 'right'
       n_in = self._lanes(m.along, False)
       if m.turn:
-        nav = gta5_nav.Turn(m.along, side, m.exit_heading)
+        nav = planner.Turn(m.along, side, m.exit_heading)
       else:
         forks = [f for f in route.forks if abs(f.along - m.along) < FORK_NEAR]
         if forks:
           f = min(forks, key=lambda f: abs(f.along - m.along))
-          nav = gta5_nav.Fork(m.along, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip)
+          nav = planner.Fork(m.along, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip)
         elif gta:  # GTA has no fork here: any lane, as nav, unless the map's arrows say
-          nav = gta5_nav.Fork(m.along, side, n_in, n_in, False)
+          nav = planner.Fork(m.along, side, n_in, n_in, False)
         else:  # a map's route alone: by the branch's lane count
-          nav = gta5_nav.Fork(m.along, side, self._lanes(m.along, True), n_in, True)
-      gta5_nav.aim(nav, arrows)
+          nav = planner.Fork(m.along, side, self._lanes(m.along, True), n_in, True)
+      planner.aim(nav, arrows)
       navs.append(nav)
-    navs += gta5_nav.throughs(self.points, arrows, navs)
+    navs += planner.throughs(self.points, arrows, navs)
     navs.sort(key=lambda nav: nav.dist)
-    maneuvers = {id(nav) for nav in navs if not isinstance(nav, gta5_nav.Through)}
+    maneuver_ids = {id(nav) for nav in navs if not isinstance(nav, planner.Through)}
     free = 0.0
     for nav in navs:
-      move = Move(nav.dist, nav, self.section_here(nav.dist - EXIT_PAST, False), id(nav) in maneuvers)
+      move = Move(nav.dist, nav, self.section_here(nav.dist - EXIT_PAST, False), id(nav) in maneuver_ids)
       move.free = free
       if move.targets:
         opening = self.lanes.opening(self.lanes.segment(nav.dist - EXIT_PAST))
@@ -228,7 +228,7 @@ class LaneSlots:
           if move.targets & set(range(extra) if left else range(move.n - extra, move.n)):
             move.opens = at  # a bay: the lane it opens from until then
         move.bans = self._bans(move)
-      free = nav.dist + (gta5_nav.TURN_HOLDS if move.turn else 0.0)
+      free = nav.dist + (planner.TURN_HOLDS if move.turn else 0.0)
       self.moves.append(move)
     self.along = np.array([m.along for m in self.moves])
     self.next = [k for k, m in enumerate(self.moves) if m.maneuver]
