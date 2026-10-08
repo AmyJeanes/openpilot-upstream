@@ -139,6 +139,30 @@ def test_explicit_taper():
   assert lanes.opened_at(85.0, 1).lanes == 2 and lanes.opened_at(100.0, 1).lanes == 3
 
 
+def test_blend_where_a_road_carries_on():
+  # a two-way road bending at node 2 from one way onto the next, measured wider there: its lanes move across over
+  # BLEND_M either side of the node, its lines meet there mitred, and nav's lanes move with them
+  nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (30.0, 95.0)}
+  ways = {20: ({'highway': 'primary', 'lanes': '2', 'width': '11'}, [1, 2]),
+          21: ({'highway': 'primary', 'lanes': '2', 'width': '13'}, [3, 2])}  # drawn the other way
+  ids = np.array(sorted(nodes), np.int64)
+  osm = OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {}),
+                 lambda lat, lon: (lon, lat))
+  assert osm.taper(20) is None and osm.blend(20)[1][0][0] == 0.0
+  a = {line.offset: g for line, g in osm.line_geometry(20)}
+  b = {line.offset: g for line, g in osm.line_geometry(21)}
+  assert np.allclose(a[-5.5][-1], b[6.5][-1], atol=1e-6) and np.allclose(a[5.5][-1], b[-6.5][-1], atol=1e-6)
+  assert np.allclose(a[0.0][-1], b[0.0][-1], atol=1e-6)
+  assert 6.0 < np.hypot(*a[5.5][-1]) < 6.1  # halfway, mitred out a little at the bend
+  assert np.allclose(a[-5.5][0], (-5.5, -100.0)) and np.allclose(a[-5.5][-5], (-5.5, -10.0))  # untouched 10 m back
+  assert osm.edges_at(20, 85.0) == (-5.5, 5.5) and abs(osm.edges_at(20, 100.0)[1] - 6.0) < 1e-6
+  pts = np.array([nodes[1], nodes[2], nodes[3]])
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  widths = [lanes.section_at(s).edges[1] for s in (85.0, 95.0, 100.0 - 1e-6)] + [lanes.section_at(100.0, 1).edges[1]]
+  assert np.allclose(widths, [5.5, 5.5 + 0.15625, 6.0, 6.0], atol=1e-3), widths
+  assert lanes.section_at(110.0 + 1e-3, 1).edges[1] == 6.5 and lanes.section_at(150.0, 1).lanes == 1
+
+
 def test_route_lanes_bend_has_no_fillet():
   # a road bending through a node that isn't a junction keeps its own lane line
   osm = junction_map()
