@@ -465,7 +465,7 @@ def correct_oneway(samples: list[dict], n: int, kerbs: tuple[float, float]):
   """The painted lanes of a one-way link with n lanes and its kerbs where the class layout has them, from the game
   files' samples alone (the camera's lines are too loose for roads without a yellow centre to anchor them): its edges
   are the yellow or white lines nearest those kerbs (within EDGE_REACH), else the asphalt's edges, with n - 1 white lane
-  lines between, each lane LANE_MIN to LANE_MAX wide, centred on the link (within CENTRE_TOL; one-way links are centred
+  lines between (or none, where the files miss them: n even lanes), each lane LANE_MIN to LANE_MAX wide, centred on the link (within CENTRE_TOL; one-way links are centred
   on their lanes, so the line can't say more): ({'lanes': [widths left to right], 'change': [...] where a line can't
   be crossed}, None), or (None, why not)."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
@@ -492,6 +492,8 @@ def correct_oneway(samples: list[dict], n: int, kerbs: tuple[float, float]):
   if lo is None or hi is None:
     return None, 'one-way, no edges'
   between = [v for v in seen if lo + LANE_MIN * 0.8 < v < hi - LANE_MIN * 0.8]
+  if not between and n > 1 and LANE_MIN <= (hi - lo) / n <= LANE_MAX:
+    between = [lo + (hi - lo) * k / n for k in range(1, n)]  # the files miss the lane lines: GTA's lanes, evenly
   if len(between) != n - 1:
     return None, f'one-way, {len(between) + 1} lanes painted, GTA has {n}'
   if abs((lo + hi) / 2) > CENTRE_TOL:
@@ -564,6 +566,30 @@ def unpainted(samples: list[dict]) -> bool:
   return edges * 2 >= len(files) and bare >= UNPAINTED * len(files)
 
 
+OUTER_REACH = 1.2  # m from a one-way link's outer lane edge that a white lane line is that edge's
+
+
+def outer_lines(samples: list[dict], edges: tuple[float, float]) -> tuple[bool | None, bool | None]:
+  """Whether a one-way link's outer lanes may cross the white lane lines at their outer edges (`edges`, m right of its
+  line), where another link runs on beside it, as GTA's freeway links side by side: each edge takes the kind of the
+  white lane line nearest it within OUTER_REACH in half the samples or more. (left, right); None where no lane line is
+  seen there (a kerb or edge line, or a gap in the files)."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < MIN_SAMPLES:
+    return None, None
+  out = []
+  for i, edge in enumerate(edges):
+    seen = Counter()
+    for d in files:
+      near = [(abs(o - edge), kind) for m in d['marks'] if m['conf'] >= CONF and m['colour'] == 'white' and
+              (kind := m['type']) in CROSSING and abs((o := sum(m['pair']) / 2 if m.get('pair') else m['offset']) - edge) <= OUTER_REACH]
+      if near:
+        seen[min(near)[1]] += 1
+    kind, n = seen.most_common(1)[0] if seen else (None, 0)
+    out.append(CROSSING[kind][1 - i] if kind and n * 2 >= len(files) else None)  # the half facing the link's lanes
+  return out[0], out[1]
+
+
 def disagree(a: dict, b: dict, tol: float = AGREE) -> bool:
   """Whether two sources' cross-sections of a link differ by more than tol anywhere."""
   def edges(sec):
@@ -592,15 +618,17 @@ def arrow_marks(path) -> list[tuple[float, float, float, float, str]]:
 CARRIAGEWAY_REACH = 25.0  # m either side of a one-way link that the lines of its carriageway are read
 MARKERS_BESIDE = 2.0  # m: raised markers this near another painted line run alongside it, not between lanes of their own
 PLACE_TOL = 1.0  # m the painted lines may move to put the link's line where placement=* can say it
+CARRIAGEWAY_LANE_MAX = 7.6  # m: GTA's freeway lanes are 5.5-7.5 m wide
+LINE_MERGE = 1.6  # m: painted lines nearer each other than this are one boundary
 
 
 def correct_carriageway(samples: list[dict], n: int):
   """The painted lanes of a one-way link that is one of several side by side making up a carriageway, as GTA draws a
   freeway (its lane changes are links between them), from the game files' samples alone. correct_oneway can't take
   these: the carriageway's edges are far from the link's own kerbs, and its lanes needn't be centred on it. Every lane
-  across the carriageway is read (painted lines LANE_MIN to LANE_MAX apart, raised markers beside another line left
-  out, the asphalt's edges beyond the outermost lines), and the link's are the n side by side, white lines between,
-  whose middle is nearest its line, within half a lane.
+  across the carriageway is read (painted lines LANE_MIN to CARRIAGEWAY_LANE_MAX apart, lines nearer than LINE_MERGE
+  taken as one, raised markers beside another line left out, the asphalt's edges beyond the outermost lines), and the
+  link's are the n side by side, white lines between, whose middle is nearest its line, within half a lane.
   A way's line stays on GTA's nodes and placement=* only puts it on a lane's edge or middle, so it goes on the nearest of
   those within PLACE_TOL: on an edge, only that line moves (the lanes either side take up the difference); on a lane's
   middle, all of them move with it.
@@ -620,13 +648,27 @@ def correct_carriageway(samples: list[dict], n: int):
           lines.append((k, offset))
           kinds.append((offset, m['type'] if m['colour'] == 'white' else 'yellow'))
 
-  def kind(v):  # the line's kind most seen at v
+  def kind_near(v):  # the line's kind most seen at v
     seen = Counter(t for o, t in kinds if abs(o - v) <= AGREE)
     return seen.most_common(1)[0][0] if seen else None
-  seen = [v for v, c in clusters(lines) if c >= need]
-  seen = [v for v in seen if kind(v) != 'markers' or not any(AGREE < abs(v - q) <= MARKERS_BESIDE and kind(q) != 'markers' for q in seen)]
-  if not seen:
+  strong = [(v, c) for v, c in clusters(lines) if c >= need]
+  strong = [(v, c) for v, c in strong if kind_near(v) != 'markers' or
+            not any(AGREE < abs(v - q) <= MARKERS_BESIDE and kind_near(q) != 'markers' for q, _ in strong)]
+  if not strong:
     return None, 'carriageway, no lines'
+  groups = []  # lines nearer each other than LINE_MERGE are one: a double line read as two, markers beside markers
+  for v, c in sorted(strong):
+    if groups and v - groups[-1][-1][0] < LINE_MERGE:
+      groups[-1].append((v, c))
+    else:
+      groups.append([(v, c)])
+  known = {}
+  for g in groups:
+    known[float(np.mean([v for v, _ in g]))] = kind_near(max(g, key=lambda vc: (kind_near(vc[0]) != 'markers', vc[1]))[0])
+  seen = list(known)
+
+  def kind(v):
+    return known[v] if v in known else kind_near(v)
   bounds = list(seen)
   for side, beyond in (('left', lambda v: v < min(seen)), ('right', lambda v: v > max(seen))):
     asphalt = [d['kerbs'][side] for d in files if (d.get('kerbs') or {}).get(side) is not None]
@@ -634,7 +676,7 @@ def correct_carriageway(samples: list[dict], n: int):
         all(abs(edge - v) > LANE_MIN * 0.8 for v in seen):
       bounds.append(edge)
   bounds.sort()
-  lanes = [(a, b) for a, b in zip(bounds, bounds[1:], strict=False) if LANE_MIN <= b - a <= LANE_MAX]
+  lanes = [(a, b) for a, b in zip(bounds, bounds[1:], strict=False) if LANE_MIN <= b - a <= CARRIAGEWAY_LANE_MAX]
   best = None  # (the run's middle, its first lane)
   for i in range(len(lanes) - n + 1):
     run = lanes[i:i + n]

@@ -15,7 +15,8 @@ from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, oneway_of
 
 SHARED = 0.75  # m: a kerb this near another way's carriageway, or on it, is inside the road surface
 MEETS = 1.5  # m a kerb may be on the carriageway beside it (lanes placed to a lane's edge or middle) and still be its edge
-SAME_WAY = 45.0  # deg between two ways' headings running the same way
+SAME_WAY = 75.0  # deg between two ways' headings running the same way (GTA's lane changes cut across at up to ~60)
+PARALLEL = 10.0  # deg: a way meeting another this near parallel shares a lane line with it, rather than crossing to it
 LEVEL = 2.5  # m of height between ways on one level
 STEP = 0.5  # m: kerbs are cut to this
 MIN_PIECE = 0.3  # m
@@ -106,7 +107,7 @@ class SideBySide:
       on = in_fan(mids[idx], centre, surface)
       covered[idx[on]] = True
       if right:
-        meets = idx[on & in_fan(mids[idx], strip.mean(0), strip)]
+        meets = idx[on & in_fan(mids[idx], strip.mean(0), strip) & (u[idx] @ heading >= np.cos(np.radians(PARALLEL)))]
         beside[meets] = wid
     kept = [pts[a:b + 1] for a, b in _runs(~covered)]
     lines = []

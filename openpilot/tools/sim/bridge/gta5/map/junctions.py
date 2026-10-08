@@ -50,6 +50,7 @@ CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
+MERGE_FLOW = 30.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
 U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
 STRAIGHT = 30.0  # deg: a move turning less than this goes through
 # the deg turned (left positive) along which each turn:lanes arrow points
@@ -523,7 +524,8 @@ class Junctions:
         m = self.member(n, step)
         if m is not None:
           members.append(m)
-    if len(members) < 3 or all(self.ways[m.ways[0][0]][0].get('highway') in FREEWAY for m in members):
+    if len(members) < 3 or all(self.ways[m.ways[0][0]][0].get('highway') in FREEWAY for m in members) or \
+        self.merges(members, [w for ways, _ in links for w, _ in ways]):
       return None  # freeways only merge and part, with no junction between
     centre = np.mean([self.osm.node_xy(n) for n in nodes], axis=0)
 
@@ -559,6 +561,22 @@ class Junctions:
       kerbs = [push(k, centre, np.vstack(samples)) for k in kerbs]
       polygon = np.vstack([np.vstack([kerbs[i - 1][-1:], kerbs[i][:-1]]) for i in range(len(kerbs))])
     return Junction(nodes, arms, polygon, kerbs, inside, centre)
+
+  def merges(self, members: list[Member], inside: list[int]) -> bool:
+    """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW of one heading, and the roads
+    between its nodes (`inside`) are one-way: lanes merging, parting or changing across one carriageway (as lane changes
+    laid as links of their own), with no traffic crossing."""
+    if any(not oneway_of(self.ways[w][0]) for w in inside):
+      return False
+    flows = []
+    for m in members:
+      w, along = m.ways[0]
+      way = oneway_of(self.ways[w][0])
+      if not way:
+        return False
+      flows.append(m.heading if (way == 1) == along else m.heading + math.pi)
+    mean = math.atan2(sum(math.sin(f) for f in flows), sum(math.cos(f) for f in flows))
+    return all(math.cos(f - mean) > math.cos(math.radians(MERGE_FLOW)) for f in flows)
 
   def bundle(self, members: list[Member]) -> list[Arm]:
     """Groups members (counterclockwise) running side by side into arms."""

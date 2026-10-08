@@ -129,6 +129,43 @@ def crossovers(nodes, es):
   return out
 
 
+LANE_CHANGE_FLOW = 30.0  # deg: one-way links within this of their mean heading all run the same way
+LANE_CHANGE_AXIS = 50.0  # deg: a link within this of that heading crosses between them, as a lane change
+
+
+def lane_changes(nodes, es):
+  """Two-way links between one-way links that all run the same way, as GTA lays some lane changes across a freeway or a
+  one-way street (chains of them crossing in an X): {edge: whether it runs a -> b}, the way the traffic beside it runs.
+  Every other two-way link at their ends must be one too, so that roads of their own stay two-way."""
+  flow = defaultdict(list)  # node -> directions of travel of its one-way edges
+  twos = defaultdict(set)
+  for (a, b), (fwd, back, _) in es.items():
+    if fwd and back:
+      twos[a].add((a, b))
+      twos[b].add((a, b))
+    elif fwd or back:
+      d = direction(nodes, a, b) if fwd else direction(nodes, b, a)
+      flow[a].append(d)
+      flow[b].append(d)
+  out = {}
+  for (a, b), (fwd, back, _) in es.items():
+    if not (fwd and back) or not flow[a] or not flow[b]:
+      continue
+    ds = flow[a] + flow[b]
+    mx, my = sum(d[0] for d in ds), sum(d[1] for d in ds)
+    n = math.hypot(mx, my) or 1.0
+    mx, my = mx / n, my / n
+    ux, uy = direction(nodes, a, b)
+    along = ux * mx + uy * my
+    if min(d[0] * mx + d[1] * my for d in ds) > math.cos(math.radians(LANE_CHANGE_FLOW)) and \
+        abs(along) > math.cos(math.radians(LANE_CHANGE_AXIS)):
+      out[(a, b)] = along > 0
+  while bad := {e for e in out if any(o not in out for n in e for o in twos[n])}:
+    for e in bad:
+      del out[e]
+  return out
+
+
 def highway(nodes, a, b, fwd, back):
   fa, fb = nodes[a]['f'], nodes[b]['f']
   if (fa[0] | fb[0]) & 8:
@@ -1288,6 +1325,29 @@ def painted_lines(tags, cls, two_way, samples, why):
   return out
 
 
+def outer_changes(tags, samples, why):
+  """A one-way way's tags with change:lanes on its outer lanes' outer sides from the game files' white lines there
+  (paint_survey.outer_lines): the lines between it and the links GTA lays beside it, on a freeway."""
+  road = WayLanes.from_tags(tags)
+  left, right = paint_survey.outer_lines(samples, road.edges(FORWARD))
+  if left is None and right is None:
+    return tags
+  ways = {v: k for k, v in paint_survey.CHANGE.items()}
+  change = [list(ways[v]) for v in tags.get('change:lanes', '|'.join(['yes'] * len(road.lanes))).split('|')]
+  if len(change) != len(road.lanes):
+    return tags
+  if left is not None:
+    change[0][0] = left
+  if right is not None:
+    change[-1][1] = right
+  values = [paint_survey.CHANGE[tuple(c)] for c in change]
+  out = {k: v for k, v in tags.items() if k != 'change:lanes'}
+  if set(values) != {'yes'}:
+    out['change:lanes'] = '|'.join(values)
+    why['outer lines not to cross'] += 1
+  return out
+
+
 def arrows(n, kinds, fewer_left=False):
   """The turn arrows of n lanes into a junction whose ways out turn `kinds` ways (left, through, right), as GTA paints
   most approaches it paints every lane of: every lane the same way at a forced turn; else the left lane turns left only
@@ -1543,8 +1603,13 @@ def main():
   es = edges(nodes, links)
   cross = crossovers(nodes, es)
   es = {k: v for k, v in es.items() if k not in cross}
+  changes = lane_changes(nodes, es)
+  for k, ab in changes.items():
+    fwd, back, lf = es[k]
+    es[k] = (max(fwd, back), 0, lf) if ab else (0, max(fwd, back), lf)
   used = sorted({k for e in es for k in e})
-  print(f"{len(used)} nodes, {len(es)} ways ({len(cross)} carriageway crossovers dropped)")
+  print(f"{len(used)} nodes, {len(es)} ways ({len(cross)} carriageway crossovers dropped, {len(changes)} two-way lane "
+        "changes made one-way)")
 
   info = []  # (way id, a, b, fwd, back, class, limit, name, link flags)
   for i, ((a, b), (fwd, back, lf)) in enumerate(sorted(es.items())):
@@ -1840,6 +1905,8 @@ def main():
     if survey and 'lane_markings' not in tags and tags.get('source:width') != 'survey' and \
         not any(k.endswith((':start', ':end')) for k in tags) and (samples := link_samples(wid, a, b)):
       tags = painted_lines(tags, cls, bool(back), samples, lines_why)
+    if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
+      tags = outer_changes(tags, samples, lines_why)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:
