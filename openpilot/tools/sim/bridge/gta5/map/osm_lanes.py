@@ -26,8 +26,11 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
 Geometry is in metres in a frame with y 90 degrees left of x (x east, y north): "right" is right of the direction of
 travel. Traffic drives on the right unless `drive_on_right=False`, which mirrors where each direction's lanes are.
 """
+import bisect
+import math
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from typing import NamedTuple
 
 import numpy as np
@@ -420,7 +423,8 @@ MOVE_HEADING = 15.0  # m before the junction that the road's heading into it is 
 class Section:
   """A road's cross-section where a route runs along it, seen in the route's direction of travel: its lanes left to
   right (ours, oncoming and centre lanes), m right of the route's line. Lanes are numbered from the left of ours: 0 to
-  lanes - 1 are ours, negative ones left of them (the oncoming lanes where traffic drives on the right)."""
+  lanes - 1 are ours, negative ones left of them (the oncoming lanes where traffic drives on the right). Not changed
+  once made (its key is kept)."""
   def __init__(self, spans: list[Span], edges: tuple[float, float]):
     self.spans = spans
     ours = [i for i, s in enumerate(spans) if s.heading == 1] or [i for i, s in enumerate(spans) if s.heading == 0]
@@ -444,7 +448,7 @@ class Section:
   def turns(self) -> list[frozenset[str]]:
     return [s.lane.turns for s in self.ours]
 
-  @property
+  @cached_property
   def key(self) -> tuple:
     """The layout, to tell one road's lanes from another's."""
     return (self.first, *((round(s.left, 2), round(s.right, 2)) for s in self.spans))
@@ -1016,6 +1020,7 @@ class RouteLanes:
     self._corners: list[tuple[float, float]] | None = None
     self._drops: list[tuple[float, tuple[int, int, int]]] | None = None
     self._openings: list[tuple[float, int]] | None = None
+    self._runs: dict[int, tuple[int, int]] = {}
 
   @classmethod
   def from_osm(cls, points, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes) -> 'RouteLanes':
@@ -1133,12 +1138,15 @@ class RouteLanes:
 
   def _run(self, k: int) -> tuple[int, int]:
     """The segments either side of k on the same road layout (Section.key), the road carrying on across ways."""
+    if k in self._runs:
+      return self._runs[k]
     key = self.sections[k].key
     k0, k1 = k, k
     while k0 > 0 and (p := self.sections[k0 - 1]) is not None and k0 - 1 not in self.explicit and p.key == key:
       k0 -= 1
     while k1 + 1 < len(self.sections) and (n := self.sections[k1 + 1]) is not None and k1 + 1 not in self.explicit and n.key == key:
       k1 += 1
+    self._runs[k] = k0, k1
     return k0, k1
 
   def section_at(self, s: float, k: int | None = None) -> Section | None:
@@ -1232,17 +1240,25 @@ class RouteLanes:
     xy = np.stack([np.interp(s2, self.along, self.points[:, 0]), np.interp(s2, self.along, self.points[:, 1])], axis=1)
     lane_in, lane_out = _keyed(s2, kx, ky)
     seg = np.clip(np.searchsorted(self.along, (s2[:-1] + s2[1:]) / 2, side='right') - 1, 0, len(self.sections) - 1)
-    offs = np.full(len(s2), np.nan)
+    # in Python floats: a few thousand points every half second on the bridge's main thread
+    sv, lin, lout = s2.tolist(), lane_in.tolist(), lane_out.tolist()
+    offl = [math.nan] * len(sv)
     jogs = []  # shared points where the lane in and the lane out don't line up
-    for i, k in enumerate(seg):
-      for v, lane in ((i, lane_out), (i + 1, lane_in)):  # the piece's ends, averaged with the next's at a shared point
-        sec = self.section_at(s2[v], k)
+    last: tuple = (-1, -1, None)  # the cross-section at a point inside a segment, for the next piece's start
+    for i, k in enumerate(seg.tolist()):
+      for v, lane in ((i, lout), (i + 1, lin)):  # the piece's ends, averaged with the next's at a shared point
+        if last[0] == v and last[1] == k:
+          sec = last[2]
+        else:
+          sec = self.section_at(sv[v], k)
+          last = (v, k, sec)
         if sec is None or not sec.lanes:
           continue
         off = sec.offset(lane[v])
-        if not np.isnan(offs[v]) and abs(off - offs[v]) > JOG_MIN:
+        if not math.isnan(offl[v]) and abs(off - offl[v]) > JOG_MIN:
           jogs.append(v)
-        offs[v] = off if np.isnan(offs[v]) else (offs[v] + off) / 2
+        offl[v] = off if math.isnan(offl[v]) else (offl[v] + off) / 2
+    offs = np.array(offl)
     known = ~np.isnan(offs)
     if not known.any():
       return None
@@ -1418,7 +1434,7 @@ def mirrored(sec: Section) -> Section:
 def at_knots(knots: list[tuple[float, Section]], v: float) -> Section:
   """The cross-section v m along a way from its knots [(m, Section)] (taper(), blend()), linear between them."""
   ks = [k for k, _ in knots]
-  i = int(np.searchsorted(ks, v, side='right')) - 1
+  i = bisect.bisect_right(ks, v) - 1
   if i < 0:
     return knots[0][1]
   if i >= len(knots) - 1:
