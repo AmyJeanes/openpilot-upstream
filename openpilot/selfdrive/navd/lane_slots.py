@@ -21,7 +21,8 @@ nearest first, narrowed to the following move's lanes where its window has begun
 Layout (LANE_SLOTS_LEN = 50 floats): [0:24] LANES_HERE and [24:48] LANES_EXIT, slot k at 3k (oncoming), 3k + 1
 (allowed), 3k + 2 (target); [48] TARGET_START and [49] TARGET_END, m / 100 clipped 0..3 (0: from now, by now; also 0
 with no target, which the target slots tell apart). The bridge writes it with [50] the traffic side (1 right, -1
-left, 0 no route) to its own shared-memory file for watch_route.py's preview, apart from the model's route input.
+left, 0 no route) and [51:53] the car's lane as the bridge reads it (index from the left of ours, count; count 0 for
+none) to its own shared-memory file for watch_route.py's preview, apart from the model's route input.
 """
 import os
 from typing import NamedTuple
@@ -39,7 +40,8 @@ TARGET_START = 6 * SLOTS
 TARGET_END = TARGET_START + 1
 LANE_SLOTS_LEN = TARGET_END + 1
 SIDE = LANE_SLOTS_LEN  # the preview's traffic side
-PREVIEW_LEN = SIDE + 1
+CAR_LANE = SIDE + 1  # the preview's car lane: index from the left, count
+PREVIEW_LEN = CAR_LANE + 2
 DIST_UNIT = 100.0  # m
 TARGET_SHOW = 150.0  # m before the car may start moving into a target that it shows
 # m before a turn a shared centre turn lane is its target: about 200 ft, the most many US states allow driving in one
@@ -343,12 +345,15 @@ class LaneSlots:
         slots[slot, ONCOMING] = 1.0
 
 
-def preview(slots: LaneSlots | None, s: float, v: float) -> np.ndarray:
-  """[PREVIEW_LEN] for watch_route.py: the slots and the traffic side; zero without a route."""
+def preview(slots: LaneSlots | None, s: float, v: float, lane: list[int] | None = None) -> np.ndarray:
+  """[PREVIEW_LEN] for watch_route.py: the slots and the traffic side, zero without a route; and the car's lane
+  [i from the left, of n], zero without one."""
   out = np.zeros(PREVIEW_LEN, np.float32)
   if slots is not None:
     out[:LANE_SLOTS_LEN] = slots.encode(s, v)
     out[SIDE] = 1.0 if slots.drive_on_right else -1.0
+  if lane:
+    out[CAR_LANE:CAR_LANE + 2] = lane
   return out
 
 

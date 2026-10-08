@@ -488,9 +488,9 @@ class GTA5World(World):
     self.routes += route is not None and route is not self.route
     self.route = route
     self._write_route_input(state)
-    self._write_lane_slots(state)
     state = {**state, "waypoint": dest.tolist() if dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
     if self.route is None:
+      self._write_lane_slots(state, state.get("lane"))
       return state
     on = self.route.off < ON_ROUTE
     lane, plugin = self.route.lane() if on else None, state.get("lane")
@@ -499,6 +499,7 @@ class GTA5World(World):
       lane, frac = None, None  # they disagree: no lane changes on either
     elif not lane:
       lane = plugin
+    self._write_lane_slots(state, lane)
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
 
@@ -565,14 +566,14 @@ class GTA5World(World):
     """The route's lane slots, from its RouteInput (made once per route), for the nav messages' lane guidance."""
     return self._route_encoder(route).slots
 
-  def _write_lane_slots(self, state: dict):
-    """Route input v2's lane slots for the preview; zero off the route."""
+  def _write_lane_slots(self, state: dict, lane: list[int] | None = None):
+    """Route input v2's lane slots for the preview, zero off the route; with the car's lane, for the model's guess at it."""
     if self.lanes_writer is None:
       return
     route = self.route if self.route is not None and self.route.off <= OFF_ROUTE_INPUT else None
     try:
       vec = preview(self._route_encoder(route).slots if route is not None else None, route.at if route is not None else 0.0,
-                    state["vEgo"])
+                    state["vEgo"], lane)
     except Exception as e:  # only a preview: it mustn't stop the bridge
       print(f"gta5: lane slots: {e!r}")
       vec = preview(None, 0.0, 0.0)

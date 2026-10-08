@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Shows the route input the driving model gets (navd/route_input.py), live from the bridge's shared memory: the NAV
-bins, the route's heading ahead as a path, the next maneuver and the next stop line; and below, a preview of route
-input v2's lane slots (navd/lane_slots.py), which the bridge writes to a file of their own."""
+bins, the route's heading ahead as a path, the next maneuver and the next stop line; and below, route input v2's lane
+slots (navd/lane_slots.py), which the bridge also writes to a file of their own with the car's lane, and on them the
+driving model's guess at that lane (modelV2.laneHead)."""
 import time
 
 import numpy as np
 import pyray as rl
 
+import openpilot.cereal.messaging as messaging
 from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -29,7 +31,10 @@ DIR_COLORS = (OTHER, LEFT, RIGHT)
 TARGET = rl.Color(40, 210, 200, 255)
 ONCOMING_FILL = rl.Color(70, 64, 66, 255)
 HATCH = rl.Color(200, 70, 70, 255)
+MODEL = rl.Color(250, 210, 60, 255)  # the model's lane; the car's true lane is GOOD
+MODEL_P = rl.Color(250, 210, 60, 70)
 LANES_H = 112  # px: the lane slots panel
+MODEL_STALE = 1.0  # s without modelV2
 
 
 def text(s: str, x: float, y: float, size: int, color=TEXT, weight=FontWeight.MEDIUM):
@@ -132,7 +137,7 @@ def draw_next(d, r: rl.Rectangle):
   for i in range(n):
     rl.draw_rectangle_rec(rl.Rectangle(r.x + 8 + i * lane_w, y, lane_w - 3, 22), color if i in use else EMPTY)
   text(f"be in {lanes_text(use, n)}", r.x + 16 + n * lane_w, y + 1, 18)
-  text(f"road: {nx.lanes_in} lanes our way, {nx.lanes_out} after (left to right)", r.x + 8, y + 28, 14, DIM)
+  text(f"v1 lane fields: {nx.lanes_in} lanes our way, {nx.lanes_out} after (left to right)", r.x + 8, y + 28, 14, DIM)
 
 
 def lanes_text(use: list[int], n: int) -> str:
@@ -144,7 +149,8 @@ def lanes_text(use: list[int], n: int) -> str:
   return f"lane {use[0] + 1} of {n}" if len(use) == 1 else f"lanes {use[0] + 1}-{use[-1] + 1} of {n}"
 
 
-def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray | None = None, lanes_age: float | None = None):
+def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray | None = None, lanes_age: float | None = None,
+         head=None, car: tuple[int, int] | None = None):
   rl.clear_background(BG)
   d = decode(vec)
   m = 10
@@ -155,7 +161,7 @@ def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray |
   present = "PRESENT" if d.present else "no route"
   text(present, m + text_w("Route input", 18, FontWeight.BOLD) + 14, 9, 16, GOOD if d.present else DIM)
 
-  draw_lanes(lanes, lanes_age, d.next, rl.Rectangle(m, h - m - LANES_H, w - 2 * m, LANES_H))
+  draw_lanes(lanes, lanes_age, d.next, rl.Rectangle(m, h - m - LANES_H, w - 2 * m, LANES_H), head, car)
   h -= LANES_H + m  # the route input above it
   top = 36
   side = min(w * 0.4, h - top - m)
@@ -199,14 +205,38 @@ def draw_slot(state: int, r: rl.Rectangle):
     rl.draw_circle_v(rl.Vector2(cx, r.y + r.height / 2), 2, EMPTY)
 
 
-def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
+def has_head(head) -> bool:
+  """A model with a current-lane head: without one laneCount keeps its default (-1) and idxProbs are empty."""
+  return head is not None and 0 <= head.laneIdx < head.laneCount and any(head.idxProbs)
+
+
+def lane_col(i: int, n: int, right: bool) -> int:
+  """The strip's column for lane i from the left of n our way: slot n - 1 - i from the kerb."""
+  return slots_mod.SLOTS - n + i if right else i
+
+
+def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle, head=None, car: tuple[int, int] | None = None):
   """Route input v2's lane slots: the road here and the road out of the next maneuver, as the driver sees them, left to
-  right, with the kerb they are counted from marked; from and by where to move into a target lane."""
+  right, with the kerb they are counted from marked; from and by where to move into a target lane. On the road here,
+  the model's lane (outlined, with its P(index) as faint bars) and the car's true lane (a mark under it)."""
   rl.draw_rectangle_rec(r, PANEL)
-  text("Lane slots (v2 preview, not yet model input)", r.x + 8, r.y + 6, 14, DIM)
+  title = "Lane slots (route input v2)"
+  text(title, r.x + 8, r.y + 6, 14, DIM)
   stale = age is None or age > 1.0
   status = "no lane slots file" if age is None else f"{age:.1f} s old" if age < 10 else f"{age:.0f} s old"
   text(status, r.x + r.width - 8 - text_w(status, 14), r.y + 6, 14, STOP if stale else DIM)
+  if head is None:
+    words = [("no modelV2", DIM)]
+  elif not has_head(head):
+    words = [("no lane head", DIM)]
+  else:
+    words = [(f"model lane {head.laneIdx + 1}/{head.laneCount} {head.prob:.0%}", MODEL)]
+    if car is not None:
+      words.append((f" vs true {car[0] + 1}/{car[1]}" if car[0] >= 0 else " vs true oncoming", GOOD))
+  x = r.x + 8 + text_w(title, 14) + 16
+  for s, color in words:
+    text(s, x, r.y + 6, 14, color)
+    x += text_w(s, 14)
   if vec is None or not vec[slots_mod.SIDE]:
     s = "no lane slots file" if vec is None else "stale" if stale else "no route"
     text(s, r.x + 8, r.y + 44, 22, DIM)
@@ -225,6 +255,21 @@ def draw_lanes(vec: np.ndarray | None, age: float | None, nxt, r: rl.Rectangle):
     for k, state in enumerate(states):
       col = slots_mod.SLOTS - 1 - k if right else k  # slot 0 is the kerb lane
       draw_slot(int(state), rl.Rectangle(x0 + col * (bw + gap), y, bw, bh))
+  y = rows[0][0]
+  if not (here < 0).all() and has_head(head):
+    # P(index from the left) has no count of its own: laid out by the model's count, as its lane is
+    for k, p in enumerate(head.idxProbs):
+      col = lane_col(k, head.laneCount, right)
+      if 0 <= col < slots_mod.SLOTS and p > 0.02:
+        rl.draw_rectangle_rec(rl.Rectangle(x0 + col * (bw + gap), y + bh * (1 - p), bw, bh * p), MODEL_P)
+    col = lane_col(head.laneIdx, head.laneCount, right)
+    if 0 <= col < slots_mod.SLOTS:
+      rl.draw_rectangle_lines_ex(rl.Rectangle(x0 + col * (bw + gap) - 2, y - 2, bw + 4, bh + 4), 2, MODEL)
+  if not (here < 0).all() and car is not None:
+    col = lane_col(car[0], car[1], right)
+    if 0 <= col < slots_mod.SLOTS:
+      cx, ty = x0 + col * (bw + gap) + bw / 2, y + bh + 2
+      rl.draw_triangle(rl.Vector2(cx, ty), rl.Vector2(cx - 6, ty + 7), rl.Vector2(cx + 6, ty + 7), GOOD)
   if (here < 0).all() and (out < 0).all():
     return
   kerb_x = x0 + strip + gap / 2 + 1 if right else x0 - gap / 2 - 1
@@ -266,11 +311,18 @@ if __name__ == "__main__":
   rl.set_window_state(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE)
   rl.set_target_fps(0)  # raylib's frame limiter busy-waits the end of each frame: sleep instead
   reader = RouteInputReader(V1_LEN)
-  lanes_reader = RouteInputReader(slots_mod.PREVIEW_LEN, slots_mod.lane_slots_path())
+  # the slots apart from the car's lane after them, which a bridge from before it doesn't write
+  lanes_reader = RouteInputReader(slots_mod.CAR_LANE, slots_mod.lane_slots_path())
+  car_reader = RouteInputReader(slots_mod.PREVIEW_LEN, slots_mod.lane_slots_path())
+  sm = messaging.SubMaster(["modelV2"])
   due = time.monotonic()
   for _ in gui_app.render():
-    vec, lanes = reader.read(), lanes_reader.read()
+    vec, lanes, car_vec = reader.read(), lanes_reader.read(), car_reader.read()
     lanes_age = input_age(lanes_reader)
-    draw(vec, input_age(reader), rl.get_screen_width(), rl.get_screen_height(), lanes if lanes_age is not None else None, lanes_age)
+    sm.update(0)
+    fresh = sm.recv_frame["modelV2"] > 0 and time.monotonic() - sm.recv_time["modelV2"] < MODEL_STALE
+    i, n = (int(v) for v in car_vec[slots_mod.CAR_LANE:])
+    draw(vec, input_age(reader), rl.get_screen_width(), rl.get_screen_height(), lanes if lanes_age is not None else None, lanes_age,
+         sm["modelV2"].laneHead if fresh else None, (i, n) if n > 0 else None)
     due = max(due + 1 / FPS, time.monotonic())
     time.sleep(max(due - time.monotonic(), 0.0))
