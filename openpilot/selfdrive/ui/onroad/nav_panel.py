@@ -282,10 +282,15 @@ class NavCard:
   def _lanes(self):
     if not self.route_on:
       return [], None
-    key = (self.nav.updates, self.nav.car_lane)
+    always = ui_state.nav_show_lanes_always
+    key = (self.nav.updates, self.nav.car_lane, always)
     if self._lanes_key != key:
-      self._lanes_key, self._lanes_cache = key, card_lanes(self.nav.guidance, self.nav.car_lane)
+      self._lanes_key, self._lanes_cache = key, card_lanes(self.nav.guidance, self.nav.car_lane, always)
     return self._lanes_cache
+
+  def _lanes_up(self, has_lanes: bool) -> bool:
+    """The lanes show over the map: as the maneuver nears, or with NavShowLanesAlways whenever there are some."""
+    return has_lanes and (self.phase == "approach" or ui_state.nav_show_lanes_always)
 
   def _guidance_words(self) -> tuple:
     """(distance, road, icon kind, mirrored, trip row) for the latest navInstruction."""
@@ -350,7 +355,7 @@ class NavCard:
     self.open.set(1.0 if self.want_open else 0.0, now, EXPAND_S)
     self.map_ctrl.set(1.0 if now - self.map_poke_t < MAP_CONTROLS_S else 0.0, now, 0.3)
     has_lanes = bool(self._lanes()[0])
-    self.lanes.set(1.0 if self.phase == "approach" and has_lanes and self.want_open else 0.0, now, EXPAND_S)
+    self.lanes.set(1.0 if self._lanes_up(has_lanes) and self.want_open else 0.0, now, EXPAND_S)
     self.split.set(1.0 if self.split_on else 0.0, now, EXPAND_S)
     self.noo_lit.set(1.0 if self.noo else 0.0, now, EXPAND_S)
     self.present.set(1.0 if self.route_on else 0.0, now, EXPAND_S)
@@ -383,7 +388,7 @@ class NavCard:
     o_fade, la_fade = self.open.fade(now), self.lanes.fade(now)
     if self.o_live is not None:  # following the finger, the lanes too (when there are any to show)
       o = o_fade = self.o_live
-      if self.phase == "approach" and has_lanes:
+      if self._lanes_up(has_lanes):
         la = la_fade = self.o_live
 
     # sp blends the card over the camera (0) into the always-on split (1): the camera narrows inside its border,

@@ -22,7 +22,7 @@ os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 STEP = 0.05  # s of virtual time a frame
 LONG_PRESS = 6  # frames a slide's finger moves over
 NAMES = ("none", "start", "open", "slide", "end", "split", "split_start", "turn", "alert", "drag", "long", "arrive", "metric",
-         "drive", "speed", "check_x_input", "check_routes", "check_full_alert")
+         "drive", "speed", "always", "check_x_input", "check_routes", "check_full_alert")
 PERF_FROM = 1.0  # s, after the card is up
 
 
@@ -79,6 +79,11 @@ def scenarios(c):
               (7.6, c.speed(6.7, "turnLeft")), (7.7, c.shot("speed_fading_in")), (8.5, c.pin()), (9.5, c.shot("speed_split")),
               (9.6, c.metric()), (10.5, c.shot("speed_split_metric")), (10.6, c.speed(0.0, "none")), (11.5, c.shot("speed_released"))],
     "perf": [(0.0, c.drive(450.0)), (30.0, c.pin()), (45.0, c.stop())],
+    # NavShowLanesAlways: the road's lanes with no maneuver near, the car's by the model's lane head; none with it off
+    "always": [(0.0, c.lanes_always(True)), (0.0, c.scene("cruise")), (1.0, c.tap("card")), (2.0, c.shot("always_lanes_open")),
+               (2.1, c.check("lanes shown with no maneuver near", lambda: len(c.card._lanes()[0]) == 4 and c.card._lanes()[1] == 1)),
+               (2.2, c.pin()), (3.2, c.shot("always_lanes_split")), (3.3, c.lanes_always(False)),
+               (4.3, c.check("none with the setting off", lambda: c.card._lanes() == ([], None)))],
     "drive": [(0.0, c.drive(450.0)), (5.0, c.shot("drive_cruise")), (21.0, c.shot("drive_opening")),
               (25.0, c.shot("drive_lanes")), (36.8, c.shot("drive_turn")), (39.0, c.shot("drive_after_turn")),
               (41.0, c.shot("drive_closed"))],
@@ -96,6 +101,7 @@ class Context:
     self.params.put_bool("ExperimentalModeConfirmed", True)
     self.params.put_bool("NavigateOnOpenpilot", False)
     self.params.put_bool("NavSplitPinned", False)
+    self.params.put_bool("NavShowLanesAlways", False)
 
     from openpilot.selfdrive.ui.tests.nav_fake import FakeCamera, FakeNav, FakeOnroad
     self.out = out
@@ -138,6 +144,13 @@ class Context:
   def setting(self, on: bool):
     def f(_):
       self.params.put_bool("NavigateOnOpenpilotDefault", on)
+    return f
+
+  def lanes_always(self, on: bool):
+    def f(_):
+      from openpilot.selfdrive.ui.ui_state import ui_state
+      self.params.put_bool("NavShowLanesAlways", on)
+      ui_state.nav_show_lanes_always = on  # without waiting for the UI's slow param reads
     return f
 
   def reroute(self):

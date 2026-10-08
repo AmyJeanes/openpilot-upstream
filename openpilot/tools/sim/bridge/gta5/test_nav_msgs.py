@@ -5,7 +5,7 @@ import time
 import numpy as np
 
 from openpilot.cereal import messaging
-from openpilot.selfdrive.ui.nav.nav_state import NavState, format_distance
+from openpilot.selfdrive.ui.nav.nav_state import NavState, card_lanes, format_distance, instruction_guidance
 from openpilot.selfdrive.navd import lane_slots as ls
 from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
@@ -97,6 +97,19 @@ def test_no_lanes_shown_before_the_window():
   g = nm.lane_guide(ls.LaneSlots(r), 40.0, 0.0, [0, 1])
   assert g.lanes and not g.show and not any(lane["active"] for lane in g.lanes)
   assert nm.lane_guide(None, 40.0, 0.0, None) == nm.NO_LANES
+
+
+def test_plain_road_lanes_for_lanes_always():
+  # no maneuver needs a lane: the road's lanes go out all the same, none active, which the card shows only with
+  # NavShowLanesAlways
+  nodes = {1: (0.0, 0.0), 2: (0.0, 400.0)}
+  r = route(osm_map(nodes, {1: (TWO_EACH_WAY, [1, 2])}), nodes, [1, 2])
+  g = nm.lane_guide(ls.LaneSlots(r), 100.0, 10.0, [1, 2])
+  assert [lane["oncoming"] for lane in g.lanes] == [True, True, False, False] and not g.show
+  msg = messaging.new_message("navInstruction")
+  nm.fill_instruction(msg.navInstruction, r, 100.0, 10.0, lanes=g)
+  ui = instruction_guidance(msg.navInstruction)
+  assert card_lanes(ui) == ([], None) and len(card_lanes(ui, always=True)[0]) == 2
 
 
 def test_directions():

@@ -302,12 +302,14 @@ class CardLane:
   turn_lit: bool  # the route takes its turn
 
 
-def card_lanes(g: Guidance, car: CarLane | None = None) -> tuple[list[CardLane], int | None]:
+def card_lanes(g: Guidance, car: CarLane | None = None, always: bool = False) -> tuple[list[CardLane], int | None]:
   """The lanes for the card, our direction's only (the oncoming ones are for the model, not the driver), left to
-  right, and which of them the car is in by the model's lane head (None unknown, or it counts other lanes than nav's)."""
-  if not g.show_lanes or (g.maneuver is not None and g.maneuver.type == "arrive"):
-    return [], None
+  right, and which of them the car is in by the model's lane head (None unknown, or it counts other lanes than nav's).
+  Shown while the route needs particular lanes, or with `always` (NavShowLanesAlways) wherever there are two or more."""
   ours = [lane for lane in g.lanes if not lane.oncoming]
+  guiding = g.show_lanes and not (g.maneuver is not None and g.maneuver.type == "arrive")
+  if not guiding and not (always and len(ours) >= 2):
+    return [], None
   out = []
   for lane in ours:
     dirs = [d for d in lane.directions if d != "none"] or ["straight"]
