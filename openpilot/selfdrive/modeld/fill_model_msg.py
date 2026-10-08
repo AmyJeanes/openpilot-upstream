@@ -70,6 +70,31 @@ def fill_driving_model_data(msg: capnp._DynamicStructBuilder, modelv2_send: capn
   fill_lane_line_meta(driving_model_data.laneLineMeta, modelV2.laneLines, modelV2.laneLineProbs)
   fill_xyz_poly(driving_model_data.path, ModelConstants.POLY_PATH_DEGREE, modelV2.position.x, modelV2.position.y, modelV2.position.z)
 
+def lane_head_marginals(probs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+  """P(index from the left = k) and P(count = k + 1) from the lane head's (count, index) class probabilities, class
+  count * (count - 1) / 2 + index."""
+  n = ModelConstants.LANE_HEAD_MAX
+  idx, count = np.zeros(n, np.float32), np.zeros(n, np.float32)
+  k = 0
+  for c in range(1, n + 1):
+    idx[:c] += probs[k:k + c]
+    count[c - 1] = probs[k:k + c].sum()
+    k += c
+  return idx, count
+
+
+def fill_lane_head(builder, probs: np.ndarray) -> None:
+  k = int(np.argmax(probs))
+  count = int((1 + np.sqrt(1 + 8 * k)) // 2)
+  count -= int(count * (count - 1) // 2 > k)
+  builder.laneIdx = k - count * (count - 1) // 2
+  builder.laneCount = count
+  builder.prob = float(probs[k])
+  idx_p, count_p = lane_head_marginals(probs)
+  builder.idxProbs = idx_p.tolist()
+  builder.countProbs = count_p.tolist()
+
+
 def fill_model_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, np.ndarray], action: log.ModelDataV2.Action,
                    publish_state: PublishState, vipc_frame_id: int, vipc_frame_id_extra: int,
                    frame_id: int, frame_drop: float, timestamp_eof: int, model_execution_time: float,
@@ -169,6 +194,9 @@ def fill_model_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, 
     modelV2.confidence = ConfidenceClass.yellow
   else:
     modelV2.confidence = ConfidenceClass.red
+
+  if 'lane_head' in net_output_data:
+    fill_lane_head(modelV2.laneHead, net_output_data['lane_head'][0])
 
   # raw prediction if enabled
   if SEND_RAW_PRED:
