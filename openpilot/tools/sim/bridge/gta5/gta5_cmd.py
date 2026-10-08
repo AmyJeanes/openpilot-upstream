@@ -28,7 +28,7 @@
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
   gta5_cmd.py expert status                     the control file
   gta5_cmd.py debug on [layers=edges,dividers,stops,junctions,arrows,crossings,parking,tapers,flags,route,nav,points,fill|all]
-             [width=1] [widths=e:2,d:1.5] [dist=120] [grow=40] [ground=1] [lift=0.05] [thin=0] [sides=1] [force=1]
+             [width=1] [widths=e:2,d:1.5] [dist=120] [grow=40] [ground=1] [lift=0.05] [casing=1] [thin=0] [sides=1] [force=1]
                                                 the map debug overlay in the world, on the player's frames only (never in
                                                 openpilot's; gta5_overlay.py, core.cpp DrawDebug; F7 toggles it): strips of
                                                 each kind's own width on the game's ground (ground=0: at the map's heights),
