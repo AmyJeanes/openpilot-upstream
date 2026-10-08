@@ -96,7 +96,7 @@ CACHE_DIR = os.path.expanduser(os.getenv("GTA5_OVERLAY_CACHE", "~/.cache/gta5_ov
 CACHE_KEEP = 3  # files
 MARKS_VERSION = 3  # the cache's format
 # map/ modules road_marks depends on, as this one
-MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py", "junctions.py", "osm_to_roads.py")
+MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py", "junctions.py", "osm_to_roads.py", "side_by_side.py")
 
 
 def smooth(x: np.ndarray, sigma: float) -> np.ndarray:
@@ -438,6 +438,7 @@ def road_marks(paths, osm) -> dict:
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
   from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas
   from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, PaintAreas, level, z_along
+  from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
   junctions = Junctions(osm, lambda tags: tags.get("highway", "").removesuffix("_link") in ROAD_CLASSES)
   # each junction's height and a GTA node at it, from its nodes (which are GTA's)
@@ -446,6 +447,7 @@ def road_marks(paths, osm) -> dict:
     gta = [found[0] for n in j.nodes if (found := paths.nodes_at(osm.node_xy(n)))]
     at.append((float(np.mean(paths.z[gta])), gta[0]) if gta else None)
   paint = PaintAreas(junctions)
+  side = SideBySide(osm, [w for w in junctions.ways if w not in junctions.inside], lambda w: level(osm.ways[w][0])[0])
 
   ends, kinds, nodes = [], [], []
 
@@ -468,7 +470,9 @@ def road_marks(paths, osm) -> dict:
     zpts = node_heights(osm, osm.ways[wid][1], za, zb, pts)
     for middle in taper_middles(osm, wid, pts, zpts):
       add("t", middle, (a, b))
-    for line, base in osm.line_geometry(wid):
+    geometry = osm.line_geometry(wid)
+    right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
+    for line, base in geometry:
       if np.hypot(*(base[0] - pts[0])) > np.hypot(*(base[-1] - pts[0])):
         base = base[::-1]  # drawn the other way (OsmLanes.taper)
       z = zpts if len(base) == len(pts) else z_along(base, pts, zpts)
@@ -479,7 +483,15 @@ def road_marks(paths, osm) -> dict:
         areas = paint.near(geom, layer, {wid}, kind == "e")
         pieces = clip_areas(geom, areas) if areas else [geom]
         for piece in pieces:
-          add(kind, np.column_stack([piece, z if piece is geom else z_along(piece, geom, z)]), (a, b))
+          pz = z if piece is geom else z_along(piece, geom, z)
+          if kind != "e":
+            add(kind, np.column_stack([piece, pz]), (a, b))
+            continue
+          kerbs, between = side.kerb(piece, pz, layer, {wid}, line.offset == right)  # none between ways side by side
+          for p in kerbs:
+            add(kind, np.column_stack([p, z_along(p, piece, pz)]), (a, b))
+          for p, style in between:
+            add("d" if style == "dashed" else "w", np.column_stack([p, z_along(p, piece, pz)]), (a, b))
   shape_pts, shape_len, shape_kind, shape_node = [], [], [], []
 
   def shape(kind, pts, z, node):

@@ -2,7 +2,8 @@
 """Writes the roads of an OSM file as the map view's roads.json: polylines in metres (x east, y north), each road's
 middle, with its width kerb to kerb, how far each is trimmed back at its junctions, and the junctions' areas
 (junctions.py); and with --lanes, the lines painted on them as lanes.json (osm_lanes.py, from the map's lane tags):
-kerbs, carried round the junctions' corners, white lines between lanes one way (dashed, solid where change:lanes
+kerbs, carried round the junctions' corners (none between one-way ways side by side on one surface: a lane line,
+side_by_side.py), white lines between lanes one way (dashed, solid where change:lanes
 forbids crossing), yellow lines between the directions, stop and give way lines, and crossings (`footway=crossing`).
 No lines are painted inside junctions, nor between a stop line and its junction; the moves through them from lane to
 lane (Junctions.movements: turn:lanes, connectivity, restrictions) are guides the view can show there.
@@ -22,6 +23,7 @@ from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, PARKING, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
 # lanes.json's kinds: a road's edge (kerb), white lines between lanes one way, yellow lines between the directions,
@@ -256,16 +258,26 @@ def main():
     line_layers.append(layer)
     if high:
       line_z.append(packed(z))
+  # kerbs only where the road surface ends, not between one-way ways side by side (side_by_side.py)
+  side = SideBySide(osm, [w for w in junctions.ways if w not in junctions.inside], lambda w: levels[w][0])
   for (layer, sig), _, nodes in join(layouts):
     pts = points(nodes)
     z = heights(nodes) if high else None
     ways = {osm.pairs[(a, b)][0] for a, b in zip(nodes[:-1], nodes[1:], strict=True)}
+    right = max((offset for kind, offset, _ in sig if kind == EDGE), default=None)
     for kind, offset, style in sig:
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
           marks(style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE)):
-          add(k, piece, layer, z_along(piece, pts, z) if high else None)
+          if kind != EDGE:
+            add(k, piece, layer, z_along(piece, pts, z) if high else None)
+            continue
+          kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, ways, offset == right)
+          for p in kerbs:
+            add(k, p, layer, z_along(p, pts, z) if high else None)
+          for p, s in between:
+            add(KINDS.index(s), p, layer, z_along(p, pts, z) if high else None)
   for wid in tapered:  # lanes opening or closing along it (osm_lanes.OsmLanes.taper)
     refs, road, layer = junctions.ways[wid][1], osm.lanes(wid), levels[wid][0]
     pts = points(refs)
