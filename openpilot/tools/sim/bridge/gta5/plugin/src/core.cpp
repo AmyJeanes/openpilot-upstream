@@ -1624,6 +1624,68 @@ bool WaypointAt(Vector3 &w) {
   return true;
 }
 
+// Where a mission's GPS route goes: missions route to a blip of their own (SET_BLIP_ROUTE), not the map's waypoint, or
+// along a multi-point route. Reported apart from the waypoint, and only read: the waypoint commands and the take while
+// our route shows never touch it. The blips are searched by sprite, a slice each tick; the nearest routed one wins.
+struct MissionRoute {
+  int blip = 0;
+  bool multi = false;  // no routed blip: the end of the multi-point route
+  Vector3 at{};
+  int sprite = 0, best = 0;  // the search: its next sprite, and the nearest routed blip so far this pass
+  float bestDist = 0;
+  double nextMulti = 0;
+} g_mission;
+constexpr int BLIP_SPRITES = 1024, SPRITES_PER_TICK = 64;
+
+void LogMission(const char *what) {
+  Log(std::string("mission route ") + what + " at " + Num(g_mission.at.x) + "," + Num(g_mission.at.y));
+}
+
+void UpdateMission(double now) {
+  MissionRoute &m = g_mission;
+  int waypointSprite = GET_WAYPOINT_BLIP_ENUM_ID();  // the waypoint's route is its own, and so is our marker of it
+  for (int end = m.sprite + SPRITES_PER_TICK; m.sprite < end && m.sprite < BLIP_SPRITES; m.sprite++) {
+    if (m.sprite == waypointSprite) continue;
+    for (int b = GET_FIRST_BLIP_INFO_ID(m.sprite); DOES_BLIP_EXIST(b); b = GET_NEXT_BLIP_INFO_ID(m.sprite)) {
+      if (!DOES_BLIP_HAVE_GPS_ROUTE(b)) continue;
+      Vector3 p = GET_BLIP_INFO_ID_COORD(b), me = GET_ENTITY_COORDS(PLAYER_PED_ID(), TRUE);
+      float d = std::hypot(p.x - me.x, p.y - me.y);
+      if (!m.best || d < m.bestDist) m.best = b, m.bestDist = d;
+    }
+  }
+  if (m.sprite >= BLIP_SPRITES) {
+    if (m.best != m.blip) {
+      if (m.best) m.at = GET_BLIP_INFO_ID_COORD(m.best), m.multi = false;
+      LogMission(m.best ? "to a blip" : "to a blip gone");
+      m.blip = m.best;
+    }
+    m.sprite = 0, m.best = 0;
+  }
+  if (m.blip && (!DOES_BLIP_EXIST(m.blip) || !DOES_BLIP_HAVE_GPS_ROUTE(m.blip))) {
+    m.blip = 0;
+    LogMission("to a blip gone");
+  }
+  if (m.blip) {
+    m.at = GET_BLIP_INFO_ID_COORD(m.blip);  // a blip on a car or a ped moves
+    return;
+  }
+  if (now < m.nextMulti) return;
+  m.nextMulti = now + 0.5;
+  // asked for far past its end, a GPS route gives its end; not our own custom route's end, if the slots ever share
+  Vector3 p{};
+  bool multi = GET_POS_ALONG_GPS_TYPE_ROUTE(&p, TRUE, 100000.0f, 2) && (p.x != 0 || p.y != 0);
+  if (multi && g_gps.shown && std::hypot(p.x - g_gps.pts[g_gps.shown - 1].x, p.y - g_gps.pts[g_gps.shown - 1].y) < 5.0f) multi = false;
+  if (multi) m.at = p;
+  if (multi != m.multi) m.multi = multi, LogMission(multi ? "multi-point" : "multi-point gone");
+}
+
+// "mission":{"dest":[x,y],"from":"blip"|"multi"}, or nothing
+std::string MissionState() {
+  const MissionRoute &m = g_mission;
+  if (!m.blip && !m.multi) return "";
+  return "\"mission\":{\"dest\":[" + Num(m.at.x) + "," + Num(m.at.y) + "],\"from\":\"" + (m.blip ? "blip" : "multi") + "\"}";
+}
+
 std::string GpsState() {
   return "\"gpsRoute\":{\"on\":" + std::string(g_gps.on ? "true" : "false") + ",\"points\":" + std::to_string(g_gps.shown) + ",\"max\":" +
          std::to_string(g_gps.max) + ",\"waypointHeld\":" + (g_waypoint.held ? "true" : "false") + "}";
@@ -1668,7 +1730,8 @@ std::string Street(double now) {
   return street;
 }
 
-// the map's waypoint and the GPS route to it: a point every 5 m from the car for up to 500 m, fewer where it ends
+// the map's waypoint, whenever there is one, and GTA's GPS route to it where it has one (none while held, on foot, or
+// still being found): a point every 5 m from the car for up to 500 m, fewer where it ends; and a mission's route's end
 std::string Route(double now) {
   static std::string route;
   static double next = 0;
@@ -1676,17 +1739,21 @@ std::string Route(double now) {
   next = now + 0.2;
   route.clear();
   Vector3 w{};
-  if (!WaypointAt(w)) return route;
-  if (g_waypoint.held) return route = "\"waypoint\":[" + Num(w.x) + "," + Num(w.y) + "]";  // no GTA route to it meanwhile
-  Vector3 last{};
-  for (float d = 0; d <= 500.0f; d += 5.0f) {
-    Vector3 p{};
-    if (!GET_POS_ALONG_GPS_TYPE_ROUTE(&p, TRUE, d, 0)) break;
-    if (d > 0 && p.x == last.x && p.y == last.y) break;  // past the end, it gives the end again
-    route += std::string(route.empty() ? "[" : ",") + "[" + Num(std::round(p.x * 10) / 10) + "," + Num(std::round(p.y * 10) / 10) + "]";
-    last = p;
+  if (WaypointAt(w)) {
+    std::string pts;
+    Vector3 last{};
+    for (float d = 0; !g_waypoint.held && d <= 500.0f; d += 5.0f) {
+      Vector3 p{};
+      if (!GET_POS_ALONG_GPS_TYPE_ROUTE(&p, TRUE, d, 0)) break;
+      if (d > 0 && p.x == last.x && p.y == last.y) break;  // past the end, it gives the end again
+      pts += std::string(pts.empty() ? "[" : ",") + "[" + Num(std::round(p.x * 10) / 10) + "," + Num(std::round(p.y * 10) / 10) + "]";
+      last = p;
+    }
+    route = "\"waypoint\":[" + Num(w.x) + "," + Num(w.y) + "]";
+    if (!pts.empty()) route += ",\"route\":" + pts + "]";
   }
-  if (!route.empty()) route = "\"waypoint\":[" + Num(w.x) + "," + Num(w.y) + "],\"route\":" + route + "]";
+  std::string mission = MissionState();
+  if (!mission.empty()) route += (route.empty() ? "" : ",") + mission;
   return route;
 }
 
@@ -2753,6 +2820,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
     g_drawSum += took, g_drawMax = std::max(g_drawMax, took);
   }
   TakeWaypoint(now);
+  UpdateMission(now);
   if (connected) {
     // police chases after a scrape with traffic would end any drive
     SET_MAX_WANTED_LEVEL(0);

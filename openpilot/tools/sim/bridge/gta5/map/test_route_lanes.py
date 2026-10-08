@@ -10,8 +10,8 @@ import numpy as np
 
 from openpilot.selfdrive.navd.planner import Through, Turn, aim, lane_plan, parse_arrows, throughs
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, continuing, turn_targets, \
-  ways_from_nodes, ways_from_trace
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, _ease_jogs, _keyed, continuing, \
+  turn_targets, ways_from_nodes, ways_from_trace
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 
 # a junction at (0, 0): a one-way road north into it, two lanes, widening to three 30 m before it (a left turn bay);
@@ -235,6 +235,50 @@ def test_nav_aims_for_the_lanes_that_carry_on():
   keys = lane_plan(route, [], (0, 2), lambda d, after: 1 if after and d >= 100.0 else 2, 10.0, drops=[[100.0, 1, 1, 2]])
   assert keys == [(0.0, 0.0), (30.0, 0.0), (70.0, 1.0), (100.0, 1.0), (100.0, 0.0)]
   assert lane_plan(route, [], (0, 2), lambda d, after: 2, 10.0) == [(0.0, 0.0)]
+
+
+def bay_map() -> OsmLanes:
+  """A one-lane one-way road north whose left turn bay opens on its left from 100 m along over the next 30 m, into a
+  junction with a road east at 200 m."""
+  nodes = {1: (0.0, 0.0), 2: (0.0, 100.0), 3: (0.0, 130.0), 4: (0.0, 200.0), 5: (100.0, 200.0), 6: (0.0, 300.0)}
+  one = {'highway': 'primary', 'oneway': 'yes', 'lanes': '1', 'width': '5.5'}
+  two = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width:lanes': '5.5|5.5', 'turn:lanes': 'left|through;right'}
+  ways = {30: (one, [1, 2]), 31: ({**two, 'width:lanes:start': '0|5.5', 'width:lanes:end': '5.5|5.5'}, [2, 3]), 32: (two, [3, 4]),
+          33: (one, [4, 5]), 34: (one, [4, 6])}
+  ids = np.array(sorted(nodes), np.int64)
+  data = OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {})
+  return OsmLanes(data, lambda lat, lon: (lon, lat))
+
+
+def test_lane_plan_keeps_its_lane_as_a_bay_opens():
+  osm = bay_map()
+  pts = np.array([(0.0, 0.0), (0.0, 100.0), (0.0, 130.0), (0.0, 200.0), (0.0, 300.0)])
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert lanes.openings == [(100.0, 1)]
+  # the car's lane carries on as the right one: no change, and the line stays in it
+  keys = lane_plan(pts, [], (0, 1), lambda d, after: 2 if d > 100.0 or (after and d >= 100.0) else 1, 10.0, opens=[[100.0, 1]])
+  assert keys == [(0.0, 0.0), (100.0, 0.0), (100.0, 1.0)]
+  line = lanes.lane_line(0.0, keys)
+  # the way's line is the middle of the road as the bay opens on the left: the lane stays right of the bay, not in it
+  at = [np.interp(y, line[:, 1], line[:, 0]) for y in (50.0, 115.0, 160.0)]
+  assert np.allclose(at, [0.0, 1.375, 2.75], atol=0.05) and np.abs(np.diff(line[:, 0])).max() < 0.5
+  # a fork the route takes right, past which the road carries on with all its lanes (GTA's bay link folded in): no renumbering
+  assert lane_plan(pts, [[150.0, 'right', 1, 1, True, 1, False]], (1, 2), lambda d, after: 2, 10.0) ==     [(0.0, 1.0), (150.0, 1.0), (150.0, 1.0)]
+  assert lane_plan(pts, [[150.0, 'right', 1, 1, True, 1, False]], (1, 2), lambda d, after: 1 if after else 2, 10.0)[-1] == (150.0, 0.0)
+
+
+def test_keyed_lanes_step_where_keys_share_a_place():
+  arriving, leaving = _keyed(np.array([-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]), np.array([0.0, 10.0, 10.0, 20.0]),
+                             np.array([0.0, 1.0, 2.0, 0.0]))
+  assert arriving.tolist() == [0.0, 0.0, 0.5, 1.0, 1.0, 0.0] and leaving.tolist() == [0.0, 0.0, 0.5, 2.0, 1.0, 0.0]
+
+
+def test_lane_line_eases_across_jogs():
+  s = np.arange(0.0, 41.0, 1.0)
+  offs = np.where(s < 20.0, 0.0, 5.0)
+  eased = _ease_jogs(s, offs, [20.0])
+  assert np.allclose(eased[s <= 10.0], 0.0) and np.allclose(eased[s >= 30.0], 5.0)
+  assert np.allclose(eased[(s > 10.0) & (s < 30.0)], (s[(s > 10.0) & (s < 30.0)] - 10.0) / 4.0)
 
 
 def pbf_bytes() -> bytes:

@@ -1444,8 +1444,9 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
   turn bay folded into its road (`left_bays`, its road's links) is its left lane, marked from where it opens, also
   where the road gains lanes on the way (`left|through` before that). On a two-way road with a median (`medians`, its links (node, next node) where the median has room for a lane)
   running in to a junction it may turn left at, GTA paints the median as a left-turn lane without a link of its own
-  (measured on 4 of 4 such approaches): one more lane, `left`, on the approach's links within the median, if they are
-  at least MEDIAN_LANE_MIN long. Each lane takes the arrow painted on it up to ARROW_REACH m before the junction
+  (measured on 4 of 4 such approaches; not where the game files paint the median on into the junction, left out of
+  `medians`): one more lane, `left`, on the approach's links within the median, if they are at least MEDIAN_LANE_MIN
+  long. Each lane takes the arrow painted on it up to ARROW_REACH m before the junction
   (`painted`: PaintedArrows, found in the lanes `spans` gives each link (node, next node): their (left, right) m right
   of it) where the junction has a way out it points along (with_paint), a skewed road on painted through or as a
   turn that way. `ways` is
@@ -1792,6 +1793,14 @@ def main():
     if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
       centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
   print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
+  shut = 0
+  for _, a, b, _, back, *_, lf in info:
+    for p, q in ((a, b), (b, a)):
+      if (p, q) in medians and junction(q) and \
+         paint_survey.median_runs_in(paint_survey.along(survey, p, q) or [], layout(lf, back)[1], link_length(p, q)):
+        medians.discard((p, q))  # the median painted on into the junction: no turn lane in it
+        shut += 1
+  print(f"{shut} links into junctions with the median painted on into them, no left-turn lane in it")
   painted_arrows, spans = None, {}  # (node, next node) -> its lanes' (left, right), m right of it, left to right
   if args.survey_features:
     painted_arrows = PaintedArrows(paint_survey.arrow_marks(args.survey_features))

@@ -150,3 +150,62 @@ def test_destination_not_ended_when_nav_drives_regardless():
   assert dest.update(wp, car, None) is not None
   params.remove("NavDestination")
   assert list(dest.update(wp, car, None)) == wp
+
+
+def test_destination_from_a_mission_route():
+  # with no waypoint, a mission's GPS route's end is the destination; the player's waypoint wins while there is one
+  params, sent = Params(), []
+  dest = Destination(params, sent.append)
+  car, wp, mission = np.array([0.0, 0.0]), [1000.0, 2000.0], [-500.0, 300.0]
+  assert list(dest.update(None, car, None, mission)) == mission and "NavDestination" in params.values
+  assert list(dest.update(wp, car, None, mission)) == wp
+  # the player clears it far from it: back to the mission's
+  assert list(dest.update(None, car, None, mission)) == mission
+  # a blip on a moving car: small moves keep the route, a big one is a new destination
+  assert list(dest.update(None, car, None, [-510.0, 310.0])) == mission
+  assert list(dest.update(None, car, None, [-560.0, 300.0])) == [-560.0, 300.0]
+  # arriving leaves the mission's blip alone, and the same blip doesn't come back as a new destination
+  dest.arrived()
+  assert dest.dest is None and sent == [] and "NavDestination" not in params.values
+  assert dest.update(None, car, None, [-560.0, 300.0]) is None
+  # the mission takes its blip away from afar: the destination goes; a new one counts
+  assert list(dest.update(None, car, None, [100.0, 100.0])) == [100.0, 100.0]
+  assert dest.update(None, car, None, None) is None
+  assert list(dest.update(None, car, None, [100.0, 100.0])) == [100.0, 100.0]
+
+
+def test_destination_waypoint_cleared_on_arrival_with_a_mission():
+  # GTA clears the waypoint as the car nears it: the mission's route waits until the car has arrived
+  params, sent = Params(), []
+  dest = Destination(params, sent.append)
+  wp, mission = [1000.0, 2000.0], [-500.0, 300.0]
+  assert list(dest.update(wp, np.array([0.0, 0.0]), None, mission)) == wp
+  near = np.array([1000.0, 2000.0 - CANCELLED_FROM + 10.0])
+  assert list(dest.update(None, near, None, mission)) == wp
+  dest.arrived()
+  assert sent == [{"type": "waypoint", "off": True}]
+  assert list(dest.update(None, near, None, mission)) == mission
+
+
+def test_destination_mission_route_ended_by_the_driver():
+  # slide to end: the mission's route is ignored until it moves on (the mission isn't ours to end)
+  params, sent = Params(), []
+  dest = Destination(params, sent.append)
+  dest.check_every = 0.0
+  car, mission = np.array([0.0, 0.0]), [-500.0, 300.0]
+  assert dest.update(None, car, None, mission) is not None
+  params.remove("NavDestination")
+  assert dest.update(None, car, None, mission) is None and sent == []
+  assert dest.update(None, car, None, [-505.0, 300.0]) is None
+  assert list(dest.update(None, car, None, [-600.0, 300.0])) == [-600.0, 300.0]
+
+
+def test_destination_waypoint_set_on_foot():
+  # the bridge sees no states on foot; a waypoint set meanwhile is new when the car's states come again
+  params, sent = Params(), []
+  dest = Destination(params, sent.append)
+  car = np.array([0.0, 0.0])
+  assert dest.update(None, car, None) is None
+  assert list(dest.update([1000.0, 2000.0], car, None)) == [1000.0, 2000.0]
+  # and one changed on foot replaces the old
+  assert list(dest.update([1500.0, 2000.0], car, None)) == [1500.0, 2000.0]

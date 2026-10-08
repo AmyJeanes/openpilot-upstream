@@ -452,9 +452,11 @@ class GTA5World(World):
 
   def _map_route(self, state: dict, bearing: float) -> dict:
     """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
-    map along it. The destination is whichever was set last of the game map's waypoint and the map view's."""
+    map along it. The destination is whichever was set last of the game map's waypoint (else a mission's GPS route's end)
+    and the map view's."""
     pos = np.array(state["pos"][:2], dtype=float)
-    dest = self.destination.update(state.get("waypoint"), pos, self.map_view.take_destination() if self.map_view is not None else None)
+    picked = self.map_view.take_destination() if self.map_view is not None else None
+    dest = self.destination.update(state.get("waypoint"), pos, picked, (state.get("mission") or {}).get("dest"))
     match = self.matcher.match if self.matcher is not None else None
     route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
     self.routes += route is not None and route is not self.route
@@ -590,7 +592,7 @@ class GTA5World(World):
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
     line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0)))
+                                 r.lane_drops(r.length, 0.0), r.lane_opens(r.length, 0.0)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

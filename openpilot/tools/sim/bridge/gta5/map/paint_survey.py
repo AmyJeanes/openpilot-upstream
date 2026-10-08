@@ -33,6 +33,7 @@ unpainted which roads have no lines at all. Other fields (z, a mark's width / co
 features) are read past.
 """
 import json
+import math
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -272,11 +273,13 @@ def swing_taper(lines: list[tuple[int, np.ndarray]], road: np.ndarray, half: flo
       continue  # not one crossing
     start, end = _cross(d, off, leave, hi), _cross(d, off, arrive - 1, lo)
     if TAPER_LENGTH[0] <= end - start <= TAPER_LENGTH[1]:
-      found.append((start, end))
+      # the median's right edge where the line left it: the paint's, which GTA's median width often isn't
+      before = off[:leave + 1]
+      found.append((start, end, float(np.median(before[before >= before.max() - SWING_BACK]))))
 
   def runs(a, b, at):  # a line along the median's edge at `at` between a and b m along
     return any(((d > a) & (d < b) & (np.abs(off - at) < ARRIVED)).any() for d, off in seen)
-  found = [(s, e) for s, e in found if not runs(e + 1.0, e + 1.0 + RUNS_ON, half)]  # nothing left at its right edge after it
+  found = [(s, e) for s, e, edge in found if not runs(e + 1.0, e + 1.0 + RUNS_ON, edge)]  # nothing left at its right edge after it
   if not found:
     return None
   last = max(e for _, e in found)  # a double line's two polylines: the same swing
@@ -285,6 +288,25 @@ def swing_taper(lines: list[tuple[int, np.ndarray]], road: np.ndarray, half: flo
 
 
 MEDIAN_TOL = 1.0  # m between two yellow lines' spacing and the median's width, to take them as its edges
+RUNS_IN = 8.0  # m before a link's end looked at for its median's right edge running on into the junction
+RUNS_IN_TOL = (1.0, 1.5)  # m nearer and further than GTA's median edge a yellow line may be painted as that edge
+
+
+def median_runs_in(samples: list[dict], half: float, length: float) -> bool:
+  """Whether the game files paint a two-way link's median (`half` m either side of its line, by GTA's offset) as a
+  median up to its end (`length` m along), seen travelling it: a yellow line at its right edge in every section over the
+  last RUNS_IN m and no arrow of ours painted in it, so no left-turn lane opens in it there. Where GTA paints its median
+  as a turn lane, the edge has swung across to the oncoming lanes' side before the junction."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if any(a.get('dir') in ('ab', 'ahead') and abs(a.get('offset', math.inf)) < half for d in files for a in d.get('arrows') or []):
+    return False
+  near = [d for d in files if 's' in d and d['s'] >= length - RUNS_IN]
+
+  def edge(d):
+    return any(m['colour'] == 'yellow' and m['conf'] >= CONF and
+               half - RUNS_IN_TOL[0] <= (sum(m['pair']) / 2 if m.get('pair') else m['offset']) <= half + RUNS_IN_TOL[1]
+               for m in d['marks'])
+  return bool(near) and all(edge(d) for d in near)
 
 
 def median_edges(samples: list[dict], median: float) -> tuple[str | None, str | None]:
