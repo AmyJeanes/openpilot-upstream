@@ -397,6 +397,12 @@ DROP_SPAN = 25.0  # m: junction nodes this near each other along a route are one
 DROP_TURN = 30.0  # deg at most a route turns going straight on through a junction (over DROP_REACH m either side)
 DROP_REACH = 15.0  # m
 SAME_WIDTH = 0.5  # m: roads either side of a junction this near as wide are one road carrying on, kerb to kerb
+# The route's move through a junction, as its turn:lanes call it (junction_move): a way out turning up to MOVE_THROUGH
+# goes through, else the nearest one up to MOVE_SKEW where none is within it (a skewed junction's road on, painted
+# through); the rest turn. Ways out are looked for across the junction's short straight links (a divided road's far side).
+MOVE_THROUGH, MOVE_SKEW, MOVE_U_TURN = 45.0, 55.0, 135.0  # deg
+MOVE_SPAN = 20.0  # m across the junction from its node
+MOVE_HEADING = 15.0  # m before the junction that the road's heading into it is taken over
 
 
 class Section:
@@ -672,19 +678,70 @@ def runs(ways: list) -> list[tuple[int, bool, int, int]]:
   return out
 
 
-def ways_from_nodes(points, osm: OsmLanes, tol: float = MATCH_TOL) -> list[tuple[int, bool, int, int]]:
-  """The ways along a route whose shape points are the map's nodes, as on our GTA map, where every route point is one
-  (but the ends, part way along a way): [(way id, along the way's direction, first shape index, last shape index)] for
-  each run of segments on one way. Among nodes at the same place (over and under each other), those joined along the
-  route."""
-  pts = np.asarray(points, float)[:, :2]
-  found = [osm.nodes_at(p, tol) for p in pts]
+def route_nodes(points, osm: OsmLanes, tol: float = MATCH_TOL) -> list[int | None]:
+  """The map node at each of a route's shape points (None where there is none): among nodes at the same place (over and
+  under each other), those joined along the route."""
+  found = [osm.nodes_at(p, tol) for p in np.asarray(points, float)[:, :2]]
   nodes: list[int | None] = []
   for k, cands in enumerate(found):
     prev = nodes[-1] if nodes else None
     nxt = found[k + 1] if k + 1 < len(found) else []
     joined = [c for c in cands if (prev is not None and (prev, c) in osm.pairs) or any((c, n) in osm.pairs for n in nxt)]
     nodes.append((joined or cands or [None])[0])
+  return nodes
+
+
+def junction_move(osm: OsmLanes, nodes: list[int | None], points, along, k: int) -> str | None:
+  """'left', 'through' or 'right': the route's move through the junction at its shape point k, as the junction's
+  turn:lanes call it (MOVE_THROUGH, MOVE_SKEW), rather than by how far the route turns; None where the route's way out
+  isn't found among the junction's (nodes: route_nodes)."""
+  j = nodes[k] if 0 < k < len(nodes) - 1 else None
+  if j is None or nodes[k - 1] is None:
+    return None
+  pts = np.asarray(points, float)[:, :2]
+  s = max(float(along[k]) - MOVE_HEADING, 0.0)
+  back = np.array([np.interp(s, along, pts[:, 0]), np.interp(s, along, pts[:, 1])])
+  h_in = heading_of(pts[k] - back)
+  taken = {(a, b) for a, b in zip(nodes[k:], nodes[k + 1:], strict=False) if a is not None and b is not None}
+  seen = {n for n in nodes[:k + 1] if n is not None}
+
+  def drivable(a, b):
+    w, fwd = osm.pairs[(a, b)]
+    one = oneway_of(osm.ways[w][0])
+    return one == 0 or (one == 1) == fwd
+
+  exits = []  # (deg turned, left positive; whether it's the route's)
+  stack = [(j, 0.0)]
+  while stack:
+    n, dist = stack.pop()
+    for m in osm.links.get(n, ()):
+      if m in seen or not drivable(n, m):
+        continue
+      seen.add(m)
+      d = osm.node_xy(m) - osm.node_xy(n)
+      turned = float(np.degrees((heading_of(d) - h_in + np.pi) % (2 * np.pi) - np.pi))
+      length = float(np.hypot(*d))
+      if abs(turned) <= MOVE_THROUGH and dist + length <= MOVE_SPAN and any(q != n and drivable(m, q) for q in osm.links.get(m, ())):
+        stack.append((m, dist + length))
+      elif abs(turned) <= MOVE_U_TURN:
+        exits.append((turned, (n, m) in taken))
+  ours = [e for e in exits if e[1]]
+  if len(ours) != 1:
+    return None
+  turned = ours[0][0]
+  nearest = min(abs(t) for t, _ in exits)
+  if abs(turned) <= MOVE_THROUGH or (abs(turned) == nearest and nearest <= MOVE_SKEW):
+    return 'through'
+  return 'left' if turned > 0 else 'right'
+
+
+def ways_from_nodes(points, osm: OsmLanes, tol: float = MATCH_TOL) -> list[tuple[int, bool, int, int]]:
+  """The ways along a route whose shape points are the map's nodes, as on our GTA map, where every route point is one
+  (but the ends, part way along a way): [(way id, along the way's direction, first shape index, last shape index)] for
+  each run of segments on one way. Among nodes at the same place (over and under each other), those joined along the
+  route."""
+  pts = np.asarray(points, float)[:, :2]
+  nodes = route_nodes(pts, osm, tol)
   ways: list[tuple[int, bool] | None] = [osm.pairs.get((a, b)) if a is not None and b is not None else None
                                          for a, b in zip(nodes, nodes[1:], strict=False)]
 
@@ -794,11 +851,13 @@ class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
-               junctions=None, explicit: dict | None = None):
+               junctions=None, explicit: dict | None = None, moves: list | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
     self.arrows: list[tuple[float, list[frozenset[str]]]] = arrows or []  # (m along where they end, each lane's)
+    # the route's move through each of those junctions as the arrows call it (junction_move), None where unknown
+    self.moves: list[str | None] = moves if moves is not None else [None] * len(self.arrows)
     self.tapers: dict[int, tuple[Section, Section]] = tapers or {}  # first segment of a way: (lanes before, after)
     # segments of a way whose lanes widen or narrow along it (width:lanes...:start / :end): its cross-sections where the
     # route enters and leaves it, and m along there
@@ -824,6 +883,7 @@ class RouteLanes:
       sections.append(cache[wd] if wd is not None else None)
     along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))))
     arrows: list[tuple[float, list[frozenset[str]]]] = []
+    ends: list[int] = []  # the shape point each arrows' junction is at
     tapers: dict[int, tuple[Section, Section]] = {}
     degree = [osm.degree.get(n[0], 0) if (n := osm.nodes_at(p)) else 0 for p in pts]
     explicit: dict[int, tuple[Section, Section, float, float]] = {}
@@ -838,12 +898,15 @@ class RouteLanes:
       nxt = sections[k + 1] if k + 1 < len(sections) else None
       if sec is not None and any(sec.turns) and not (nxt is not None and any(nxt.turns) and nxt.lanes == sec.lanes):
         arrows.append((float(along[k + 1]), sec.turns))  # the end of a run of ways with arrows: the junction
+        ends.append(k + 1)
       prev = sections[k - 1] if k else None
       if prev is not None and sec is not None and ways[k - 1] != ways[k] and degree[k] == 2 and _taperable(prev, sec) and \
          k not in explicit and k - 1 not in explicit:
         tapers[k] = (prev, sec)
     junctions = [float(along[k]) for k in range(1, len(pts) - 1) if degree[k] >= 3]
-    return cls(pts, sections, arrows, tapers, junctions, explicit)
+    nodes = route_nodes(pts, osm) if ends else []
+    moves = [junction_move(osm, nodes, pts, along, k) for k in ends]
+    return cls(pts, sections, arrows, tapers, junctions, explicit, moves)
 
   @property
   def corners(self) -> list[tuple[float, float]]:
@@ -956,6 +1019,11 @@ class RouteLanes:
     _, extra, left = opening
     lo = sec.first if left else sec.first + sec.lanes - extra
     return Section(sec.spans[:lo] + sec.spans[lo + extra:], sec.edges)
+
+  @property
+  def arrows_moves(self) -> list[tuple]:
+    """arrows, each with the route's move through its junction where known: (m along, each lane's[, move])."""
+    return [(e, turns) if move is None else (e, turns, move) for (e, turns), move in zip(self.arrows, self.moves, strict=True)]
 
   def arrows_near(self, s: float, before: float = 30.0, after: float = 5.0) -> list[frozenset[str]] | None:
     """The turn arrows of the lanes into the junction at a maneuver s m along: those ending nearest it, from `before`

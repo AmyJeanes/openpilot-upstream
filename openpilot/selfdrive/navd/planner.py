@@ -149,7 +149,7 @@ LEFT_SIGNAL_AFTER_CHANGE = 8.0  # s after a lane change towards a left turn its 
 # The map's turn arrows (turn:lanes) say which lanes a turn or fork is taken from: those of the lanes into its junction,
 # ending this near the turn's point (in the junction)
 ARROWS_BEFORE, ARROWS_AFTER = 30.0, 5.0  # m
-THROUGH_TURN = 20.0  # deg at most the route turns through a junction it goes straight on through
+THROUGH_TURN = 20.0  # deg at most the route turns through a junction it goes straight on through, where the arrows don't say
 
 
 def wrap(deg: float) -> float:
@@ -285,21 +285,34 @@ def remap(targets: tuple[int, int, int], n: int, left: bool) -> tuple[int, int]:
   return min(max(lo, 0), n - 1), min(max(hi, 0), n - 1)
 
 
-def parse_arrows(arrows) -> list[tuple[float, list[frozenset[str]]]]:
-  """Route.info's laneArrows: [(m ahead to where they end, each lane's arrows from the left)]."""
-  return [(float(d), [frozenset(a.split(";")) - {""} for a in lanes]) for d, lanes in arrows or []]
+def parse_arrows(arrows) -> list[tuple]:
+  """Route.info's laneArrows: [(m ahead to where they end, each lane's arrows from the left[, the route's move through
+  the junction as they call it: 'left', 'through' or 'right'])]."""
+  return [(float(d), [frozenset(a.split(";")) - {""} for a in lanes], *move) for d, lanes, *move in arrows or []]
+
+
+def arrows_entry(arrows: list, dist: float) -> tuple | None:
+  """The arrows entry (parse_arrows') of the junction of a turn or fork `dist` m on, None for none."""
+  near = [(abs(a[0] - dist), a) for a in arrows if dist - ARROWS_BEFORE <= a[0] <= dist + ARROWS_AFTER]
+  return min(near, key=lambda n: n[0])[1] if near else None
 
 
 def arrows_at(arrows: list, dist: float) -> list[frozenset[str]] | None:
   """The arrows of the lanes into the junction of a turn or fork `dist` m on (parse_arrows'), None for none."""
-  near = [(abs(d - dist), lanes) for d, lanes in arrows if dist - ARROWS_BEFORE <= d <= dist + ARROWS_AFTER]
-  return min(near, key=lambda n: n[0])[1] if near else None
+  entry = arrows_entry(arrows, dist)
+  return entry[1] if entry is not None else None
 
 
 def aim(m, arrows: list):
-  """A turn or fork's target lanes from the map's turn arrows, where its junction has them."""
-  lanes = arrows_at(arrows, m.dist)
-  found = turn_targets(lanes, m.side, isinstance(m, Fork)) if lanes else []
+  """A turn or fork's target lanes from the map's turn arrows, where its junction has them. The move they're for is the
+  one the arrows call the route's (a turn of a skewed junction's road on is through), else the turn or fork's side."""
+  entry = arrows_entry(arrows, m.dist)
+  lanes = entry[1] if entry is not None else None
+  move = entry[2] if entry is not None and len(entry) > 2 else None
+  if lanes and move is not None and (isinstance(m, Turn) and move == "through" or getattr(m, "junction", False)):
+    found = turn_targets(lanes, move)
+  else:
+    found = turn_targets(lanes, m.side, isinstance(m, Fork)) if lanes else []
   m.targets = (min(found), max(found), len(lanes)) if found else None
 
 
@@ -336,6 +349,7 @@ class Fork:
     main = other > 0 and lanes > other and lanes >= lanes_in - other
     self.keep = keep and not main
     self.slip = slip  # the other branch opens a slip lane or turn bay
+    self.junction = False  # the route's move through a junction rather than a fork in the road: aimed as the arrows call it
     self.targets: tuple[int, int, int] | None = None  # lanes lo-hi of n the map's arrows allow it from
 
   def lanes(self, n: int) -> tuple[int, int]:
@@ -363,7 +377,8 @@ class Through:
 
 def throughs(route: np.ndarray, arrows: list, moves: list, drops: list | None = None) -> list[Through]:
   """The junctions the route goes straight on through (no turn or fork near) where the arrows leave some lanes out, or
-  where some lanes end (Route.info's laneDrops: [m ahead, first and last lane that carry on, of how many])."""
+  where some lanes end (Route.info's laneDrops: [m ahead, first and last lane that carry on, of how many]). Straight on
+  is as the arrows call the route's move, else by how far it turns."""
   out = []
   along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T)))) if len(route) >= 2 else np.zeros(1)
 
@@ -372,16 +387,21 @@ def throughs(route: np.ndarray, arrows: list, moves: list, drops: list | None = 
   for d, lo, hi, n in drops or []:
     if clear(d):
       out.append(Through(d, (lo, hi, n)))
-  for d, lanes in arrows:
+  for d, lanes, *move in arrows:
     if not clear(d):
       continue
     found = turn_targets(lanes, "through")
     if not found or len(found) == len(lanes):
       continue
-    p = [np.array([np.interp(v, along, route[:, 0]), np.interp(v, along, route[:, 1])]) for v in (d - 15.0, d, d + 25.0)]
-    h_in, h_out = (math.degrees(math.atan2(*(b - a)[::-1])) for a, b in ((p[0], p[1]), (p[1], p[2])))
-    if abs(wrap(h_out - h_in)) <= THROUGH_TURN:
-      out.append(Through(d, (min(found), max(found), len(lanes))))
+    if move:  # as the arrows call the route's move, also a skewed junction's road on
+      if move[0] != "through":
+        continue
+    else:
+      p = [np.array([np.interp(v, along, route[:, 0]), np.interp(v, along, route[:, 1])]) for v in (d - 15.0, d, d + 25.0)]
+      h_in, h_out = (math.degrees(math.atan2(*(b - a)[::-1])) for a, b in ((p[0], p[1]), (p[1], p[2])))
+      if abs(wrap(h_out - h_in)) > THROUGH_TURN:
+        continue
+    out.append(Through(d, (min(found), max(found), len(lanes))))
   return out
 
 

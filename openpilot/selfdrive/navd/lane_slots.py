@@ -195,7 +195,7 @@ class LaneSlots:
     self.next: list[int] = []
     if self.lanes is None:
       return
-    arrows = self.lanes.arrows
+    arrows = self.lanes.arrows_moves
     gta = any(link is not None for link in route.links)  # GTA's road data, with its forks in the road
     navs = []
     for m in maneuvers.maneuvers(route):
@@ -208,8 +208,9 @@ class LaneSlots:
         if forks:
           f = min(forks, key=lambda f: abs(f.along - m.along))
           nav = planner.Fork(m.along, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip)
-        elif gta:  # GTA has no fork here: any lane, as nav, unless the map's arrows say
+        elif gta:  # GTA has no fork here: any lane, as nav, unless the map's arrows say for the route's move
           nav = planner.Fork(m.along, side, n_in, n_in, False)
+          nav.junction = True
         else:  # a map's route alone: by the branch's lane count
           nav = planner.Fork(m.along, side, self._lanes(m.along, True), n_in, True)
       planner.aim(nav, arrows)

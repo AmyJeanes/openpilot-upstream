@@ -207,7 +207,7 @@ def test_nav_lane_reading_waits_for_the_bay():
     sec = r.lanes.opened_at(s, r.seg)
     r.right = sec.ours[k].centre
     turn = planner.Turn(300.0 - s, 'left', 90.0)
-    planner.aim(turn, [(d - s, lanes) for d, lanes in arrows])
+    planner.aim(turn, [(d - s, *rest) for d, *rest in arrows])
     assert r.lane() == [k, lanes_here] and turn.lanes(lanes_here) == want, (s, r.lane())
   r.at, r.seg = 250.0, r.lanes.segment(250.0)
   assert r.section(r.seg).lanes == 3  # the way's own lanes, which nav read before
@@ -294,6 +294,46 @@ def test_route_input_v2():
     assert not old[ri.LANES].any()
   assert any(ls.decode(v2.encode(float(s), 0.0, 8.0)[ri.LANES])[2] is not None for s in np.linspace(0.0, r.length, 60))
   assert ri.describe(v2.encode(150.0, 0.0, 8.0)).count('here') == 1
+
+
+def skewed(road_on: float = 52.0, straight: bool = False):
+  """A one-way road north into a junction, arrows left|through, whose road on goes off road_on deg to the left; a road
+  also turns left 100 deg and right 90 deg, and with `straight`, one goes on 10 deg left."""
+  def off(deg):
+    return (-100.0 * np.sin(np.radians(deg)), 100.0 * np.cos(np.radians(deg)))
+  nodes = {1: (0.0, -200.0), 2: (0.0, -30.0), 3: (0.0, 0.0), 4: off(road_on), 5: off(100.0), 6: off(-90.0), 7: off(10.0)}
+  into = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '7'}
+  ways = {1: (into, [1, 2]), 2: ({**into, 'turn:lanes': 'left|through'}, [2, 3]),
+          **{k: (TWO_EACH_WAY, [3, k + 1]) for k in (3, 4, 5)}, **({6: (TWO_EACH_WAY, [3, 7])} if straight else {})}
+  return osm_map(nodes, ways), nodes
+
+
+def test_skewed_road_on_is_through():
+  """Lanes for the road on at a skewed junction (a turn by its angle) are those the arrows send through, as the map paints
+  them; a real left turn there, or the road on where another road goes straighter, still takes the left lane."""
+  osm, nodes = skewed()
+  r = route(osm, nodes, [1, 2, 3, 4], {2: LEFT})
+  assert r.lanes.moves == ['through'] and r.lane_arrows(r.length)[0][2] == 'through'
+  slots = ls.LaneSlots(r)
+  assert [(m.turn, m.targets) for m in slots.moves] == [(True, {1})]
+  turn = planner.find_turn(r.points, planner.MIN_AHEAD_MAP)
+  assert turn is not None and turn.side == 'left'
+  planner.aim(turn, planner.parse_arrows(r.lane_arrows(r.length)))
+  assert turn.lanes(2) == (1, 1)
+  left = route(osm, nodes, [1, 2, 3, 5], {2: LEFT})
+  assert left.lanes.moves == ['left'] and [m.targets for m in ls.LaneSlots(left).moves] == [{0}]
+  osm, nodes = skewed(straight=True)
+  on = route(osm, nodes, [1, 2, 3, 4], {2: LEFT})
+  assert on.lanes.moves == ['left'] and [m.targets for m in ls.LaneSlots(on).moves] == [{0}]
+  # a bend nav doesn't call a turn: straight on through by the arrows, from the through lane
+  osm, nodes = skewed(35.0)
+  bend = route(osm, nodes, [1, 2, 3, 4], {2: 16})
+  arrows = planner.parse_arrows(bend.lane_arrows(bend.length))
+  assert planner.find_turn(bend.points, planner.MIN_AHEAD_MAP) is None
+  assert [(type(m).__name__, m.targets) for m in planner.throughs(bend.points, arrows, [])] == [('Through', (1, 1, 2))]
+  bend.links = [True] * len(bend.links)  # GTA's roads, with no fork in the road here
+  assert [(m.fork, m.targets) for m in ls.LaneSlots(bend).moves] == [(True, {1})]
+  assert planner.throughs(bend.points, [a[:2] for a in arrows], []) == []  # by its angle alone: no
 
 
 def test_encode_is_cheap():
