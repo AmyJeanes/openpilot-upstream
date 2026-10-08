@@ -139,8 +139,8 @@ on the game's ground, colours as the map view's where it has them:
 
 | Layer (`layers=`) | Kinds |
 |---|---|
-| edges `e` | kerbs, green, 0.35 m |
-| dividers `d` | lane lines white, centre lines and median edges yellow, 0.2 m; dashed ones in 3 m dashes, 6 m gaps; a double line is two 0.3 m apart |
+| edges `e` | kerbs (the road's edge, kerbed or not), green, 0.35 m |
+| dividers `d` | lane lines white, centre lines and median edges yellow, 0.2 m, edged dark so they show over the game's own paint (`casing=0` drops it); dashed ones in 3 m dashes, 6 m gaps (the map has no dash phase, so they needn't line up with the paint's); a double line is two 0.3 m apart |
 | parking `p` | where a parking lane meets the lanes, purple, dashed |
 | stops `s` | stop lines 0.6 m, red at lights, orange at stop signs; give way lines orange, dashed |
 | crossings `x` | zebra stripes, 3 m |
@@ -154,8 +154,10 @@ Strips widen and lift with distance beyond `grow=` m (40; up to 4x) so a 0.2 m l
 drawn to `dist=` m (120; the bridge sends 150). `width=` scales them all, `widths=e:2,d:1.5` some layers; `ground=0`
 draws them at the map's heights instead, which shows height errors in the map; `thin=1` gives back the 1-px lines.
 The ground under each point comes from GET_GROUND_Z_FOR_3D_COORD, up to `probes=` (100) new points a frame, kept by
-place; the status line shows the points, draw calls and the share on the ground. Lane edges and dividers stop at
-junctions (from the stop line in, and inside junction areas). The bridge sends them every 0.5 s, and the route alone
+place, and the points a line on the ground doesn't need are then dropped; the status line shows the points, draw calls
+and the share on the ground. At a busy freeway interchange that's ~4000 draw calls and 0.7 ms of the script thread a
+frame, as much as `thin=1`. Lane edges and dividers stop at junctions (from the stop line in, and inside junction
+areas). The bridge sends them every 0.5 s, and the route alone
 every 0.1 s between, from where the car will be as it is drawn, while the plugin's debug is on (`GTA5_OVERLAY=0` stops
 it); on a lane-tagged map they're all from its tags (built once and cached, `GTA5_OVERLAY_CACHE`), else from GTA's
 lane bands. The plugin draws them only on the player's frames, never on the openpilot camera's (they're the ones with

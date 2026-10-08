@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -1005,6 +1006,7 @@ struct DebugOverlay {
   bool on = false, force = false;
   bool ground = true;   // strips on the game's ground under each point (else at the map's heights)
   bool thin = false;    // 1-px lines as before the strips
+  bool casing = true;   // white and yellow strips edged dark
   std::string layers = "edsjrnmaxptq";  // layer letters (DebugLayer); f fills junction areas
   float lift = 0.05f;   // m above the ground, added to each kind's own
   float width = 1.0f;   // every kind's width scaled
@@ -1127,7 +1129,43 @@ uint64_t GroundKey(const P3 &p) {
   return (q(p.x * 10) << 42) | (q(p.y * 10) << 21) | q(p.z * 0.5f);
 }
 
-// moves the lines' points onto the game's ground, up to probes new ones a frame, the bridge's order (nearest first by kind)
+// Douglas-Peucker in 3D: the points of a line on the ground that its strip needs, the rest (Densify's, where the ground
+// is flat and the line straight) dropped, for fewer draw calls
+constexpr float GROUND_SIMPLIFY = 0.03f;  // m a dropped point may be off the line
+void SimplifyLine(std::vector<P3> &pts) {
+  size_t n = pts.size();
+  if (n <= 2) return;
+  std::vector<uint8_t> keep(n, 0);
+  keep[0] = keep[n - 1] = 1;
+  std::vector<std::pair<size_t, size_t>> stack{{0, n - 1}};
+  while (!stack.empty()) {
+    auto [i, j] = stack.back();
+    stack.pop_back();
+    if (j <= i + 1) continue;
+    const P3 &a = pts[i], &b = pts[j];
+    float abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z, ab2 = abx * abx + aby * aby + abz * abz;
+    size_t worstAt = i;
+    float worst = -1;
+    for (size_t k = i + 1; k < j; k++) {
+      float px = pts[k].x - a.x, py = pts[k].y - a.y, pz = pts[k].z - a.z;
+      float t = ab2 > 1e-12f ? std::clamp((px * abx + py * aby + pz * abz) / ab2, 0.0f, 1.0f) : 0.0f;
+      float dx = px - t * abx, dy = py - t * aby, dz = pz - t * abz, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > worst) worst = d2, worstAt = k;
+    }
+    if (worst > GROUND_SIMPLIFY * GROUND_SIMPLIFY) {
+      keep[worstAt] = 1;
+      stack.push_back({i, worstAt});
+      stack.push_back({worstAt, j});
+    }
+  }
+  size_t m = 0;
+  for (size_t k = 0; k < n; k++)
+    if (keep[k]) pts[m++] = pts[k];
+  pts.resize(m);
+}
+
+// moves the lines' points onto the game's ground, up to probes new ones a frame, the bridge's order (nearest first by
+// kind), and drops the points a line on the ground doesn't need
 void GroundStep(DebugOverlay &d, double now) {
   int probes = 0;
   if (g_ground.size() > GROUND_KEEP) g_ground.clear();
@@ -1148,6 +1186,7 @@ void GroundStep(DebugOverlay &d, double now) {
       if (std::isfinite(it->second.z)) p.z = it->second.z, d.grounded++;
       else d.offGround++;
     }
+    if (!IsMarker(l.kind)) SimplifyLine(l.pts);
   }
 }
 
@@ -1204,8 +1243,10 @@ float Grow(const DebugView &v, const P3 &p, float &dist) {
 // corners, dashed ones in dashes of the style's on m and off m gaps along the whole line. Dashes go by their index
 // along it, so every pass of the inner loop moves on a dash (a float phase stepped by what's left of a dash can stop
 // moving at rounding, which hung the game's script thread). Segments with both ends beyond the view's distance are left
-// out. Returns the draw calls used.
-int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float lift, const DebugView &v, int budget) {
+// out. With inner (0-1), only its edges are drawn, from inner of the half width out, in colour rgba: a casing round a
+// narrower strip drawn alone, which keeps the two from fighting for the same pixels. Returns the draw calls used.
+int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float lift, const DebugView &v, int budget,
+              const int *rgba = nullptr, float inner = 0) {
   size_t n = pts.size();
   if (n < 2) return 0;
   static std::vector<float> half, up, dist;
@@ -1220,8 +1261,19 @@ int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float
     float dx = pts[i].x - pts[i - 1].x, dy = pts[i].y - pts[i - 1].y, len = std::hypot(dx, dy);
     nrm[i] = len > 1e-3f && len < 1e4f ? P3{dy / len, -dx / len, len} : P3{0, 0, 0};  // also NaN
   }
-  int used = 0, per = g_debug.sides >= 2 ? 4 : 2;
+  int used = 0, per = (g_debug.sides >= 2 ? 4 : 2) * (inner > 0 ? 2 : 1);
   auto out = [&](size_t i) { return dist[i] > v.dist; };
+  const int cr = rgba ? rgba[0] : s.r, cg = rgba ? rgba[1] : s.g, cb = rgba ? rgba[2] : s.b, ca = rgba ? rgba[3] : s.a;
+  // a piece of the strip from end 0 to end 1 (corner(end, side), side -1 its left edge to 1 its right), whole or its edges
+  auto piece = [&](auto corner) {
+    auto quad = [&](float lo, float hi) {
+      P3 a0 = corner(0, lo), a1 = corner(0, hi), c1 = corner(1, hi), c0 = corner(1, lo);
+      used += DrawTri(a0, a1, c1, cr, cg, cb, ca);
+      used += DrawTri(a0, c1, c0, cr, cg, cb, ca);
+    };
+    if (inner > 0) quad(-1, -inner), quad(inner, 1);
+    else quad(-1, 1);
+  };
   if (s.on <= 0) {
     for (size_t i = 0; i < n; i++) {
       P3 a = nrm[i], b = i + 1 < n ? nrm[i + 1] : nrm[i];
@@ -1239,9 +1291,7 @@ int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float
     auto at = [&](size_t i, float side) { return P3{pts[i].x + side * mitre[i].x * half[i], pts[i].y + side * mitre[i].y * half[i], pts[i].z + up[i]}; };
     for (size_t i = 1; i < n && used + per <= budget; i++) {
       if (nrm[i].z == 0 || (out(i - 1) && out(i))) continue;
-      P3 aL = at(i - 1, -1), aR = at(i - 1, 1), cR = at(i, 1), cL = at(i, -1);
-      used += DrawTri(aL, aR, cR, s.r, s.g, s.b, s.a);
-      used += DrawTri(aL, cR, cL, s.r, s.g, s.b, s.a);
+      piece([&](int end, float side) { return at(i - 1 + end, side); });
     }
     return used;
   }
@@ -1262,9 +1312,7 @@ int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float
     for (long k = long(std::floor(base / period)), last = long(std::floor((base + len) / period)); k <= last && used + per <= budget; k++) {
       double t0 = std::max(0.0, (k * period - base) / len), t1 = std::min(1.0, (k * period + s.on - base) / len);
       if (t1 - t0 < 1e-4) continue;
-      P3 aL = at(t0, -1), aR = at(t0, 1), cR = at(t1, 1), cL = at(t1, -1);
-      used += DrawTri(aL, aR, cR, s.r, s.g, s.b, s.a);
-      used += DrawTri(aL, cR, cL, s.r, s.g, s.b, s.a);
+      piece([&](int end, float side) { return at(end ? t1 : t0, side); });
     }
     base += len;
   }
@@ -1372,6 +1420,12 @@ void DrawDebug(double now) {
       continue;
     }
     float width = s.width * d.width * d.layerWidth[layer & 127];
+    if (d.casing && std::strchr("dwycT", l.kind)) {
+      // white and yellow lie on paint of their colour: a dark edge tells ours from the game's
+      static constexpr int CASING_RGBA[4] = {10, 10, 10, 190};
+      constexpr float CASING = 0.05f;  // m each side
+      budget -= DrawStrip(l.pts, s, width + 2 * CASING, s.lift + lift, view, budget, CASING_RGBA, width / (width + 2 * CASING));
+    }
     budget -= DrawStrip(l.pts, s, width, s.lift + lift, view, budget);
   }
   d.polys = g_debugPolys = d.maxPolys - budget;
@@ -2249,6 +2303,7 @@ void HandleMessage(const Message &m, double now) {
     g_debug.force = MsgBool(m, "force", g_debug.force);
     g_debug.ground = MsgBool(m, "ground", g_debug.ground);
     g_debug.thin = MsgBool(m, "thin", g_debug.thin);
+    g_debug.casing = MsgBool(m, "casing", g_debug.casing);
     g_debug.lift = std::clamp(static_cast<float>(MsgNum(m, "lift", g_debug.lift)), -1.0f, 3.0f);
     g_debug.width = std::clamp(static_cast<float>(MsgNum(m, "width", g_debug.width)), 0.1f, 20.0f);
     g_debug.dist = std::clamp(static_cast<float>(MsgNum(m, "dist", g_debug.dist)), 5.0f, 1000.0f);
