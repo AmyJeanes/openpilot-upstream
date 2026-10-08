@@ -7,7 +7,7 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.nav.draw import StrokeBatch, draw_polyline
+from openpilot.selfdrive.ui.nav.draw import StrokeBatch, draw_polyline, max_blend, premul
 from openpilot.selfdrive.ui.nav.nav_state import NavState
 
 
@@ -42,11 +42,20 @@ class NavMap:
     self._roads = StrokeBatch([], [])
     self._roads_version = -1
 
-  def render(self, rect: rl.Rectangle, nav: NavState) -> None:
+  def render(self, rect: rl.Rectangle, nav: NavState, alpha: float = 1.0) -> None:
+    """alpha < 1 fades the map toward black, drawn premultiplied under a max blend so its overlaps fade as one."""
+    if nav.car() is None or alpha <= 0.01:
+      return
+    if alpha >= 0.999:
+      self._render(rect, nav, lambda c: c)
+      return
+    with max_blend():
+      self._render(rect, nav, lambda c: premul(c, alpha))
+
+  def _render(self, rect: rl.Rectangle, nav: NavState, col) -> None:
     st = self.style
     car = nav.car()
-    if car is None:
-      return
+    assert car is not None
     pos, bearing = car  # already smooth: NavState's PoseTracker
     b = bearing
     m = nav.guidance.maneuver
@@ -71,7 +80,7 @@ class NavMap:
       self._roads_version = nav.version
       self._roads = StrokeBatch([r.points for r in nav.roads],
                                 [min(st.road_px_min + st.road_px_per_m * r.width, st.road_px_max) for r in nav.roads])
-    self._roads.draw(origin, pos, rot / scale, scale, st.road)
+    self._roads.draw(origin, pos, rot / scale, scale, col(st.road))
 
     if len(nav.route) >= 2:
       along, seg = nav.along_route(pos, bearing)
@@ -79,22 +88,22 @@ class NavMap:
       rest = nav.route[seg + 1:]
       rest = rest[nav.route_along[seg + 1:] < end]
       line = np.vstack([nav.route_point(along)[None, :], rest, nav.route_point(min(end, nav.route_along[-1]))[None, :]])
-      draw_polyline(to_screen(line), st.route_px, st.route, round_caps=True)
+      draw_polyline(to_screen(line), st.route_px, col(st.route), round_caps=True)
       if m is not None and m.type != "arrive" and m.distance <= radius * 1.5:
         p = to_screen(nav.route_point(along + m.distance)[None, :])[0]
-        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius + 3, st.background)
-        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius, st.marker)
+        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius + 3, col(st.background))
+        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius, col(st.marker))
       elif m is not None and m.type == "arrive":
         p = to_screen(nav.route[-1][None, :])[0]
-        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius + 5, st.background)
-        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius + 2, st.marker)
-        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius - 4, st.route)
+        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius + 5, col(st.background))
+        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius + 2, col(st.marker))
+        rl.draw_circle_v(rl.Vector2(float(p[0]), float(p[1])), st.marker_radius - 4, col(st.route))
 
-    self._draw_car(cx, cy)
+    self._draw_car(cx, cy, col)
 
-  def _draw_car(self, cx: float, cy: float) -> None:
+  def _draw_car(self, cx: float, cy: float, col) -> None:
     st = self.style
-    for size, color in ((st.car_size + 4, st.background), (st.car_size, st.car)):
+    for size, color in ((st.car_size + 4, col(st.background)), (st.car_size, col(st.car))):
       tip = rl.Vector2(cx, cy - size)
       notch = rl.Vector2(cx, cy + size * 0.45)
       left, right = rl.Vector2(cx - size * 0.8, cy + size * 0.9), rl.Vector2(cx + size * 0.8, cy + size * 0.9)

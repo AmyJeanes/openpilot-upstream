@@ -148,6 +148,8 @@ class NavState:
     self.route_along = np.zeros(0)
     self.roads: list[Road] = []
     self.version = 0  # counts navRoute updates, for drawing caches
+    self.updates = 0  # counts navInstructions read, for caches of what's drawn from them
+    self.route_end: tuple[float, float] | None = None  # lat, lon: where the route goes, to tell a new destination
     self.pose = PoseTracker()
     self._route_fingerprint: tuple = ()
 
@@ -168,6 +170,7 @@ class NavState:
 
   def read_instruction(self, ni) -> tuple[np.ndarray, float] | None:
     """Takes a navInstruction's guidance; returns the pose it reports, in local m, if any."""
+    self.updates += 1
     self.guidance = instruction_guidance(ni) if ni.valid else Guidance()
     g = self.guidance
     if g.position is None or self.projection is None:
@@ -190,8 +193,9 @@ class NavState:
     coords = nr.coordinates
     self.version += 1
     if len(coords) < 2:
-      self.route, self.route_along, self.roads = np.zeros((0, 2)), np.zeros(0), []
+      self.route, self.route_along, self.roads, self.route_end = np.zeros((0, 2)), np.zeros(0), [], None
       return
+    self.route_end = (coords[-1].latitude, coords[-1].longitude)
     lat = np.array([c.latitude for c in coords])
     lon = np.array([c.longitude for c in coords])
     old, self.projection = self.projection, Projection(float(lat[0]), float(lon[0]))
@@ -226,13 +230,13 @@ class NavState:
 
 
 def format_distance(m: float, metric: bool) -> str:
-  """Rounded as a driver reads it: 10 m steps under a km, then 0.1 km; 50 ft steps under 0.1 mi, then 0.1 mi."""
+  """Rounded as a driver reads it: 10 m steps under a km, then 0.1 km; 50 ft steps under 1000 ft, then 0.1 mi."""
   if metric:
     if m < 1000:
       return f"{max(int(round(m / 10.0)) * 10, 0)} m"
     return f"{m / 1000:.1f} km"
   miles = m / (CV.MPH_TO_KPH * 1000.0)
-  if miles < 0.1:
+  if m * FEET_PER_M < 975:  # what rounds to 1000 ft reads as 0.2 mi
     return f"{max(int(round(m * FEET_PER_M / 50.0)) * 50, 0)} ft"
   return f"{miles:.1f} mi"
 
@@ -241,8 +245,60 @@ def format_duration(s: float) -> str:
   minutes = max(math.ceil(s / 60.0), 1) if s > 0 else 0
   if minutes < 60:
     return tr("{} min").format(minutes)
-  return tr("{} h {} min").format(minutes // 60, minutes % 60)
+  return tr("{}h {}m").format(minutes // 60, minutes % 60)
+
+
+def format_trip_distance(m: float, metric: bool) -> str:
+  """The distance left: a tenth under 10, whole above, with thousands grouped."""
+  v = m / 1000.0 if metric else m / (CV.MPH_TO_KPH * 1000.0)
+  unit = "km" if metric else "mi"
+  return f"{v:.1f} {unit}" if v < 10 else f"{round(v):,} {unit}"
 
 
 def format_arrival(s: float) -> str:
   return (datetime.datetime.now() + datetime.timedelta(seconds=s)).strftime("%H:%M")
+
+
+# the next maneuver, by its distance at the car's speed: the card opens for it ("approach", with the lanes), and its
+# distance reads "Now" in the turn; the card closes again only a little farther than it opens, so it doesn't flap
+OPEN_AHEAD_S, OPEN_AHEAD_MIN = 15.0, 200.0  # s, m
+CLOSE_FACTOR = 1.2
+NOW_AHEAD_S, NOW_AHEAD_MIN = 2.0, 20.0  # s, m
+
+
+def maneuver_phase(g: Guidance, v: float, was_open: bool) -> str:
+  """cruise, approach or turn."""
+  m = g.maneuver
+  if m is None:
+    return "cruise"
+  if m.distance <= max(NOW_AHEAD_MIN, v * NOW_AHEAD_S):
+    return "turn"
+  open_at = max(OPEN_AHEAD_MIN, v * OPEN_AHEAD_S) * (CLOSE_FACTOR if was_open else 1.0)
+  return "approach" if m.distance <= open_at else "cruise"
+
+
+@dataclass
+class CardLane:
+  arrow: str  # up, left, right, or upleft / upright: a lane that goes straight or turns
+  straight_lit: bool  # the route takes its straight branch
+  turn_lit: bool  # the route takes its turn
+
+
+def card_lanes(g: Guidance) -> tuple[list[CardLane], int | None]:
+  """The lanes for the card, our direction's only (the oncoming ones are for the model, not the driver), left to
+  right, and which of them the car is in (None unknown)."""
+  if not g.show_lanes or (g.maneuver is not None and g.maneuver.type == "arrive"):
+    return [], None
+  ours = [lane for lane in g.lanes if not lane.oncoming]
+  out = []
+  for lane in ours:
+    dirs = [d for d in lane.directions if d != "none"] or ["straight"]
+    turns = [d for d in dirs if d != "straight"]
+    use = lane.active_direction if lane.active and lane.active_direction != "none" else None
+    turn = use if use in turns else (turns[0] if turns else None)
+    side = "left" if turn is not None and "left" in turn.lower() else "right"
+    arrow = ("up" + side if "straight" in dirs else side) if turn is not None else "up"
+    straight_lit = lane.active and (use == "straight" or arrow == "up")
+    out.append(CardLane(arrow, straight_lit, lane.active and not straight_lit))
+  here = next((i for i, lane in enumerate(ours) if lane.current), None)
+  return out, here
