@@ -124,7 +124,7 @@ class NavCard:
     self._wheel = gui_app.texture("icons/chffr_wheel.png", STOCK_ICON, STOCK_ICON)
     self._exp_icon = gui_app.texture("icons/experimental.png", STOCK_ICON, STOCK_ICON)
 
-    self.split_on = False  # the layout pin: the always-on split, else the card over the camera
+    self.split_on = self._params.get_bool("NavSplitPinned")  # the layout pin: the always-on split, else the card over the camera
     self.noo = False  # Navigate on openpilot, as shown
     self._noo_set_t = -1e9
     self.route_on = False  # a route to show: nav has one, and the driver hasn't ended it here
@@ -218,6 +218,7 @@ class NavCard:
       self.map_poke_t = now
       leaving_split = self.split_on
       self.split_on = not self.split_on
+      self._params.put_bool("NavSplitPinned", self.split_on)
       self.override = None
       if leaving_split:  # stay open, as if pulled open by hand, until nav would next close it (or the timeout)
         self.override, self.override_t = "open", now

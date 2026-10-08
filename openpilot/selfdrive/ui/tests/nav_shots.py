@@ -64,6 +64,7 @@ class Context:
     self.params.put_bool("IsMetric", False)
     self.params.put_bool("ExperimentalModeConfirmed", True)
     self.params.put_bool("NavigateOnOpenpilot", False)
+    self.params.put_bool("NavSplitPinned", False)
 
     from openpilot.selfdrive.ui.tests.nav_fake import FakeCamera, FakeNav, FakeOnroad
     self.out = out
