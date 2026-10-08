@@ -131,9 +131,11 @@ a model trained on v1's 173 reads only the start of it.
 next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
 beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,
 from a route it finds over the map itself (its docstring says how).
-`GTA5_NOO` is Navigate on openpilot: `on` (the default, for test runs) nav drives; `param` follows the UI's nav button
-(the `NavigateOnOpenpilot` param); `off` only guides (no NavDesire, lane changes, caps or route input). With `param` or
-`off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
+`GTA5_NOO` is Navigate on openpilot: `param` (the default) follows the UI's nav button (the `NavigateOnOpenpilot`
+param); `on` drives regardless, which test runs (e2e, A/Bs) must set; `off` only guides. Guiding only, nav takes no
+actions (no turn signals or desires, lane changes, slowing for turns, arrival or route input for the model) but still
+caps the speed for the road's bends up to the next turn and for its speed limits, and holds keepRight out of the
+oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
 changes.
 
 ### navd and the GTA layer

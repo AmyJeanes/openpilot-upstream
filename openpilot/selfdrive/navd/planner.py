@@ -602,7 +602,8 @@ class Planner:
   def _update(self, inp: NavInputs) -> tuple[float, bool]:
     """The cruise cap (m/s, 0 for none) and whether the car has arrived."""
     now = self.now = inp.t
-    # guidance only (Navigate on openpilot off) drives nothing, as when disengaged: signals cancelled, NavDesire cleared
+    # guidance only (Navigate on openpilot off) takes no nav actions, as when disengaged: signals cancelled, no lane
+    # changes, turn or keep desires, turn slowing or arrival; but what keeps the car on its road stays (_guide)
     engaged, indicator, desire = inp.engaged and inp.drive, inp.blinker, inp.desire
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
@@ -619,12 +620,13 @@ class Planner:
       self._cancel(indicator)
       self._end_change(indicator)
       self.keeping, self.fork_keep = None, None
+      cap = self._guide(inp, now) if inp.engaged else 0.0
       self._set_desire(now)
       self.route_end, self.dest = None, None
       self.skipped.clear()
       self.taken.clear()
       self.hold = None
-      return 0.0, False
+      return cap, False
     self._watch_change(indicator, now)
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
@@ -754,6 +756,26 @@ class Planner:
       stop, arrived = self._arrive(v)
       return min(cap, stop) if cap else stop, arrived
     return cap, False
+
+  def _guide(self, inp: NavInputs, now: float) -> float:
+    """Guidance only, engaged: the cruise cap for the road's bends and speed limits ahead, the bends only up to the next
+    turn at a junction (the driver may not take it, and turns aren't slowed for), and keepRight out of the oncoming
+    lanes."""
+    self.yaw, self.one_way = inp.yaw_rate, inp.two_way is False
+    near = [d for d in (inp.stops or []) + (inp.junctions or []) if abs(d) < ONCOMING_JUNCTION]
+    self._oncoming_keep(inp.truth_lane_plugin, bool(near), now, inp.truth_lane_map)
+    caps = [limit_cap(inp.limits or [], inp.v)]
+    if inp.route:
+      route = np.array(inp.route, dtype=float)
+      turn = find_turn(route, MIN_AHEAD_MAP if inp.route_end is not None else MIN_AHEAD)
+      while turn is not None and not any(abs(d - turn.dist) < ENTRY_JUNCTION_BEFORE / 2 for d in inp.junctions or []):
+        turn = find_turn(route, turn.dist + TURN_HOLDS)  # a bend of the road, not a turn: slowed for
+      if turn is not None:
+        along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
+        route = np.vstack([route[along < turn.dist], self._point(route, turn.dist)])
+      caps.append(curve_cap(route, inp.v, self.tune))
+    caps = [c for c in caps if c > 0]
+    return max(min(caps), 0.5) if caps else 0.0
 
   def _hold_cap(self, heading: float, yaw_rate: float, v: float, now: float) -> float:
     """The turn's speed, held through its arc and lifted gently once the car is out of it (0 for none); logs the

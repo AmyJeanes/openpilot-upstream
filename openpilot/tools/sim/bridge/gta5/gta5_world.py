@@ -59,9 +59,9 @@ LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
 # openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
 NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
-# Navigate on openpilot: "on" (the default, so test runs drive as ever) nav drives; "param" follows the
-# NavigateOnOpenpilot param the UI's nav button sets (off: guidance only); "off" guidance only
-NOO = os.getenv("GTA5_NOO", "on")
+# Navigate on openpilot: "param" (the default) follows the NavigateOnOpenpilot param the UI's nav button sets (off:
+# guidance only); "on" nav drives regardless, as test runs need; "off" guidance only
+NOO = os.getenv("GTA5_NOO", "param")
 NOO_CHECK = 0.5  # s between reads of the param
 # routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
 # pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's

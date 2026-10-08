@@ -15,6 +15,7 @@ def test_lane_slots_preview():
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
   r.at, r.off = 20.0, 1.0
   w = GTA5World.__new__(GTA5World)
+  w.noo, w.noo_t = True, float("inf")  # Navigate on openpilot on, the param read
   writes, inputs = [], []
   w.lanes_writer = SimpleNamespace(write=writes.append)
   w.route_writer = SimpleNamespace(write=inputs.append)
@@ -97,6 +98,7 @@ def test_lane_slots_failure_keeps_v1():
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
   r.at, r.off = 20.0, 1.0
   w = GTA5World.__new__(GTA5World)
+  w.noo, w.noo_t = True, float("inf")
   inputs = []
   w.route_writer = SimpleNamespace(write=inputs.append)
   w.route_input, w.route = None, r

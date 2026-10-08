@@ -469,6 +469,7 @@ def main():
     extract(args.results, args.ids, args.out, args.log)
   elif args.cmd == "run":
     os.environ.setdefault("GTA5_DEBUG", "1")
+    os.environ.setdefault("GTA5_NOO", "on")  # the drives were recorded with nav driving
     run(args.inputs, args.logs, args.router, args.cache, args.map)
   else:
     sys.exit(1 if diff(args.a, args.b) else 0)
