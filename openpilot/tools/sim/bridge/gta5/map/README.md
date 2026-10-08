@@ -137,7 +137,9 @@ shown or a level changes.
     (`placement:forward` / `:backward=left_of:N`), which keeps it on GTA's link as the bays widen.
   - Where a two-way road's median (2.5 m or more) runs in to a junction it may turn left at and GTA has no bay link,
     the game paints the median as a left-turn lane on the approach (seen on 4 of 4 such approaches): its links within
-    the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.
+    the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median. Not
+    where the game files paint the median's edge on our side on into the junction with no arrow of ours in it
+    (`paint_survey.median_runs_in`): there the median stays a median, often with the other way's bay opening in it.
   - These widths are class rules, right on average. `--survey <file.jsonl> ...` corrects them where the game's paint
     was surveyed (format and rules in `paint_survey.py`): read from the game files' road meshes and marking decals
     (`"src": "gamefiles"`, exact to a few cm, the primary source); the map audit's top-down camera survey only
