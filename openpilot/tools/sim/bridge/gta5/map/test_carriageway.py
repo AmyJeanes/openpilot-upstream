@@ -1,6 +1,6 @@
 """Carriageways made of one-way ways side by side, as GTA draws its freeways: paint_survey.correct_carriageway,
-.outer_lines and correct_oneway on made-up samples, ynd_to_osm.lane_changes on made-up links, and side_by_side.py's
-kerbs and Junctions.merges on small maps made here. No pytest needed: `python test_carriageway.py`."""
+.outer_lines and correct_oneway on made-up samples, ynd_to_osm.lane_changes and .split_shared on made-up links, and
+side_by_side.py's kerbs and Junctions.merges on small maps made here. No pytest needed: `python test_carriageway.py`."""
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
@@ -8,7 +8,7 @@ from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, offset_line
 from openpilot.tools.sim.bridge.gta5.map.paint_survey import correct_carriageway, correct_oneway, outer_lines
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 from openpilot.tools.sim.bridge.gta5.map.test_junctions import make
-from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_changes
+from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import SPLIT_NODE_AREA, lane_changes, split_shared
 
 
 def mark(offset, colour='white', kind='dashed'):
@@ -116,6 +116,41 @@ def test_no_junction_where_lanes_only_merge():
   nodes[4] = (60.0, 57.0)
   ways[3] = (oneway, [4, 2])
   assert len(Junctions(make(nodes, ways)).junctions) == 1
+
+
+def test_carriageways_through_one_node_are_parted():
+  def gta(x, y):
+    return {'a': 1, 'i': 0, 'x': x, 'y': y, 'z': 0.0, 'f': [0, 0, 4, 0, 0], 'st': 0, 'sp': 1}
+  one, two = [0, 0, 2 << 5], [0, 0, (1 << 5) | (1 << 2)]
+  # a divided road's carriageways 16 m apart (westbound north), both bent in to one node in the median, where a side
+  # road from the north meets it, and a turn lane in the median
+  nodes = {'W1': gta(60, 8), 'W2': gta(-60, 8), 'E1': gta(-60, -8), 'E2': gta(60, -8), 'N': gta(0, 0), 'S': gta(0, 40),
+           'T': gta(30, 2)}
+  info = [[1, 'W1', 'N', 2, 0, 'primary', 40, None, one], [2, 'N', 'W2', 2, 0, 'primary', 40, None, one],
+          [3, 'E1', 'N', 2, 0, 'primary', 40, None, one], [4, 'N', 'E2', 2, 0, 'primary', 40, None, one],
+          [5, 'S', 'N', 1, 1, 'residential', 25, None, two], [6, 'T', 'N', 1, 0, 'primary', 40, None, one]]
+  assert split_shared(nodes, info) == 1
+  w, e = (SPLIT_NODE_AREA, 1), (SPLIT_NODE_AREA, 2)
+  assert (nodes[w]['x'], nodes[w]['y'], nodes[e]['x'], nodes[e]['y']) == (0, 8, 0, -8)
+  assert [r[1:3] for r in info] == [['W1', w], [w, 'W2'], ['E1', e], [e, 'E2'], ['S', w], ['T', 'N'], [w, 'N'], ['N', e]]
+  assert [r[0] for r in info[-2:]] == [7, 8] and info[-1][3:5] == [1, 1]
+  # without the turn lane, a link straight across
+  nodes = {k: v for k, v in nodes.items() if k[0] != SPLIT_NODE_AREA}
+  info = [r for r in info if r[0] < 6]
+  for r, (a, b) in zip(info, [('W1', 'N'), ('N', 'W2'), ('E1', 'N'), ('N', 'E2'), ('S', 'N')], strict=True):
+    r[1], r[2] = a, b
+  assert split_shared(nodes, info) == 1 and [r[1:3] for r in info[5:]] == [[w, e]]
+  # a second divided road crossing it through the same node: left as GTA has it
+  nodes |= {'S1': gta(-8, 60), 'S2': gta(-8, -60), 'N1': gta(8, -60), 'N2': gta(8, 60)}
+  info = info[:4] + [[5, 'S1', 'N', 2, 0, 'primary', 40, None, one], [6, 'N', 'S2', 2, 0, 'primary', 40, None, one],
+                                  [7, 'N1', 'N', 2, 0, 'primary', 40, None, one], [8, 'N', 'N2', 2, 0, 'primary', 40, None, one]]
+  for r, (a, b) in zip(info, [('W1', 'N'), ('N', 'W2'), ('E1', 'N'), ('N', 'E2')], strict=False):
+    r[1], r[2] = a, b
+  assert split_shared(nodes, info) == 0
+  # nor where the node is on a carriageway's line, as where two-way traffic meets a one-way pair
+  info = info[:4]
+  nodes['N'] = gta(0, 8)
+  assert split_shared(nodes, info) == 0
 
 
 if __name__ == '__main__':

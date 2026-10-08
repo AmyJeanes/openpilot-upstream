@@ -119,6 +119,20 @@ def test_divided_road_is_one_junction():
   assert in_fan([[0.0, 0.0]], j.centre, j.polygon).all()
 
 
+def test_side_road_at_a_gap_in_the_median():
+  # a side road from the north meeting a divided road whose carriageways are 20 m apart, a two-way road across the gap in
+  # the median between them: one junction, its area square across both carriageways at the median's noses
+  nodes = {1: (0.0, -10.0), 2: (0.0, 10.0), 3: (-100.0, -10.0), 4: (100.0, -10.0), 5: (100.0, 10.0), 6: (-100.0, 10.0),
+           8: (0.0, 100.0)}
+  ways = {1: (ONE_WAY, [3, 1]), 2: (ONE_WAY, [1, 4]), 3: (ONE_WAY, [5, 2]), 4: (ONE_WAY, [2, 6]),
+          6: (TWO_WAY, [1, 2]), 7: (TWO_WAY, [2, 8])}
+  js = Junctions(make(nodes, ways))
+  j = only(js)
+  assert sorted(j.nodes) == [1, 2] and j.inside == {6} and len(j.arms) == 5
+  assert js.trims[(1, 1)] > 1.0 and abs(js.trims[(1, 1)] - js.trims[(4, 2)]) < 0.01
+  assert js.trims[(2, 1)] > 1.0 and abs(js.trims[(2, 1)] - js.trims[(3, 2)]) < 0.01
+
+
 def test_junctions_apart_are_trimmed_to_fit():
   # two crossroads of wide roads 22 m apart: kept apart, each trimmed back no further than leaves a gap between them
   wide = {'highway': 'primary', 'lanes': '4', 'width': '20'}
