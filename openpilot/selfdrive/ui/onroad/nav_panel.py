@@ -56,6 +56,7 @@ EXPAND_S = 0.5  # the card's expand/collapse, the lanes' slide, the route's star
 NOO_HOLD_S = 2.0  # a tapped Navigate on openpilot shows as set while the param catches up
 LANES_H = 168.0
 NOWHERE = rl.Rectangle(0, 0, 0, 0)  # a hit area with nothing drawn
+TEXT_STEP = 8  # px: text is fitted to widths rounded down to this, so animations re-measure it only every few frames
 END_MOVED = 50.0  # m the destination moves for a route that was ended to count as a new one
 
 
@@ -395,7 +396,8 @@ class NavCard:
     icon, dist_size, sec_pad = lerp(96, 100, o), lerp(78, 90, o), lerp(0, 24, o)
     tx_off = sec_pad + icon + 20
     text_w_max = (cw - exp_right - exp_d - 12) - (pad_x + tx_off)
-    road_lines = self._cached(("road", road, round(text_w_max)), lambda: wrap(self._semi, road, fs(road_size), text_w_max, 3))
+    wq = text_w_max // TEXT_STEP * TEXT_STEP
+    road_lines = self._cached(("road", road, wq), lambda: wrap(self._semi, road, fs(road_size), wq, 3))
     text_h = dist_size + 6 + 46 * len(road_lines)
     sec_h = max(max(icon, text_h) + 2 * sec_pad, exp_d + 2 * lerp(0, 12, o))
     eta_h = lerp(2 + 21 + 48 + 6, 110, sp)
@@ -453,7 +455,8 @@ class NavCard:
       rl.draw_rectangle(int(inner.x), int(eta_y), int(inner.width), 2, with_alpha(RULE, 1 - sp))
     row_top, row_bot = lerp(eta_y + 2, eta_y, sp), lerp(card.y + card.height, eta_y + eta_h, sp)
     self.hit_eta = rl.Rectangle(inner.x, row_top - 20, inner.width, card.y + card.height - row_top + 20)
-    size, sizes = self._cached(("eta", eta, round(ew)), lambda: self._eta_layout(eta, ew))
+    ewq = ew // TEXT_STEP * TEXT_STEP
+    size, sizes = self._cached(("eta", eta, ewq), lambda: self._eta_layout(eta, ewq))
     for i, (v, vz) in enumerate(zip(eta, sizes, strict=True)):
       self._text(self._bold, v, ex0 + ew * (i + 0.5) / 3 - vz.x / 2, row_top + (row_bot - row_top - vz.y) / 2, fs(size), rl.WHITE)
 
@@ -587,7 +590,8 @@ class NavCard:
       full = rl.Rectangle(cx - self.slide_len - d / 2, cy - d / 2, self.slide_len + d, d)
       rl.draw_rectangle_rounded(full, 1.0, 24, with_alpha(SLIDE_TRACK_BG, shown))
       label = tr("slide to end navigation")
-      px, lz = self._cached(("slide", round(full.width - d * 1.5)), lambda: self._slide_label_layout(label, full.width - d * 1.5))
+      lw = (full.width - d * 1.5) // TEXT_STEP * TEXT_STEP
+      px, lz = self._cached(("slide", lw), lambda: self._slide_label_layout(label, lw))
       lx = full.x + d * 0.4  # left aligned, in from the track's rounded end
       self._text(self._semi, label, lx, cy - lz.y / 2, fs(px), with_alpha(rl.WHITE, shown * 0.8 * (1 - frac)))
       cx -= self.slide

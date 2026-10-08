@@ -80,7 +80,7 @@ class NavMap:
       self._roads_version = nav.version
       self._roads = StrokeBatch([r.points for r in nav.roads],
                                 [min(st.road_px_min + st.road_px_per_m * r.width, st.road_px_max) for r in nav.roads])
-    self._roads.draw(origin, pos, rot / scale, scale, col(st.road))
+    self._roads.draw(origin, pos, b, scale, col(st.road))
 
     if len(nav.route) >= 2:
       along, seg = nav.along_route(pos, bearing)

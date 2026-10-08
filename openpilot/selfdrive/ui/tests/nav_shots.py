@@ -5,7 +5,8 @@ going through the card's own gesture handling. Run at the device's size on a tes
 
   OPENPILOT_PREFIX=uiport BIG=1 SCALE=1 python selfdrive/ui/tests/nav_shots.py --out <dir> [--camera <png>] [scenario ...]
 
-Each scenario starts the UI afresh and saves port_<shot>.png at the times it names."""
+Each scenario starts the UI afresh and saves port_<shot>.png at the times it names. The perf scenario saves none: it
+times the frames (CPU, real time) through a drive past the turn, the card open with its lanes and map, and the split."""
 import argparse
 import os
 import sys
@@ -20,6 +21,7 @@ STEP = 0.05  # s of virtual time a frame
 LONG_PRESS = 6  # frames a slide's finger moves over
 NAMES = ("none", "start", "open", "slide", "end", "split", "split_start", "turn", "alert", "drag", "long", "arrive", "metric",
          "drive")
+PERF_FROM = 1.0  # s, after the card is up
 
 
 def scenarios(c):
@@ -48,6 +50,7 @@ def scenarios(c):
     "arrive": [(0.0, c.scene("arrive")), (1.5, c.shot("arrive"))],
     "metric": [(0.0, c.metric()), (0.0, c.scene("approach")), (1.5, c.shot("metric"))],
     # driving from 450 m before the turn: the card opens for it by itself, then closes after it
+    "perf": [(0.0, c.drive(450.0)), (30.0, c.pin()), (45.0, c.stop())],
     "drive": [(0.0, c.drive(450.0)), (5.0, c.shot("drive_cruise")), (21.0, c.shot("drive_opening")),
               (25.0, c.shot("drive_lanes")), (36.8, c.shot("drive_turn")), (39.0, c.shot("drive_after_turn")),
               (41.0, c.shot("drive_closed"))],
@@ -73,6 +76,7 @@ class Context:
     self.frames: list[list] = []  # touch events for the frames to come
     self.card = None
     self.clock = 0.0
+    self.done = False
 
   # *** actions ***
 
@@ -85,6 +89,11 @@ class Context:
     def f(_):
       from openpilot.selfdrive.ui.tests.nav_fake import TURN_AT
       self.nav.scene, self.nav.drive_s = "drive", TURN_AT - before_turn
+    return f
+
+  def stop(self):
+    def f(_):
+      self.done = True
     return f
 
   def alert(self, text1: str, text2: str, size: str):
@@ -178,6 +187,29 @@ class Context:
       self.cam.send()
 
 
+def timers(view) -> dict[str, list[float]]:
+  """Times the card's update, its drawing and its map's, each frame, in real time."""
+  perf: dict[str, list[float]] = {"onroad view": [], "card update": [], "card draw": [], "map": []}
+
+  def timed(obj, attr, key):
+    fn = getattr(obj, attr)
+
+    def wrapper(*a, **kw):
+      t0 = time.perf_counter()
+      try:
+        return fn(*a, **kw)
+      finally:
+        perf[key].append(time.perf_counter() - t0)
+    setattr(obj, attr, wrapper)
+  card = view.card
+  timed(view, "render", "onroad view")
+  timed(card, "update", "card update")
+  timed(card, "draw", "card draw")
+  timed(card.map, "render", "map")
+  view.road_view.overlay = card.draw
+  return perf
+
+
 def run(name: str, args):
   real_monotonic = time.monotonic
   ctx = Context(args.out, args.camera)
@@ -193,11 +225,17 @@ def run(name: str, args):
     layout = MainLayout()
     ctx.card = layout._layouts[MainState.ONROAD].card
     gui_app._mouse.get_events = lambda: ctx.frames.pop(0) if ctx.frames else []
+    perf = timers(layout._layouts[MainState.ONROAD]) if name == "perf" else None
     while script and script[0][0] <= 0.0 and not getattr(script[0][1], "is_shot", False):
       script.pop(0)[1](ctx)
     ctx.publish()
     ui_state.update()
     for _ in gui_app.render():
+      if perf is not None and ctx.clock < PERF_FROM:
+        for v in perf.values():
+          v.clear()
+      if ctx.done:
+        break
       while script and script[0][0] <= ctx.clock + 1e-6 and getattr(script[0][1], "is_shot", False):
         script.pop(0)[1](rl)
       if not script:
@@ -208,6 +246,11 @@ def run(name: str, args):
       ctx.publish()
       ui_state.update()
     gui_app.close()
+    if perf is not None:
+      import numpy as np
+      for k, v in perf.items():
+        v = np.array(v) * 1000
+        print(f"perf {k}: mean {v.mean():.2f} ms, p90 {np.percentile(v, 90):.2f}, max {v.max():.2f} over {len(v)} frames", flush=True)
   finally:
     time.monotonic = real_monotonic
 

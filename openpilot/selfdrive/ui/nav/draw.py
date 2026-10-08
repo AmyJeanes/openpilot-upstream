@@ -31,10 +31,12 @@ def strip(points: np.ndarray, half: float) -> np.ndarray:
 
 
 class StrokeBatch:
-  """Many polylines of one colour, each of its own width in px, mitred and square-capped. They're laid out once in
-  their own coordinates (metres east and north, y up), so a frame only maps them onto the screen (a rotation, a scale
-  and the flip of y) and draws a few strips, joined by degenerate triangles."""
+  """Many polylines of one colour, each of its own width in px, mitred and square-capped. They're laid out in their own
+  coordinates (metres east and north, y up) for a scale, and drawn under a transform onto the screen (a rotation, the
+  scale and the flip of y) as a few strips joined by degenerate triangles, so a frame does no work on them in Python:
+  they're laid out again only when the scale has moved enough to change their widths."""
   CHUNK = 6000  # strip vertices per draw call, within raylib's batch
+  RESCALE = 0.02  # the scale's change, as a fraction, that lays them out again (their widths off by up to this)
 
   def __init__(self, lines: list[np.ndarray], widths: list[float]):
     anchors, offsets, halves, chunks, chunk, size = [], [], [], [], [], 0
@@ -70,19 +72,29 @@ class StrokeBatch:
     self.offsets = np.concatenate(offsets) if offsets else np.zeros((0, 2))
     self.halves = np.concatenate(halves)[:, None] if halves else np.zeros((0, 1))
     self.chunks = chunks
+    self._scale: float | None = None
+    self._strips: list = []  # (vertices, their buffer) per chunk, at self._scale
 
-  def draw(self, origin: np.ndarray, centre: np.ndarray, rot: np.ndarray, scale: float, color: rl.Color) -> None:
-    """Draws with `centre` (in the lines' coordinates) at screen point `origin`, rotated by `rot` (2x2, rows giving
-    screen right and up) and scaled px per unit."""
+  def draw(self, origin: np.ndarray, centre: np.ndarray, angle: float, scale: float, color: rl.Color) -> None:
+    """Draws with `centre` (in the lines' coordinates) at screen point `origin`, turned `angle` degrees
+    counterclockwise and scaled px per unit."""
     if not self.chunks:
       return
-    rel = (self.anchors - centre) @ rot.T * scale + self.offsets @ rot.T * self.halves
-    screen = np.empty(rel.shape, np.float32)
-    screen[:, 0] = origin[0] + rel[:, 0]
-    screen[:, 1] = origin[1] - rel[:, 1]
-    for idx in self.chunks:
-      s = np.ascontiguousarray(screen[idx])
-      rl.draw_triangle_strip(rl.ffi.from_buffer("Vector2[]", s), len(s), color)
+    if self._scale is None or abs(scale / self._scale - 1.0) > self.RESCALE:
+      self._scale = scale
+      verts = (self.anchors + self.offsets * self.halves / scale).astype(np.float32)
+      self._strips = []
+      for idx in self.chunks:
+        s = np.ascontiguousarray(verts[idx])
+        self._strips.append((s, rl.ffi.from_buffer("Vector2[]", s)))
+    rl.rl_push_matrix()
+    rl.rl_translatef(float(origin[0]), float(origin[1]), 0.0)
+    rl.rl_scalef(scale, -scale, 1.0)
+    rl.rl_rotatef(angle, 0.0, 0.0, 1.0)
+    rl.rl_translatef(-float(centre[0]), -float(centre[1]), 0.0)
+    for s, buf in self._strips:
+      rl.draw_triangle_strip(buf, len(s), color)
+    rl.rl_pop_matrix()
 
 
 def draw_polyline(points: np.ndarray, thickness: float, color: rl.Color, round_caps: bool = False) -> None:
@@ -171,27 +183,61 @@ def arc(cx: float, cy: float, r: float, a0: float, a1: float, n: int = 10) -> li
           for i in range(n + 1)]
 
 
-# The card's icons are built once per place, size and animation step, as screen points, and drawn from that while they
-# stay put: geometry functions are cached on their arguments rounded to a quarter pixel (and steps to a hundredth)
+# The card's icons are built once per place, size and animation step and drawn from that while they stay put: the
+# geometry functions are cached on their arguments rounded to a quarter pixel (and steps to a hundredth)
 def q(v: float) -> float:
   return round(v * 4) / 4
 
 
-Stroke = tuple[tuple[rl.Vector2, ...], float]  # points and width
+class Shape:
+  """Pieces of one colour drawn in one call: each piece a triangle strip of its own (a line's quad, a round join's
+  polygon zigzagged across, a lone triangle), chained into one strip by repeating the vertices either side of each
+  join (degenerate triangles, which draw nothing). raylib's strip alternates each triangle's vertex order to keep the
+  winding, so each piece starts on whichever parity puts its triangles screen-counterclockwise (the side raylib
+  doesn't cull)."""
+  def __init__(self, pieces):
+    seq: list = []
+    for p in pieces:
+      if len(p) < 3:
+        continue
+      (ax, ay), (bx, by), (cx, cy) = p[0], p[1], p[2]
+      parity = 0 if (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) <= 0 else 1  # y down: <= 0 is counterclockwise
+      if seq:
+        seq += [seq[-1], p[0]]
+      if len(seq) % 2 != parity:
+        seq.append(p[0])
+      seq += p
+    self.n = len(seq)
+    if self.n:
+      self._points = np.ascontiguousarray(seq, np.float32)
+      self._buf = rl.ffi.from_buffer("Vector2[]", self._points)
+
+  def draw(self, color: rl.Color) -> None:
+    if self.n:
+      rl.draw_triangle_strip(self._buf, self.n, color)
 
 
-def strokes(paths, w: float) -> tuple[Stroke, ...]:
-  return tuple((tuple(rl.Vector2(x, y) for x, y in p), w) for p in paths)
+def stroke_tris(paths, w: float) -> list:
+  """Strokes through each path's points, w wide, round at their joints and ends, as strip pieces for a Shape."""
+  pieces = []
+  r = w / 2
+  k = max(8, min(24, int(w * 2)))  # as few segments as still look round at the width
+  ring = [(math.cos(2 * math.pi * i / k) * r, math.sin(2 * math.pi * i / k) * r) for i in range(k)]
+  zigzag = [0] + [j for i in range(1, k // 2 + 1) for j in (i, k - i)][:k - 1]  # the polygon as a strip, across
+  for path in paths:
+    for (ax, ay), (bx, by) in zip(path, path[1:], strict=False):
+      d = math.hypot(bx - ax, by - ay)
+      if d < 1e-6:
+        continue
+      nx, ny = -(by - ay) / d * r, (bx - ax) / d * r
+      pieces.append([(ax + nx, ay + ny), (ax - nx, ay - ny), (bx + nx, by + ny), (bx - nx, by - ny)])
+    for px, py in path:
+      pieces.append([(px + ring[i][0], py + ring[i][1]) for i in zigzag])
+  return pieces
 
 
-def draw_strokes(lines: tuple[Stroke, ...], color: rl.Color) -> None:
-  """Each a stroke through its points, round at its joints and ends."""
-  for pts, w in lines:
-    for a, b in zip(pts, pts[1:], strict=False):
-      rl.draw_line_ex(a, b, w, color)
-    segments = max(8, min(24, int(w * 2)))  # as few as still look round at the width
-    for v in pts:
-      rl.draw_circle_sector(v, w / 2, 0, 360, segments, color)
+def arrow_tris(tip, l, notch, r) -> list:
+  return [[tip, l, notch], [tip, notch, r]]
 
 
 Strokes = list[list[tuple[float, float]]]
@@ -242,18 +288,18 @@ def maneuver_paths(kind: str) -> Strokes:
 
 
 @lru_cache(maxsize=32)
-def _maneuver(kind: str, left: bool, cx: float, cy: float, size: float) -> tuple[Stroke, ...]:
+def _maneuver(kind: str, left: bool, cx: float, cy: float, size: float) -> Shape:
   s = size / 48
   paths = [[(48 - x, y) for x, y in p] if left else p for p in maneuver_paths(kind)]
-  return strokes([[(cx - size / 2 + x * s, cy - size / 2 + y * s) for x, y in p] for p in paths], 4.5 * s)
+  return Shape(stroke_tris([[(cx - size / 2 + x * s, cy - size / 2 + y * s) for x, y in p] for p in paths], 4.5 * s))
 
 
 def draw_maneuver(cx: float, cy: float, size: float, kind: str, left: bool, color: rl.Color) -> None:
-  draw_strokes(_maneuver(kind, left, q(cx), q(cy), q(size)), color)
+  _maneuver(kind, left, q(cx), q(cy), q(size)).draw(color)
 
 
 @lru_cache(maxsize=64)
-def _lane_arrow(kind: str, cx: float, cy: float, size: float) -> tuple[Stroke, ...]:
+def _lane_arrow(kind: str, cx: float, cy: float, size: float) -> Shape:
   s = size / 24
 
   def P(x, y):
@@ -263,79 +309,64 @@ def _lane_arrow(kind: str, cx: float, cy: float, size: float) -> tuple[Stroke, .
     b = [P(15, 4), P(19, 8), P(15, 12)]
     if kind == "left":
       a, b = [(2 * cx - x, y) for x, y in a], [(2 * cx - x, y) for x, y in b]
-    return strokes([a, b], 2.8 * s)
-  return strokes([[P(12, 20), P(12, 4)], [P(6, 10), P(12, 4), P(18, 10)]], 2.5 * s)
+    return Shape(stroke_tris([a, b], 2.8 * s))
+  return Shape(stroke_tris([[P(12, 20), P(12, 4)], [P(6, 10), P(12, 4), P(18, 10)]], 2.5 * s))
 
 
 def lane_arrow(cx: float, cy: float, size: float, kind: str, color: rl.Color) -> None:
   """A lane's arrow in a 24-unit box: up, left or right."""
-  draw_strokes(_lane_arrow(kind, q(cx), q(cy), q(size)), color)
+  _lane_arrow(kind, q(cx), q(cy), q(size)).draw(color)
 
 
 @lru_cache(maxsize=64)
-def _split_arrow(right: bool, cx: float, cy: float, size: float) -> tuple[tuple[Stroke, ...], tuple[Stroke, ...]]:
+def _split_arrow(right: bool, cx: float, cy: float, size: float) -> tuple[Shape, Shape]:
   s = size / 24
 
   def P(x, y):
     x = x if right else 24 - x
     return (cx - size / 2 + x * s, cy - size / 2 + y * s)
-  straight = strokes([[P(9, 15), P(9, 4)], [P(4.5, 8.5), P(9, 4), P(13.5, 8.5)]], 2.5 * s)
-  turn = strokes([[P(9, 21), P(9, 15)] + [P(*p) for p in arc(14, 15, 5, 180, 270, 6)] + [P(20, 10)],
-                  [P(17, 7), P(20, 10), P(17, 13)]], 2.8 * s)
+  straight = Shape(stroke_tris([[P(9, 15), P(9, 4)], [P(4.5, 8.5), P(9, 4), P(13.5, 8.5)]], 2.5 * s))
+  turn = Shape(stroke_tris([[P(9, 21), P(9, 15)] + [P(*p) for p in arc(14, 15, 5, 180, 270, 6)] + [P(20, 10)],
+                            [P(17, 7), P(20, 10), P(17, 13)]], 2.8 * s))
   return straight, turn
 
 
 def split_arrow(cx: float, cy: float, size: float, right: bool, straight_col: rl.Color, turn_col: rl.Color) -> None:
   """A lane that goes straight or turns: its straight branch and its turning branch, each in its own colour."""
   straight, turn = _split_arrow(right, q(cx), q(cy), q(size))
-  draw_strokes(straight, straight_col)
-  draw_strokes(turn, turn_col)
-
-
-Triangle = tuple[rl.Vector2, rl.Vector2, rl.Vector2]
-
-
-def draw_triangles(tris: tuple[Triangle, ...], color: rl.Color) -> None:
-  for a, b, c in tris:
-    rl.draw_triangle(a, b, c, color)
-
-
-def _arrow_tris(tip, l, notch, r) -> tuple[Triangle, ...]:
-  tip, l, notch, r = (rl.Vector2(*p) for p in (tip, l, notch, r))
-  return (tip, l, notch), (tip, notch, r)
+  straight.draw(straight_col)
+  turn.draw(turn_col)
 
 
 @lru_cache(maxsize=32)
-def _car(cx: float, cy: float, size: float) -> tuple[Triangle, ...]:
+def _car(cx: float, cy: float, size: float) -> Shape:
   s = size / 24
-  return _arrow_tris((cx, cy - 9 * s), (cx - 7 * s, cy + 9 * s), (cx, cy + 5 * s), (cx + 7 * s, cy + 9 * s))
+  return Shape(arrow_tris((cx, cy - 9 * s), (cx - 7 * s, cy + 9 * s), (cx, cy + 5 * s), (cx + 7 * s, cy + 9 * s)))
 
 
 def draw_car(cx: float, cy: float, size: float, color: rl.Color) -> None:
   """The map's car arrow, pointing up."""
-  draw_triangles(_car(q(cx), q(cy), q(size)), color)
+  _car(q(cx), q(cy), q(size)).draw(color)
 
 
 @lru_cache(maxsize=32)
-def _corners(x0: float, y0: float, x1: float, y1: float, rad: float) -> tuple[Triangle, ...]:
+def _corners(x0: float, y0: float, x1: float, y1: float, rad: float) -> Shape:
   tris = []
   for kx, ky, cx, cy, a0 in [(x0, y0, x0 + rad, y0 + rad, 180), (x1, y0, x1 - rad, y0 + rad, 270),
                              (x1, y1, x1 - rad, y1 - rad, 0), (x0, y1, x0 + rad, y1 - rad, 90)]:
-    k = rl.Vector2(kx, ky)
-    pts = [rl.Vector2(*p) for p in arc(cx, cy, rad, a0, a0 + 90, 12)]
-    for p, n in zip(pts, pts[1:], strict=False):  # both windings: raylib culls one
-      tris += [(k, n, p), (k, p, n)]
-  return tuple(tris)
+    pts = arc(cx, cy, rad, a0, a0 + 90, 12)
+    tris += [[(kx, ky), p, n] for p, n in zip(pts, pts[1:], strict=False)]
+  return Shape(tris)
 
 
 def mask_corners(r: rl.Rectangle, rad: float, color: rl.Color) -> None:
   """Paints the bits of a rectangle outside its rounded corners, for content a rectangular scissor can't round off."""
   rad = min(rad, r.width / 2, r.height / 2)
-  draw_triangles(_corners(q(r.x), q(r.y), q(r.x + r.width), q(r.y + r.height), q(rad)), color)
+  _corners(q(r.x), q(r.y), q(r.x + r.width), q(r.y + r.height), q(rad)).draw(color)
 
 
 @lru_cache(maxsize=16)
-def _road_icon(cx: float, cy: float, d: float, step: float, morph: float) -> tuple[tuple[Stroke, ...], tuple[Triangle, ...]]:
+def _road_icon(cx: float, cy: float, d: float, step: float, morph: float) -> tuple[Shape, Shape]:
   s = d / 48
 
   def P(x, y):
@@ -348,8 +379,8 @@ def _road_icon(cx: float, cy: float, d: float, step: float, morph: float) -> tup
 
   def G(xb, y):  # a point at height y on the ground line that meets the bottom at xb
     return 24 + (xb - 24) * (y - vy) / (y0 - vy), y
-  edges = strokes([[Q(G(8, y0), (15, 33)), Q(G(8, y1), (33, 15))], [Q(G(40, y0), (33, 33)), Q(G(40, y1), (15, 15))]],
-                  lerp(2.0, 4.4, m) * s)
+  edges = stroke_tris([[Q(G(8, y0), (15, 33)), Q(G(8, y1), (33, 15))], [Q(G(40, y0), (33, 33)), Q(G(40, y1), (15, 15))]],
+                      lerp(2.0, 4.4, m) * s)
   # each dash slides into the next nearer one's place over a step: the nearest leaves at the bottom, a new one
   # arrives at the top; on the ground the far dash is shorter and thinner
   spans = [(46.0, 38.0), (y0 - 1, 27.0), (23.0, 16.5), (12.0, 9.5)]  # off the bottom, near, far, off the top
@@ -359,16 +390,15 @@ def _road_icon(cx: float, cy: float, d: float, step: float, morph: float) -> tup
     ya, yb = min(lerp(a0, a1, step), y0 - 1), max(lerp(b0, b1, step), y1)
     if ya - yb > 0.3:
       dashes.append((ya, yb))
-  tris: list[Triangle] = []
+  tris = []
   for xb in (15.5, 32.5):
     for ya, yb in dashes:
       (xa, _), (xz, _) = G(xb, ya), G(xb, yb)
       wa, wz = 1.9 * s * (ya - vy) / (y0 - vy), 1.9 * s * (yb - vy) / (y0 - vy)
       (ax, ay), (bx, by) = P(xa, ya), P(xz, yb)
-      tris.append((rl.Vector2(ax + wa / 2, ay), rl.Vector2(bx + wz / 2, by), rl.Vector2(bx - wz / 2, by)))
-      tris.append((rl.Vector2(ax + wa / 2, ay), rl.Vector2(bx - wz / 2, by), rl.Vector2(ax - wa / 2, ay)))
-  tris += _arrow_tris(P(24, 24.5), P(18.5, 35.5), P(24, 32.5), P(29.5, 35.5))  # the car, a little foreshortened
-  return edges, tuple(tris)
+      tris.append([(ax + wa / 2, ay), (ax - wa / 2, ay), (bx + wz / 2, by), (bx - wz / 2, by)])  # a dash: one quad
+  tris += arrow_tris(P(24, 24.5), P(18.5, 35.5), P(24, 32.5), P(29.5, 35.5))  # the car, a little foreshortened
+  return Shape(edges), Shape(tris)
 
 
 def draw_road_icon(cx: float, cy: float, d: float, color: rl.Color, step: float, morph: float, end_red: rl.Color,
@@ -381,23 +411,23 @@ def draw_road_icon(cx: float, cy: float, d: float, color: rl.Color, step: float,
   if morph > 0:
     rl.draw_circle(int(cx), int(cy), d / 2, with_alpha(end_red, a * morph))
   col = mix(color, with_alpha(x_lines, a), morph)
-  edges, tris = _road_icon(q(cx), q(cy), q(d), round(step, 2), round(morph, 2))
-  draw_strokes(edges, col)
+  edges, inner = _road_icon(q(cx), q(cy), q(d), round(step, 2), round(morph, 2))
+  edges.draw(col)
   if morph < 0.45:
-    draw_triangles(tris, with_alpha(col, 1 - morph / 0.45))
+    inner.draw(with_alpha(col, 1 - morph / 0.45))
 
 
 @lru_cache(maxsize=8)
-def _pin(cx: float, cy: float, pinned: float) -> tuple[tuple[Triangle, ...], tuple[Stroke, ...]]:
+def _pin(cx: float, cy: float, pinned: float) -> tuple[Shape, Shape]:
   ang, lift = math.radians(lerp(40, 0, pinned)), lerp(-1, 0, pinned)
 
   def PN(x, y):
     dx, dy = x - 24, y - 26 + lift
     return cx + (dx * math.cos(ang) - dy * math.sin(ang)) * 2, cy + (2 + dx * math.sin(ang) + dy * math.cos(ang)) * 2
   head = [PN(18.5, 11), PN(29.5, 11), PN(27.5, 20), PN(32, 25), PN(16, 25), PN(20.5, 20)]
-  tl, tr, wr, br, bl, wl = (rl.Vector2(*p) for p in head)
-  fill = ((tl, wl, wr), (tl, wr, tr), (wl, bl, br), (wl, br, wr))
-  outline = strokes([head + head[:1]], 4.4) + strokes([[PN(24, 25), PN(24, 37)]], 4.8)
+  tl, tr, wr, br, bl, wl = head
+  fill = Shape([[tl, wl, wr], [tl, wr, tr], [wl, bl, br], [wl, br, wr]])
+  outline = Shape(stroke_tris([head + head[:1]], 4.4) + stroke_tris([[PN(24, 25), PN(24, 37)]], 4.8))
   return fill, outline
 
 
@@ -406,5 +436,5 @@ def draw_pin(cx: float, cy: float, pinned: float, color: rl.Color) -> None:
   pinned open (1). Drawn on a 48-unit grid, 2 px a unit, turning about the pin's waist."""
   fill, outline = _pin(q(cx), q(cy), round(pinned, 2))
   if pinned > 0.01:
-    draw_triangles(fill, with_alpha(color, pinned))
-  draw_strokes(outline, color)
+    fill.draw(with_alpha(color, pinned))
+  outline.draw(color)
