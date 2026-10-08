@@ -999,6 +999,8 @@ struct DebugLine {
               // through, right), t a taper's lane, q lane count flag, r/b route (ahead/behind), n nav's lane plan,
               // m next turn, g where its signal comes on
   std::vector<P3> pts;
+  std::vector<uint8_t> need;  // points the ground cache didn't have, for GroundStep
+  int pending = 0;
 };
 
 // The map around the car from the bridge, drawn into the world every player frame while on (debug command, key_debug)
@@ -1008,7 +1010,7 @@ struct DebugOverlay {
   bool thin = false;    // 1-px lines as before the strips
   bool casing = true;   // white and yellow strips edged dark
   std::string layers = "edsjrnmaxptq";  // layer letters (DebugLayer); f fills junction areas
-  float lift = 0.05f;   // m above the ground, added to each kind's own
+  float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
   float layerWidth[128];  // and each layer's, by its letter
   float dist = 120.0f;  // m from the camera drawn
@@ -1019,7 +1021,6 @@ struct DebugOverlay {
   int probes = 100;      // ground probes per frame
   std::vector<DebugLine> lines;
   int vertices = 0;
-  size_t probeLine = 0, probePt = 0;  // how far the ground probes have got through the lines
   int grounded = 0, offGround = 0;    // points put on the ground, and left at the map's height (no ground near it)
   int polys = 0;                      // drawn last frame
   bool recording = false;  // the bridge is recording: drawn only when forced
@@ -1031,6 +1032,9 @@ constexpr double DEBUG_STALE = 3.0;  // s without new lines: the bridge stopped 
 constexpr float DEBUG_DENSE = 3.0f;  // m at most between a strip's points, so it follows the ground between them
 constexpr float PROBE_ABOVE = 2.0f, PROBE_MAX_DZ = 2.5f;  // m above a point the ground is looked for from, and kept within
 constexpr float GROW_MAX = 4.0f;  // times its width a strip widens to at most
+// m more lift per m from the player: further off, the depth buffer and the game's jittered anti-aliasing can't tell a
+// strip a few cm over the road from the road, and it flickers in and out
+constexpr float DIST_LIFT = 0.001f;
 
 char DebugLayer(char kind) {
   switch (kind) {
@@ -1043,8 +1047,9 @@ char DebugLayer(char kind) {
   }
 }
 
-// Each kind's look: colour, width (m), dash and gap (m; 0: solid), and lift (m) over the ground, so kinds that overlap
-// don't fight. Lane lines, centre lines, stop lines, crossings and arrows' turns as the map view (map/view.html) colours
+// Each kind's look: colour, width (m), dash and gap (m; 0: solid), and lift (m) over the ground, a step apart for each
+// kind (and its casing half a step under it) so kinds that overlap, as a kerb along a junction's outline, never share a
+// depth and fight. Lane lines, centre lines, stop lines, crossings and arrows' turns as the map view (map/view.html) colours
 // them; kerbs green, which shows against both the asphalt and the white paint.
 struct KindStyle {
   char kind;
@@ -1052,24 +1057,24 @@ struct KindStyle {
   float width, on, off, lift;
 };
 constexpr KindStyle STYLES[] = {
-    {'e', 40, 230, 90, 235, 0.35f, 0, 0, 0.02f},       // kerb
-    {'d', 245, 245, 245, 235, 0.20f, 3, 6, 0.03f},     // lane line, dashed
-    {'w', 245, 245, 245, 235, 0.20f, 0, 0, 0.03f},     // lane line, solid
-    {'y', 242, 194, 0, 235, 0.20f, 3, 6, 0.03f},       // centre line, dashed
-    {'c', 242, 194, 0, 235, 0.20f, 0, 0, 0.03f},       // centre line or a median's edge, solid
-    {'p', 175, 120, 255, 220, 0.15f, 1, 1, 0.03f},     // a parking lane's edge along the lanes
-    {'l', 255, 50, 50, 235, 0.60f, 0, 0, 0.04f},       // stop line at lights
-    {'s', 255, 140, 0, 235, 0.60f, 0, 0, 0.04f},       // stop line at a stop sign
-    {'k', 255, 140, 0, 235, 0.45f, 0.6f, 0.6f, 0.04f}, // give way line
-    {'x', 235, 235, 235, 120, 3.0f, 0.5f, 0.6f, 0.01f},// crossing, its stripes
-    {'j', 40, 110, 255, 235, 0.15f, 0, 0, 0.02f},      // junction area's outline
-    {'L', 77, 163, 255, 240, 0.30f, 0, 0, 0.05f},      // lane arrow turning left
-    {'T', 235, 235, 235, 240, 0.30f, 0, 0, 0.05f},     // through
-    {'R', 255, 169, 64, 240, 0.30f, 0, 0, 0.05f},      // right
-    {'t', 0, 220, 255, 110, 1.20f, 0, 0, 0.01f},       // the middle of a lane opening or closing along a taper
+    {'e', 40, 230, 90, 235, 0.35f, 0, 0, 0.060f},       // kerb
+    {'d', 245, 245, 245, 235, 0.20f, 3, 6, 0.090f},     // lane line, dashed
+    {'w', 245, 245, 245, 235, 0.20f, 0, 0, 0.090f},     // lane line, solid
+    {'y', 242, 194, 0, 235, 0.20f, 3, 6, 0.105f},       // centre line, dashed
+    {'c', 242, 194, 0, 235, 0.20f, 0, 0, 0.105f},       // centre line or a median's edge, solid
+    {'p', 175, 120, 255, 220, 0.15f, 1, 1, 0.075f},     // a parking lane's edge along the lanes
+    {'l', 255, 50, 50, 235, 0.60f, 0, 0, 0.120f},       // stop line at lights
+    {'s', 255, 140, 0, 235, 0.60f, 0, 0, 0.120f},       // stop line at a stop sign
+    {'k', 255, 140, 0, 235, 0.45f, 0.6f, 0.6f, 0.120f}, // give way line
+    {'x', 235, 235, 235, 120, 3.0f, 0.5f, 0.6f, 0.015f},// crossing, its stripes
+    {'j', 40, 110, 255, 235, 0.15f, 0, 0, 0.045f},      // junction area's outline
+    {'L', 77, 163, 255, 240, 0.30f, 0, 0, 0.135f},      // lane arrow turning left
+    {'T', 235, 235, 235, 240, 0.30f, 0, 0, 0.135f},     // through
+    {'R', 255, 169, 64, 240, 0.30f, 0, 0, 0.135f},      // right
+    {'t', 0, 220, 255, 110, 1.20f, 0, 0, 0.030f},       // the middle of a lane opening or closing along a taper
     {'r', 255, 25, 25, 100, 1.75f, 0, 0, 0.0f},        // route ahead
     {'b', 140, 15, 15, 100, 1.75f, 0, 0, 0.0f},        // route behind
-    {'n', 255, 255, 255, 235, 0.25f, 2, 1.5f, 0.06f},  // nav's lane plan, over the route
+    {'n', 255, 255, 255, 235, 0.25f, 2, 1.5f, 0.150f},  // nav's lane plan, over the route
 };
 constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
 
@@ -1093,6 +1098,14 @@ void DebugColour(char kind, int &r, int &g, int &b) {
 }
 
 bool IsMarker(char kind) { return kind == 'm' || kind == 'g' || kind == 'q'; }
+
+// Where the overlay is drawn from (its distance limit, widening and order): the player. Not the rendered camera, which
+// on the player's frames can still be openpilot's from the frame before (interleaving), so strips' widths and the
+// distance limit jumped between frames: flicker with the car standing still.
+P3 DebugOrigin() {
+  Vector3 p = GET_ENTITY_COORDS(PLAYER_PED_ID(), TRUE);
+  return {p.x, p.y, p.z};
+}
 
 // points added along a strip's line no more than DEBUG_DENSE m apart (heights along it), so it can follow the ground
 void Densify(DebugLine &l) {
@@ -1164,30 +1177,78 @@ void SimplifyLine(std::vector<P3> &pts) {
   pts.resize(m);
 }
 
-// moves the lines' points onto the game's ground, up to probes new ones a frame, the bridge's order (nearest first by
-// kind), and drops the points a line on the ground doesn't need
-void GroundStep(DebugOverlay &d, double now) {
-  int probes = 0;
+// A point's ground from the cache: true with z set (NaN: none near, left at the map's height), false if it needs a probe
+bool GroundCached(const P3 &p, double now, float &z) {
+  auto it = g_ground.find(GroundKey(p));
+  if (it == g_ground.end() || (!std::isfinite(it->second.z) && now - it->second.t > GROUND_RETRY)) return false;
+  z = it->second.z;
+  return true;
+}
+
+// Puts a new message's points on the ground they had before (the bridge sends the same points again every 0.1 s), so
+// no frame draws a line half at the map's heights; the points never probed are left for GroundStep. A line is
+// simplified once all its points are settled.
+void GroundFromCache(DebugOverlay &d, double now) {
   if (g_ground.size() > GROUND_KEEP) g_ground.clear();
-  for (; d.probeLine < d.lines.size(); d.probeLine++, d.probePt = 0) {
-    DebugLine &l = d.lines[d.probeLine];
+  d.grounded = d.offGround = 0;
+  for (DebugLine &l : d.lines) {
+    l.pending = 0;
+    l.need.assign(l.pts.size(), 0);
     if (l.kind == 'm' || l.kind == 'g') continue;
-    for (; d.probePt < l.pts.size(); d.probePt++) {
-      P3 &p = l.pts[d.probePt];
-      uint64_t key = GroundKey(p);
-      auto it = g_ground.find(key);
-      if (it == g_ground.end() || (!std::isfinite(it->second.z) && now - it->second.t > GROUND_RETRY)) {
-        if (probes >= d.probes) return;
-        probes++;
-        float z = 0;
-        bool hit = GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + PROBE_ABOVE, &z, FALSE, FALSE) && std::fabs(z - p.z) < PROBE_MAX_DZ;
-        it = g_ground.insert_or_assign(key, GroundHit{hit ? z : NAN, now}).first;
+    for (size_t i = 0; i < l.pts.size(); i++) {
+      float z;
+      if (!GroundCached(l.pts[i], now, z)) {
+        l.need[i] = 1, l.pending++;
+        continue;
       }
-      if (std::isfinite(it->second.z)) p.z = it->second.z, d.grounded++;
+      if (std::isfinite(z)) l.pts[i].z = z, d.grounded++;
       else d.offGround++;
     }
-    if (!IsMarker(l.kind)) SimplifyLine(l.pts);
+    if (!l.pending && !IsMarker(l.kind)) SimplifyLine(l.pts);
   }
+}
+
+// Probes the ground under the points the cache doesn't have, up to probes a frame, nearest lines first; a line is
+// simplified (the points it doesn't need on the ground dropped) once all its points are settled
+void GroundStep(DebugOverlay &d, double now) {
+  int probes = 0;
+  for (DebugLine &l : d.lines) {
+    if (!l.pending) continue;
+    for (size_t i = 0; i < l.pts.size() && l.pending; i++) {
+      if (!l.need[i]) continue;
+      if (probes >= d.probes) return;
+      P3 &p = l.pts[i];
+      float z = 0;
+      if (!GroundCached(p, now, z)) {  // another line's point may have put it there meanwhile
+        probes++;
+        bool hit = GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + PROBE_ABOVE, &z, FALSE, FALSE) && std::fabs(z - p.z) < PROBE_MAX_DZ;
+        z = hit ? z : NAN;
+        g_ground.insert_or_assign(GroundKey(p), GroundHit{z, now});
+      }
+      if (std::isfinite(z)) p.z = z, d.grounded++;
+      else d.offGround++;
+      l.need[i] = 0, l.pending--;
+    }
+    if (!l.pending && !IsMarker(l.kind)) SimplifyLine(l.pts);
+  }
+}
+
+// The lines nearest the car first (markers and the route before all), in 5 m steps, the bridge's order within each:
+// the same order every frame, so a capped frame always leaves out the same, furthest pieces
+void SortByDistance(std::vector<DebugLine> &lines, float x, float y) {
+  std::vector<std::pair<float, size_t>> key(lines.size());
+  for (size_t k = 0; k < lines.size(); k++) {
+    const DebugLine &l = lines[k];
+    float best = 1e9f;
+    for (const P3 &p : l.pts) best = std::min(best, std::hypot(p.x - x, p.y - y));
+    bool first = IsMarker(l.kind) || l.kind == 'r' || l.kind == 'b' || l.kind == 'n';
+    key[k] = {first ? -1.0f : std::floor(best / 5.0f), k};
+  }
+  std::stable_sort(key.begin(), key.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  std::vector<DebugLine> out;
+  out.reserve(lines.size());
+  for (auto &[_, k] : key) out.push_back(std::move(lines[k]));
+  lines.swap(out);
 }
 
 // gta5_overlay.py's polylines: a kind letter, then decimetres from the origin, each point after the first as the change
@@ -1254,7 +1315,7 @@ int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float
   half.resize(n), up.resize(n), dist.resize(n), nrm.resize(n), mitre.resize(n);
   for (size_t i = 0; i < n; i++) {
     float g = Grow(v, pts[i], dist[i]);
-    half[i] = 0.5f * width * g, up[i] = lift * g;
+    half[i] = 0.5f * width * g, up[i] = lift * g + DIST_LIFT * dist[i];
   }
   nrm[0] = {0, 0, 0};
   for (size_t i = 1; i < n; i++) {
@@ -1370,8 +1431,8 @@ void DrawDebug(double now) {
   }
   auto has = [&](char layer) { return d.layers.find(layer) != std::string::npos; };
   bool fill = has('f');
-  Vector3 cam = GET_FINAL_RENDERED_CAM_COORD();
-  DebugView view{cam.x, cam.y, d.dist, d.thin ? 0.0f : d.grow};
+  P3 at = DebugOrigin();
+  DebugView view{at.x, at.y, d.dist, d.thin ? 0.0f : d.grow};
   int budget = d.maxPolys;
   float lift = d.lift;
   for (const DebugLine &l : d.lines) {
@@ -1398,7 +1459,7 @@ void DrawDebug(double now) {
     }
     if (l.kind == 'j' && fill && l.pts.size() >= 4) {
       // a fan from the first corner of the area's outline
-      float up = StyleOf('j').lift + lift;
+      float up = 0.0075f + lift;  // under the outlines and lines, over the route
       P3 o{p0.x, p0.y, p0.z + up};
       for (size_t i = 2; i + 1 < l.pts.size() && budget >= 2; i++) {
         const P3 &a = l.pts[i - 1], &c = l.pts[i];
@@ -1424,7 +1485,7 @@ void DrawDebug(double now) {
       // white and yellow lie on paint of their colour: a dark edge tells ours from the game's
       static constexpr int CASING_RGBA[4] = {10, 10, 10, 190};
       constexpr float CASING = 0.05f;  // m each side
-      budget -= DrawStrip(l.pts, s, width + 2 * CASING, s.lift + lift, view, budget, CASING_RGBA, width / (width + 2 * CASING));
+      budget -= DrawStrip(l.pts, s, width + 2 * CASING, s.lift + lift - 0.0075f, view, budget, CASING_RGBA, width / (width + 2 * CASING));
     }
     budget -= DrawStrip(l.pts, s, width, s.lift + lift, view, budget);
   }
@@ -2321,8 +2382,9 @@ void HandleMessage(const Message &m, double now) {
     if (!g_debug.on) return;
     ParseDebugGeo(MsgStr(m, "g"), static_cast<float>(MsgNum(m, "ox")), static_cast<float>(MsgNum(m, "oy")), static_cast<float>(MsgNum(m, "oz")),
                   g_debug.lines, g_debug.vertices);
-    g_debug.probeLine = g_debug.probePt = 0;
-    g_debug.grounded = g_debug.offGround = 0;
+    P3 at = DebugOrigin();
+    SortByDistance(g_debug.lines, at.x, at.y);
+    if (g_debug.ground && !g_debug.thin) GroundFromCache(g_debug, now);
     g_debug.recording = MsgBool(m, "rec");
     g_debug.t = now;
   } else if (type == "roadq") {
