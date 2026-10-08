@@ -57,8 +57,8 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 
 ## Navigation
 Set a waypoint on the game's map while engaged and the car follows GTA's GPS route to it: the plugin sends the route (a
-point every 5 m for 500 m) and navd's planner finds the turns in it, lowers the set speed to 12 mph for each (16 mph for
-a gentler one; the car reports a lower cruise speed, as a car's own navigation would), and signals
+point every 5 m for 500 m) and navd's planner finds the turns in it, caps the speed to 12 mph for each (16 mph for
+a gentler one), and signals
 it, which below 19 mph asks the driving model for the turn. The model takes that request as a pulse when the blinker
 comes on, and forgets it after several seconds and at a stop, so the bridge drops the blinker briefly for openpilot
 (not the car's lights) every 2.5 s until the turn starts, when the car pulls away again, or when the model stops
@@ -131,9 +131,16 @@ a model trained on v1's 173 reads only the start of it.
 next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
 beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,
 from a route it finds over the map itself (its docstring says how).
-`GTA5_NOO` is Navigate on openpilot: `on` (the default, for test runs) nav drives; `param` follows the UI's nav button
-(the `NavigateOnOpenpilot` param); `off` only guides (no NavDesire, lane changes, caps or route input). With `param` or
-`off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
+nav's speed cap reaches openpilot as `navSpeed` (cereal's custom.capnp: the cap and why, a turn either way, a bend, a
+lower limit ahead, a lane change, a turn bay or the arrival), and openpilot's longitudinal planner drives the lower of it
+and the set speed, as sunnypilot's map curve speed control does: the set speed stays the car's (the arrow keys), and the
+onroad UI shows the cap under the MAX box while it is lower. `GTA5_NAV_SPEED=can` instead lowers the simulated car's set
+speed to the cap (the car reports it on CAN, as before), for A/B runs.
+`GTA5_NOO` is Navigate on openpilot: `param` (the default) follows the UI's nav button (the `NavigateOnOpenpilot`
+param); `on` drives regardless, which test runs (e2e, A/Bs) must set; `off` only guides. Guiding only, nav takes no
+actions (no turn signals or desires, lane changes, slowing for turns, arrival or route input for the model) but still
+caps the speed for the road's bends up to the next turn and for its speed limits, and holds keepRight out of the
+oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
 changes.
 
 ### navd and the GTA layer

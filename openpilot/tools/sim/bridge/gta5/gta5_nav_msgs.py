@@ -13,6 +13,7 @@ from typing import NamedTuple
 import numpy as np
 
 from openpilot.cereal import log, messaging
+from openpilot.selfdrive.navd.maneuvers import junction_maneuvers
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, LEFTS, RIGHTS
 
@@ -73,9 +74,10 @@ def sign(m: dict) -> str:
 
 
 def maneuvers(route) -> list[Maneuver]:
-  """The route's maneuvers worth showing, in order: turns, ramps, forks, merges and the arrival."""
+  """The route's maneuvers worth showing, in order: turns, ramps, forks, merges and the arrival; turns through a
+  junction's links as one (navd's junction_maneuvers)."""
   out = []
-  for m in route.maneuvers:
+  for m in junction_maneuvers(route):
     kind = MANEUVERS.get(m.get("type"))
     i = m.get("begin_shape_index", 0)
     if kind is None or kind[0] not in SHOWN or i >= len(route.along):

@@ -332,9 +332,9 @@ class Route:
 
   def lane_arrows(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
     """The turn arrows of the lanes into each junction within `distance` m: [[m ahead to where they end, each lane's
-    from the left, ';'-separated]]."""
-    arrows = self.lanes.arrows if self.lanes is not None else []
-    return [[round(e - self.at, 1), [";".join(sorted(t)) for t in turns]] for e, turns in arrows if -behind < e - self.at < distance]
+    from the left, ';'-separated[, the route's move through the junction as they call it, where known]]]."""
+    arrows = self.lanes.arrows_moves if self.lanes is not None else []
+    return [[round(a[0] - self.at, 1), [";".join(sorted(t)) for t in a[1]], *a[2:]] for a in arrows if -behind < a[0] - self.at < distance]
 
   def lane_drops(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
     """The junctions within `distance` m the route goes straight on through onto fewer lanes (RouteLanes.drops):

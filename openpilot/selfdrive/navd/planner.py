@@ -20,6 +20,7 @@ DEBUG = bool(os.getenv("NAVD_DEBUG") or os.getenv("GTA5_DEBUG"))
 TURN_ANGLE = 50.0  # deg of heading change along TURN_WINDOW m of route that makes a turn, not a bend
 TURN_WINDOW = 30.0  # m
 TURN_HOLDS = 20.0  # m past the turn where the route still heads the new way: a jog between lanes comes back
+JOG_LINK = 25.0  # m: a turn off a link this short across a junction (a jog between offset roads) is one from the road before it
 U_TURN_ANGLE = 135.0  # deg: the model can't make a U-turn, so drive on until GTA routes round instead
 TURN_SPEED = 4.5  # m/s for a square turn: slower turns tighter, and the lane turn desire works below 19 mph
 SHARP_TURN_SPEED = 4.0  # m/s beyond sharp_angle
@@ -28,6 +29,7 @@ TURN_SLOW_BY = 25.0  # m before the turn
 SLOW_DECEL = 0.6  # m/s^2, the approach the cruise cap allows
 SLOW_LAG = 1.0  # s: openpilot eases into a lower set speed
 LOOKAHEAD = 250.0  # m, turns further on don't cap the speed yet
+NO_CAP = (0.0, "")
 # Signal SIGNAL_TIME before a turn (no further out than SIGNAL_DIST) once below the lane change speed, which would ask
 # for a lane change instead: further out, the model stops short with a turn asked for and no turning to take.
 SIGNAL_TIME = 5.0  # s
@@ -149,7 +151,7 @@ LEFT_SIGNAL_AFTER_CHANGE = 8.0  # s after a lane change towards a left turn its 
 # The map's turn arrows (turn:lanes) say which lanes a turn or fork is taken from: those of the lanes into its junction,
 # ending this near the turn's point (in the junction)
 ARROWS_BEFORE, ARROWS_AFTER = 30.0, 5.0  # m
-THROUGH_TURN = 20.0  # deg at most the route turns through a junction it goes straight on through
+THROUGH_TURN = 20.0  # deg at most the route turns through a junction it goes straight on through, where the arrows don't say
 
 
 def wrap(deg: float) -> float:
@@ -285,21 +287,34 @@ def remap(targets: tuple[int, int, int], n: int, left: bool) -> tuple[int, int]:
   return min(max(lo, 0), n - 1), min(max(hi, 0), n - 1)
 
 
-def parse_arrows(arrows) -> list[tuple[float, list[frozenset[str]]]]:
-  """Route.info's laneArrows: [(m ahead to where they end, each lane's arrows from the left)]."""
-  return [(float(d), [frozenset(a.split(";")) - {""} for a in lanes]) for d, lanes in arrows or []]
+def parse_arrows(arrows) -> list[tuple]:
+  """Route.info's laneArrows: [(m ahead to where they end, each lane's arrows from the left[, the route's move through
+  the junction as they call it: 'left', 'through' or 'right'])]."""
+  return [(float(d), [frozenset(a.split(";")) - {""} for a in lanes], *move) for d, lanes, *move in arrows or []]
+
+
+def arrows_entry(arrows: list, dist: float) -> tuple | None:
+  """The arrows entry (parse_arrows') of the junction of a turn or fork `dist` m on, None for none."""
+  near = [(abs(a[0] - dist), a) for a in arrows if dist - ARROWS_BEFORE <= a[0] <= dist + ARROWS_AFTER]
+  return min(near, key=lambda n: n[0])[1] if near else None
 
 
 def arrows_at(arrows: list, dist: float) -> list[frozenset[str]] | None:
   """The arrows of the lanes into the junction of a turn or fork `dist` m on (parse_arrows'), None for none."""
-  near = [(abs(d - dist), lanes) for d, lanes in arrows if dist - ARROWS_BEFORE <= d <= dist + ARROWS_AFTER]
-  return min(near, key=lambda n: n[0])[1] if near else None
+  entry = arrows_entry(arrows, dist)
+  return entry[1] if entry is not None else None
 
 
 def aim(m, arrows: list):
-  """A turn or fork's target lanes from the map's turn arrows, where its junction has them."""
-  lanes = arrows_at(arrows, m.dist)
-  found = turn_targets(lanes, m.side, isinstance(m, Fork)) if lanes else []
+  """A turn or fork's target lanes from the map's turn arrows, where its junction has them. The move they're for is the
+  one the arrows call the route's (a turn of a skewed junction's road on is through), else the turn or fork's side."""
+  entry = arrows_entry(arrows, m.dist)
+  lanes = entry[1] if entry is not None else None
+  move = entry[2] if entry is not None and len(entry) > 2 else None
+  if lanes and move is not None and (isinstance(m, Turn) and move == "through" or getattr(m, "junction", False)):
+    found = turn_targets(lanes, move)
+  else:
+    found = turn_targets(lanes, m.side, isinstance(m, Fork)) if lanes else []
   m.targets = (min(found), max(found), len(lanes)) if found else None
 
 
@@ -336,6 +351,7 @@ class Fork:
     main = other > 0 and lanes > other and lanes >= lanes_in - other
     self.keep = keep and not main
     self.slip = slip  # the other branch opens a slip lane or turn bay
+    self.junction = False  # the route's move through a junction rather than a fork in the road: aimed as the arrows call it
     self.targets: tuple[int, int, int] | None = None  # lanes lo-hi of n the map's arrows allow it from
 
   def lanes(self, n: int) -> tuple[int, int]:
@@ -363,7 +379,8 @@ class Through:
 
 def throughs(route: np.ndarray, arrows: list, moves: list, drops: list | None = None) -> list[Through]:
   """The junctions the route goes straight on through (no turn or fork near) where the arrows leave some lanes out, or
-  where some lanes end (Route.info's laneDrops: [m ahead, first and last lane that carry on, of how many])."""
+  where some lanes end (Route.info's laneDrops: [m ahead, first and last lane that carry on, of how many]). Straight on
+  is as the arrows call the route's move, else by how far it turns."""
   out = []
   along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T)))) if len(route) >= 2 else np.zeros(1)
 
@@ -372,16 +389,21 @@ def throughs(route: np.ndarray, arrows: list, moves: list, drops: list | None = 
   for d, lo, hi, n in drops or []:
     if clear(d):
       out.append(Through(d, (lo, hi, n)))
-  for d, lanes in arrows:
+  for d, lanes, *move in arrows:
     if not clear(d):
       continue
     found = turn_targets(lanes, "through")
     if not found or len(found) == len(lanes):
       continue
-    p = [np.array([np.interp(v, along, route[:, 0]), np.interp(v, along, route[:, 1])]) for v in (d - 15.0, d, d + 25.0)]
-    h_in, h_out = (math.degrees(math.atan2(*(b - a)[::-1])) for a, b in ((p[0], p[1]), (p[1], p[2])))
-    if abs(wrap(h_out - h_in)) <= THROUGH_TURN:
-      out.append(Through(d, (min(found), max(found), len(lanes))))
+    if move:  # as the arrows call the route's move, also a skewed junction's road on
+      if move[0] != "through":
+        continue
+    else:
+      p = [np.array([np.interp(v, along, route[:, 0]), np.interp(v, along, route[:, 1])]) for v in (d - 15.0, d, d + 25.0)]
+      h_in, h_out = (math.degrees(math.atan2(*(b - a)[::-1])) for a, b in ((p[0], p[1]), (p[1], p[2])))
+      if abs(wrap(h_out - h_in)) > THROUGH_TURN:
+        continue
+    out.append(Through(d, (min(found), max(found), len(lanes))))
   return out
 
 
@@ -415,6 +437,9 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
     exit_change = abs(wrap(heads[max(held, j)] - heads[i]))
     if exit_change < TURN_ANGLE:
       continue
+    jog = 0 < i < len(heads) - 1 and starts[i + 1] - starts[i] < JOG_LINK
+    if jog and np.sign(change[i]) * wrap(heads[max(held, j)] - heads[i - 1]) <= THROUGH_TURN:
+      continue  # off a junction's link (a jog): from the road before it, the way on is straight on, or the other way
     if exit_change > U_TURN_ANGLE:
       return None
     return Turn(float(starts[k]), "left" if change[i] > 0 else "right", float(heads[max(held, j)]), exit_change)
@@ -449,6 +474,19 @@ def limit_cap(limits: list, v: float) -> float:
   none; the set speed follows the limit where the car is."""
   caps = [math.sqrt(limit ** 2 + 2 * LIMIT_DECEL * max(0.0, d - v * SLOW_LAG)) for d, limit in limits if limit > 0 and d > 0]
   return min(caps) if caps else 0.0
+
+
+def lowest(caps: list[tuple[float, str]]) -> tuple[float, str]:
+  """The lowest of the caps (m/s, 0 for none) with its reason, no lower than a crawl; NO_CAP with none."""
+  caps = [c for c in caps if c[0] > 0]
+  if not caps:
+    return NO_CAP
+  cap, reason = min(caps, key=lambda c: c[0])
+  return max(cap, 0.5), reason
+
+
+def turn_reason(side: str) -> str:
+  return "turnLeft" if side == "left" else "turnRight"
 
 
 def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> float:
@@ -596,13 +634,14 @@ class Planner:
   def update(self, inp: NavInputs) -> NavOutputs:
     """The step's cruise cap, arrival, requests to the driver and NavDesire's changes."""
     self.requests, self.desires = [], []
-    cap, arrived = self._update(inp)
-    return NavOutputs(cap, arrived, self.requests, self.desires)
+    (cap, reason), arrived = self._update(inp)
+    return NavOutputs(cap, arrived, self.requests, self.desires, reason)
 
-  def _update(self, inp: NavInputs) -> tuple[float, bool]:
-    """The cruise cap (m/s, 0 for none) and whether the car has arrived."""
+  def _update(self, inp: NavInputs) -> tuple[tuple[float, str], bool]:
+    """The cruise cap (m/s, 0 for none) and its reason, and whether the car has arrived."""
     now = self.now = inp.t
-    # guidance only (Navigate on openpilot off) drives nothing, as when disengaged: signals cancelled, NavDesire cleared
+    # guidance only (Navigate on openpilot off) takes no nav actions, as when disengaged: signals cancelled, no lane
+    # changes, turn or keep desires, turn slowing or arrival; but what keeps the car on its road stays (_guide)
     engaged, indicator, desire = inp.engaged and inp.drive, inp.blinker, inp.desire
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
@@ -619,12 +658,13 @@ class Planner:
       self._cancel(indicator)
       self._end_change(indicator)
       self.keeping, self.fork_keep = None, None
+      cap = self._guide(inp, now) if inp.engaged else NO_CAP
       self._set_desire(now)
       self.route_end, self.dest = None, None
       self.skipped.clear()
       self.taken.clear()
       self.hold = None
-      return 0.0, False
+      return cap, False
     self._watch_change(indicator, now)
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
@@ -642,9 +682,10 @@ class Planner:
       if left is not None and left < ARRIVE_KEEP:
         # counted down by the distance driven, which doesn't grow again if the car runs past it
         self.route_end = left if self.route_end is None else min(self.route_end - step, left)
-        return self._arrive(v)
+        stop, arrived = self._arrive(v)
+        return (stop, "arrival"), arrived
       self.route_end, self.dest = None, None
-      return 0.0, False
+      return NO_CAP, False
     route = np.array(route, dtype=float)
     waypoint = np.array(inp.dest or (0.0, 0.0), dtype=float)
     self.dest = waypoint if waypoint.any() else route[-1]  # (0, 0) as GTA clears it
@@ -718,18 +759,18 @@ class Planner:
       aim(m, arrows)
     drops = inp.lane_drops if t.lane_drops else None
     ahead = moves + [m for m in throughs(route, arrows, moves, drops) if turn is None or m.dist < turn.dist]
-    caps = [self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now)]
+    caps = [(self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now), "laneChange")]
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, inp.stops or [], inp.junctions or [])
     if turn is not None and turn.dist < t.slow_from:
       bay = self._bay(forks, turn)
       ref = self.entry if t.slow_ref == "entry" else turn.dist
-      caps.append(slow_for(turn.speed(t), min(ref - t.slow_done, turn.dist - bay - BAY_SIGNAL), v, t.slow_decel))
+      caps.append((slow_for(turn.speed(t), min(ref - t.slow_done, turn.dist - bay - BAY_SIGNAL), v, t.slow_decel), turn_reason(turn.side)))
       self._enter_bay(turn, bay, v, now)
       if self.changing is not None and self.driven < self.bay_to and t.bay_speed > 0:
-        caps.append(t.bay_speed)
+        caps.append((t.bay_speed, "bay"))
       self._signal(turn, route, indicator, v, now, heading, bay)
-    caps.append(self._hold_cap(heading, yaw_rate, v, now))
+    caps.append((self._hold_cap(heading, yaw_rate, v, now), turn_reason(self.hold['side']) if self.hold else ""))
     if self.turn is not None:
       if v < 0.3:
         self.stopped = True
@@ -742,18 +783,36 @@ class Planner:
           self.repeat_t = now
         self.stopped = False
     self._exit_watch(heading, yaw_rate, now)
-    caps.append(curve_cap(route, v, t))
-    caps.append(limit_cap(inp.limits or [], v))
+    caps.append((curve_cap(route, v, t), "bend"))
+    caps.append((limit_cap(inp.limits or [], v), "speedLimit"))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
     self._keep_straight(turn, desire, v, now)
     self._set_desire(now)
 
-    caps = [c for c in caps if c > 0]
-    cap = max(min(caps), 0.5) if caps else 0.0
+    cap = lowest(caps)
     if self.route_end is not None:
       stop, arrived = self._arrive(v)
-      return min(cap, stop) if cap else stop, arrived
+      return (stop, "arrival") if not cap[0] or stop <= cap[0] else cap, arrived
     return cap, False
+
+  def _guide(self, inp: NavInputs, now: float) -> tuple[float, str]:
+    """Guidance only, engaged: the cruise cap for the road's bends and speed limits ahead, the bends only up to the next
+    turn at a junction (the driver may not take it, and turns aren't slowed for), and keepRight out of the oncoming
+    lanes."""
+    self.yaw, self.one_way = inp.yaw_rate, inp.two_way is False
+    near = [d for d in (inp.stops or []) + (inp.junctions or []) if abs(d) < ONCOMING_JUNCTION]
+    self._oncoming_keep(inp.truth_lane_plugin, bool(near), now, inp.truth_lane_map)
+    caps = [(limit_cap(inp.limits or [], inp.v), "speedLimit")]
+    if inp.route:
+      route = np.array(inp.route, dtype=float)
+      turn = find_turn(route, MIN_AHEAD_MAP if inp.route_end is not None else MIN_AHEAD)
+      while turn is not None and not any(abs(d - turn.dist) < ENTRY_JUNCTION_BEFORE / 2 for d in inp.junctions or []):
+        turn = find_turn(route, turn.dist + TURN_HOLDS)  # a bend of the road, not a turn: slowed for
+      if turn is not None:
+        along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
+        route = np.vstack([route[along < turn.dist], self._point(route, turn.dist)])
+      caps.append((curve_cap(route, inp.v, self.tune), "bend"))
+    return lowest(caps)
 
   def _hold_cap(self, heading: float, yaw_rate: float, v: float, now: float) -> float:
     """The turn's speed, held through its arc and lifted gently once the car is out of it (0 for none); logs the

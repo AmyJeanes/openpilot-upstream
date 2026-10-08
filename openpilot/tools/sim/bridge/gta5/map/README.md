@@ -70,7 +70,11 @@ work out, so they're kept in `~/.cache/gta5_lanes` (`GTA5_LANE_CACHE`) by the ma
 the background (`python -m openpilot.tools.sim.bridge.gta5.map.lane_match gta5.osm.pbf`) and by e2e when it starts. The
 map view draws the roads at their width and, from `lanes.json` (`osm_to_roads.py --lanes`) zoomed in, their lines:
 edges, white dashed lines between lanes one way (solid where `change:lanes` forbids crossing), the yellow line between
-the directions; and the plugin's debug overlay the same lines, from the map's tags. Zoomed in, junctions are drawn as
+the directions; and the plugin's debug overlay the same lines, from the map's tags. Kerbs are drawn only where the road
+surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
+cutting across between them, where the line between two such ways is a lane line, solid where either's `change:lanes`
+says so (`side_by_side.py`). Where every road at a node is one-way and all run about one way (lanes merging, parting or
+changing across a carriageway) there is no junction area. Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it, stop lines across
 the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
@@ -151,8 +155,11 @@ shown or a level changes.
     where its paint has other counts than GTA's (Eclipse Blvd's 3 + 2; arrows are then laid out for the painted
     lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
-    lanes between their painted edges. GTA's lane
-    counts stay on one-way links (freeways GTA draws as parallel links are painted as one carriageway). With
+    lanes between their painted edges (GTA's lanes evenly between them where the files miss every lane line). GTA's lane
+    counts stay on one-way links. A freeway GTA draws as parallel links is painted as one carriageway: each link takes
+    the painted lanes about its line (`paint_survey.correct_carriageway`), placed by `placement` on the nearest lane
+    edge or middle (the lines move up to 1 m to fit), and a one-way link's outer lanes take `change:lanes` from the
+    white line painted at their outer edge, the line between it and the next link (`paint_survey.outer_lines`). With
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
@@ -249,7 +256,9 @@ shown or a level changes.
 - openpilot's driving model can't turn back on itself, so every move that turns back more than 135 degrees is a
   `no_u_turn` restriction: at a node, and through up to four short links (40 m) as through a median gap or a turning
   loop. GTA's nodes allow them everywhere. The short two-way links joining a divided road's carriageways away from
-  junctions are left out. A trip from a dead end then has no route. A move with no other way on at any node along it
+  junctions are left out, and the two-way links GTA lays as lane changes between one-way links all running the same
+  way (crossing in an X, as on the Elysian Fields Fwy) are one-way, the way the traffic runs (`lane_changes`). A trip
+  from a dead end then has no route. A move with no other way on at any node along it
   is the road, not a U-turn: a hairpin bend, or the only way out of an acute junction.
 - No restriction may cut road off that GTA's links join to the rest of the map (`traps.py`: a car on a way that way
   could not be routed out, or a way could not be routed to either way). Where restrictions do, the generator changes

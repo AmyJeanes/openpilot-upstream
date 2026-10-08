@@ -30,6 +30,10 @@ DESCRIPTIONS = {
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
   'RecordFront': tr_noop("Upload data from the cabin camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
+  "NavigateOnOpenpilotDefault": tr_noop(
+    "Start every route with Navigate on openpilot on: openpilot follows the route, changing lanes and taking its turns. " +
+    "When off, a route starts with guidance only. The navigation button changes it for the current route."
+  ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
 }
 
@@ -52,6 +56,12 @@ class TogglesLayout(Widget):
         lambda: tr("Experimental Mode"),
         "",
         "experimental_white.png",
+        False,
+      ),
+      "NavigateOnOpenpilotDefault": (
+        lambda: tr("Always Enable Navigate on openpilot"),
+        DESCRIPTIONS["NavigateOnOpenpilotDefault"],
+        "road.png",
         False,
       ),
       "DisengageOnAccelerator": (

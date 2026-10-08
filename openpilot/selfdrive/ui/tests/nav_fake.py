@@ -7,7 +7,8 @@ speed) and a still camera frame. The UI run separately on the same OPENPILOT_PRE
   OPENPILOT_PREFIX=uiport BIG=1 SCALE=1 python selfdrive/ui/ui.py
 
 Scenes: none (no route), cruise (the turn far ahead), approach (near it, with the lanes), turn, arrive, drive (the car
-drives the route from the start, through the turn to the destination, at a city speed)."""
+drives the route from the start, through the turn to the destination, at a city speed). --speed CAP:REASON also sends
+navigation's speed cap (navSpeed, m/s), e.g. --speed 6:turnRight."""
 import argparse
 import math
 import os
@@ -38,8 +39,10 @@ def to_lat_lon(x: float, y: float) -> tuple[float, float]:
   return float(LAT0 + y / M_PER_DEG), float(LON0 + x / (M_PER_DEG * math.cos(math.radians(LAT0))))
 
 
-def route_points() -> np.ndarray:
-  return np.array([(0.0, 0.0), (0.0, TURN_AT), (AFTER, TURN_AT)])
+def route_points(after: float = AFTER, variant: int = 0) -> np.ndarray:
+  """variant > 0: the same route as a router sends it again (a reroute), with a point more along its way."""
+  extra = [(0.0, TURN_AT * variant / (variant + 1))] if variant else []
+  return np.array([(0.0, 0.0), *extra, (0.0, TURN_AT), (after, TURN_AT)])
 
 
 def pose_at(s: float) -> tuple[tuple[float, float], float]:
@@ -60,9 +63,9 @@ def nearby_roads() -> list[tuple[np.ndarray, float]]:
   return roads
 
 
-def route_message():
+def route_message(after: float = AFTER, variant: int = 0):
   msg = messaging.new_message("navRoute", valid=True)
-  pts = route_points()
+  pts = route_points(after, variant)
   coords = msg.navRoute.init("coordinates", len(pts))
   for c, (x, y) in zip(coords, pts, strict=True):
     c.latitude, c.longitude = to_lat_lon(x, y)
@@ -76,7 +79,7 @@ def route_message():
   return msg
 
 
-def instruction_message(s: float | None, road: str = "short", lanes: bool = True):
+def instruction_message(s: float | None, road: str = "short", lanes: bool = True, after: float = AFTER):
   """navInstruction for the car s m along the route; None for no route."""
   msg = messaging.new_message("navInstruction", valid=True)
   ni = msg.navInstruction
@@ -84,7 +87,7 @@ def instruction_message(s: float | None, road: str = "short", lanes: bool = True
     return msg
   ni.valid = True
   ni.destinationName = DESTINATION
-  end = TURN_AT + AFTER
+  end = TURN_AT + after
   ahead = [(TURN_AT, "turn", "right", ROADS[road]), (end, "arrive", "straight", "")]
   ahead = [m for m in ahead if m[0] > s]
   if ahead:
@@ -180,9 +183,20 @@ def nv12(path: str, w: int, h: int) -> bytes:
 class FakeNav:
   """navInstruction at 10 Hz and navRoute every 2 s, for a scene."""
   def __init__(self, scene: str = "cruise", road: str = "short", drive_from: float = 0.0):
-    self.pm = messaging.PubMaster(["navInstruction", "navRoute"])
+    self.pm = messaging.PubMaster(["navInstruction", "navRoute", "navSpeed"])
     self.scene, self.road = scene, road
+    self.speed: tuple[float, str] | None = None  # navSpeed's cap (m/s) and reason, sent while set
     self.drive_s = drive_from
+    self._route_t = -1e9
+    self.after, self.variant = AFTER, 0  # the destination, m on from the turn; reroutes so far
+
+  def reroute(self):
+    self.variant += 1
+    self._route_t = -1e9
+
+  def new_destination(self):
+    self.after += 400.0
+    self.variant = 0
     self._route_t = -1e9
 
   def position(self) -> tuple[float | None, float]:
@@ -195,14 +209,18 @@ class FakeNav:
 
   def send(self, now: float, dt: float = 0.0):
     if self.scene == "drive":
-      self.drive_s = (self.drive_s + DRIVE_SPEED * dt) % (TURN_AT + AFTER)
+      self.drive_s = (self.drive_s + DRIVE_SPEED * dt) % (TURN_AT + self.after)
     s, _ = self.position()
     if s is not None and now - self._route_t > 2.0:
-      self.pm.send("navRoute", route_message())
+      self.pm.send("navRoute", route_message(self.after, self.variant))
       self._route_t = now
     if s is None:
       self._route_t = -1e9
-    self.pm.send("navInstruction", instruction_message(s, self.road))
+    self.pm.send("navInstruction", instruction_message(s, self.road, after=self.after))
+    if self.speed is not None:
+      msg = messaging.new_message("navSpeed", valid=True)
+      msg.navSpeed.speedCap, msg.navSpeed.reason = self.speed
+      self.pm.send("navSpeed", msg)
 
 
 def main():
@@ -211,9 +229,13 @@ def main():
   ap.add_argument("--road", default="short", choices=list(ROADS))
   ap.add_argument("--onroad", action="store_true", help="also the openpilot state the onroad view needs")
   ap.add_argument("--camera", help="a still frame (png) as the road camera, with --onroad")
+  ap.add_argument("--speed", help="navigation's speed cap, CAP:REASON (m/s and a NavSpeed.Reason)")
   args = ap.parse_args()
   os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
   nav = FakeNav(args.scene, args.road)
+  if args.speed:
+    cap, reason = args.speed.split(":")
+    nav.speed = (float(cap), reason)
   op = FakeOnroad() if args.onroad else None
   cam = FakeCamera(args.camera) if args.onroad and args.camera else None
   last = time.monotonic()

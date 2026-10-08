@@ -40,6 +40,7 @@ class Drive:
     out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
     self.driver.act(out)
     self.desires += out.desires
+    self.reason = out.cap_reason
     if out.arrived:
       self._send({"type": "waypoint", "off": True})
     return out.cap, out.arrived
@@ -71,6 +72,23 @@ def test_find_turn_on_its_last_segment():
     t = find_turn(np.array([(0.0, 0.0), (0.0, before), (30.0, before), (60.0, before)]), 5.0)
     assert t is not None and t.side == "right" and abs(t.dist - before) < 0.1
   assert find_turn(np.array([(0.0, 0.0), (0.0, 4.0), (30.0, 4.0), (60.0, 4.0)]), 5.0) is None
+
+
+def test_find_turn_off_a_junction_link():
+  """A jog across a junction (a turn onto its short link, then the other way off it) is no turn where the way on, from
+  the road before the link, goes straight on or the other way; a real turn off the link still is."""
+  def jog(first: float, second: float, link: float = 10.0) -> np.ndarray:
+    pts, h = [np.array([0.0, 0.0]), np.array([0.0, 20.0])], 0.0
+    for turn, length in ((first, link), (second, 100.0)):
+      h += turn
+      pts.append(pts[-1] + length * np.array([-np.sin(np.radians(h)), np.cos(np.radians(h))]))
+    return np.array(pts)
+  assert find_turn(jog(-90.0, 90.0), 5.0) is None  # straight across
+  assert find_turn(jog(-90.0, 53.0), 5.0) is None  # bearing right, which a left off the link would miss
+  t = find_turn(jog(-25.0, 78.0), 5.0)  # a left turn, past a bear right onto the link
+  assert t is not None and t.side == "left"
+  t = find_turn(jog(-90.0, 53.0, 40.0), 5.0)  # a link too long to be across a junction: two turns
+  assert t is not None and t.side == "right"
 
 
 def test_entry_signal_past_the_entry():
@@ -631,17 +649,35 @@ def test_lane_change_for_a_lane_that_ends():
   assert d.nav.changing is None  # already in it
 
 
+def test_guidance_only_still_slows_for_bends():
+  # Navigate on openpilot off: no nav actions, but the road's bends ahead still cap the speed, as this tight bend without
+  # a junction (which the turn finder calls a turn); a turn at a junction (test_guidance_only_drives_nothing) isn't
+  arc = [(20.0 - 20.0 * np.cos(a), 150.0 + 20.0 * np.sin(a)) for a in np.radians(np.arange(5.0, 91.0, 5.0))]
+  route = np.array([(0.0, y) for y in np.arange(0.0, 150.0, 5.0)] + arc + [(20.0 + x, 170.0) for x in (20.0, 40.0, 80.0)])
+  assert find_turn(route) is not None
+  d = Drive((0, 1), v=15.0)
+  d.drives = False
+  caps = [d.step(route, 50.0 + k * 2.0)[0] for k in range(40)]
+  assert d.sent == [] and d.desires == [] and 0.0 < min(caps) < 12.0
+  d = Drive((0, 1), v=15.0)
+  d.drives = False
+  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": [], "limits": [[0.0, 10.0], [50.0, 5.0]]},
+                  True, None, {})[0] > 0  # and the speed limits ahead
+  d.drives = True  # Navigate on openpilot on: the same bend capped as ever
+  assert 0.0 < d.step(route, 100.0)[0] < 15.0
+
+
 def test_guidance_only_drives_nothing():
-  # Navigate on openpilot off: no signals, lane changes, NavDesire or speed caps on the way to a turn; turned on,
-  # nav drives as before, and turned off again mid-way it cancels what it asked for
+  # Navigate on openpilot off: no signals, lane changes, NavDesire or speed caps on the way to a turn at a junction;
+  # turned on, nav drives as before, and turned off again mid-way it cancels what it asked for
   route = route_to_turn(200.0)
   d = Drive((0, 2), v=7.0)
   d.drives = False
   y, caps = 0.0, []
   while y < 100.0:
-    caps.append(d.step(route, y)[0])
+    caps.append(d.step(route, y, {"junctions": [200.0 - y]})[0])
     y += d.v * 0.05
-  assert d.sent == [] and d.desires == [] and not any(caps)
+  assert d.sent == [] and d.desires == [] and not any(0.0 < c < 2 * d.v for c in caps)  # nothing that slows the car
   d.drives = True
   while y < 190.0 and not d.sent:
     d.step(route, y)
@@ -651,3 +687,28 @@ def test_guidance_only_drives_nothing():
   for _ in range(20):  # NavDesire is held a moment past a lane change, as openpilot reads it every 0.2 s
     d.step(route, y)
   assert d.nav.desire == "" and d.nav.changing is None and d.nav.signaled is None
+
+
+def test_cap_reasons():
+  # what sets the cap, for navSpeed and the UI: the turn ahead (by side), the arrival, a bend, a lower limit ahead
+  route = route_to_turn(150.0, "left")
+  d = Drive((0, 2), v=12.0)
+  y, reasons = 0.0, set()
+  while y < 140.0:
+    cap = d.step(route, y)[0]
+    if 0.0 < cap < d.v:
+      reasons.add(d.reason)
+    y += d.v * 0.05
+  assert "turnLeft" in reasons and reasons <= {"turnLeft", "bend"}  # the turn itself is a bend too, at the end
+  d = Drive((0, 1), v=10.0)
+  straight = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
+  assert d.step(straight, 0.0, {"routeEnd": 40.0})[0] < 10.0 and d.reason == "arrival"
+  d = Drive((0, 1), v=15.0)
+  d.drives = False
+  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": [], "limits": [[0.0, 20.0], [40.0, 5.0]]},
+                  True, None, {})[0] < 15.0 and d.reason == "speedLimit"
+  arc = [(20.0 - 20.0 * np.cos(a), 150.0 + 20.0 * np.sin(a)) for a in np.radians(np.arange(5.0, 91.0, 5.0))]
+  bend = np.array([(0.0, y) for y in np.arange(0.0, 150.0, 5.0)] + arc + [(20.0 + x, 170.0) for x in (20.0, 40.0, 80.0)])
+  assert d.step(bend, 100.0)[0] < 15.0 and d.reason == "bend"  # guiding only: no turn there at a junction
+  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": []}, False, None, {}) == (0.0, False)
+  assert d.reason == ""

@@ -17,7 +17,7 @@ from openpilot.selfdrive.ui.nav.draw import (clamp01, draw_car, draw_maneuver, d
                                              mask_corners, max_blend, maneuver_kind, mix, premul, smootherstep, smoothstep,
                                              split_arrow, with_alpha, xfade)
 from openpilot.selfdrive.ui.nav.nav_map import NavMap
-from openpilot.selfdrive.ui.nav.nav_state import (NavState, card_lanes, format_arrival, format_distance, format_duration,
+from openpilot.selfdrive.ui.nav.nav_state import (NavState, RouteStarts, card_lanes, format_arrival, format_distance, format_duration,
                                                   format_trip_distance, maneuver_phase)
 from openpilot.selfdrive.ui.nav.text import maneuver_road
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -130,6 +130,7 @@ class NavCard:
     self._noo_set_t = -1e9
     self.route_on = False  # a route to show: nav has one, and the driver hasn't ended it here
     self._ended: tuple | None = None  # the route the driver slid to end, until nav drops it or has a new destination
+    self._starts = RouteStarts()
     self.phase = "cruise"
     self.want_open = False
     # a hand open or close of the card overrides nav's own choice until nav would next change it
@@ -266,7 +267,13 @@ class NavCard:
       self.press_x, self.vdrag = None, None
       self.claimed = False
 
+  def clear_hits(self):
+    """Nothing of the card is on screen to touch (a full-screen alert has it)."""
+    self.hit_exp = self.hit_layout = (0.0, 0.0, 0.0)
+    self.hit_card = self.hit_eta = self.hit_map = NOWHERE
+
   def _end_route(self):
+    self._starts.forget()
     self._ended = self._route_key()
     self._params.remove("NavDestination")  # as a phone or the map would: navd drops the destination
 
@@ -305,8 +312,9 @@ class NavCard:
     if self._ended is not None and (not self.nav.active or self._new_destination(self._ended)):
       self._ended = None
     route_on = self.nav.active and self._ended is None
-    if route_on and not self.route_on:  # each new route starts with Navigate on openpilot off: guidance until tapped on
-      self.set_noo(False)
+    if self._starts.update(route_on, self.nav.route_end, now):  # a new destination, not a reroute: NoO from its setting
+      self.set_noo(self._params.get_bool("NavigateOnOpenpilotDefault"))
+    if route_on and not self.route_on:
       self.override = None
     self.route_on = route_on
     if now - self._noo_set_t > NOO_HOLD_S:
