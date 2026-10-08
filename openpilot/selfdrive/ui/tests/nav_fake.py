@@ -101,7 +101,8 @@ def instruction_message(s: float | None, road: str = "short", lanes: bool = True
   (x, y), bearing = pose_at(s)
   ni.position.latitude, ni.position.longitude = to_lat_lon(x, y)
   ni.bearingDeg = bearing
-  # four lanes our way (two oncoming, which the card leaves off), the right two for the turn, the car in the second
+  # four lanes our way (two oncoming, which the card leaves off), the right two for the turn, the car in the second (as
+  # the bridge marks it; the card takes the car's lane from FakeOnroad's lane head)
   if lanes and s < TURN_AT and TURN_AT - s < 400.0:
     ni.showFull = True
     spec = [(["straight"], False, "none", True, False), (["straight"], False, "none", True, False),
@@ -116,7 +117,7 @@ def instruction_message(s: float | None, road: str = "short", lanes: bool = True
 
 class FakeOnroad:
   """The state the onroad view reads: started, engaged (or not) at a speed, Experimental mode, an alert if given."""
-  SERVICES = ["deviceState", "pandaStates", "selfdriveState", "carState", "controlsState", "carParams", "deviceMotion"]
+  SERVICES = ["deviceState", "pandaStates", "selfdriveState", "carState", "controlsState", "carParams", "deviceMotion", "modelV2"]
 
   def __init__(self):
     self.pm = messaging.PubMaster(self.SERVICES)
@@ -124,6 +125,7 @@ class FakeOnroad:
     self.engaged = True
     self.experimental = True
     self.alert: tuple[str, str, str] | None = None  # text1, text2, size
+    self.lane: tuple[int, int, float] | None = (1, 4, 0.9)  # the model's lane head: index from the left, count, prob
 
   def send(self):
     msgs = {s: messaging.new_message(s, valid=True) for s in self.SERVICES if s != "pandaStates"}
@@ -144,6 +146,9 @@ class FakeOnroad:
     cs.vEgo, cs.vEgoCluster, cs.vCruiseCluster, cs.cruiseState.enabled = self.v, self.v, 56.0, True
     msgs["controlsState"].controlsState.deprecated.vCruise = 56.0
     msgs["carParams"].carParams.openpilotLongitudinalControl = True
+    if self.lane is not None:
+      lh = msgs["modelV2"].modelV2.laneHead
+      lh.laneIdx, lh.laneCount, lh.prob = self.lane
     for s, m in msgs.items():
       self.pm.send(s, m)
 

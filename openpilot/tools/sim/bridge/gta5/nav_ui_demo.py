@@ -136,6 +136,7 @@ class Openpilot:
     self.alert: tuple[str, str, str] | None = None  # text1, text2, size
     self.engaged = True
     self.yaw_rate = 0.0  # rad/s, clockwise positive
+    self.lane: list[int] | None = None  # the model's lane head, as the car's true lane [from the left, of n]
 
   def send(self):
     msgs = {s: messaging.new_message(s, valid=True) for s in self.SERVICES if s != 'pandaStates'}
@@ -169,6 +170,8 @@ class Openpilot:
       edge.x, edge.y, edge.z = x, [y] * 33, [0.0] * 33
     md.roadEdgeStds = [0.3, 0.3]
     md.acceleration.x = [0.0] * 33
+    if self.lane and 0 <= self.lane[0] < self.lane[1]:
+      md.laneHead.laneIdx, md.laneHead.laneCount, md.laneHead.prob = self.lane[0], self.lane[1], 0.9
     msgs['deviceMotion'].deviceMotion.angularVelocityDevice.z = self.yaw_rate  # device z points down
     for s, m in msgs.items():
       self.pm.send(s, m)
@@ -293,6 +296,7 @@ def main():
     s = target - op.v * max(lead - (now - t0), 0.0)  # driving, to be there at the screenshot
     pos = place(route, s, lane)
     op.alert, op.yaw_rate = alert, yaw_rate(route, s, op.v)
+    op.lane = route.lane() if on else None
     op.send()
     nav.update(route if on else None, op.v, osm, lambda r: slots, pose=(pos, car_heading(route, s)))
     vipc.send(VisionStreamType.VISION_STREAM_NARROW_ROAD, frame, frame_id, frame_id * 50_000_000, frame_id * 50_000_000)

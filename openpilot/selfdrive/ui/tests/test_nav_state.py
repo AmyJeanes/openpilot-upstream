@@ -4,9 +4,9 @@ import numpy as np
 
 from openpilot.cereal import messaging
 from openpilot.selfdrive.ui.nav.draw import maneuver_kind
-from openpilot.selfdrive.ui.nav.nav_state import (M_PER_DEG, ROUTE_GONE_S, CardLane, NavState, PoseTracker, Projection, RouteStarts,
-                                                  card_lanes, format_duration, format_trip_distance, instruction_guidance, maneuver_phase,
-                                                  wrap)
+from openpilot.selfdrive.ui.nav.nav_state import (M_PER_DEG, ROUTE_GONE_S, CardLane, CarLane, NavState, PoseTracker, Projection,
+                                                  RouteStarts, card_lanes, format_duration, format_trip_distance, instruction_guidance,
+                                                  maneuver_phase, model_lane, wrap)
 from openpilot.selfdrive.ui.nav.text import maneuver_road
 
 
@@ -46,17 +46,29 @@ def test_guidance_and_lanes():
   mans[1].distance, mans[1].type, mans[1].modifier = 580.0, "turn", "left"
   lanes = ni.init('lanes', 3)
   lanes[0].oncoming = True
-  lanes[1].current, lanes[1].directions = True, ["straight"]
+  lanes[1].current, lanes[1].directions = True, ["straight"]  # the simulator's truth, which the card ignores
   lanes[2].active, lanes[2].directions, lanes[2].activeDirection = True, ["right"], "right"
   ni.showFull, ni.laneDistance = True, 60.0
   g = instruction_guidance(ni)
   assert g.show_lanes and maneuver_road(g) == "Elm St"
-  # the oncoming lane left off; the car in the straight one, the turn lit in the other
-  assert card_lanes(g) == ([CardLane("up", False, False), CardLane("right", False, True)], 0)
+  # the oncoming lane left off; the car in the straight one by the model, the turn lit in the other
+  ours = [CardLane("up", False, False), CardLane("right", False, True)]
+  assert card_lanes(g) == (ours, None)
+  assert card_lanes(g, CarLane(0, 2, True)) == (ours, 0)
+  assert card_lanes(g, CarLane(1, 3, True)) == (ours, None)  # the model counts other lanes than nav's
   g.secondary = "Exit 3"
   assert maneuver_road(g) == "Exit 3 · Elm St"
   g.show_lanes = False
   assert card_lanes(g) == ([], None)
+
+
+def test_car_lane_from_the_lane_head():
+  lh = messaging.new_message('modelV2').modelV2.laneHead
+  assert model_lane(lh) is None  # a model without the head
+  lh.laneIdx, lh.laneCount, lh.prob = 2, 3, 0.8
+  assert model_lane(lh) == CarLane(2, 3, True)
+  lh.prob = 0.3
+  assert model_lane(lh) == CarLane(2, 3, False)
 
 
 def test_shared_lane_lights_the_branch_taken():

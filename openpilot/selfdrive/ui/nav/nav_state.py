@@ -19,6 +19,8 @@ BEARING_TC = 0.8  # s
 SNAP_DIST = 50.0  # m from the reported position: a new place, taken at once
 DT_MAX = 1.0  # s of dead reckoning in one step: through a stalled frame, not a screen that was off
 YAW_STALE = 0.5  # s without deviceMotion: no yaw rate
+LANE_STALE = 0.5  # s without modelV2: no car lane
+LANE_SURE = 0.5  # the lane head's probability under which the car's lane shows dim
 FEET_PER_M = 3.28084
 
 
@@ -28,7 +30,6 @@ class Lane:
   active: bool
   active_direction: str
   oncoming: bool
-  current: bool
 
 
 @dataclass
@@ -62,14 +63,28 @@ class Guidance:
   bearing: float = 0.0
 
 
+@dataclass(frozen=True)
+class CarLane:
+  index: int  # from the left of the lanes our way
+  count: int
+  sure: bool
+
+
+def model_lane(lh) -> CarLane | None:
+  """The car's lane by the driving model's current-lane head (modelV2.laneHead); None from a model without one."""
+  if not 0 <= lh.laneIdx < lh.laneCount:
+    return None
+  return CarLane(lh.laneIdx, lh.laneCount, lh.prob >= LANE_SURE)
+
+
 def instruction_guidance(ni) -> Guidance:
   g = Guidance()
   if ni.maneuverType:
     g.maneuver = Maneuver(ni.maneuverDistance, ni.maneuverType, ni.maneuverModifier, ni.maneuverPrimaryText)
   g.secondary = ni.maneuverSecondaryText
   g.maneuvers = [Maneuver(m.distance, m.type, m.modifier, m.primaryText) for m in ni.allManeuvers]
-  g.lanes = [Lane([str(d) for d in lane.directions], lane.active, str(lane.activeDirection), lane.oncoming, lane.current)
-             for lane in ni.lanes]
+  # not the lanes' `current`: the car's lane is the model's guess (card_lanes), as a real car has, not the simulator's truth
+  g.lanes = [Lane([str(d) for d in lane.directions], lane.active, str(lane.activeDirection), lane.oncoming) for lane in ni.lanes]
   g.show_lanes = ni.showFull and any(lane.active for lane in g.lanes)
   g.lane_distance, g.lane_open_distance = ni.laneDistance, ni.laneOpenDistance
   g.distance_remaining, g.time_remaining = ni.distanceRemaining, ni.timeRemaining
@@ -151,10 +166,13 @@ class NavState:
     self.updates = 0  # counts navInstructions read, for caches of what's drawn from them
     self.route_end: tuple[float, float] | None = None  # lat, lon: where the route goes, to tell a new destination
     self.pose = PoseTracker()
+    self.car_lane: CarLane | None = None
     self._route_fingerprint: tuple = ()
 
   def update(self, sm) -> None:
     now = time.monotonic()
+    model = sm.recv_frame["modelV2"] > 0 and now - sm.recv_time["modelV2"] < LANE_STALE
+    self.car_lane = model_lane(sm["modelV2"].laneHead) if model else None
     if sm.updated["navRoute"]:
       self._read_route(sm["navRoute"])
     fix = self.read_instruction(sm["navInstruction"]) if sm.updated["navInstruction"] else None
@@ -284,9 +302,9 @@ class CardLane:
   turn_lit: bool  # the route takes its turn
 
 
-def card_lanes(g: Guidance) -> tuple[list[CardLane], int | None]:
+def card_lanes(g: Guidance, car: CarLane | None = None) -> tuple[list[CardLane], int | None]:
   """The lanes for the card, our direction's only (the oncoming ones are for the model, not the driver), left to
-  right, and which of them the car is in (None unknown)."""
+  right, and which of them the car is in by the model's lane head (None unknown, or it counts other lanes than nav's)."""
   if not g.show_lanes or (g.maneuver is not None and g.maneuver.type == "arrive"):
     return [], None
   ours = [lane for lane in g.lanes if not lane.oncoming]
@@ -300,8 +318,7 @@ def card_lanes(g: Guidance) -> tuple[list[CardLane], int | None]:
     arrow = ("up" + side if "straight" in dirs else side) if turn is not None else "up"
     straight_lit = lane.active and (use == "straight" or arrow == "up")
     out.append(CardLane(arrow, straight_lit, lane.active and not straight_lit))
-  here = next((i for i, lane in enumerate(ours) if lane.current), None)
-  return out, here
+  return out, car.index if car is not None and car.count == len(ours) else None
 
 
 ROUTE_GONE_S = 30.0  # s without a route after which the next counts as new, even to the same place
