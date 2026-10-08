@@ -5,8 +5,9 @@ middle, with its width kerb to kerb, how far each is trimmed back at its junctio
 kerbs, carried round the junctions' corners (none between one-way ways side by side on one surface: a lane line,
 side_by_side.py), white lines between lanes one way (dashed, solid where change:lanes
 forbids crossing), yellow lines between the directions, stop and give way lines, and crossings (`footway=crossing`).
-No lines are painted inside junctions, nor between a stop line and its junction; the moves through them from lane to
-lane (Junctions.movements: turn:lanes, connectivity, restrictions) are guides the view can show there.
+No lines are painted inside junctions but those of a road carried straight on through one (Junction.carried), nor
+between a stop line and its junction; the moves through them from lane to lane (Junctions.movements: turn:lanes,
+connectivity, restrictions) are guides the view can show there.
 
 Where the map's nodes have heights (`ele`, as ynd_to_osm's do), each road, line, junction and signal has its height,
 so the view can tell the level the car is on from the roads over and under it.
@@ -22,7 +23,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import DIVIDER, EDGE, FORWARD, PARKING, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
@@ -33,7 +34,13 @@ KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way
          'guide_right', 'parking']
 PARKING_STRIP = 'parking_strip'  # a parking lane's middle, in a road's lines
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
+PAINTED = (DIVIDER, CENTRE, MEDIAN)  # the lines between lanes, which a road carried on through a junction keeps across it
 CELL = 50.0  # m
+
+
+def drawn(tags: dict) -> bool:
+  """Whether a way is one of the roads drawn."""
+  return tags.get('highway', '').removesuffix('_link') in ROAD_CLASSES
 
 
 def join(ways):
@@ -115,13 +122,14 @@ def level(tags: dict) -> tuple[int, int]:
 class PaintAreas:
   """Where no lines are painted: each junction's area and the road from each stop line in to it. An area cuts the lines
   on its junction's layer (its roads' highest) and those of the roads meeting it on any layer, as a bridge starting
-  there: layer tags alone can't tell a road meeting a junction from one passing under it."""
+  there: layer tags alone can't tell a road meeting a junction from one passing under it. A junction's area doesn't cut
+  the lines of the road carried on through it (Junction.carried)."""
   def __init__(self, junctions: Junctions):
     js = junctions.junctions
     self.layer = [max(level(junctions.ways[w][0])[0] for w in j.ways) for j in js]
     self.areas = [(j.centre, j.polygon) for j in js] + [(s.area.mean(0), s.area) for j in js for s in j.stops]
     of = list(range(len(js))) + [n for n, j in enumerate(js) for _ in j.stops]  # each area's junction
-    self._of, self._roads = of, [j.roads for j in js]
+    self._of, self._roads, self._carried = of, [j.roads for j in js], [j.carried for j in js]
     self._index: dict[tuple[int, int], list[int]] = defaultdict(list)
     for n, (_, a) in enumerate(self.areas):
       lo, hi = a.min(0) // CELL, a.max(0) // CELL
@@ -129,13 +137,17 @@ class PaintAreas:
         for cy in range(int(lo[1]), int(hi[1]) + 1):
           self._index[(cx, cy)].append(n)
 
-  def near(self, pts: np.ndarray, layer: int, ways=frozenset(), kerbs_only: bool = False, but: int | None = None) -> list:
+  def near(self, pts: np.ndarray, layer: int, ways=frozenset(), kerbs_only: bool = False, but: int | None = None,
+           offset: float | None = None) -> list:
     """The areas [(centre, polygon)] that cut a line near points [K, 2] on a layer, along these ways; for a kerb only
-    the junctions' areas, but for junction `but`'s."""
+    the junctions' areas, but for junction `but`'s. `offset`: the line's m right of its ways, where it's one painted
+    between lanes (Junction.carried)."""
     lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
     found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in self._index.get((cx, cy), ())}
+    key = None if offset is None else round(offset, 2)
     return [self.areas[n] for n in sorted(found) if (self.layer[self._of[n]] == layer or self._roads[self._of[n]] & ways)
-            and n != but and (not kerbs_only or n < len(self.layer))]
+            and n != but and (not kerbs_only or n < len(self.layer))
+            and not (key is not None and n < len(self.layer) and any(key in self._carried[n].get(w, ()) for w in ways))]
 
 
 def main():
@@ -164,9 +176,6 @@ def main():
 
   def heights(nodes) -> np.ndarray:
     return np.array([ele(n) for n in nodes])
-
-  def drawn(tags):
-    return tags.get('highway', '').removesuffix('_link') in ROAD_CLASSES
   junctions = Junctions(osm, drawn)
   levels = {wid: level(tags) for wid, (tags, _) in junctions.ways.items()}
   try:  # the nodes' heights, where the map has them all
@@ -269,7 +278,7 @@ def main():
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
           marks(style, kind == DIVIDER):
         geom = offset_line(pts, offset + off)
-        for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE)):
+        for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE, offset=offset if kind in PAINTED else None)):
           if kind != EDGE:
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue

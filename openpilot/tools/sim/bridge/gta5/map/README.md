@@ -76,7 +76,8 @@ cutting across between them, where the line between two such ways is a lane line
 says so (`side_by_side.py`). Where every road at a node is one-way and all run about one way (lanes merging, parting or
 changing across a carriageway) there is no junction area. Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
-neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it, stop lines across
+neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it (but the lines of a
+road carried straight on past side roads, as the main road's centre line runs on across them), stop lines across
 the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
 and `footway=crossing` crossings striped across the road. Roads are drawn a layer at a time (`layer`, `bridge`,
 `tunnel`): bridges over what they cross, with a dark casing, tunnels faded. A median between the directions is a

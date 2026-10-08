@@ -9,8 +9,9 @@ signal comes on, drawn at their own heights (GTA's) rather than filtered to the 
 own every ROUTE_EVERY s in between, with the rest as last sent (the plugin replaces all it draws with each message): from
 where the car will be while it's drawn on, and behind the car where it was drawn as the car passed (Ribbon).
 On a lane-tagged map the roads are all from its tags, as the map view draws them (osm_to_roads.py): junction areas,
-their kerbs round the corners and their stop lines from junctions.py, the lines cut out of junction areas and (but for
-kerbs) from each stop line in to its junction, and a median's edges a yellow line each. They take about 40 s to build,
+their kerbs round the corners and their stop lines from junctions.py, the lines cut out of junction areas (but those
+of a road carried on through one, Junction.carried) and (but for kerbs) from each stop line in to its junction, and a
+median's edges a yellow line each. They take about 40 s to build,
 so they're cached (GTA5_OVERLAY_CACHE) by the map files' contents and the code that builds them; a bridge start that
 finds none builds them in a separate process, and the overlay goes on without the roads until they're ready.
 Elsewhere the road pieces follow gta5_train's maprender (its lane bands, dividers left out at junctions, junction areas
@@ -437,7 +438,7 @@ def road_marks(paths, osm) -> dict:
   junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
   from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas
-  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import ROAD_CLASSES, PaintAreas, level, z_along
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PAINTED, ROAD_CLASSES, PaintAreas, level, z_along
   from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
   junctions = Junctions(osm, lambda tags: tags.get("highway", "").removesuffix("_link") in ROAD_CLASSES)
@@ -480,7 +481,7 @@ def road_marks(paths, osm) -> dict:
         geom = offset_polyline(base, off) if off else base
         if len(geom) != len(base):
           continue
-        areas = paint.near(geom, layer, {wid}, kind == "e")
+        areas = paint.near(geom, layer, {wid}, kind == "e", offset=line.offset if line.kind in PAINTED else None)
         pieces = clip_areas(geom, areas) if areas else [geom]
         for piece in pieces:
           pz = z if piece is geom else z_along(piece, geom, z)

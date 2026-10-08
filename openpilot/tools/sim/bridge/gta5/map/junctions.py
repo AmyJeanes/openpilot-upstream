@@ -19,6 +19,14 @@ map as on our GTA V one.
   one; no nearer the junction than its mouth, and behind a crossing (`footway=crossing`) near it. Signals on a
   junction's own node stop every way into it at the mouth. A stop line surveyed where it's painted
   (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that.
+- A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
+  road has no stop or give way line or crossing into it, nothing of a higher class and wider meets it there, and its
+  lines meet the same lines of the road on the far side at the junction's node (a turn lane's line, which doesn't, is
+  left out). One road per junction, the highest class, then the widest; none where another as important crosses it (a
+  crossroads of equals). Where it's a priority road both sides (`priority_road=designated` / `yes_unposted`), its lines
+  are painted on across the junction (`Junction.carried`), as a main road's centre line runs on past a side road. The
+  junction's area stays the whole of where its roads meet, the through road's lanes too: traffic turning out of a side
+  road crosses them, and the moves, trims and stop lines are worked out over it.
 
 Geometry is in metres with y 90 degrees left of x; arms are sorted counterclockwise. "Left" of an arm is on the left
 looking out of the junction along it.
@@ -28,7 +36,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, offset_line, oneway_of
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, FORWARD, MEDIAN, OsmLanes, offset_line, oneway_of
 
 CLUSTER_LINK = 15.0  # m: junction nodes joined by a road this short (and shorter than their widest road is wide) are one junction
 ARM_LENGTH = 60.0  # m of each road out of a junction that its geometry is worked out over
@@ -52,6 +60,10 @@ STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
 MERGE_FLOW = 30.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
 U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
+MEET = 0.6  # m: lines of a road either side of a junction this near each other at its node are one line carried across
+CLASSES = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street', 'service', 'track')
+PRIORITY = ('designated', 'yes_unposted')  # priority_road=*: a priority road, signed or not
+FLIPPED = {'dashed_solid': 'solid_dashed', 'solid_dashed': 'dashed_solid'}  # a line's halves seen from the other way
 STRAIGHT = 30.0  # deg: a move turning less than this goes through
 # the deg turned (left positive) along which each turn:lanes arrow points
 ARROWS = {'through': (-STRAIGHT, STRAIGHT), 'slight_left': (10.0, 60.0), 'left': (STRAIGHT, 150.0), 'sharp_left': (110.0, U_TURN),
@@ -301,6 +313,8 @@ class Junction:
   inside: set[int]  # ways inside it
   centre: np.ndarray  # its nodes' middle, which its area fans out from (in_fan)
   stops: list[Stop] = field(default_factory=list)
+  through: dict[int, set[float]] = field(default_factory=dict)  # the road carried on through: way -> its lines (m right, to cm)
+  carried: dict[int, set[float]] = field(default_factory=dict)  # those painted on across it (a priority road's)
 
   @property
   def ways(self) -> set[int]:
@@ -505,6 +519,10 @@ class Junctions:
         for m in arm.members:
           self.trims[(m.ways[0][0], m.start)] = m.trim
     self._stops()
+    for j in self.junctions:
+      j.through = self._through(j)
+      if all(self.ways[w][0].get('priority_road') in PRIORITY for w in j.through):
+        j.carried = j.through
 
   def junction(self, nodes: list[int], caps: dict[tuple[int, int], float] | None = None) -> Junction | None:
     """A junction of these nodes, or None where its roads make fewer than three arms (as where a road's lanes split).
@@ -740,6 +758,68 @@ class Junctions:
     uq = _left(m.line.tangent(m.trim))
     area = np.array([q - uq * e_hi, p + right * (-e_hi), p + right * (-e_lo), q - uq * e_lo])
     j.stops.append(Stop(kind, line, m, s, area, signal, node))
+
+  # *** a road carried on through ***
+
+  def _through(self, j: Junction) -> dict[int, set[float]]:
+    """The road carried straight on through a junction, as its lines that meet across it: {way: {m right of its line,
+    rounded to cm}}, for the way either side; empty where there's none."""
+    tags_of = self.osm.data.node_tags
+    if any(s.signal for s in j.stops) or any(tags_of.get(n, {}).get('highway') == 'traffic_signals' for n in j.nodes):
+      return {}
+
+    def rank(m):
+      return CLASSES.index(c) if (c := self.ways[m.ways[0][0]][0].get('highway', '').removesuffix('_link')) in CLASSES else len(CLASSES)
+    stopped = {id(s.member) for s in j.stops}
+    found = []
+    for i, a in enumerate(j.arms):
+      for b in j.arms[i + 1:]:
+        turn = abs(math.degrees((b.heading - a.heading) % (2 * math.pi) - math.pi))
+        if turn > STRAIGHT or len(a.members) != 1 or len(b.members) != 1:
+          continue
+        ma, mb = a.members[0], b.members[0]
+        if ma.start != mb.start or id(ma) in stopped or id(mb) in stopped or not (lines := self._meeting(ma, mb)):
+          continue
+        pair_rank, width = max(rank(ma), rank(mb)), min(a.width, b.width)
+        ok = not any(self.osm.taper(m.ways[0][0]) is not None or self._crossed(m) for m in (ma, mb)) and \
+          not any(rank(m) < pair_rank and arm.width > width for arm in j.arms if arm is not a and arm is not b for m in arm.members)
+        found.append(((pair_rank, -width, turn), {id(a), id(b)}, lines, ok))  # a taper's lines move along it
+    if not found:
+      return {}
+    found.sort(key=lambda f: f[0])
+    best = found[0]
+    # where a road as important crosses it with its lines, neither has the way: a crossroads of equals
+    if not best[3] or any(f[0][0] == best[0][0] and not f[1] & best[1] for f in found[1:]):
+      return {}
+    return best[2]
+
+  def _crossed(self, m: Member) -> bool:
+    """Whether a pedestrian crossing (`footway=crossing`) crosses the road near its junction: its lines stop there."""
+    reach = m.trim + CROSSING_REACH + CROSSING_WIDTH
+    for c in self._near(self.crossings, self._crossing_cells, m.line.at(min(m.trim, m.line.length))):
+      hit = crossing(Poly(c, 0.0, 0.0), m.line, math.inf, reach)
+      if hit is not None and hit[1] >= 0.0:
+        return True
+    return False
+
+  def _meeting(self, ma: Member, mb: Member) -> dict[int, set[float]]:
+    """The lines of two roads out of a node that meet each other there, same kind and style: {way: {m right}}."""
+    def lines(m):
+      w, fwd = m.ways[0]
+      road = self.osm.lanes(w)
+      if not road.markings:
+        return []
+      p, right = self.osm.node_xy(m.start), -_left(m.line.tangent(0.0))
+      return [(ln, p + right * ln.offset, w, fwd) for ln in road.lines(FORWARD if fwd else BACKWARD) if ln.kind in (CENTRE, DIVIDER, MEDIAN)]
+    out: dict[int, set[float]] = {}
+    theirs = lines(mb)
+    for ln, p, w, fwd in lines(ma):
+      for ln2, q, w2, fwd2 in theirs:
+        if ln2.kind == ln.kind and FLIPPED.get(ln2.style, ln2.style) == ln.style and np.hypot(*(p - q)) < MEET:
+          out.setdefault(w, set()).add(round(ln.offset if fwd else -ln.offset, 2))  # offsets along the way's own direction
+          out.setdefault(w2, set()).add(round(ln2.offset if fwd2 else -ln2.offset, 2))
+          break
+    return out
 
   # *** movements ***
 
