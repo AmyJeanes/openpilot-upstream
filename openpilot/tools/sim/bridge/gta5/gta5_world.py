@@ -452,9 +452,11 @@ class GTA5World(World):
 
   def _map_route(self, state: dict, bearing: float) -> dict:
     """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
-    map along it. The destination is whichever was set last of the game map's waypoint and the map view's."""
+    map along it. The destination is whichever was set last of the game map's waypoint (else a mission's GPS route's end)
+    and the map view's."""
     pos = np.array(state["pos"][:2], dtype=float)
-    dest = self.destination.update(state.get("waypoint"), pos, self.map_view.take_destination() if self.map_view is not None else None)
+    picked = self.map_view.take_destination() if self.map_view is not None else None
+    dest = self.destination.update(state.get("waypoint"), pos, picked, (state.get("mission") or {}).get("dest"))
     match = self.matcher.match if self.matcher is not None else None
     route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
     self.routes += route is not None and route is not self.route

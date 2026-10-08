@@ -165,9 +165,12 @@ inline float GET_FRAME_TIME() { return Invoke<float>(0x15C40837039FFAF7); }
 inline BOOL IS_WAYPOINT_ACTIVE() { return Invoke<BOOL>(0x1DD1F58F493F1DA5); }
 inline int GET_WAYPOINT_BLIP_ENUM_ID() { return Invoke<int>(0x186E5D252FA50E7D); }
 inline int GET_FIRST_BLIP_INFO_ID(int sprite) { return Invoke<int>(0x1BEDE233E6CD2A1F, sprite); }
+inline int GET_NEXT_BLIP_INFO_ID(int sprite) { return Invoke<int>(0x14F96AA50D6FBEA7, sprite); }
 inline Vector3 GET_BLIP_INFO_ID_COORD(int blip) { return Invoke<Vector3>(0xFA7C7F0AADF25D09, blip); }
+inline BOOL DOES_BLIP_HAVE_GPS_ROUTE(int blip) { return Invoke<BOOL>(0xDD2238F57B977751, blip); }
 inline void SET_WAYPOINT_OFF() { Invoke(0xA7E4E2D361C2627F); }
 inline void SET_NEW_WAYPOINT(float x, float y) { Invoke(0xFE43368D2AA4F2FC, x, y); }
+// type: GTA's GPS slot, 0 the waypoint's route, 1 a blip's (SET_BLIP_ROUTE), 2 the multi-point route
 inline BOOL GET_POS_ALONG_GPS_TYPE_ROUTE(Vector3 *result, BOOL p1, float dist, int type) { return Invoke<BOOL>(0xF3162836C28F9DA5, result, p1, dist, type); }
 // blips: sprite 8 is the waypoint's; REMOVE_BLIP zeroes the handle
 inline int ADD_BLIP_FOR_COORD(float x, float y, float z) { return Invoke<int>(0x5A039BB0BCA604B6, x, y, z); }
