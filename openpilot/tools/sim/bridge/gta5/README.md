@@ -279,6 +279,14 @@ and calibration unlike a comma device's. Keep openpilot runs on the Model 3 with
 comma mount (1.22 m above the ground), the bonnet isn't in the road camera, and is the bottom eighth or so of the wide
 camera's picture, with the wipers below it.
 
+### Junction recordings
+For training the route input, the same approach driven out of a junction each legal way: `junction_plan.py plan --out
+plan.json` picks junctions on our map (by kind, spread over the city, the in-game A/B trips' junctions held out for
+eval) and routes each approach's ways out as the bridge would, `junction_run.py run --plan plan.json --name <run>` drives
+them with the AI expert while the bridge records (record_run.py's Run; it resumes a stopped run and writes
+`<run>.manifest.json` beside the run's log), and `junction_rec.sh <plan> <run> --until <time>` runs that in tmux,
+resuming after the game comes back. gta5-train's `scripts/juncrec_labels.sh` makes the recordings training data.
+
 ## How it works
 - The plugin attaches a scripted camera to the car where a comma device mounts, just behind the windscreen (from the
   car's windscreen bone, and at least 0.29 m below the roof, a Model 3's device height; else 1.22 m above the ground),

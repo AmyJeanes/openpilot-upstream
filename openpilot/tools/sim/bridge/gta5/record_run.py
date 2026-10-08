@@ -792,7 +792,8 @@ class Run:
                  "segments": len(self.segments), "restarts": self.restarts, **kw}, f)
     os.replace(self.status_path + ".tmp", self.status_path)
 
-  def run(self, picker: Picker):
+  def run(self, picker: Picker) -> str:
+    """Drives picker's trips until the hours are up or something stops it (a Stop raised in picker.next too); why."""
     a = self.args
     started, start_mono = time.strftime("%Y-%m-%dT%H:%M:%S"), time.monotonic()
     end_mono = start_mono + a.hours * 3600
@@ -888,6 +889,7 @@ class Run:
         f.write(text + "\n")
       say("\n" + text)
       self.status(done=True, why=why)
+    return why
 
 
 def summarize(recs: list[dict], segs: list[dict], extra: dict | None = None) -> tuple[dict, str]:
@@ -999,19 +1001,8 @@ def main():
   p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   sub = p.add_subparsers(dest="command", required=True)
   r = sub.add_parser("run")
-  r.add_argument("--hours", type=float, default=8.0)
-  r.add_argument("--name", help="the run's name (default rec-MMDD-HHMM)")
-  r.add_argument("--seed", type=int, help="for the trips (default a random one, logged)")
   r.add_argument("--dry-run", action="store_true", help="only pick and print --n trips")
   r.add_argument("--n", type=int, default=30, help="trips for --dry-run")
-  r.add_argument("--settings", help="the expert's k=v options, e.g. 'task=coord speed=10' (else --settings-file's)")
-  r.add_argument("--settings-file", default=SETTINGS_FILE, help="k=v options, # comments; read before each trip")
-  r.add_argument("--randomise", action="store_true", help="gta5_cmd.py randomise <seed> before each trip (the scene, car and " +
-                 "camera mount), if it has it")
-  r.add_argument("--randomise-args", default="", help="for it, e.g. model_share=0.6")
-  r.add_argument("--traffic", choices=["on", "off", "keep"], default="keep", help="the plugin's traffic, set each trip")
-  r.add_argument("--hours-of-day", default="", help="e.g. 8,12,17: each trip's time of day, picked from these")
-  r.add_argument("--weathers", default="", help="e.g. EXTRASUNNY,CLEAR,CLOUDS: each trip's weather, picked from these")
   r.add_argument("--lane", default="auto", help="start lane from the left (9: the rightmost); auto: leftmost when the " +
                  "first maneuver is a left, else rightmost")
   r.add_argument("--min-len", type=float, default=500.0, help="m of route")
@@ -1020,6 +1011,26 @@ def main():
   r.add_argument("--candidates", type=int, default=6, help="trips picked for each one driven, the best of them kept")
   r.add_argument("--junction-weight", type=float, default=1.0, help="how much junctions per km count in picking")
   r.add_argument("--no-avoid", action="store_true", help="don't avoid road driven in earlier runs")
+  run_arguments(r)
+  sm = sub.add_parser("summary")
+  sm.add_argument("files", nargs="+")
+  args = p.parse_args()
+  {"run": cmd_run, "summary": cmd_summary}[args.command](args)
+
+
+def run_arguments(r: argparse.ArgumentParser):
+  """A run's options for driving, recording and recovering (junction_run.py's too)."""
+  r.add_argument("--hours", type=float, default=8.0)
+  r.add_argument("--name", help="the run's name (default rec-MMDD-HHMM)")
+  r.add_argument("--seed", type=int, help="for the trips (default a random one, logged)")
+  r.add_argument("--settings", help="the expert's k=v options, e.g. 'task=coord speed=10' (else --settings-file's)")
+  r.add_argument("--settings-file", default=SETTINGS_FILE, help="k=v options, # comments; read before each trip")
+  r.add_argument("--randomise", action="store_true", help="gta5_cmd.py randomise <seed> before each trip (the scene, car and " +
+                 "camera mount), if it has it")
+  r.add_argument("--randomise-args", default="", help="for it, e.g. model_share=0.6")
+  r.add_argument("--traffic", choices=["on", "off", "keep"], default="keep", help="the plugin's traffic, set each trip")
+  r.add_argument("--hours-of-day", default="", help="e.g. 8,12,17: each trip's time of day, picked from these")
+  r.add_argument("--weathers", default="", help="e.g. EXTRASUNNY,CLEAR,CLOUDS: each trip's weather, picked from these")
   r.add_argument("--stuck-s", type=float, default=120.0, help=f"s without moving {PROGRESS:.0f} m")
   r.add_argument("--oncoming-s", type=float, default=10.0, help="s moving in the oncoming lanes")
   r.add_argument("--off-route-s", type=float, default=15.0, help=f"s more than {OFF_ROUTE:.0f} m off the route")
@@ -1039,10 +1050,6 @@ def main():
   r.add_argument("--router", default=os.getenv("GTA5_ROUTER"), help="Valhalla (default the bridge's GTA5_ROUTER, else :8002)")
   r.add_argument("--runs", default=f"{T}/recruns", help="the runs folder")
   r.add_argument("--stop-file", default=f"{T}/recruns/STOP")
-  sm = sub.add_parser("summary")
-  sm.add_argument("files", nargs="+")
-  args = p.parse_args()
-  {"run": cmd_run, "summary": cmd_summary}[args.command](args)
 
 
 if __name__ == "__main__":
