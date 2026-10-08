@@ -106,3 +106,30 @@ def test_lane_slots_failure_keeps_v1():
   w._route_encoder(r).slots.encode = None  # broken: calling it raises
   w._write_route_input({"vEgo": 10.0, "heading": 0.0})
   assert w.route_input[1].slots is None and inputs[-1][ri.PRESENT] == 1.0 and not inputs[-1][ri.LANES].any()
+
+
+def test_nav_speed_cap(monkeypatch):
+  """nav's cap goes to openpilot's planner as navSpeed (the car's set speed stays the driver's), at most every
+  NAV_SPEED_EVERY unless its reason changes; with GTA5_NAV_SPEED=can, the simulated car shows it as its set speed."""
+  from openpilot.tools.sim.lib.common import SimulatorState
+  now = [100.0]
+  monkeypatch.setattr(world_mod.time, "monotonic", lambda: now[0])
+  sent = []
+  w = GTA5World.__new__(GTA5World)
+  w.cap, w.cap_reason, w.next_nav_speed = 0.0, "", 0.0
+  w.nav_speed_pm = SimpleNamespace(send=lambda s, m: sent.append((s, round(m.navSpeed.speedCap, 2), str(m.navSpeed.reason))))
+  s = SimulatorState()
+  w._set_cap(s, 6.0, "turnLeft")
+  assert sent == [("navSpeed", 6.0, "turnLeft")] and s.cruise_cap == 6.0 and not s.cap_set_speed
+  now[0] += 0.01
+  w._set_cap(s, 5.9, "turnLeft")
+  assert len(sent) == 1 and w.cap == 5.9
+  w._set_cap(s, 5.8, "arrival")
+  assert sent[-1] == ("navSpeed", 5.8, "arrival")
+  now[0] += world_mod.NAV_SPEED_EVERY
+  w._set_cap(s, 0.0, "")
+  assert sent[-1] == ("navSpeed", 0.0, "none") and len(sent) == 3
+
+  w.nav_speed_pm = None  # GTA5_NAV_SPEED=can
+  w._set_cap(s, 7.0, "bendLeft")
+  assert len(sent) == 3 and s.cruise_cap == 7.0 and s.cap_set_speed

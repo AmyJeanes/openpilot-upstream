@@ -412,7 +412,7 @@ def replay(path: str, mp: Map, out: str):
       step = {"t": fr["mono"], "cmd": rec["cmd"], "q": rec["q"], "nd": rec["nd"], "cap": s.cruise_cap,
               "bl": [s.left_blinker, s.right_blinker], "tq": s.user_torque, "sl": s.speed_limit, "slf": s.speed_limit_follow,
               "ri": w.route_writer.last, "ls": w.lanes_writer.last, "routes": w.routes, "tp": tp,
-              "out": buf.getvalue().splitlines()}
+              "out": buf.getvalue().splitlines(), **({"why": w.cap_reason} if hasattr(w, "cap_reason") else {})}
       log.write(json.dumps(step) + "\n")
       lines += 1
   return head["trip"], lines

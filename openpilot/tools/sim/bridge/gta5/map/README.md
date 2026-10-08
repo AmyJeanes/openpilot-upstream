@@ -130,6 +130,13 @@ shown or a level changes.
     links whose lane counts come from the paint, the lane is there where the paint counts one more than GTA. osm_lanes
     draws lines and lane centres between those sections, so the median's edge kinks across, and nav's lane slots open
     the lane where it's wide. Elsewhere osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
+  - Where a road carries on from one way to the next (two ways meeting end to end, no junction) with the same lanes
+    sitting elsewhere (other widths or line, as where the survey measured one link and not the next), osm_lanes moves
+    them across on a smoothstep over up to 10 m either side of the node (`BLEND_M`, half of a shorter way; a tapered
+    way keeps its taper and the next way takes it all), and mitres each way's lines into the next's: kerbs, lines,
+    junctions' kerbs, nav's lane line and its lane slots run on without a step. The map view draws those ways' asphalt
+    between their kerbs (roads.json's `strips`), and lanes.json's pieces that meet end to end are one line, so dashes
+    run on. A lane appearing or ending at a node with no taper still steps there.
   - Both ways' bays often share one median back to back (a diamond, or one line handing the median from one way's bay
     to the other's). A line crossing the median looks the same from either way: it is the bay of the way after which
     nothing runs on at the median's right edge. Each way's bay opens from its own end, both widths on the same ways

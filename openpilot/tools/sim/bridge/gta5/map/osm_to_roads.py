@@ -22,8 +22,8 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
-from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, clip_outside, hull
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
@@ -78,6 +78,61 @@ def join(ways):
   return out
 
 
+JOINED = frozenset(KINDS.index(k) for k in ('edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'parking'))
+JOIN_TOL = 0.06  # m between two pieces' ends that are one point (a double line's two, offset again at a bend, end apart)
+
+
+def join_lines(lines: list, layers: list, zs: list | None) -> tuple[list, list, list | None]:
+  """lanes.json's lines [kind, x0, y0, ...] joined end to end where two pieces of one kind on one layer, and no
+  other, end at the same point, as where a road carries on from one way to the next: one line, so its dashes run on."""
+  ends = defaultdict(list)  # (layer, kind, cell) -> [(piece, its last point (1) or first (0))]
+  for n, line in enumerate(lines):
+    if line[0] in JOINED and len(line) >= 5:
+      for e, (x, y) in ((0, line[1:3]), (1, line[-2:])):
+        ends[(layers[n], line[0], round(x / JOIN_TOL), round(y / JOIN_TOL))].append((n, e))
+
+  def partner(n, e):  # the one other piece ending where piece n's end e is
+    line = lines[n]
+    x, y = line[1:3] if e == 0 else line[-2:]
+    cx, cy = round(x / JOIN_TOL), round(y / JOIN_TOL)
+    found = {(m, f) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for m, f in ends.get((layers[n], line[0], cx + dx, cy + dy), ())
+             if (m, f) != (n, e) and np.hypot(*(np.array(lines[m][1:3] if f == 0 else lines[m][-2:]) - (x, y))) <= JOIN_TOL}
+    return next(iter(found)) if len(found) == 1 else None
+
+  def heights(n):
+    z = zs[n]
+    return [z] * ((len(lines[n]) - 1) // 2) if isinstance(z, int) else list(z)
+  done = [False] * len(lines)
+  out, out_layers, out_z = [], [], []
+  for n in range(len(lines)):
+    if done[n]:
+      continue
+    done[n] = True
+    pts = np.array(lines[n][1:], float).reshape(-1, 2)
+    z = heights(n) if zs is not None else None
+    for e in (1, 0):  # on from its end, then back from its start
+      at, end = n, e
+      while lines[at][0] in JOINED and (found := partner(at, end)) is not None and not done[found[0]] and partner(*found) == (at, end):
+        m, f = found
+        done[m] = True
+        more = np.array(lines[m][1:], float).reshape(-1, 2)
+        mz = heights(m) if zs is not None else None
+        if (f == 1) == (e == 1):  # runs the other way
+          more, mz = more[::-1], mz[::-1] if mz is not None else None
+        if e == 1:
+          pts = np.vstack([pts, more[1:]])
+          z = z + mz[1:] if z is not None else None
+        else:
+          pts = np.vstack([more[:-1], pts])
+          z = mz[:-1] + z if z is not None else None
+        at, end = m, 1 - f
+    out.append([lines[n][0]] + [round(float(v), 2) for v in pts.ravel()])
+    out_layers.append(layers[n])
+    if zs is not None:
+      out_z.append(packed(z))
+  return out, out_layers, out_z if zs is not None else None
+
+
 def z_along(piece: np.ndarray, line: np.ndarray, z: np.ndarray) -> np.ndarray:
   """The heights [P] of the points of a piece of a polyline [N, 2] that has heights z [N], by where each falls along it."""
   if len(line) < 2:
@@ -117,6 +172,68 @@ def level(tags: dict) -> tuple[int, int]:
   except (KeyError, ValueError):
     layer = 1 if bridge else -1 if tunnel else 0
   return layer, 1 if bridge else 2 if tunnel else 0
+
+
+def strip(osm: OsmLanes, wid: int, t0: float, t1: float) -> tuple[np.ndarray, np.ndarray] | None:
+  """A way whose kerbs move along it (OsmLanes.taper, .blend): its left and right kerbs [N, 2] seen along it, as
+  line_geometry draws them, trimmed back t0 m from its first node and t1 m from its last; None where they don't."""
+  found = osm.taper(wid) or osm.blend(wid)
+  if found is None:
+    return None
+  edges = [g for line, g in osm.line_geometry(wid) if line.kind == EDGE]
+  left, right = edges[0], edges[-1]
+  if found[0] == BACKWARD:
+    left, right = right[::-1], left[::-1]
+  if len(left) != len(right) or len(left) < 2:
+    return None
+  along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff((left + right) / 2, axis=0).T))))
+  if t0 + t1 >= along[-1] - 0.05:
+    return None
+  s = np.unique(np.concatenate(([t0], along[(along > t0) & (along < along[-1] - t1)], [along[-1] - t1])))
+
+  def at(line):
+    return np.stack([np.interp(s, along, line[:, 0]), np.interp(s, along, line[:, 1])], axis=1)
+  kerbs = left, right
+  left, right = at(left), at(right)
+  # a trimmed end on the kerbs where the junction's mouth meets them: each kerb's nearest point to the way's line there
+  line, way_along = osm.way_points(wid), osm.way_along(wid)
+  for t, end in ((t0, 0), (t1, -1)):
+    if t > 0:
+      v = t if end == 0 else way_along[-1] - t
+      p = np.array([np.interp(v, way_along, line[:, 0]), np.interp(v, way_along, line[:, 1])])
+      left[end], right[end] = nearest(kerbs[0], p), nearest(kerbs[1], p)
+  return left, right
+
+
+def nearest(line: np.ndarray, p: np.ndarray) -> np.ndarray:
+  """The point of a polyline [N, 2] nearest p."""
+  a, ab = line[:-1], np.diff(line, axis=0)
+  t = np.clip(np.einsum('ij,ij->i', p - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-12), 0.0, 1.0)
+  q = a + ab * t[:, None]
+  return q[int(np.argmin(np.hypot(*(q - p).T)))]
+
+
+def joint(osm: OsmLanes, junctions: Junctions, node: int, reach: float = 0.6) -> np.ndarray | None:
+  """Junctions.joint from the kerbs as drawn (OsmLanes.edges_at), where flat-ended roads meet outside junctions: the
+  hull of their ends, and where a road just carries on, of its kerbs' mitred corner too, so nothing is left between a
+  road piece's flat end and the next one's."""
+  steps = junctions.steps.get(node, ())
+  if len(steps) < 2:
+    return None
+  p, pts = osm.node_xy(node), []
+  for w, nxt, fwd in steps:
+    u = _unit(osm.node_xy(nxt) - p)
+    refs = osm.ways[w][1]
+    lo, hi = osm.edges_at(w, float(osm.way_along(w)[refs.index(node)]), FORWARD if fwd else BACKWARD)
+    r = -_left(u)
+    pts += [p + r * lo, p + r * hi, p + u * reach + r * lo, p + u * reach + r * hi]
+  if len(steps) == 2:  # the corner where the kerbs of the way in and the way out meet
+    (_, a, _), (w, b, fwd) = steps
+    refs = osm.ways[w][1]
+    line = np.array([osm.node_xy(a), p, osm.node_xy(b)])
+    for off in osm.edges_at(w, float(osm.way_along(w)[refs.index(node)]), FORWARD if fwd else BACKWARD):
+      pts.append(offset_line(line, off)[1])
+  return hull(np.array(pts))
 
 
 class PaintAreas:
@@ -185,14 +302,22 @@ def main():
   except (KeyError, ValueError):
     high = False
   roads, layouts, tapered = [], [], []
+  strips, strip_z = [], []  # roads whose kerbs move along them, drawn zoomed in between their kerbs as drawn
   for wid, (tags, refs) in junctions.ways.items():
     road = osm.lanes(wid)
     lo, hi = road.edges(FORWARD)
     lanes = tags.get('lanes', '1').split(';')[0]
-    kind = (ROAD_CLASSES.index(tags['highway'].removesuffix('_link')), int(lanes) if lanes.isdigit() else 1,
-            round(hi - lo, 1), round((lo + hi) / 2, 1), wid in junctions.inside, *levels[wid])
+    c = ROAD_CLASSES.index(tags['highway'].removesuffix('_link'))
+    kerbs = None if wid in junctions.inside else       strip(osm, wid, junctions.trims.get((wid, refs[0]), 0.0), junctions.trims.get((wid, refs[-1]), 0.0))
+    if kerbs is not None:
+      strips.append([c, *levels[wid], len(kerbs[0])] + [round(float(v), 2) for v in np.concatenate(kerbs).ravel()])
+      if high:
+        strip_z.append(packed(z_along((kerbs[0] + kerbs[1]) / 2, points(refs), heights(refs))))
+    # a strip's way is drawn whole only zoomed out, as a way inside a junction (trims -1)
+    kind = (c, int(lanes) if lanes.isdigit() else 1, round(hi - lo, 1), round((lo + hi) / 2, 1),
+            wid in junctions.inside or kerbs is not None, *levels[wid])
     roads.append((kind, tags.get('oneway') == 'yes', refs))
-    if wid not in junctions.inside and osm.taper(wid) is not None:
+    if wid not in junctions.inside and (osm.taper(wid) is not None or osm.blend(wid) is not None):
       tapered.append(wid)  # its lines move along it: drawn on their own
     elif wid not in junctions.inside:
       lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or (road.markings
@@ -230,9 +355,9 @@ def main():
       area_z.append(packed(junction_z[n]))
   in_junctions = {n for j in junctions.junctions for n in j.nodes}
   for n, c in ends.items():  # where flat-ended road pieces meet outside junctions
-    if n not in in_junctions and (joint := junctions.joint(n)) is not None and len(joint) >= 3:
+    if n not in in_junctions and (area := joint(osm, junctions, n)) is not None and len(area) >= 3:
       areas.append([c, layer_at({w for w, _, _ in junctions.steps[n]})] +
-                   [round(float(v), 2) for v in np.concatenate((osm.node_xy(n), joint.ravel()))])
+                   [round(float(v), 2) for v in np.concatenate((osm.node_xy(n), area.ravel()))])
       if high:
         area_z.append(packed(ele(n)))
   signals = [n for n, tags in data.node_tags.items() if tags.get('highway') == 'traffic_signals']
@@ -247,9 +372,13 @@ def main():
     # itself: fill the triangles from the centre to each edge), and where road pieces meet elsewhere
     'junctions': areas,
     'signals': [[round(float(v), 1) for v in osm.node_xy(n)] for n in signals],
+    # [class, layer, structure, n, left kerb x0, y0, ... (n points), right kerb x0, y0, ...]: roads whose kerbs move
+    # along them (OsmLanes.taper, .blend), trimmed back at junctions, drawn between their kerbs zoomed in
+    'strips': strips,
   }
   if high:  # m: each way's height at each of its points (one number where it's level), each junction's, each signal's
-    out.update(heights=out_heights, junction_heights=area_z, signal_heights=[packed(ele(n)) for n in signals])
+    out.update(heights=out_heights, junction_heights=area_z, signal_heights=[packed(ele(n)) for n in signals],
+               strip_heights=strip_z)
   with open(args.out, 'w') as f:
     json.dump(out, f, separators=(',', ':'))
   print(f"{len(out['ways'])} ways, {len(areas)} junctions, {len(out['signals'])} signals -> {args.out}")
@@ -277,7 +406,7 @@ def main():
     for kind, offset, style in sig:
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
           marks(style, kind == DIVIDER):
-        geom = offset_line(pts, offset + off)
+        geom = osm.offset_nodes(nodes, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE, offset=offset if kind in PAINTED else None)):
           if kind != EDGE:
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
@@ -291,13 +420,22 @@ def main():
     refs, road, layer = junctions.ways[wid][1], osm.lanes(wid), levels[wid][0]
     pts = points(refs)
     z = heights(refs) if high else None
-    for line, geom in osm.line_geometry(wid):
+    geometry = osm.line_geometry(wid)
+    right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
+    for line, geom in geometry:
       if line.kind != EDGE and (not road.markings or line.kind == PARKING):
         continue
       for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.kind == DIVIDER):
         g = offset_line(geom, off) if off else geom
         for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE)):
-          add(k, piece, layer, z_along(piece, pts, z) if high else None)
+          if line.kind != EDGE:
+            add(k, piece, layer, z_along(piece, pts, z) if high else None)
+            continue
+          kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, {wid}, line.offset == right)
+          for p in kerbs:  # none between one-way ways side by side, as for the ways above
+            add(k, p, layer, z_along(p, pts, z) if high else None)
+          for p, st in between:
+            add(KINDS.index(st), p, layer, z_along(p, pts, z) if high else None)
     for a, b in road.parking_lanes(FORWARD):
       g = offset_line(pts, (a + b) / 2)
       for piece in clip_outside(g, paint.near(g, layer, {wid})):
@@ -317,6 +455,7 @@ def main():
     road_xy, road_z = points(road_nodes), heights(road_nodes)
   for c in crossings:
     add(KINDS.index('crossing'), c, 0, road_z[np.argmin(np.hypot(*(road_xy - c.mean(0)).T))] if high else None)
+  lines, line_layers, line_z = join_lines(lines, line_layers, line_z if high else None)
   out = {'kinds': KINDS, 'lines': lines, 'layers': line_layers}
   if high:
     out['heights'] = line_z  # m: each line's height at each of its points, one number where it's level

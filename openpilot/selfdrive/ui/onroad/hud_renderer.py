@@ -3,6 +3,7 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.nav_speed import NavSpeedSign
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -76,6 +77,7 @@ class HudRenderer(Widget):
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
 
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
+    self._nav_speed = NavSpeedSign()
     self.show_exp_button = True  # off while navigation's card has the button's spot
 
   def _update_state(self) -> None:
@@ -85,6 +87,7 @@ class HudRenderer(Widget):
       self.is_cruise_set = False
       self.set_speed = SET_SPEED_NA
       self.speed = 0.0
+      self._nav_speed.update(self.set_speed, False)
       return
 
     controls_state = sm['controlsState']
@@ -99,6 +102,7 @@ class HudRenderer(Widget):
 
     if self.is_cruise_set and not ui_state.is_metric:
       self.set_speed *= KM_TO_MILE
+    self._nav_speed.update(self.set_speed, self.is_cruise_set)
 
     v_ego_cluster = car_state.vEgoCluster
     self.v_ego_cluster_seen = self.v_ego_cluster_seen or v_ego_cluster != 0.0
@@ -123,6 +127,9 @@ class HudRenderer(Widget):
 
     if MODEL_LABEL:
       self._draw_model_label(rect)
+
+    if self.is_cruise_available:
+      self._draw_nav_speed(rect)
 
     self._draw_current_speed(rect)
 
@@ -176,6 +183,13 @@ class HudRenderer(Widget):
       0,
       set_speed_color,
     )
+
+  def _draw_nav_speed(self, rect: rl.Rectangle) -> None:
+    """Navigation's speed cap under the MAX box (and the model's name), while nav holds the car below the set speed."""
+    width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
+    x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - width) // 2
+    y = rect.y + 45 + UI_CONFIG.set_speed_height + 12 + (56 + 12 if MODEL_LABEL else 0)
+    self._nav_speed.draw(x, y, width)
 
   def _draw_model_label(self, rect: rl.Rectangle) -> None:
     """Draw the driving model's name under the MAX box, at the box's width."""

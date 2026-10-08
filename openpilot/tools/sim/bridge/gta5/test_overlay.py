@@ -365,6 +365,21 @@ def fresh_marks(paths, osm):
   return ov.road_marks(paths, osm)
 
 
+def test_route_heights_from_beside_the_route_not_its_length():
+  # a route climbing 10%; a lane line 3 m beside it whose length has drifted 10 m from the route's
+  route = SimpleNamespace(points=np.column_stack([np.arange(0.0, 210.0, 10.0), np.zeros(21)]))
+  route.along = route.points[:, 0].copy()
+  route.z = 0.1 * route.along
+  x = np.arange(5.0, 195.0, 1.0)
+  lane = np.column_stack([x, np.full(len(x), 3.0)])
+  z = ov.route_heights(route, lane, x + 10.0, fallback=-99.0)
+  np.testing.assert_allclose(z, 0.1 * x, atol=1e-6)
+  assert np.abs(ov.route_z(route, x + 10.0, -99.0) - 0.1 * x).max() > 0.9  # what reading by length gave
+  # no route place within the window of its guess: by length, as before
+  far = ov.route_heights(route, lane[:1], np.array([150.0]), fallback=-99.0, window=5.0)
+  np.testing.assert_allclose(far, [15.0])
+
+
 def test_arrow_strokes():
   strokes = ov.arrow_strokes(frozenset({"left", "through"}))
   assert [k for k, _ in strokes] == ["T", "T", "T", "L", "L"]  # the shared shaft, then each turn's branch and head

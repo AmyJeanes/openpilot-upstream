@@ -57,8 +57,8 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 
 ## Navigation
 Set a waypoint on the game's map while engaged and the car follows GTA's GPS route to it: the plugin sends the route (a
-point every 5 m for 500 m) and navd's planner finds the turns in it, lowers the set speed to 12 mph for each (16 mph for
-a gentler one; the car reports a lower cruise speed, as a car's own navigation would), and signals
+point every 5 m for 500 m) and navd's planner finds the turns in it, caps the speed to 12 mph for each (16 mph for
+a gentler one), and signals
 it, which below 19 mph asks the driving model for the turn. The model takes that request as a pulse when the blinker
 comes on, and forgets it after several seconds and at a stop, so the bridge drops the blinker briefly for openpilot
 (not the car's lights) every 2.5 s until the turn starts, when the car pulls away again, or when the model stops
@@ -90,9 +90,10 @@ off, no more pulses once begun), with keepRight for a moment if the car is still
 a turn (GTA's bays are short slip-lane links into the median), the car slows for the turn from there, changes into it
 from the lane beside it, and then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
 lane from the route counts only while the car heads along the route's link and agrees with the plugin's, if it has
-one. With the map's speed limits, engaging sets the limit where the car is, the set speed
-follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set speed alone), and a lower limit ahead
-slows the car before it. Routes avoid service roads (car parks, alleys, drives), which the model doesn't see as roads.
+one. With the map's speed limits, engaging sets the limit where the car is; after that the set speed is the driver's
+alone (the arrow keys), and nav caps the speed at the limit where the car is and slows for a lower one ahead
+(`GTA5_FOLLOW_LIMIT=1` has the set speed follow the limit instead, as before, for A/B runs). Routes avoid service
+roads (car parks, alleys, drives), which the model doesn't see as roads.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
 U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
 where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take
@@ -131,6 +132,11 @@ a model trained on v1's 173 reads only the start of it.
 next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
 beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,
 from a route it finds over the map itself (its docstring says how).
+nav's speed cap reaches openpilot as `navSpeed` (cereal's custom.capnp: the cap and why, a turn either way, a bend, a
+lower limit ahead, a lane change, a turn bay or the arrival), and openpilot's longitudinal planner drives the lower of it
+and the set speed, as sunnypilot's map curve speed control does: the set speed stays the car's (the arrow keys), and the
+onroad UI shows the cap under the MAX box while it is lower. `GTA5_NAV_SPEED=can` instead lowers the simulated car's set
+speed to the cap (the car reports it on CAN, as before), for A/B runs.
 `GTA5_NOO` is Navigate on openpilot: `param` (the default) follows the UI's nav button (the `NavigateOnOpenpilot`
 param); `on` drives regardless, which test runs (e2e, A/Bs) must set; `off` only guides. Guiding only, nav takes no
 actions (no turn signals or desires, lane changes, slowing for turns, arrival or route input for the model) but still
@@ -200,6 +206,12 @@ clears it, it's dropped within 20 m as GTA drops its own, and `gpsroute off` giv
 alone (both lines show; `colour=` tells them apart). `gta5_cmd.py gtadirs x y z` prints GTA's own GPS directions from the car to a
 point (its next turn and the distance to it), and `compare_dirs.py <trips>` compares them with our router's at e2e trips'
 starts (it places the car, so run it only with nothing else driving).
+
+Both reset when the plugin's core reloads (a DLL swap, a GTA restart), so the bridge keeps them: it merges every
+`debug` and `gpsroute` command sent through it, takes up what the plugin's state shows (settings from before the bridge
+started, F7), and sets them again each time the game connects, which a reload does. `GTA5_DEBUG_OVERLAY` and
+`GTA5_GPSROUTE`, written as `gta5_cmd.py`'s arguments after `debug` or `gpsroute` (`GTA5_DEBUG_OVERLAY="on layers=all"`,
+`GTA5_GPSROUTE=on`), set them from the bridge's start; unset, the bridge sets nothing until told or the state shows one on.
 
 Checking that none of it reaches openpilot: with interleaving on, turn the overlay on with `force=1` and gpsroute on,
 check the lines sit on the road from the player's camera at a few known places (the L7 X junction, a freeway: X1),

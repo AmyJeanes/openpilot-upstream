@@ -2,7 +2,8 @@
 
 The plugin sends raw NV12 frames for both cameras (about 140 MB/s), which would compete for the GIL with the bridge's
 100 Hz threads. This process owns the TCP connection, copies frames into shared memory and hands the bridge only small
-messages: (slot, views, state). It also listens on localhost for debug commands (gta5_cmd.py), forwarded to the plugin."""
+messages: (slot, views, state). It also listens on localhost for debug commands (gta5_cmd.py), forwarded to the plugin,
+and sets the plugin's map debug overlay and GPS route again each time the game connects."""
 import json
 import socket
 import struct
@@ -20,6 +21,11 @@ SLOTS = 8  # the bridge may lag a few frames behind when its threads are busy; a
 NV12_SIZE = get_nv12_info(W, H)[3]
 FRAME_BYTES = W * H * 3 // 2  # one view as the plugin sends it: Y rows, then interleaved UV rows, unpadded
 DEBUG_PORT = 8792
+# Plugin settings that reset when its core reloads (a DLL swap, a GTA restart), which reconnects it: the receiver keeps
+# the last sent and sets them again on each connection. Each command type's key in the plugin's state, and the settings
+# the state reports as the command takes them.
+DISPLAY = {"debug": ("debug", ("layers", "force", "ground", "thin", "width", "dist", "grow", "sides", "flip")),
+           "gpsroute": ("gpsRoute", ("max",))}
 # The game sometimes renders an openpilot frame with the previous openpilot frame's camera, so a road frame can hold the
 # wide render or the other way round. A pair matches when the wide frame's center is the road frame shrunk by the
 # lenses' focal length ratio; mismatched pairs (correlation under the threshold) are dropped.
@@ -77,8 +83,14 @@ def recv_exact(sock: socket.socket, view: memoryview) -> bool:
 
 
 class Receiver:
-  def __init__(self, frames: Connection, controls: Connection, shm_names: dict[str, str], latest=None):
+  def __init__(self, frames: Connection, controls: Connection, shm_names: dict[str, str], latest=None,
+               display: list[dict] | None = None, debug_port: int = DEBUG_PORT):
     self.latest = latest  # the newest frame's seq, for the bridge to tell a slot written over since it was announced
+    self.port = 0
+    self.debug_port = debug_port
+    self.display = {cmd["type"]: dict(cmd) for cmd in display or []}  # DISPLAY commands, each type's merged
+    self.display_unconfirmed: set[str] = set()  # types sent that the plugin's state doesn't show yet
+    self.display_lock = threading.Lock()
     self.frames = frames
     self.controls = controls
     self.shm = {name: SharedMemory(name=shm_names[name]) for name in VIEWS}
@@ -108,8 +120,7 @@ class Receiver:
       except (EOFError, OSError):
         return
 
-  def debug_loop(self) -> None:
-    srv = socket.create_server(("127.0.0.1", DEBUG_PORT), reuse_port=True)
+  def debug_loop(self, srv: socket.socket) -> None:
     while True:
       conn, _ = srv.accept()
       with conn, conn.makefile("r") as f:
@@ -118,14 +129,62 @@ class Receiver:
             cmd = json.loads(line)
           except json.JSONDecodeError:
             continue
-          if cmd.get("type") == "snap":
-            self.snap_path = cmd.get("path", "/tmp/gta5")
-          elif cmd.get("type") == "state":
-            self.state_path = cmd.get("path", "/tmp/gta5state.json")
-          elif cmd.get("type") == "burst":
-            self.burst_path, self.burst_left = cmd.get("path", "/tmp/gta5burst"), int(cmd.get("count", 40))
-          else:
-            self.send_plugin(cmd)
+          self.command(cmd)
+
+  def command(self, cmd: dict) -> None:
+    if cmd.get("type") == "snap":
+      self.snap_path = cmd.get("path", "/tmp/gta5")
+    elif cmd.get("type") == "state":
+      self.state_path = cmd.get("path", "/tmp/gta5state.json")
+    elif cmd.get("type") == "burst":
+      self.burst_path, self.burst_left = cmd.get("path", "/tmp/gta5burst"), int(cmd.get("count", 40))
+    elif cmd.get("type") in DISPLAY:
+      with self.display_lock:
+        # the plugin keeps a setting a command leaves out, so the one to set again is all of them merged
+        self.display[cmd["type"]] = {**self.display.get(cmd["type"], {}), **cmd}
+        self.display_unconfirmed.add(cmd["type"])
+        self.send_plugin(cmd)
+    else:
+      self.send_plugin(cmd)
+
+  def connected(self, conn: socket.socket | None) -> None:
+    with self.lock:
+      self.conn = conn
+    if conn is None:
+      return
+    with self.display_lock:
+      for cmd in self.display.values():
+        self.send_plugin(cmd)
+      self.display_unconfirmed = set(self.display)
+      if self.display:
+        print("gta5: set " + ", ".join(f"{t} {'on' if c.get('on') else 'off'}" for t, c in self.display.items()) + " again",
+              flush=True)
+
+  def follow_display(self, state: dict) -> None:
+    """Takes up the settings the plugin had before this bridge started, and changes it made itself (F7 toggles the
+    overlay), once its state shows what was sent last."""
+    with self.display_lock:
+      for t, (key, reported) in DISPLAY.items():
+        got = state.get(key)
+        if not isinstance(got, dict) or "on" not in got:
+          continue
+        on, want = int(bool(got["on"])), self.display.get(t)
+        if want is None and not on:
+          self.display_unconfirmed.discard(t)
+          continue
+        if want is None:
+          want = self.display[t] = {"type": t, "on": on}
+        elif t in self.display_unconfirmed:
+          if int(bool(want.get("on"))) != on:
+            continue
+        elif int(bool(want.get("on"))) != on:
+          want["on"] = on
+        else:
+          continue
+        self.display_unconfirmed.discard(t)
+        for k in reported:
+          if k in got:
+            want.setdefault(k, got[k])
 
   def on_frame(self, msg: memoryview) -> None:
     head_len = struct.unpack_from("<I", msg, 0)[0]
@@ -142,6 +201,7 @@ class Receiver:
       with open(self.state_path, "w") as f:
         json.dump(head["state"], f, indent=1)
       self.state_path = None
+    self.follow_display(head["state"])
     if (head["width"], head["height"]) != (W, H):
       raise ValueError(f"unsupported frame size {head['width']}x{head['height']}")
     slot = self.seq % SLOTS
@@ -183,8 +243,10 @@ class Receiver:
 
   def serve(self, port: int, ready: Connection) -> None:
     srv = socket.create_server(("0.0.0.0", port), reuse_port=True)
+    debug_srv = socket.create_server(("127.0.0.1", self.debug_port), reuse_port=True)
+    self.port, self.debug_port = srv.getsockname()[1], debug_srv.getsockname()[1]
     threading.Thread(target=self.control_loop, daemon=True).start()
-    threading.Thread(target=self.debug_loop, daemon=True).start()
+    threading.Thread(target=self.debug_loop, args=(debug_srv,), daemon=True).start()
     ready.send(None)
     buf = bytearray(64 << 20)
     while True:
@@ -192,8 +254,7 @@ class Receiver:
       conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
       conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
       print(f"gta5: game connected from {addr[0]}", flush=True)
-      with self.lock:
-        self.conn = conn
+      self.connected(conn)
       try:
         size = memoryview(bytearray(4))
         while recv_exact(conn, size):
@@ -207,15 +268,15 @@ class Receiver:
       except OSError:
         pass
       finally:
-        with self.lock:
-          self.conn = None
+        self.connected(None)
         conn.close()
         print("gta5: game disconnected", flush=True)
 
 
-def rx_main(port: int, frames: Connection, controls: Connection, ready: Connection, shm_names: dict[str, str], latest=None) -> None:
+def rx_main(port: int, frames: Connection, controls: Connection, ready: Connection, shm_names: dict[str, str], latest=None,
+            display: list[dict] | None = None) -> None:
   try:
-    Receiver(frames, controls, shm_names, latest).serve(port, ready)
+    Receiver(frames, controls, shm_names, latest, display).serve(port, ready)
   except Exception as e:
     ready.send(f"{type(e).__name__}: {e}")
     raise

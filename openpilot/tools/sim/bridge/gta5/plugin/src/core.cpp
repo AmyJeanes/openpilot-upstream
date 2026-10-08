@@ -1130,7 +1130,7 @@ void Densify(DebugLine &l) {
 // the same points again with each message. No ground found is kept a while, then looked for again (it may not have
 // streamed in yet).
 struct GroundHit {
-  float z;  // NaN: none near
+  float z;  // the ground the probe found under the point; NaN: none
   double t;
 };
 std::unordered_map<uint64_t, GroundHit> g_ground;
@@ -1185,6 +1185,15 @@ bool GroundCached(const P3 &p, double now, float &z) {
   return true;
 }
 
+// Whether a point of a kind goes onto the ground found under it: within PROBE_MAX_DZ of its height, else it's some
+// other surface. The route may also drop down to ROUTE_MAX_DROP: where its heights miss a dip it would float.
+constexpr float ROUTE_MAX_DROP = 8.0f;
+bool OnGround(char kind, float z, float ground) {
+  if (!std::isfinite(ground)) return false;
+  if (std::fabs(ground - z) < PROBE_MAX_DZ) return true;
+  return (kind == 'r' || kind == 'b' || kind == 'n') && ground < z && z - ground < ROUTE_MAX_DROP;
+}
+
 // Puts a new message's points on the ground they had before (the bridge sends the same points again every 0.1 s), so
 // no frame draws a line half at the map's heights; the points never probed are left for GroundStep. A line is
 // simplified once all its points are settled.
@@ -1201,7 +1210,7 @@ void GroundFromCache(DebugOverlay &d, double now) {
         l.need[i] = 1, l.pending++;
         continue;
       }
-      if (std::isfinite(z)) l.pts[i].z = z, d.grounded++;
+      if (OnGround(l.kind, l.pts[i].z, z)) l.pts[i].z = z, d.grounded++;
       else d.offGround++;
     }
     if (!l.pending && !IsMarker(l.kind)) SimplifyLine(l.pts);
@@ -1221,11 +1230,10 @@ void GroundStep(DebugOverlay &d, double now) {
       float z = 0;
       if (!GroundCached(p, now, z)) {  // another line's point may have put it there meanwhile
         probes++;
-        bool hit = GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + PROBE_ABOVE, &z, FALSE, FALSE) && std::fabs(z - p.z) < PROBE_MAX_DZ;
-        z = hit ? z : NAN;
+        if (!GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + PROBE_ABOVE, &z, FALSE, FALSE)) z = NAN;
         g_ground.insert_or_assign(GroundKey(p), GroundHit{z, now});
       }
-      if (std::isfinite(z)) p.z = z, d.grounded++;
+      if (OnGround(l.kind, p.z, z)) p.z = z, d.grounded++;
       else d.offGround++;
       l.need[i] = 0, l.pending--;
     }

@@ -441,17 +441,8 @@ class Junctions:
       return None
     edges = [self.osm.lanes(w).edges(FORWARD if fwd else BACKWARD) for w, fwd in ways]
 
-    def kerb(side):  # each run of ways as wide offset on its own, stepping where the width changes
-      out, k = [], 0
-      while k < len(edges):
-        k1 = k
-        while k1 + 1 < len(edges) and abs(edges[k1 + 1][side] - edges[k][side]) < 0.01:
-          k1 += 1
-        out.append(offset_line(pts[k:k1 + 2], edges[k][side]))
-        k = k1 + 1
-      return np.vstack(out)
-    try:
-      line, left, right = Poly(pts), Poly(kerb(0)), Poly(kerb(1))
+    try:  # the kerbs as the roads' edges are drawn (OsmLanes.line_geometry), stepping only where they don't meet
+      line, left, right = Poly(pts), Poly(self.osm.kerb_line(ways, nodes, 0)), Poly(self.osm.kerb_line(ways, nodes, 1))
     except ValueError:
       return None
     return Member(node, ways, nodes, line, left, right, edges[0])
@@ -781,9 +772,9 @@ class Junctions:
         if ma.start != mb.start or id(ma) in stopped or id(mb) in stopped or not (lines := self._meeting(ma, mb)):
           continue
         pair_rank, width = max(rank(ma), rank(mb)), min(a.width, b.width)
-        ok = not any(self.osm.taper(m.ways[0][0]) is not None or self._crossed(m) for m in (ma, mb)) and \
+        ok = not any(self._moving(m.ways[0][0]) or self._crossed(m) for m in (ma, mb)) and \
           not any(rank(m) < pair_rank and arm.width > width for arm in j.arms if arm is not a and arm is not b for m in arm.members)
-        found.append(((pair_rank, -width, turn), {id(a), id(b)}, lines, ok))  # a taper's lines move along it
+        found.append(((pair_rank, -width, turn), {id(a), id(b)}, lines, ok))
     if not found:
       return {}
     found.sort(key=lambda f: f[0])
@@ -792,6 +783,10 @@ class Junctions:
     if not best[3] or any(f[0][0] == best[0][0] and not f[1] & best[1] for f in found[1:]):
       return {}
     return best[2]
+
+  def _moving(self, way: int) -> bool:
+    """Whether a way's lines move across it (a taper or a blend), so aren't at one offset to carry on."""
+    return self.osm.taper(way) is not None or self.osm.blend(way) is not None
 
   def _crossed(self, m: Member) -> bool:
     """Whether a pedestrian crossing (`footway=crossing`) crosses the road near its junction: its lines stop there."""

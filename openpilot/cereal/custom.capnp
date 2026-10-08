@@ -10,7 +10,24 @@ $Cxx.namespace("cereal");
 # DO rename the structs
 # DON'T change the identifier (e.g. @0x81c2f05a394cf4af)
 
-struct CustomReserved0 @0x81c2f05a394cf4af {
+# fork: navigation's speed cap, below the driver's set speed (as sunnypilot's map curve speed control): openpilot's
+# longitudinal planner drives the lower of the two, and the set speed stays the car's
+struct NavSpeed @0x81c2f05a394cf4af {
+  speedCap @0 :Float32;  # m/s the car may drive now, falling ahead of what it slows for; 0 for none
+  reason @1 :Reason;
+
+  enum Reason {
+    none @0;
+    turnLeft @1;
+    turnRight @2;
+    bend @3;  # its way unknown (bendLeft, bendRight)
+    speedLimit @4;  # the limit where the car is, or a lower one ahead
+    laneChange @5;  # room to change lanes for a turn or fork
+    bay @6;  # changing into a turn's bay
+    arrival @7;
+    bendLeft @8;
+    bendRight @9;
+  }
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {
