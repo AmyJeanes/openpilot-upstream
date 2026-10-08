@@ -426,17 +426,8 @@ class Junctions:
       return None
     edges = [self.osm.lanes(w).edges(FORWARD if fwd else BACKWARD) for w, fwd in ways]
 
-    def kerb(side):  # each run of ways as wide offset on its own, stepping where the width changes
-      out, k = [], 0
-      while k < len(edges):
-        k1 = k
-        while k1 + 1 < len(edges) and abs(edges[k1 + 1][side] - edges[k][side]) < 0.01:
-          k1 += 1
-        out.append(offset_line(pts[k:k1 + 2], edges[k][side]))
-        k = k1 + 1
-      return np.vstack(out)
-    try:
-      line, left, right = Poly(pts), Poly(kerb(0)), Poly(kerb(1))
+    try:  # the kerbs as the roads' edges are drawn (OsmLanes.line_geometry), stepping only where they don't meet
+      line, left, right = Poly(pts), Poly(self.osm.kerb_line(ways, nodes, 0)), Poly(self.osm.kerb_line(ways, nodes, 1))
     except ValueError:
       return None
     return Member(node, ways, nodes, line, left, right, edges[0])

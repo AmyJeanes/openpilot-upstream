@@ -259,8 +259,13 @@ function drawMap(g, s, marked) {
       g.lineWidth = width;
       eachPiece(visible, which, l.key, lit, stroke);
       if (marked && (i + 1 === keys.length || keys[i + 1].order !== l.order)) {
+        g.strokeStyle = BRIDGE_CASING;  // the sides of the roads drawn between their kerbs, on a bridge
+        g.lineWidth = 2 * CASING;
+        eachPiece(visible, 'stripsides', layer + '|' + l.order, lit, stroke);
         g.fillStyle = colour;
-        g.lineWidth = SEAM;  // over the seams where a flat road end meets its junction
+        g.strokeStyle = colour;
+        g.lineWidth = SEAM;  // over the seams where a flat road end meets its junction, and between a strip's pieces
+        eachPiece(visible, 'strips', layer + '|' + l.order, lit, p => { g.fill(p.path); g.stroke(p.ring); });
         eachPiece(visible, 'areas', layer + '|' + l.order, lit, p => { g.fill(p.path); g.stroke(p.ring); });
       }
       g.globalAlpha = 1;
@@ -471,7 +476,7 @@ function draw() {
 function cellAt(grid, size, x, y) {
   const key = Math.floor(x / size) + ',' + Math.floor(y / size);
   let cell = grid.get(key);
-  if (!cell) grid.set(key, cell = { paths: new Map(), cut: new Map(), areas: new Map(), marks: new Map(), signals: [] });
+  if (!cell) grid.set(key, cell = { paths: new Map(), cut: new Map(), areas: new Map(), strips: new Map(), stripsides: new Map(), marks: new Map(), signals: [] });
   return cell;
 }
 
@@ -607,6 +612,43 @@ function addArea(j, z) {
   }
 }
 
+function addStrip(s, zs) {
+  // a road whose kerbs move along it [class, layer, structure, n, left kerb x0, y0, ..., right kerb x0, y0, ...]: filled
+  // between its kerbs, in pieces no longer than a line's, each in the cell of its first point (the seams between them
+  // stroked over), and on a bridge with its casing along both sides
+  const [order, layer, structure, n] = s;
+  const L = i => [s[4 + 2 * i], s[5 + 2 * i]], R = i => [s[4 + 2 * n + 2 * i], s[5 + 2 * n + 2 * i]];
+  const key = layer + '|' + order;
+  for (let i = 0; i < n - 1;) {
+    const [x0, y0] = L(i);
+    let j = i + 1;
+    while (j < n - 1 && Math.hypot(L(j)[0] - x0, L(j)[1] - y0) < FINE / 4) j++;
+    let band = null;
+    if (zs) {
+      let z = 0;
+      for (let k = i; k <= j; k++) z += zs[k];
+      band = Math.round(z / (j - i + 1) / BAND);
+    }
+    const p = pieceAt(fine, FINE, 'strips', key, x0, y0, band);
+    if (!p.ring) p.ring = new Path2D();
+    p.path.moveTo(...L(i));
+    for (let k = i + 1; k <= j; k++) p.path.lineTo(...L(k));
+    for (let k = j; k >= i; k--) p.path.lineTo(...R(k));
+    p.path.closePath();
+    for (let k = i; k <= j; k++) { grow(p, ...L(k)); grow(p, ...R(k)); }
+    if (i > 0) { p.ring.moveTo(...L(i)); p.ring.lineTo(...R(i)); }
+    if (structure === 1) {
+      const c = pieceAt(fine, FINE, 'stripsides', key, x0, y0, band);
+      for (const side of [L, R]) {
+        c.path.moveTo(...side(i));
+        for (let k = i + 1; k <= j; k++) c.path.lineTo(...side(k));
+      }
+      for (let k = i; k <= j; k++) { grow(c, ...L(k)); grow(c, ...R(k)); }
+    }
+    i = j;
+  }
+}
+
 async function loadRoads() {
   const roads = await (await fetch('roads.json')).json();
   const kinds = new Map();
@@ -628,6 +670,7 @@ async function loadRoads() {
     }
   });
   (roads.junctions || []).forEach((j, n) => addArea(j, roads.junction_heights ? roads.junction_heights[n] : null));
+  (roads.strips || []).forEach((s, n) => addStrip(s, heightsOf(roads.strip_heights, n, s[3])));
   roads.signals.forEach(([x, y], n) => {
     const z = roads.signal_heights ? roads.signal_heights[n] : null;
     cellAt(fine, FINE, x, y).signals.push({ x0: x, y0: y, x1: x, y1: y, z, on: true, frame: -1 });

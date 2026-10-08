@@ -377,6 +377,18 @@ def offset_line(points, right) -> np.ndarray:
   return p + normal * (right * scale)[:, None]
 
 
+def mitred(points, right, before=None, after=None) -> np.ndarray:
+  """offset_line, its end corners mitred as if the polyline went on to the point `before` its start and `after` its
+  end (None: square ends), so that it meets the offset line of the polyline it carries on into."""
+  p = np.asarray(points, float)[:, :2]
+  if len(p) < 2 or (before is None and after is None):
+    return offset_line(p, right)
+  r = np.broadcast_to(np.asarray(right, float), (len(p),))
+  head, tail = ([before], [r[0]]) if before is not None else ([], []), ([after], [r[-1]]) if after is not None else ([], [])
+  out = offset_line(np.vstack([*head[0], p, *tail[0]]), np.concatenate([head[1], r, tail[1]]))
+  return out[len(head[0]):len(out) - len(tail[0])]
+
+
 # *** along a route ***
 
 LEFTS = frozenset({'left', 'slight_left', 'sharp_left'})
@@ -511,6 +523,8 @@ class OsmLanes:
     self._ends: dict[tuple[int, str], WayLanes] = {}
     self._at: dict[int, list[int]] | None = None  # node -> the ways at it
     self._tapers: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
+    self._blends: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
+    self._along: dict[int, np.ndarray] = {}
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
@@ -617,11 +631,15 @@ class OsmLanes:
   def line_geometry(self, way: int) -> list[tuple['Line', np.ndarray]]:
     """The lines painted along a way (WayLanes.lines), where they run: through a taper (taper()) the lines move with
     the lanes, the median's edge swinging across as a lane opens in it, and the line between an opening lane and the
-    next one starts where it has opened."""
+    next one starts where it has opened. Where the road carries on onto one other way, each line meets that way's:
+    mitred with it, and moved across to it over blend()'s span where the two ways' lanes sit apart."""
     road, pts = self.lanes(way), self.way_points(way)
     found = self.taper(way)
+    tapered = found is not None
     if found is None:
-      return road.line_geometry(pts)
+      found = self.blend(way)
+    if found is None:
+      return [(line, self.offset_way(way, pts, line.offset)) for line in road.lines(FORWARD)]
     d, knots = found
     p = pts if d == FORWARD else pts[::-1]
     along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(p, axis=0).T))))
@@ -631,7 +649,7 @@ class OsmLanes:
     p2 = np.stack([np.interp(s2, along, p[:, 0]), np.interp(s2, along, p[:, 1])], axis=1)
     secs = [sec for _, sec in knots]
     gaps = {i for sec in secs for i in range(len(sec.spans) - 1) if sec.spans[i + 1].left - sec.spans[i].right > EPS}
-    opening = {i for sec in secs for i, sp in enumerate(sec.spans) if sp.right - sp.left < OPENED}
+    opening = {i for sec in secs for i, sp in enumerate(sec.spans) if sp.right - sp.left < OPENED} if tapered else set()
     out = []
     for key, line in road.keyed_lines(d, gaps):
       if key[0] == 'lane' and line.kind == DIVIDER and {key[1], key[1] + 1} & opening:
@@ -640,8 +658,136 @@ class OsmLanes:
         offs = np.full(len(s2), line.offset)
       else:
         offs = np.interp(s2, ks, [line_offset(key, sec) for sec in secs])
-      out.append((line, offset_line(p2, offs)))
+      out.append((line, self.offset_way(way, p2, offs, d)))
     return out
+
+  # *** where a road carries on from one way to the next ***
+
+  def end_section(self, way: int, node: int, d: int) -> Section:
+    """The way's cross-section at its end `node`, seen travelling d along it (a taper's there)."""
+    found = self.taper(way)
+    if found is None:
+      return Section.of(self.lanes(way), d)
+    td, knots = found
+    sec = knots[0][1] if (self.ways[way][1][0] == node) == (td == FORWARD) else knots[-1][1]
+    return sec if td == d else mirrored(sec)
+
+  def _join(self, way: int, node: int, at_end: bool, own: Section) -> tuple[float, float, Section] | None:
+    """Where the road carries on at a free (untapered) way's end node onto one other way with the same lanes sitting
+    elsewhere: (m of this way the change is spread over, m of the other, its cross-section there seen travelling this
+    way FORWARD). None where nothing moves; nothing of a tapered way, whose lines stay as its taper has them."""
+    found = self._other(way, node)
+    if found is None or found[0] == way:
+      return None
+    nb, nd = found  # nd: travelling nb into the node
+    other = self.end_section(nb, node, -nd if at_end else nd)
+    if not _same_lanes(own, other) or _apart(own, other) < EPS:
+      return None
+    lb = 0.0 if self.taper(nb) is not None else min(BLEND_M, self.length(nb) / 2)
+    return min(BLEND_M, self.length(way) / 2), lb, other
+
+  def blend(self, way: int) -> tuple[int, list[tuple[float, Section]]] | None:
+    """Where the road carries on from this way onto another with the same lanes in other places (other widths or
+    line, as where the paint survey measured one way and not the next): the lanes move across from one to the other on
+    a smoothstep, over up to BLEND_M either side of the node (half of a shorter way), so that the lines and kerbs run on
+    without a step. As taper() gives a taper (seen FORWARD); None where neither end moves, and on a tapered way (the
+    way beyond takes it all)."""
+    if way in self._blends:
+      return self._blends[way]
+    out = None
+    if self.taper(way) is None:
+      refs, length = self.ways[way][1], self.length(way)
+      own = Section.of(self.lanes(way), FORWARD)
+      knots = []
+      for node, at_end in ((refs[0], False), (refs[-1], True)):
+        found = self._join(way, node, at_end, own)
+        if found is None:
+          continue
+        la, lb, other = found
+        for x in np.linspace(0.0, la, BLEND_KNOTS + 1):  # m from the node
+          u = (la - x) / (la + lb) if at_end else (x + lb) / (la + lb)  # 0-1 across the whole change, this way first
+          knots.append((length - x if at_end else x, _toward(own, other, _smooth(u) if at_end else 1.0 - _smooth(u))))
+      if knots:
+        ends = [(s, own) for s in (0.0, length) if all(abs(s - v) > EPS for v, _ in knots)]
+        out = FORWARD, sorted(knots + ends, key=lambda k: k[0])
+    self._blends[way] = out
+    return out
+
+  def _beyond(self, way: int, node: int, p: np.ndarray) -> np.ndarray | None:
+    """Where the road goes on past the way's end node (p runs from it into the way): the next point of the one other
+    way there, None where there's none or it turns back on itself."""
+    found = self._other(way, node)
+    if found is None or found[0] == way:
+      return None
+    refs = self.ways[found[0]][1]
+    here = self.node_xy(node)
+    away = next((q for q in p[1:] if np.hypot(*(q - p[0])) > 1e-6), None)
+    if away is None:
+      return None
+    for n in (refs[::-1] if refs[-1] == node else refs)[1:]:
+      q = self.node_xy(n)
+      u, v = here - q, away - here
+      if (lu := float(np.hypot(*u))) > 1e-6:
+        return q if float(u @ v) / (lu * float(np.hypot(*v))) > -0.5 else None
+    return None
+
+  def offset_way(self, way: int, p, right, d: int = FORWARD) -> np.ndarray:
+    """offset_line of points p running along a way (in direction d), mitred at its ends with the way the road carries
+    on onto there, so the two ways' lines meet."""
+    p = np.asarray(p, float)
+    refs = self.ways[way][1]
+    first, last = (refs[0], refs[-1]) if d == FORWARD else (refs[-1], refs[0])
+    return mitred(p, right, self._beyond(way, first, p), self._beyond(way, last, p[::-1]))
+
+  def offset_nodes(self, nodes: list[int], right: float) -> np.ndarray:
+    """offset_line of a run of ways' nodes, mitred at its ends with the ways the road carries on onto there."""
+    p = self.xy[self.data.index(nodes)]
+    if len(nodes) < 2 or nodes[0] == nodes[-1]:
+      return offset_line(p, right)
+    first, last = self.pairs[(nodes[0], nodes[1])][0], self.pairs[(nodes[-2], nodes[-1])][0]
+    return mitred(p, right, self._beyond(first, nodes[0], p), self._beyond(last, nodes[-1], p[::-1]))
+
+  def way_along(self, way: int) -> np.ndarray:
+    if way not in self._along:
+      self._along[way] = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.way_points(way), axis=0).T))))
+    return self._along[way]
+
+  def edges_at(self, way: int, s: float, direction: int = FORWARD) -> tuple[float, float]:
+    """The kerbs s m along a way from its first node, m right of its line seen travelling `direction`, where
+    line_geometry draws them (through tapers and blends)."""
+    found = self.taper(way) or self.blend(way)
+    if found is None:
+      return self.lanes(way).edges(direction)
+    d, knots = found
+    v = s if d == FORWARD else self.length(way) - s
+    ks = [k for k, _ in knots]
+    lo, hi = (float(np.interp(v, ks, [sec.edges[i] for _, sec in knots])) for i in (0, 1))
+    return (lo, hi) if d == direction else (-hi, -lo)
+
+  def kerb_line(self, steps: list[tuple[int, bool]], nodes: list[int], side: int) -> np.ndarray:
+    """A road's kerb (side 0 its left, 1 its right) along segments [(way, along it)] from node to node, as
+    line_geometry draws each way's (through tapers and blends), stepping only where two ways' kerbs don't meet."""
+    runs, pts, offs = [], [], []
+    for k, (w, fwd) in enumerate(steps):
+      d = FORWARD if fwd else BACKWARD
+      refs, along, line = self.ways[w][1], self.way_along(w), self.way_points(w)
+      a, b = nodes[k], nodes[k + 1]
+      i = next(i for i in range(len(refs) - 1) if {refs[i], refs[i + 1]} == {a, b})
+      sa, sb = (along[i], along[i + 1]) if refs[i] == a else (along[i + 1], along[i])
+      found = self.taper(w) or self.blend(w)
+      inner = [] if found is None else [v if found[0] == FORWARD else self.length(w) - v for v, _ in found[1]]
+      inner = sorted((v for v in inner if min(sa, sb) + 0.05 < v < max(sa, sb) - 0.05), reverse=sb < sa)
+      for n, s in enumerate([sa, *inner, sb]):
+        off = self.edges_at(w, s, d)[side]
+        if n == 0 and pts:
+          if abs(off - offs[-1]) < 0.01:
+            continue
+          runs.append((pts, offs))
+          pts, offs = [], []
+        pts.append([np.interp(s, along, line[:, 0]), np.interp(s, along, line[:, 1])])
+        offs.append(off)
+    runs.append((pts, offs))
+    return np.vstack([offset_line(np.array(p), np.array(o)) for p, o in runs])
 
   def way_points(self, way: int) -> np.ndarray:
     return self.xy[self.data.index(self.ways[way][1])]
@@ -794,7 +940,7 @@ class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
-               junctions=None, explicit: dict | None = None):
+               junctions=None, explicit: dict | None = None, blended: dict | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
@@ -803,6 +949,9 @@ class RouteLanes:
     # segments of a way whose lanes widen or narrow along it (width:lanes...:start / :end): its cross-sections where the
     # route enters and leaves it, and m along there
     self.explicit: dict[int, tuple[Section, Section, float, float]] = explicit or {}
+    # segments of a way whose lanes move across to the next way's (OsmLanes.blend): its knots, whether the route runs
+    # along it, and m along the way at the segment's ends
+    self.blended: dict[int, tuple[list[tuple[float, Section]], bool, float, float]] = blended or {}
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     self._corners: list[tuple[float, float]] | None = None
@@ -834,6 +983,7 @@ class RouteLanes:
         k0, k1 = max(i0, 0), min(i1, len(ways))
         for k in range(k0, k1):
           explicit[k] = (first, last, float(along[k0]), float(along[k1]))
+    blended = cls._blended(pts, ways_along, osm, len(ways))
     for k, sec in enumerate(sections):
       nxt = sections[k + 1] if k + 1 < len(sections) else None
       if sec is not None and any(sec.turns) and not (nxt is not None and any(nxt.turns) and nxt.lanes == sec.lanes):
@@ -843,7 +993,19 @@ class RouteLanes:
          k not in explicit and k - 1 not in explicit:
         tapers[k] = (prev, sec)
     junctions = [float(along[k]) for k in range(1, len(pts) - 1) if degree[k] >= 3]
-    return cls(pts, sections, arrows, tapers, junctions, explicit)
+    return cls(pts, sections, arrows, tapers, junctions, explicit, blended)
+
+  @staticmethod
+  def _blended(pts: np.ndarray, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes, n: int) -> dict:
+    """RouteLanes.blended: each segment on a way whose lanes move across to the next way's (OsmLanes.blend)."""
+    out = {}
+    for w, fwd, i0, i1 in ways_along:
+      if osm.has_ends(w) or (found := osm.blend(w)) is None:
+        continue
+      line = osm.way_points(w)
+      for k in range(max(i0, 0), min(i1, n)):
+        out[k] = (found[1], fwd, _param(line, pts[k]), _param(line, pts[k + 1]))
+    return out
 
   @property
   def corners(self) -> list[tuple[float, float]]:
@@ -905,8 +1067,9 @@ class RouteLanes:
 
   def section_at(self, s: float, k: int | None = None) -> Section | None:
     """The cross-section s m along (on segment k, where s is at a point segments share): along a way whose lanes widen
-    or narrow (width:lanes...:start / :end) as they do along it; else a lane widening from nothing over TAPER_M where the
-    road's lane count has risen, or narrowing to nothing before it falls."""
+    or narrow (width:lanes...:start / :end) as they do along it; near a node where the road carries on onto a way with
+    the same lanes elsewhere, moving across to them as the lines do (OsmLanes.blend); else a lane widening from nothing
+    over TAPER_M where the road's lane count has risen, or narrowing to nothing before it falls."""
     k = self.segment(s) if k is None else k
     sec = self.sections[k] if 0 <= k < len(self.sections) else None
     if sec is None:
@@ -914,6 +1077,11 @@ class RouteLanes:
     if k in self.explicit:
       first, last, s0, s1 = self.explicit[k]
       return _lerp(first, last, (s - s0) / max(s1 - s0, EPS))
+    if k in self.blended:
+      knots, fwd, v0, v1 = self.blended[k]
+      t = (s - self.along[k]) / max(self.along[k + 1] - self.along[k], EPS)
+      here = at_knots(knots, v0 + (v1 - v0) * min(max(t, 0.0), 1.0))
+      return here if fwd else mirrored(here)
     if not self.tapers:
       return sec
     k0, k1 = self._run(k)
@@ -1091,3 +1259,46 @@ def _blend(few: Section, many: Section, t: float) -> Section:
            for o, m in zip(old, many.spans, strict=True)]
   edges = tuple(o + (m - o) * t for o, m in zip(few.edges, many.edges, strict=True))
   return Section(spans, edges)
+
+
+BLEND_M = 10.0  # m either side of a node the lanes move across over where a road carries on from one way to the next
+BLEND_KNOTS = 4  # straight pieces the smoothstep is drawn in on each side
+
+
+def _same_lanes(a: Section, b: Section) -> bool:
+  """Whether two cross-sections have the same lanes in the same order, whatever their widths and where the line runs."""
+  return len(a.spans) == len(b.spans) and a.first == b.first and all(x.heading == y.heading for x, y in zip(a.spans, b.spans, strict=True))
+
+
+def _apart(a: Section, b: Section) -> float:
+  """m the furthest of two cross-sections' (the same lanes') lane edges and kerbs are apart."""
+  return max([abs(x - y) for x, y in zip(a.edges, b.edges, strict=True)] +
+             [max(abs(x.left - y.left), abs(x.right - y.right)) for x, y in zip(a.spans, b.spans, strict=True)])
+
+
+def _toward(own: Section, other: Section, w: float) -> Section:
+  """own's lanes, moved w (0-1) of the way across to where other's (the same lanes) are."""
+  spans = [Span(o.lane, o.left + (m.left - o.left) * w, o.right + (m.right - o.right) * w, o.heading)
+           for o, m in zip(own.spans, other.spans, strict=True)]
+  return Section(spans, tuple(o + (m - o) * w for o, m in zip(own.edges, other.edges, strict=True)))
+
+
+def _smooth(u: float) -> float:
+  u = min(max(u, 0.0), 1.0)
+  return u * u * (3.0 - 2.0 * u)
+
+
+def mirrored(sec: Section) -> Section:
+  """A cross-section seen travelling the other way."""
+  return Section([Span(s.lane, -s.right, -s.left, -s.heading) for s in sec.spans[::-1]], (-sec.edges[1], -sec.edges[0]))
+
+
+def at_knots(knots: list[tuple[float, Section]], v: float) -> Section:
+  """The cross-section v m along a way from its knots [(m, Section)] (taper(), blend()), linear between them."""
+  ks = [k for k, _ in knots]
+  i = int(np.searchsorted(ks, v, side='right')) - 1
+  if i < 0:
+    return knots[0][1]
+  if i >= len(knots) - 1:
+    return knots[-1][1]
+  return _lerp(knots[i][1], knots[i + 1][1], (v - ks[i]) / max(ks[i + 1] - ks[i], EPS))

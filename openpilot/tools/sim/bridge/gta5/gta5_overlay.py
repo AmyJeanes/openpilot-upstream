@@ -191,7 +191,7 @@ def chain(segs: np.ndarray) -> list[np.ndarray]:
   if not len(segs):
     return []
   # 0.25 m across, 2 m in height, so roads passing over each other don't join
-  q = np.concatenate([np.round(segs[:, :, :2] * 4), np.round(segs[:, :, 2:] / 2)], axis=2).astype(np.int64)
+  q = np.concatenate([np.round(snapped(segs[:, :, :2]) * 4), np.round(segs[:, :, 2:] / 2)], axis=2).astype(np.int64)
   keys = [tuple(q[m, e]) for m in range(len(segs)) for e in (0, 1)]
   at = defaultdict(list)
   for n, k in enumerate(keys):
@@ -223,6 +223,26 @@ def chain(segs: np.ndarray) -> list[np.ndarray]:
     extend(back, 2 * s)
     out.append(np.array(back[::-1][:-1] + fwd))
   return out
+
+
+SNAP = 0.06  # m: segment ends this near each other are one point, though rounding would part them
+
+
+def snapped(ends: np.ndarray) -> np.ndarray:
+  """Segment ends [M, 2, 2] with those within SNAP of an earlier one moved onto it: two ways' lines meeting at a bend
+  end a few cm apart where they're offset again (a double line's two), which rounding to a grid can split."""
+  pts = ends.reshape(-1, 2)
+  out = pts.copy()
+  cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+  key = np.floor(pts / SNAP).astype(np.int64)
+  for i, (cx, cy) in enumerate(key.tolist()):
+    near = [j for dx in (-1, 0, 1) for dy in (-1, 0, 1) for j in cells.get((cx + dx, cy + dy), ())
+            if abs(out[j, 0] - pts[i, 0]) <= SNAP and abs(out[j, 1] - pts[i, 1]) <= SNAP]
+    if near:
+      out[i] = out[near[0]]
+    else:
+      cells[(cx, cy)].append(i)
+  return out.reshape(ends.shape)
 
 
 def disk(centre: np.ndarray, radius: float, n: int = 16) -> np.ndarray:
