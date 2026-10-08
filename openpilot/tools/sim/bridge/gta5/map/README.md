@@ -143,7 +143,7 @@ shown or a level changes.
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
-    rp_all/polylines.jsonl --survey-features rp_all/features.jsonl`.
+    rp_all/polylines.jsonl`.
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
@@ -201,7 +201,7 @@ shown or a level changes.
   reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav's own
   stop list follows it (`paths.py`, `GTA5_STOP_DIRECTION=1`).
 - GTA's stop line nodes are 12-24 m before their junction's node, often metres off the painted line. With
-  `--survey-lines` (and `--survey-features` for the painted crossings) the map's stop lines go where the game files
+  `--survey-lines` (and `--survey-features rp_all/features.jsonl` for the painted crossings) the map's stop lines go where the game files
   paint them (`stop_paint.py`): on each approach to a junction (junctions.py's), the thick white line across its
   lanes towards the junction (the far edge of a crossing painted there, which GTA paints as the stop line), as a node
   splitting the way there (ids as for tapers) that takes the signal or sign and its direction from GTA's node. An
