@@ -26,9 +26,8 @@ A way's line can't leave GTA's nodes, so the line stays put and the paint moves 
 the line is the middle of the road between the kerbs (OSM's default reading), so a centre off the line is said by the
 lanes' widths alone; with more lanes one way the line is the centre's (placement), which must then be on the line
 (within CENTRE_TOL). Lane counts never change here; disagreements are only counted.
-Painted arrows (game files only, a sample's "arrows" or arrow "features") give each direction's lanes their turn arrows,
-where there is one per lane, and the game files' kinds of the lines between lanes (solid, solid on one half) their
-change:lanes. Where the lanes stay the class layout, lane_lines still reads the kinds of the lines between them, and
+The game files' kinds of the lines between lanes (solid, solid on one half) give the lanes their change:lanes. Where
+the lanes stay the class layout, lane_lines still reads the kinds of the lines between them, and
 unpainted which roads have no lines at all. Other fields (z, a mark's width / cover / line id, kerb_step, hatched spans, stop lines, other
 features) are read past.
 """
@@ -56,7 +55,6 @@ DIVIDER = {'double_solid': 'double_solid_line', 'solid': 'solid_line', 'dashed':
            'solid_dashed': 'solid_line;dashed_line', 'dashed_solid': 'dashed_line;solid_line'}
 HALVES_SWAPPED = {'solid_dashed': 'dashed_solid', 'dashed_solid': 'solid_dashed'}  # a line seen the other way
 CHANGE = {(True, True): 'yes', (False, False): 'no', (False, True): 'not_left', (True, False): 'not_right'}
-ARROW_APART = 1.5  # m between two lanes' arrows
 GAMEFILES = 'gamefiles'
 
 
@@ -578,26 +576,13 @@ TURNS = {'through;left': 'left;through', 'through;right': 'through;right', 'left
          'left': 'left', 'right': 'right', 'through': 'through', 'reverse': 'reverse', 'left;right': 'left;right'}
 
 
-def arrows(samples: list[dict]) -> dict[str, list[str]]:
-  """The game files' painted arrows each way along a link: {'forward': [turn:lanes values], 'backward': [...]} (each
-  direction's lanes left to right as seen travelling it), an arrow per lane, its kind the one most seen there. Arrows
-  come as a sample's "arrows", or "features" whose kind is an arrow's."""
-  out = {}
-  for key, ahead in (('forward', True), ('backward', False)):
-    seen = [(k, a) for k, d in enumerate(samples) if d.get('src') == GAMEFILES for a in (d.get('arrows') or []) + (d.get('features') or [])
-            if (a.get('dir') in ('ab', 'ahead')) == ahead and a.get('conf', 1.0) >= CONF and a.get('kind') in TURNS and 'offset' in a]
-    if not seen:
-      continue
-    offsets = sorted(a['offset'] if ahead else -a['offset'] for _, a in seen)
-    lanes = [[offsets[0]]]
-    for v in offsets[1:]:
-      if v - lanes[-1][-1] < ARROW_APART:
-        lanes[-1].append(v)
-      else:
-        lanes.append([v])
-    kinds = []
-    for lane in lanes:
-      votes = Counter(TURNS[a['kind']] for _, a in seen if min(lane) - 1e-6 <= (a['offset'] if ahead else -a['offset']) <= max(lane) + 1e-6)
-      kinds.append(votes.most_common(1)[0][0])
-    out[key] = kinds
+def arrow_marks(path) -> list[tuple[float, float, float, float, str]]:
+  """The game files' painted turn arrows (features.jsonl's "arrow" features): [(x, y, z, the heading they point,
+  turn:lanes value)], headings in degrees counterclockwise from north, as paths.heading. A decal's own heading is a
+  quarter turn clockwise of where its arrow points."""
+  out = []
+  for line in open(path):
+    f = json.loads(line)
+    if f.get('kind') == 'arrow' and f.get('arrow') in TURNS:
+      out.append((f['x'], f['y'], f['z'], (f['heading'] - 90.0 + 180.0) % 360.0 - 180.0, TURNS[f['arrow']]))
   return out

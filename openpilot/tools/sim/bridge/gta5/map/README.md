@@ -138,7 +138,7 @@ shown or a level changes.
     where its paint has other counts than GTA's (Eclipse Blvd's 3 + 2; arrows are then laid out for the painted
     lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
-    lanes between their painted edges, and the painted arrows as `turn:lanes` where there's one per lane. GTA's lane
+    lanes between their painted edges. GTA's lane
     counts stay on one-way links (freeways GTA draws as parallel links are painted as one carriageway). With
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
@@ -160,10 +160,16 @@ shown or a level changes.
   - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
     no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
   - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it
-    less those the restrictions forbid: every lane the same way at a forced turn, else the outer lanes also turn (GTA's
-    cars turn from the outermost) and the others go through, or half each way at a T. On every way from 30 m before
-    the junction (Valhalla reads them from the way into it), not on one-lane approaches other than GTA's left turn
-    only lanes, and not where the road bends into the junction, which leaves which way is through moot.
+    less those the restrictions forbid. Each lane takes the arrow the game files paint in it up to 90 m before the
+    junction (`--survey-features rp_all/features.jsonl`, placed in the lanes by position), less any move the junction
+    has no way out for (through also where the road goes on skewed up to 55°). Lanes without paint take GTA's usual
+    painting (that of 2 in 3 approaches it paints every lane of): every lane the same way at a forced turn, else the
+    left lane left only, the right lane through and right, the others through, or half each way at a T; never turning
+    across a painted lane. GTA lays many approaches as a link per lane, each with its own turn flags: each is its own
+    approach, so a lane's arrows are the moves its own link has. On every way from 30 m before the junction, or from
+    the furthest painted arrow (Valhalla reads them from the way into it); not on one-lane approaches other than GTA's
+    left turn only lanes and those whose painted arrow covers every move they have, and not where the road bends into
+    the junction, which leaves which way is through moot.
   - One link (offset -2/14 lane) has lanes overlapping that OSM can't describe: its kerbs are kept.
 - Road classes are guessed (GTA has none): motorway for its highway nodes, primary with two lanes or more one way, service for car parks
   and alleys (nodes switched off for traffic, or without GPS), track off-road. GTA splits a road's lanes into separate

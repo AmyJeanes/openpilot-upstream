@@ -836,7 +836,8 @@ def forbidden(restricted: dict, m_in: Member, m_out: Member) -> bool:
 def lane_moves(turns: list[frozenset[str]], exits: list[tuple[float, int]]) -> list[list[tuple[int, int]]]:
   """For each way out ((deg turned, its lanes)), the moves [(lane in, lane out)] to it of the lanes in, given each lane's
   turn:lanes arrows (empty for none). With arrows, a lane takes the ways out they point along, or the nearest one on
-  that side where none does. Without, the leftmost lane also turns left, the rightmost right, and the rest go through
+  that side where none does (through: the nearest straight, as on a skewed junction). Without, the leftmost lane also
+  turns left, the rightmost right, and the rest go through
   (at a T, half each way). The lanes taking a way out go to its lanes in order from the side they turn to (through,
   spread evenly)."""
   n = len(turns)
@@ -850,7 +851,7 @@ def lane_moves(turns: list[frozenset[str]], exits: list[tuple[float, int]]) -> l
         lo, hi = ARROWS[turn]
         hit = [k for k, (t, _) in enumerate(exits) if lo <= t <= hi]
         if not hit:
-          side = [k for k, (t, _) in enumerate(exits) if (t > 0) == (lo + hi > 0)]
+          side = [k for k, (t, _) in enumerate(exits) if lo + hi == 0 or (t > 0) == (lo + hi > 0)]
           hit = [min(side, key=lambda k: abs(exits[k][0] - (lo + hi) / 2))] if side else []
         take[i] |= set(hit)
   elif n == 1:
