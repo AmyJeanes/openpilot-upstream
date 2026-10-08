@@ -8,7 +8,7 @@ import zlib
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.gta5_nav import Through, Turn, aim, lane_plan, parse_arrows, throughs
+from openpilot.selfdrive.navd.planner import Through, Turn, aim, lane_plan, parse_arrows, throughs
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, continuing, turn_targets, \
   ways_from_nodes, ways_from_trace

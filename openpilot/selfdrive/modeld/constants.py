@@ -44,6 +44,7 @@ class ModelConstants:
   DESIRED_CURV_WIDTH = 1
 
   NUM_LANE_LINES = 4
+  LANE_HEAD_MAX = 8  # the current-lane head's classes are (count, index) with index < count <= this
   NUM_ROAD_EDGES = 2
 
   LEAD_TRAJ_LEN = 6

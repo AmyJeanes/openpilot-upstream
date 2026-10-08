@@ -942,7 +942,7 @@ class Overlay:
     self.marks_for: tuple | None = None  # ((paths, osm), their road_marks' cache key, when first asked for)
     self.builder: subprocess.Popen | None | bool = None  # building them in the background; False: it failed
 
-  def update(self, state: dict, route, paths, lane_line, nav, recording: bool, osm=None) -> list[dict]:
+  def update(self, state: dict, route, paths, lane_line, turn_points, recording: bool, osm=None) -> list[dict]:
     out = []
     with self.lock:
       if self.outbox is not None:
@@ -963,8 +963,8 @@ class Overlay:
             "v": state.get("vEgo", 0.0), "full": full}
     if "r" in layers or "n" in layers:
       snap["lane_line"] = lane_line()
-    if full and "m" in layers and state.get("route") and nav is not None:
-      points = nav.turn_points(np.array(state["route"], dtype=float), state)
+    if full and "m" in layers and state.get("route") and turn_points is not None:
+      points = turn_points()
       if points is not None:
         snap["turn"], snap["signal"] = points
     with self.lock:

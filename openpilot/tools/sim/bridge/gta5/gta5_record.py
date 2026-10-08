@@ -296,7 +296,7 @@ class Recorder:
             state["vEgo"], state.get("aMeas", 0), state.get("yawRate", 0), *rot_vel, state.get("steerCurvature", 0),
             state.get("camHeight", 0), state.get("wheelBase", 0), state.get("resets", 0), state.get("collisions", 0),
             INDICATORS.get(state.get("indicator"), 0), user.get("steer", 0), user.get("gas", False), user.get("brake", False),
-            w.simulator_state.is_engaged if w is not None else 0, w.nav.blinker_gap if w is not None else 0,
+            w.simulator_state.is_engaged if w is not None else 0, w.nav.blinker_gap(time.monotonic()) if w is not None else 0,
             getattr(w, "cap", 0), lane[0], lane[1], route_idx,
             *((route.at, route.off, route.right) if route is not None else (np.nan,) * 3),
             expert_on, self.segment.expert_labels.index(label)]
