@@ -524,7 +524,7 @@ class Junctions:
         m = self.member(n, step)
         if m is not None:
           members.append(m)
-    if len(members) < 3 or all(self.ways[m.ways[0][0]][0].get('highway') in FREEWAY for m in members) or \
+    if len(members) < 3 or all(self.freeway(self.ways[m.ways[0][0]][0]) for m in members) or \
         self.merges(members, [w for ways, _ in links for w, _ in ways]):
       return None  # freeways only merge and part, with no junction between
     centre = np.mean([self.osm.node_xy(n) for n in nodes], axis=0)
@@ -561,6 +561,11 @@ class Junctions:
       kerbs = [push(k, centre, np.vstack(samples)) for k in kerbs]
       polygon = np.vstack([np.vstack([kerbs[i - 1][-1:], kerbs[i][:-1]]) for i in range(len(kerbs))])
     return Junction(nodes, arms, polygon, kerbs, inside, centre)
+
+  @staticmethod
+  def freeway(tags: dict) -> bool:
+    """A motorway's, or a one-way trunk road's: a divided highway's carriageway, or a lane change across one."""
+    return tags.get('highway') in FREEWAY or (tags.get('highway', '').removesuffix('_link') == 'trunk' and oneway_of(tags) != 0)
 
   def merges(self, members: list[Member], inside: list[int]) -> bool:
     """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW of one heading, and the roads
