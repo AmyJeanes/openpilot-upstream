@@ -124,10 +124,11 @@ On that route the bridge also writes a route input for route-conditioned driving
 by gta5-train `--route`) to shared memory, which modeld feeds only to a model with a `route` input; it is zero off the
 route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without it.
 `OPENPILOT_PREFIX=gta5 GALLIUM_DRIVER=d3d12 python openpilot/tools/sim/bridge/gta5/watch_route.py` (in the venv) shows that input live.
-Below it, it previews route input v2's lane slots (`selfdrive/navd/lane_slots.py`: the road here and the road out of the next
-maneuver, counted from the kerb, with the lanes the route needs), which the bridge writes to a shared-memory file of
-their own (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats (route input v2);
-a model trained on v1's 173 reads only the start of it.
+Below it, it shows route input v2's lane slots (`selfdrive/navd/lane_slots.py`: the road here and the road out of the next
+maneuver, counted from the kerb, with the lanes the route needs), which the bridge also writes to a shared-memory file of
+their own with the car's lane (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats
+(route input v2); a model trained on v1's 173 reads only the start of it. On the road here it marks the model's lane
+(`modelV2.laneHead`, outlined, its P(index) as faint bars) against the car's true lane (a green mark).
 `GTA5_NAV_MSGS=1` also publishes openpilot's `navInstruction` and `navRoute` for that route (`gta5_nav_msgs.py`: the
 next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
 beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,
