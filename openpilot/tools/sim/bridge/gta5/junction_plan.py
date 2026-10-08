@@ -14,9 +14,11 @@ junction, and each way out ends AFTER m down its road. Every approach and way ou
 turn, ramp or roundabout before the junction, no U-turn and no detour: so the ways out are the legal ones. An approach
 needs two.
 
-Held out for eval, whole junctions: those of --eval-trips (the in-game A/B set, so it stays a test, and the set it
-replaced), the first file's driven from each trip's own start; no training junction lies within EVAL_BUFFER m of one.
---bad-labels (a labels root) leaves out junctions where the expert collided, left the route or drove in the oncoming lanes before (the labeller's rejections).
+Held out for eval, whole junctions: those of --eval-trips (the in-game A/B set, driven from each trip's own start, freeway
+exits included; then the set it replaced and the scenario suites, by their noted points), so they stay tests: no
+training junction lies within EVAL_BUFFER m of one. --bad-labels (a labels root) leaves out junctions where the expert
+collided, left the route or drove in the oncoming lanes before (the labeller's rejections). Freeway exits (diverges:
+GTA has no junction nodes there) are trained as mainline in -> down the ramp / on along the mainline (--freeways).
 Training approaches are picked by kind (kind_score: those nav and the model get wrong first), spread over the city
 (AREA_CELL), until --hours is filled at --train-reps passes; eval junctions are driven --eval-reps times, --fail-reps
 for the --fail-trips ones.
@@ -53,7 +55,10 @@ UTURN_DEG = 30.0  # a way out within this of the way back
 PASS_NEAR = 10.0  # m: a route runs along a link this near, its way (PASS_DEG)
 PASS_DEG = 50.0
 NOT_BEFORE = {10, 11, 14, 15, 17, 18, 19, 20, 21, 26, 27}  # Valhalla turns, ramps, exits, roundabouts: none on the way in
-EXIT_KEEP = 15.0  # m: ways out whose routes pass the same point this near are one
+EXIT_SAME, SAME_OVER = 25.0, 200.0  # m: ways out whose routes stay this near over this far past the way in are one
+SPECIAL = {17, 18, 19, 20, 21, 22, 23, 24, 26, 27}  # Valhalla ramps, exits, forks, roundabouts: a way out's kind as they are
+STRAIGHT_DEG = 20.0  # deg of heading change through the junction, under which a way out is straight on
+TURN_BEFORE = 15.0  # m before the way in: a ramp or fork maneuver there is the junction's
 TURN_NEAR = 40.0  # m along from the junction: a maneuver there is the junction's
 NO_TURN_BEFORE = 40.0  # m before the junction: no NOT_BEFORE maneuver on the way in
 BEND_FROM = 100.0  # m before the junction: the road's bend from there in (SO05, SR1: 30-50 deg)
@@ -66,6 +71,16 @@ TOO_CLOSE = 60.0  # m: an approach starting this near a picked one's start is sk
 GEOM_STEP = 25.0  # m between the route points kept in the plan
 EST_OVERHEAD = 23.0  # s a trip: randomise, setup and placing (~12 s between trips), launch, arrival hold
 EST_SPEED = 5.0  # m/s on the road, light waits included (overnight1: 5.7 m/s on 0.5-3 km trips)
+EST_FWY_SPEED = 11.0  # m/s for a freeway trip from a standstill (the expert's freeway cap 18 m/s, ramps 12)
+FWY = ("motorway", "trunk")
+FX_RAMP_DEG = (3.0, 60.0)  # deg between a ramp's first link and the mainline's
+FX_BEFORE, FX_SLACK, FX_MIN = 900.0, 150.0, 600.0  # m of mainline before the diverge: nav's signal and 2-3 lane changes
+FX_AFTER, FX_AFTER_MIN = 220.0, 150.0  # m down the ramp (or on along the mainline)
+# the time of day and weather each trip is given (gta5_cmd world, after randomise's), cycled so the passes of one way out
+# differ; in the shares randomise draws them (75% day, 10% dawn or dusk, 15% night; mostly clear or cloudy, 5% fog,
+# 5% smog, 10% rain or thunder)
+HOURS = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 7, 13, 10, 15, 6, 19, 22, 0, 3)
+WEATHERS = ("EXTRASUNNY",) * 5 + ("CLEAR",) * 5 + ("CLOUDS",) * 4 + ("OVERCAST",) * 2 + ("SMOG", "FOGGY", "RAIN", "THUNDER")
 
 
 def wrap(d: float) -> float:
@@ -163,9 +178,6 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
     return {"ok": False, "why": "U-turn"}
   if any(m["type"] in NOT_BEFORE and m["s"] < s_in - NO_TURN_BEFORE for m in mans):
     return {"ok": False, "why": "a turn on the way in"}
-  at = [m for m in mans if m["real"] and s_in - NO_TURN_BEFORE <= m["s"] <= s_out + TURN_NEAR]
-  kind = maneuver_class(at[0]) if at else "straight"
-
   def point(s):
     return np.array([np.interp(s, along, pts[:, 0]), np.interp(s, along, pts[:, 1])])
 
@@ -174,13 +186,23 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
     return math.degrees(math.atan2(d[0], d[1])) % 360  # compass
   change = wrap(heading(s_out + 10, s_out + 30) - heading(s_in - 20, s_in - 5))
   bend = wrap(heading(s_in - 20, s_in - 5) - heading(max(s_in - BEND_FROM, 0.0), max(s_in - BEND_FROM + 20, 5.0)))
-  geom =[[round(float(v), 1) for v in point(s)] for s in np.append(np.arange(0.0, along[-1], GEOM_STEP), along[-1])]
+  # the turn as driven through the junction: Valhalla's maneuver nearby can be a bend in the road before it
+  special = [m for m in mans if m["type"] in SPECIAL and s_in - TURN_BEFORE <= m["s"] <= s_out + TURN_NEAR]
+  if special:
+    kind = maneuver_class(special[0])
+  elif abs(change) < STRAIGHT_DEG:
+    kind = "straight"
+  else:
+    kind = maneuver_class({"type": 10 if change > 0 else 15, "angle": change})
+  geom = [[round(float(v), 1) for v in point(s)] for s in np.append(np.arange(0.0, along[-1], GEOM_STEP), along[-1])]
   first_real = min((m["s"] for m in mans if m["real"]), default=None)
-  return {"ok": True, "length": round(float(along[-1])), "first_real": first_real, "time": round(float(sum(m.get("time", 0) for m in r.maneuvers))),
-          "s_in": round(s_in, 1), "s_out": round(s_out, 1), "kind": kind,
-          "angle": round(at[0]["angle"]) if at and at[0]["angle"] is not None else None, "change": round(change),
-          "bend": round(bend), "maneuvers": [e2e.TYPES.get(m["type"], str(m["type"])) for m in mans],
-          "exit_point": [round(float(v), 1) for v in point(s_out + 30)], "geom": geom}
+  way_out = [[round(float(v), 1) for v in point(s)] for s in s_in + np.arange(0.0, SAME_OVER + 1.0, 10.0)]
+  return {"ok": True, "length": round(float(along[-1])), "first_real": first_real,
+          "time": round(float(sum(m.get("time", 0) for m in r.maneuvers))), "s_in": round(s_in, 1), "s_out": round(s_out, 1),
+          "kind": kind, "angle": round(change), "change": round(change), "bend": round(bend),
+          "maneuvers": [e2e.TYPES.get(m["type"], str(m["type"])) for m in mans],
+          "exit_point": [round(float(v), 1) for v in point(s_out + 30)], "way_out": way_out, "geom": geom,
+          "turns": [[round(m["s"]), m["type"]] for m in mans if m["real"]]}
 
 
 # *** junctions on GTA's links ***
@@ -403,8 +425,85 @@ def bad_spots(labels_root: str) -> list[tuple[float, float, str]]:
 
 # *** the plan ***
 
-def est_seconds(length: float) -> float:
-  return EST_OVERHEAD + length / EST_SPEED
+def est_seconds(length: float, freeway: bool = False) -> float:
+  return EST_OVERHEAD + length / (EST_FWY_SPEED if freeway else EST_SPEED)
+
+
+# *** freeway exits: a ramp leaving a freeway's mainline (no junction nodes there in GTA's paths) ***
+
+def diverges(m) -> list[dict]:
+  """Nodes where a one-way freeway link of 2+ lanes splits into the mainline on (nearest its bearing, still a freeway)
+  and a ramp off it (FX_RAMP_DEG from the mainline): the side, lanes in / on / off, and whether the ramp takes a lane
+  that ends there (a drop lane: lanes in >= on + off, more than on)."""
+  def kind(a, b):
+    return m.ynd.highway(m.nodes, a, b, m.lanes.get((a, b), 0), m.lanes.get((b, a), 0))
+  out = []
+  for k, outs in m.out.items():
+    ins = m.into.get(k, [])
+    if len(outs) != 2 or len(ins) != 1:
+      continue
+    u = ins[0]
+    if kind(u, k) not in FWY or m.lanes.get((u, k), 0) < 2 or m.lanes.get((k, u), 0):
+      continue
+    b_in = m.bearing(u, k)
+    main, ramp = sorted(outs, key=lambda b: abs(wrap(m.bearing(k, b) - b_in)))
+    d_main, d_ramp = wrap(m.bearing(k, main) - b_in), wrap(m.bearing(k, ramp) - b_in)
+    if kind(k, main) not in FWY or abs(d_main) > 15 or not FX_RAMP_DEG[0] <= abs(d_ramp - d_main) <= FX_RAMP_DEG[1]:
+      continue
+    li, lm, lr = m.lanes.get((u, k), 0), m.lanes.get((k, main), 0), m.lanes.get((k, ramp), 0)
+    out.append({"node": k, "u": u, "main": main, "ramp": ramp, "x": m.nodes[k]["x"], "y": m.nodes[k]["y"],
+                "side": "right" if d_ramp > d_main else "left", "lanes_in": li, "lanes_main": lm, "lanes_ramp": lr,
+                "drop": li >= lm + lr and li > lm, "street": m.streets.get(m.nodes[u]["st"])})
+  return out
+
+
+def diverge_approach(m, d: dict, start: dict | None = None) -> dict | None:
+  """An approach along the mainline FX_BEFORE m to diverge d (or from `start`), out down the ramp and on along the
+  mainline (not routed yet)."""
+  u, k = d["u"], d["node"]
+  exits = []
+  for b in (d["ramp"], d["main"]):
+    e = exit_dest(m, k, b, FX_AFTER, FX_AFTER_MIN)
+    if e is None:
+      return None
+    exits.append({"via_out": [xy(m, k), xy(m, b)], "dest": [round(m.nodes[e[0]]["x"], 1), round(m.nodes[e[0]]["y"], 1)],
+                  "after": round(e[1]), "bearing": round(m.bearing(k, b)), "street": m.streets.get(m.nodes[b]["st"])})
+  if start is None:
+    st = approach_start(m, u, k, FX_BEFORE, FX_SLACK, FX_MIN)
+    if st is None:
+      return None
+    s0, ahead, dist, passed = st
+    n = m.nodes[s0]
+    start = {"x": round(n["x"], 1), "y": round(n["y"], 1), "z": round(n["z"], 1), "heading": round((-m.bearing(s0, ahead)) % 360)}
+    lanes_start, bend = m.lanes.get((s0, ahead), 1), wrap(m.bearing(s0, ahead) - m.bearing(u, k))
+  else:
+    dist, passed, bend = math.hypot(start["x"] - d["x"], start["y"] - d["y"]), [], 0.0
+    link = m.link_at(start["x"], start["y"], (-start["heading"]) % 360, False)
+    lanes_start = m.lanes.get(tuple(link), 1) if link else 1
+  a = approach(m, u, k, exits, start, dist, lanes_start, bend, passed)
+  a.update(freeway=True, junction=[round(d["x"], 1), round(d["y"], 1)], jsize=0.0, side=d["side"], drop=d["drop"],
+           lanes_main=d["lanes_main"], lanes_ramp=d["lanes_ramp"])
+  return a
+
+
+def nav_lane_changes(router, spec: str, v: float = 20.0) -> tuple[list[tuple[float, float, float]], int]:
+  """The lane changes navd's planner (lane_plan, as the bridge draws nav's lane line) asks for on the trip's route
+  from its start lane: [(m from, m to, lanes moved, + right)], and the lanes at the start."""
+  from openpilot.selfdrive.navd.planner import lane_plan
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  (sx, sy, sz, sh, dx, dy), lane = e2e.parse_spec(spec)
+  osm = router.osm
+  router.osm = router.roads  # the map's lanes on the route, as the bridge has them
+  try:
+    r = router.route(np.array([sx, sy]), (-sh) % 360, np.array([dx, dy]), sz)
+  finally:
+    router.osm = osm
+  forks = [[f.along, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > 0]
+  n = r.lanes_at(5.0, True) or 1
+  cur = min(lane if lane is not None and lane < 9 else n - 1, n - 1)
+  keys = lane_plan(r.rest(), forks, [cur, n], r.lanes_at, v, None, r.lane_arrows(r.length, 0.0), r.lane_drops(r.length, 0.0),
+                   r.lane_opens(r.length, 0.0))
+  return [(round(a[0]), round(b[0]), b[1] - a[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] and b[1] != a[1]], n
 
 
 def tour(items: list[dict], start=(0.0, 0.0)) -> list[dict]:
@@ -417,6 +516,12 @@ def tour(items: list[dict], start=(0.0, 0.0)) -> list[dict]:
   return out
 
 
+def same_way(a: list, b: list) -> bool:
+  """Whether two ways out (their routes' points every 10 m from the way in) stay within EXIT_SAME m of each other."""
+  n = min(len(a), len(b))
+  return bool(n) and float(np.hypot(*(np.asarray(a[:n]) - np.asarray(b[:n])).T).max()) < EXIT_SAME
+
+
 def verify(router, a: dict) -> dict | None:
   """The approach with its routed ways out (kind, length, geometry), or None with fewer than two."""
   kept = []
@@ -425,10 +530,12 @@ def verify(router, a: dict) -> dict | None:
     e["check"] = r.get("why", "ok")
     if not r["ok"]:
       continue
-    if any(math.hypot(r["exit_point"][0] - k["exit_point"][0], r["exit_point"][1] - k["exit_point"][1]) < EXIT_KEEP for k in kept):
+    # a ramp runs beside the mainline for a while: there the same way is the same destination
+    if any(math.dist(e["dest"], k["dest"]) < EXIT_SAME if a.get("freeway") else same_way(r["way_out"], k["way_out"]) for k in kept):
+      e["check"] = "the same way as another"
       continue
     kept.append({**e, **{k: r[k] for k in ("length", "time", "s_in", "s_out", "kind", "angle", "change", "bend", "maneuvers",
-                                             "exit_point", "geom")}})
+                                             "exit_point", "way_out", "geom", "turns")}})
   if len(kept) < 2:
     return None
   # the road's bend on the way in from its routes (GTA's links bend more over the 250 m from the start)
@@ -448,12 +555,35 @@ def make_plan(args) -> dict:
 
   # eval: the A/B trips' junctions, from each trip's own start
   fail = set(args.fail_trips.split(",")) if args.fail_trips else set()
-  evals, eval_ids, eval_missing = [], set(), {}
+  evals, eval_ids, eval_missing, held_points = [], set(), {}, []
+  dvs = diverges(m)
   # several files: the first one's trips are driven, a later file's junctions only add to those held out (old A/B sets)
-  for ep in [ep for path in (args.eval_trips or "").split(",") if path for ep in eval_points(path)]:
+  files = [path for path in (args.eval_trips or "").split(",") if path]
+  for i, ep in [(i, ep) for i, path in enumerate(files) for ep in eval_points(path)]:
+    if i > 0:  # held out by its noted point only (other test sets, the A/B set before it)
+      if not any(math.dist(p, ep["turn"]) < 1.0 for p in held_points):
+        held_points.append(ep["turn"])
+      continue
     c = min(cls, key=lambda c: math.hypot(c["x"] - ep["turn"][0], c["y"] - ep["turn"][1]))
-    if math.hypot(c["x"] - ep["turn"][0], c["y"] - ep["turn"][1]) > 30.0 + c["size"]:
-      eval_missing[ep["name"]] = "no junction at its turn"
+    d = min(dvs, key=lambda d: math.hypot(d["x"] - ep["turn"][0], d["y"] - ep["turn"][1]), default=None)
+    at_exit = d is not None and math.hypot(d["x"] - ep["turn"][0], d["y"] - ep["turn"][1]) < 1.0
+    if at_exit or math.hypot(c["x"] - ep["turn"][0], c["y"] - ep["turn"][1]) > 30.0 + c["size"]:
+      # a freeway exit (noted at its diverge node; a ramp's junction can be near): held out by its point, driven from
+      # the trip's start
+      if d is None or math.hypot(d["x"] - ep["turn"][0], d["y"] - ep["turn"][1]) > AB_GORE_NEAR:
+        eval_missing[ep["name"]] = "no junction or freeway exit at its turn"
+        continue
+      if any(math.dist(p, ep["turn"]) < 1.0 for p in held_points):
+        continue
+      held_points.append(ep["turn"])
+      (sx, sy, sz, sh, *_), _ = e2e.parse_spec(ep["spec"])
+      a = diverge_approach(m, d, {"x": sx, "y": sy, "z": sz, "heading": sh})
+      v = verify(router, a) if a is not None else None
+      if v is None or not label_exit(m, v, d):
+        eval_missing[ep["name"]] = "freeway exit: the router doesn't drive it as an exit and on from its start"
+        continue
+      v.update(split="eval", name=ep["name"], reps=args.fail_reps if ep["name"] in fail else args.eval_reps)
+      evals.append(v)
       continue
     if id(c) in eval_ids:
       continue  # held out already, by another trip of it
@@ -482,7 +612,7 @@ def make_plan(args) -> dict:
   for name, why in eval_missing.items():
     print(f"eval {name}: {why}", flush=True)
   held = [c for c in cls if id(c) in eval_ids]
-  eval_xy = np.array([[c["x"], c["y"]] for c in held]) if held else np.zeros((0, 2))
+  eval_xy = np.array([[c["x"], c["y"]] for c in held] + held_points) if held or held_points else np.zeros((0, 2))
 
   bad = bad_spots(args.bad_labels) if args.bad_labels and os.path.exists(os.path.expanduser(args.bad_labels)) else []
   bad_xy = np.array([[x, y] for x, y, _ in bad]) if bad else np.zeros((0, 2))
@@ -523,8 +653,31 @@ def make_plan(args) -> dict:
       cands.append((pre + rng.random() * 0.8, a, alt if alt is not None and alt["start"] != a["start"] else None))
   cands.sort(key=lambda t: -t[0])
   print(f"{len(cands)} candidate approaches; left out: {dict(skipped)}", flush=True)
+  # freeway exits for training: FREEWAYS_PER_ROAD at most on one named freeway, all FX_SPREAD m apart
+  fwy, fwy_roads = [], Counter()
+  if args.freeways:
+    def far(p):
+      return not len(eval_xy) or np.hypot(*(eval_xy - p).T).min() >= EVAL_BUFFER
+    found = freeway_exits(m, router, far)
+    print(f"{len(found)} freeway exits routed", flush=True)
+    for v in sorted(found, key=lambda v: (-(v["diverge"]["lanes_in"] >= 3) - v["diverge"]["drop"], rng.random())):
+      d = v["diverge"]
+      if d["street"] and fwy_roads[d["street"]] >= FREEWAYS_PER_ROAD or \
+         any(math.dist(v["junction"], w["junction"]) < FX_SPREAD for w in fwy):
+        continue
+      v["score"], v["tags"] = kind_score(v)
+      v["tags"] = v["tags"] + ["freeway"] + (["drop"] if d["drop"] else [])
+      v.update(split="train", reps=args.train_reps)
+      fwy.append(v)
+      fwy_roads[d["street"]] += 1
+      if len(fwy) == args.freeways:
+        break
+    print(f"{len(fwy)} freeway exits for training: {dict(fwy_roads)}", flush=True)
+  for v in fwy + [a for a in evals if a.get("freeway")]:
+    v.pop("diverge", None)
   per_trip = est_seconds(BEFORE + AFTER + 20)
-  eval_secs = sum(a["reps"] * sum(est_seconds(e["length"]) for e in a["exits"]) for a in evals)
+  eval_secs = sum(a["reps"] * sum(est_seconds(e["length"], a.get("freeway", False)) for e in a["exits"]) for a in evals)
+  eval_secs += sum(a["reps"] * sum(est_seconds(e["length"], True) for e in a["exits"]) for a in fwy)
   train_ways_wanted = max(0.0, (args.hours * 3600 - eval_secs) / per_trip / args.train_reps)
   pool, checks = [], Counter()
   t1 = time.monotonic()
@@ -572,7 +725,7 @@ def make_plan(args) -> dict:
   for a in spare:
     a.update(split="spare", reps=0)
 
-  approaches = tour(chosen) + tour(evals)
+  approaches = tour(fwy + chosen) + tour(evals)
   for i, a in enumerate(approaches):
     a["id"] = f"{'E' if a['split'] == 'eval' else 'J'}{i:03d}"
     for j, e in enumerate(a["exits"]):
@@ -584,6 +737,7 @@ def make_plan(args) -> dict:
 
   trips = []
   passes_n = max([a["reps"] for a in approaches] + [0]) + args.extra_passes
+  way_index = {e["id"]: i for i, e in enumerate(e for a in approaches for e in a["exits"])}
   for p in range(passes_n):
     for a in approaches:
       reps = a["reps"] + (args.extra_passes if a["split"] == "train" else 0)
@@ -593,16 +747,21 @@ def make_plan(args) -> dict:
       for j in range(n):
         k = (j + p) % n
         e = a["exits"][k]
-        lane = (0 if (p + k) % 2 == 0 else 9) if a["lanes_start"] >= 2 else 9
+        if a.get("freeway"):
+          lane = 0 if (p + k) % 2 == 0 else 1  # an inner lane: the expert changes lanes for the exit
+        else:
+          lane = (0 if (p + k) % 2 == 0 else 9) if a["lanes_start"] >= 2 else 9
         s = a["start"]
+        w = way_index[e["id"]]
+        world = {"hour": HOURS[(w * 7 + p * 3) % len(HOURS)], "minute": 0, "weather": WEATHERS[(w * 11 + p * 7 + 3) % len(WEATHERS)]}
         trips.append({"id": f"{e['id']}p{p}", "approach": a["id"], "exit": e["id"], "pass": p, "split": a["split"],
-                      "extra": p >= a["reps"], "lane": lane,
+                      "extra": p >= a["reps"], "lane": lane, "world": world,
                       "spec": f"{s['x']:.1f},{s['y']:.1f},{s['z']:.1f},{s['heading']:.0f},{lane}>{e['dest'][0]:.1f},{e['dest'][1]:.1f}",
-                      "est_s": round(est_seconds(e["length"]))})
+                      "est_s": round(est_seconds(e["length"], a.get("freeway", False)))})
   return {"made": time.strftime("%Y-%m-%dT%H:%M:%S"), "map": args.map,
           "pbf_bytes": os.path.getsize(os.path.join(args.map, "gta5.osm.pbf")), "router": args.valhalla or args.router, "seed": args.seed,
           "settings": {k: getattr(args, k) for k in ("hours", "train_reps", "eval_reps", "fail_reps", "extra_passes",
-                                                     "eval_trips", "fail_trips", "bad_labels", "map_share")},
+                                                     "eval_trips", "fail_trips", "bad_labels", "map_share", "freeways")},
           "constants": {"before": BEFORE, "short_before": SHORT_BEFORE, "after": AFTER, "est_overhead": EST_OVERHEAD,
                         "est_speed": EST_SPEED, "eval_buffer": EVAL_BUFFER},
           "bad_spots": len(bad), "left_out": dict(skipped), "eval_missing": eval_missing,
@@ -676,6 +835,7 @@ def figure(plan: dict, path: str):
 
 AB_NOTE = re.compile(r"(left|right) ([+-]?\d+) at \((-?[\d.]+),\s*(-?[\d.]+)\), (.*?) \((\d+) lanes\) -> (.*?), \d+ m before")
 AB_TURN_NEAR = 30.0  # m from the noted turn: the route's maneuver there is that turn
+AB_GORE_NEAR = 80.0  # m, for a freeway exit: Valhalla puts it where the gore begins, GTA's ramp node is further on
 AB_FIRST = 60.0  # m: a turn nearer the start than this has no approach (the trips were made with 103-170 m)
 AB_SEARCH, AB_ANGLE = 800.0, 20.0  # m, deg: another junction with the same turn, where its own can't be driven
 AB_BEFORE, AB_SLACK, AB_MIN = 190.0, 30.0, 150.0  # a new start, as e2e's short trips but further back
@@ -695,15 +855,19 @@ def ab_check(router, spec: str, note: re.Match) -> tuple[str | None, dict]:
   real = [(float(along[min(m["begin_shape_index"], len(along) - 1)]), m) for m in r.maneuvers if m["type"] in e2e.REAL]
   info = {"length": round(float(along[-1])), "first": round(real[0][0]) if real else None,
           "first_kind": e2e.TYPES.get(real[0][1]["type"]) if real else None}
-  at = [(s, m) for s, m in real if np.hypot(*(pts[min(m["begin_shape_index"], len(pts) - 1)] - turn)) <= AB_TURN_NEAR]
+  near = AB_GORE_NEAR if "freeway exit" in note.string else AB_TURN_NEAR
+  at = [(s, m) for s, m in real if np.hypot(*(pts[min(m["begin_shape_index"], len(pts) - 1)] - turn)) <= near]
   if not at:
     return f"its route doesn't turn at {turn.round().tolist()} (first turn: {info['first_kind']} after {info['first']} m, " + \
            f"route {info['length']} m)", info
   s_t, m_t = at[0]
   if ("left" if m_t["type"] in e2e.LEFT else "right") != side:
     return f"it turns {'left' if side == 'right' else 'right'} there", info
-  if any(s < s_t - NO_TURN_BEFORE for s, _ in real):
-    return f"another turn first ({info['first_kind']} after {info['first']} m)", info
+  # keeping on the road past a fork to the other side (stay left on a freeway, the exit coming on the right) isn't a turn
+  keep_on = {22, 24} if side == "right" else {22, 23}
+  first = [(s, m) for s, m in real if s < s_t - NO_TURN_BEFORE and m["type"] not in keep_on]
+  if first:
+    return f"another turn first ({e2e.TYPES.get(first[0][1]['type'])} after {first[0][0]:.0f} m)", info
   if s_t < AB_FIRST:
     return f"the turn comes {s_t:.0f} m after the start", info
   return None, info
@@ -804,6 +968,128 @@ def cmd_abcheck(args):
     print(f"wrote {args.out}")
 
 
+FX_SAME = 80.0  # m: diverge nodes this near are one exit (GTA splits a ramp over a few nodes)
+FX_CHANGE_FROM, FX_CHANGE_M = 200.0, 30.0  # m: a picked exit's lane changes start this far in, take this long a lane
+FX_APART = 1500.0  # m between picked exits on unnamed freeways
+FREEWAYS_PER_ROAD, FX_SPREAD = 3, 500.0  # training exits: at most this many on one named freeway, this far apart
+
+
+def freeway_exits(m, router, near_ok=lambda p: True) -> list[dict]:
+  """Every freeway exit (one per FX_SAME) with its mainline approach routed: in along the mainline, out down the ramp
+  and on along the mainline. The ramp's way out is labelled `exit <side>`, the mainline's `freeway on`."""
+  out, seen = [], []
+  for d in sorted(diverges(m), key=lambda d: -d["lanes_in"]):
+    p = (d["x"], d["y"])
+    if any(math.hypot(p[0] - q[0], p[1] - q[1]) < FX_SAME for q in seen) or not near_ok(p):
+      continue
+    a = diverge_approach(m, d)
+    v = verify(router, a) if a is not None else None
+    if v is None:
+      continue
+    seen.append(p)
+    if not label_exit(m, v, d):
+      continue
+    v["diverge"] = d
+    out.append(v)
+  return out
+
+
+EXIT_TURNS = {"right": {9, 10, 11, 18, 20, 23}, "left": {14, 15, 16, 19, 21, 24}}
+FX_PART_AT, FX_PART_M = 250.0, 30.0  # m past the diverge: the ramp's route and the mainline's this far apart
+FX_TURN_FROM, FX_TURN_TO = 150.0, 100.0  # m before / past the diverge node: where the router's exit maneuver may be
+
+
+def label_exit(m, v: dict, d: dict) -> bool:
+  """Labels a routed freeway approach's ways out `exit <side>` (down the ramp) and `freeway on`, if the router drives
+  them as an exit: a maneuver off to the ramp's side near the diverge, and the two routes FX_PART_M apart by
+  FX_PART_AT m past it (GTA's links split at places Valhalla's roads don't)."""
+  ramp = xy(m, d["ramp"])
+  ex = [e for e in v["exits"] if e["via_out"][1] == ramp]
+  on = [e for e in v["exits"] if e["via_out"][1] != ramp]
+  if not ex or not on:
+    return False
+  e, o = ex[0], on[0]
+  if not any(t in EXIT_TURNS[d["side"]] and e["s_in"] - FX_TURN_FROM <= s <= e["s_in"] + FX_TURN_TO for s, t in e["turns"]):
+    return False
+  if math.dist(geom_at(e["geom"], e["s_in"] + FX_PART_AT), geom_at(o["geom"], o["s_in"] + FX_PART_AT)) < FX_PART_M:
+    return False
+  e["kind"], o["kind"] = f"exit {d['side']}", "freeway on"
+  return True
+
+
+def geom_at(g: list, s: float) -> tuple[float, float]:
+  """The point s m along a route's kept points (held at its end)."""
+  acc = 0.0
+  for a, b in zip(g, g[1:], strict=False):
+    d = math.dist(a, b)
+    if d > 0 and acc + d >= s:
+      t = (s - acc) / d
+      return a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])
+    acc += d
+  return tuple(g[-1])
+
+
+def cmd_fxpick(args):
+  """Freeway-exit A/B trips: three right exits on different freeways from the start lane --lane (the leftmost: several
+  lane changes), the most nav changes first, one onto a drop lane where there is one."""
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  e2e.MAP_DIR = args.map
+  m = e2e.Map()
+  router = make_router(args.map, args.router, args.valhalla)
+  held = np.array([ep["turn"] for path in args.held.split(",") if path for ep in eval_points(path)] or [[1e9, 1e9]])
+  fx = freeway_exits(m, router, lambda p: np.hypot(*(held - p).T).min() >= EVAL_BUFFER)
+  rows = []
+  for v in fx:
+    d = v["diverge"]
+    e = next(e for e in v["exits"] if e["kind"].startswith("exit"))
+    s = v["start"]
+    spec = f"{s['x']:.1f},{s['y']:.1f},{s['z']:.1f},{s['heading']:.0f},{args.lane}>{e['dest'][0]:.1f},{e['dest'][1]:.1f}"
+    try:
+      changes, v["nav_lanes"] = nav_lane_changes(router, spec)
+    except Exception as ex:  # a broken plan is a reason to skip it
+      print(f"  nav plan failed at ({d['x']:.0f},{d['y']:.0f}): {ex}")
+      continue
+    moved = sum(abs(c[2]) for c in changes)
+    # each change where nav makes it: well after the start, about LANE_LINE_CHANGE m a lane, not squeezed in
+    if not all(c[0] >= FX_CHANGE_FROM and (c[1] - c[0]) / abs(c[2]) >= FX_CHANGE_M for c in changes):
+      moved = -moved
+    rows.append((v, e, spec, changes, moved))
+    print(f"{d['street']!s:22s} ({d['x']:.0f},{d['y']:.0f}) {d['side']:5s} lanes in/on/off {d['lanes_in']}/{d['lanes_main']}/" +
+          f"{d['lanes_ramp']} drop {d['drop']}, start lanes {v['lanes_start']}, {v['before']} m before: nav from lane " +
+          f"{args.lane}: {moved:+.0f} lanes {changes}")
+  lines, streets, picked = [], set(), []
+  drops = [r for r in rows if r[0]["diverge"]["drop"] and r[0]["diverge"]["side"] == "right" and r[0]["diverge"]["street"]]
+  order = sorted(drops, key=lambda r: -r[4])[:1] + sorted(rows, key=lambda r: -r[4])
+  for v, e, spec, changes, moved in order:
+    d = v["diverge"]
+    # different freeways: by name, an unnamed one at least FX_APART m from the others
+    if d["side"] != "right" or d["street"] in streets or moved <= 0 or \
+       not d["street"] and any(math.hypot(d["x"] - q[0], d["y"] - q[1]) < FX_APART for q in picked):
+      continue
+    line = (f"FX{len(lines) + 1} {spec}    # right {abs(e['change']):+d} at ({d['x']:.0f},{d['y']:.0f}), {d['street']} " +
+            f"({v['lanes_in']} lanes) -> {e['street']}, {e['s_in']:.0f} m before, {e['length'] - e['s_in']:.0f} m after, " +
+            f"freeway exit ({'drop lane' if d['drop'] else 'off the right lane'}; GTA lanes {d['lanes_in']} in, {d['lanes_main']} on), " +
+            f"start lane {args.lane} of {v['nav_lanes']} (map): nav changes {moved:+.0f} lanes at " +
+            f"{', '.join(f'{c[0]}-{c[1]} m' for c in changes)}")
+    why, _ = ab_check(router, spec, AB_NOTE.search(line.partition("#")[2]))
+    if why is not None:  # as the A/B check reads it: no other maneuver first, the exit where noted
+      print(f"  skipped ({d['x']:.0f},{d['y']:.0f}): {why}")
+      continue
+    lines.append(line)
+    picked.append((d["x"], d["y"]))
+    if d["street"]:
+      streets.add(d["street"])
+    if len(lines) == args.n:
+      break
+  for ln in lines:
+    print(ln)
+  if args.out:
+    base = Path(os.path.expanduser(args.base)).read_text().rstrip("\n").split("\n")
+    hdr = f"# {time.strftime('%Y-%m-%d')}: {os.path.basename(args.base)} + freeway exits FX1-FX{len(lines)} (junction_plan.py fxpick)"
+    Path(args.out).write_text("\n".join([hdr] + base + lines) + "\n")
+    print(f"wrote {args.out}")
+
+
 def main():
   p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   sub = p.add_subparsers(dest="command", required=True)
@@ -817,7 +1103,8 @@ def main():
   pl.add_argument("--eval-reps", type=int, default=1)
   pl.add_argument("--fail-reps", type=int, default=2, help="for --fail-trips' junctions")
   pl.add_argument("--extra-passes", type=int, default=1, help="more training passes after those, for a fast night")
-  pl.add_argument("--eval-trips", default=f"{HOME}/gta5test/e2e/short-ab-v2.txt,{HOME}/gta5test/e2e/short-ab.txt",
+  tests = ("short-ab-v3", "short-ab", "scenarios-v1", "scenarios-v1-long", "scenarios-v1-variants")
+  pl.add_argument("--eval-trips", default=",".join(f"{HOME}/gta5test/e2e/{n}.txt" for n in tests),
                   help="e2e trips files whose junctions are held out, comma-separated: the first one's are driven for eval")
   pl.add_argument("--fail-trips", default="SL7,SO05b,SO06,SO10,SR1,SR4b,SR6b", help="those failing in every arm of the A/Bs")
   pl.add_argument("--bad-labels", default=f"{HOME}/git/gta5-train/out/labels_overnight1",
@@ -826,6 +1113,7 @@ def main():
   pl.add_argument("--pool-factor", type=float, default=2.5, help="routed ways out, against those wanted")
   pl.add_argument("--max-route-s", type=float, default=1800.0, help="s of routing candidates at most")
   pl.add_argument("--spares", type=int, default=30, help="routed approaches kept unpicked, for swapping in")
+  pl.add_argument("--freeways", type=int, default=10, help="freeway exits (mainline: down the ramp, on along it) for training")
   pl.add_argument("--seed", type=int, default=1)
   pl.add_argument("--fig", help="a map of the plan (png)")
   sh = sub.add_parser("show")
@@ -839,9 +1127,21 @@ def main():
   ab.add_argument("--map", default=DEFAULT_MAP)
   ab.add_argument("--router", help="Valhalla's URL (default http://localhost:8002)")
   ab.add_argument("--valhalla", help="a valhalla.json to route in process instead")
+  fx = sub.add_parser("fxpick", help="freeway-exit A/B trips, appended to a trips file")
+  fx.add_argument("--base", default=f"{HOME}/gta5test/e2e/short-ab-v2.txt")
+  fx.add_argument("--held", default=f"{HOME}/gta5test/e2e/short-ab-v2.txt,{HOME}/gta5test/e2e/short-ab.txt",
+                  help="trips files whose turns the exits keep EVAL_BUFFER m from")
+  fx.add_argument("--out")
+  fx.add_argument("--n", type=int, default=3)
+  fx.add_argument("--lane", type=int, default=0, help="the start lane from the left (0 the leftmost, 9 the rightmost)")
+  fx.add_argument("--map", default=DEFAULT_MAP)
+  fx.add_argument("--router")
+  fx.add_argument("--valhalla")
   a = p.parse_args()
   if a.command == "abcheck":
     return cmd_abcheck(a)
+  if a.command == "fxpick":
+    return cmd_fxpick(a)
   if a.command == "plan":
     plan = make_plan(a)
     Path(a.out).write_text(json.dumps(plan, indent=1))
