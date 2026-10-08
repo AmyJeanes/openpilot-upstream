@@ -55,7 +55,9 @@ struct alignas(16) Params {
   float srcSize[2], texSize[2];
   float f, srcF, k1, tc;
   float fk1, fk2, fk3, maxAngle;
-  int model, pad[3];
+  int model;
+  float pad;
+  float radarMask[2];
 };
 
 // Each output pixel's ray goes back through the lens to a pixel of the game's pinhole render. The UV pass averages the 2x2
@@ -68,7 +70,7 @@ cbuffer P : register(b0) {
   float2 srcSize; float2 texSize;
   float f; float srcF; float k1; float tc;
   float fk1; float fk2; float fk3; float maxAngle;
-  int model; int3 pad;
+  int model; float pad; float2 radarMask;
 };
 float4 vs(uint id : SV_VertexID) : SV_Position {
   // one clockwise triangle covering the viewport (the default rasterizer culls counterclockwise ones)
@@ -89,8 +91,9 @@ float3 sampleRay(float2 p) {
     [unroll] for (int i = 0; i < 6; i++) rho -= (rho * (1.0 + k1 * rho * rho) - rd) / (1.0 + 3.0 * k1 * rho * rho);
   }
   float2 s = (r > 0.0 ? d * (rho / r) : float2(0, 0)) * srcF + srcSize * 0.5;
-  // outside the render, or the interleave marker at its corner, which the wide lens reaches
-  if (any(s < 0.0) || any(s > srcSize) || all(s < srcSize * float2(0.006, 0.01))) return float3(0, 0, 0);
+  // outside the render, or the interleave marker or the radar at its corners, which the wide lens reaches
+  bool radar = s.x < srcSize.x * radarMask.x && s.y > srcSize.y * radarMask.y;
+  if (any(s < 0.0) || any(s > srcSize) || all(s < srcSize * float2(0.006, 0.01)) || radar) return float3(0, 0, 0);
   return src.SampleLevel(samp, (srcOrigin + s) / texSize, 0).rgb * 255.0;
 }
 float psY(float4 pos : SV_Position) : SV_Target {
@@ -120,6 +123,7 @@ struct Capture::Impl {
   CaptureConfig cfg;
   FrameCallback onFrame;
   std::function<void(const std::string &)> log;
+  const std::atomic<float> *radarMask = nullptr;
 
   std::thread thread;
   std::mutex mutex;  // guards the D3D context and the stop flag
@@ -381,6 +385,8 @@ struct Capture::Impl {
       p.fk3 = v.lens.fk[2];
       p.maxAngle = cfg.lensMaxAngleDeg * 3.14159265f / 180.0f;
       p.model = v.lens.model;
+      p.radarMask[0] = radarMask[0];
+      p.radarMask[1] = radarMask[1];
       D3D11_MAPPED_SUBRESOURCE m;
       if (FAILED(ctx->Map(cb.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
       memcpy(m.pData, &p, sizeof(p));
@@ -543,6 +549,7 @@ bool Capture::Start(HWND hwnd, const CaptureConfig &cfg, FrameCallback onFrame, 
   impl_->cfg = cfg;
   impl_->onFrame = std::move(onFrame);
   impl_->log = std::move(log);
+  impl_->radarMask = radarMask_;
   std::promise<bool> started;
   auto fut = started.get_future();
   impl_->thread = std::thread([this, &started] { impl_->Run(&enabled_, &marker_, &started); });
@@ -570,6 +577,7 @@ void Capture::StartHook(const CaptureConfig &cfg, FrameCallback onFrame, std::fu
   impl_->cfg = cfg;
   impl_->onFrame = std::move(onFrame);
   impl_->log = std::move(log);
+  impl_->radarMask = radarMask_;
   impl_->hookMode = true;
   impl_->running = true;
   impl_->log("capture from the present hook");

@@ -207,8 +207,11 @@ inline void SET_FOCUS_POS_AND_VEL(float x, float y, float z, float vx, float vy,
 inline void CLEAR_FOCUS() { Invoke(0x31B73D1EA9F01DA2); }
 inline void RENDER_SCRIPT_CAMS(BOOL render, BOOL ease, int easeTime, BOOL p3, BOOL p4, int p5) { Invoke(0x07E5B515DB0636FC, render, ease, easeTime, p3, p4, p5); }
 inline void FREEZE_MICROPHONE() { Invoke(0xD57AAAE0E2214D11); }
-inline void DISPLAY_RADAR(BOOL on) { Invoke(0xA0EBB943C300E693, on); }
 inline BOOL IS_RADAR_HIDDEN() { return Invoke<BOOL>(0x157F93B036700462); }
+// script draw positions anchored to a side of the safe zone, as frontend.xml places the HUD: align 'L'/'R'/'C', 'T'/'B'/'C'
+inline void SET_SCRIPT_GFX_ALIGN(int horizontal, int vertical) { Invoke(0xB8A850F20A067EB6, horizontal, vertical); }
+inline void RESET_SCRIPT_GFX_ALIGN() { Invoke(0xE3A3DB414A373DAB); }
+inline void GET_SCRIPT_GFX_ALIGN_POSITION(float x, float y, float *screenX, float *screenY) { Invoke(0x6DD8F5AA635EB4B2, x, y, screenX, screenY); }
 inline void HIDE_HELP_TEXT_THIS_FRAME() { Invoke(0xD46923FC481CA285); }
 inline void THEFEED_HIDE_THIS_FRAME() { Invoke(0x25F87B30C382FCA7); }
 inline void CLEAR_PRINTS() { Invoke(0xCC33FA791322B9D9); }

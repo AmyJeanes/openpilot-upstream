@@ -416,7 +416,14 @@ void ActivateCamera() {
   Log(std::string("camera on") + (g_cfg.interleave ? ", interleaved" : ""));
 }
 
-bool g_radarHidden = false;  // by the openpilot camera's last frame
+// the radar's top-right corner on screen, from where frontend.xml puts it (left-bottom aligned at -0.0045, 0.002, 0.150 x
+// 0.188888), with a margin for its frame and shadow
+void RadarCorner(float &right, float &top) {
+  SET_SCRIPT_GFX_ALIGN('L', 'B');
+  GET_SCRIPT_GFX_ALIGN_POSITION(-0.0045f + 0.150f + 0.015f, 0.002f - 0.188888f - 0.02f, &right, &top);
+  RESET_SCRIPT_GFX_ALIGN();
+}
+
 void RenderCamera(bool on) {
   if (on != g_rendering) RENDER_SCRIPT_CAMS(on, FALSE, 0, TRUE, FALSE, 0);
   g_rendering = on;
@@ -2783,23 +2790,29 @@ extern "C" __declspec(dllexport) void CoreTick() {
   UpdateTopCam(v);
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view < 0 && g_top.on && !g_top.hud) HIDE_HUD_AND_RADAR_THIS_FRAME();
-  if (view >= 0) {
-    // help text would cover the marker, and the wide lens reaches the radar in the corner. Hiding the rest of the HUD
-    // or the feed for a frame restarts their animations (the radio station's name never shows), so the feed is hidden
-    // only where the frames reach the screen.
-    HIDE_HELP_TEXT_THIS_FRAME();
-    if (!IS_RADAR_HIDDEN()) {
-      DISPLAY_RADAR(FALSE);
-      g_radarHidden = true;
+  // The wide lens reaches the radar in the corner, so the capture blacks it out. Hiding the radar on openpilot's frames
+  // moves the feed down onto its place and back, so notifications jump on the player's screen.
+  if (IS_RADAR_HIDDEN()) {
+    g_capture.SetRadarMask(0.0f, 1.0f);
+  } else {
+    float right, top;
+    RadarCorner(right, top);
+    g_capture.SetRadarMask(right, top);
+    static float loggedRight = -1, loggedTop = -1;
+    if (std::abs(right - loggedRight) > 0.002f || std::abs(top - loggedTop) > 0.002f) {
+      Log("radar masked from the capture: x < " + Num(right) + ", y > " + Num(top));
+      loggedRight = right, loggedTop = top;
     }
+  }
+  if (view >= 0) {
+    // help text would cover the marker. Hiding the rest of the HUD or the feed for a frame restarts their animations
+    // (the radio station's name never shows), so the feed is hidden only where the frames reach the screen.
+    HIDE_HELP_TEXT_THIS_FRAME();
     if (!hooked) THEFEED_HIDE_THIS_FRAME();
     // tells the capture this frame is the openpilot camera's, and which view by its colour (magenta both, cyan road,
     // yellow wide); the lens resampling blacks it out
     if (g_cfg.interleave)
       DRAW_RECT(0.0025f, 0.0045f, 0.005f, 0.009f, view == HOOK_ROAD ? 0 : 255, view == HOOK_BOTH ? 0 : 255, view == HOOK_WIDE ? 0 : 255, 255, FALSE);
-  } else if (g_radarHidden) {
-    DISPLAY_RADAR(TRUE);
-    g_radarHidden = false;
   }
   // sounds are heard from the rendering camera, as the game sees it a frame late
   static bool lastOp = false;
@@ -2849,7 +2862,6 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   ReleaseCamera();
   RemoveLead();
   script_hook::Uninstall();
-  if (g_radarHidden) DISPLAY_RADAR(TRUE);
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();
   ReleaseWaypoint(true);  // and gives the map its waypoint back

@@ -292,7 +292,8 @@ camera's picture, with the wipers below it.
   views: turn off TAA, DLAA, DLSS and FSR upscaling, ray tracing's temporal denoising, and motion blur. DLSS frame
   generation on its own looked clean. Supersampling (2x) anti-aliases the magnified road view; it doesn't add pixels,
   as the frames are taken after the game scales them down. A 90 FPS cap leaves the player 70 and the GPU room for the
-  model. The openpilot frames hide only the radar, and hold sounds where the player's camera hears them. The game's
+  model. The openpilot frames hide the help text and hold sounds where the player's camera hears them; the capture blacks
+  out the radar's corner, as hiding the radar on them moves the notification feed and makes it flicker. The game's
   scripts see a script camera rendering on the frame after each, and the interaction menu (M) closes itself then, so
   the plugin swaps `IS_GAMEPLAY_CAM_RENDERING` in that script's native table for one that answers yes while connected
   (`script_hook.cpp`, with YimMenuV2's patterns for the Enhanced build; if they stop matching, the log says so and the

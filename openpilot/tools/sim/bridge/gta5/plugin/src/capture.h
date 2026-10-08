@@ -41,6 +41,9 @@ class Capture {
   // take only frames with the marker the plugin draws over openpilot camera frames, when they're interleaved with the
   // player's own
   void SetMarker(bool on) { marker_ = on; }
+  // blacks out the screen's bottom-left corner up to this right edge and from this top edge (fractions of the game's
+  // screen), where the radar is; right <= 0 masks nothing
+  void SetRadarMask(float right, float top) { radarMask_[0] = right, radarMask_[1] = top; }
   bool Running() const;
 
  private:
@@ -48,6 +51,7 @@ class Capture {
   std::unique_ptr<Impl> impl_;
   std::mutex hookMutex_;  // ProcessShared runs on the hook's thread
   std::atomic<bool> enabled_{false}, marker_{false};
+  std::atomic<float> radarMask_[2]{0.0f, 1.0f};
 };
 
 double QpcSeconds();
