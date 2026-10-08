@@ -139,3 +139,14 @@ def test_destination_ended_by_the_driver():
   params.remove("NavDestination")
   assert dest.update([1500.0, 2000.0], car, None) is None
   assert list(dest.update(None, car, ([5.0, 6.0],))) == [5.0, 6.0]
+
+
+def test_destination_not_ended_when_nav_drives_regardless():
+  # GTA5_NOO=on (test runs): a NavDestination the manager clears doesn't end the drive
+  params, sent = Params(), []
+  dest = Destination(params, sent.append, ends=False)
+  dest.check_every = 0.0
+  car, wp = np.array([0.0, 0.0]), [1000.0, 2000.0]
+  assert dest.update(wp, car, None) is not None
+  params.remove("NavDestination")
+  assert list(dest.update(wp, car, None)) == wp

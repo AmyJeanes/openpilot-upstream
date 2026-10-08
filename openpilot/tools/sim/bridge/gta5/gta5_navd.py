@@ -31,9 +31,11 @@ def nav_inputs(state: dict, engaged: bool, indicator: str | None, desire: dict[s
 
 
 class Destination:
-  def __init__(self, params, send):
+  def __init__(self, params, send, ends: bool = True):
     self.params = params
     self.send = send  # to the plugin
+    # honour the UI's slide to end; off, a NavDestination the manager clears (offroad, restart) can't end a test drive
+    self.ends = ends
     self.dest: np.ndarray | None = None  # game metres
     self.from_game = False
     self.game_waypoint: np.ndarray | None = None
@@ -70,7 +72,7 @@ class Destination:
     """The driver ended the route (the UI removed NavDestination, which we wrote): the destination goes, and the game's
     waypoint is ignored until the player sets another (it isn't cleared in the game)."""
     now = time.monotonic()
-    if self.written is None or not self.param_ok or now - self._checked < self.check_every:
+    if not self.ends or self.written is None or not self.param_ok or now - self._checked < self.check_every:
       return
     self._checked = now
     try:

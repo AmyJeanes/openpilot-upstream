@@ -179,7 +179,7 @@ class GTA5World(World):
     self.params.remove("NavDesire")  # a killed bridge can leave one
     self.nav = Planner(Tune(os.getenv("GTA5_NAVTUNE")), refresh=self.params.get_bool("TurnDesireRefresh"))
     self.driver = Driver(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")))
-    self.destination = Destination(self.params, self._send)
+    self.destination = Destination(self.params, self._send, ends=NOO != "on")
     self.next_map = 0.0
     self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
     self.route: Route | None = None
