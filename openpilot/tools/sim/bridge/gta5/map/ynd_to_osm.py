@@ -1246,27 +1246,21 @@ UNPAINTED_CLASSES = {'residential', 'service', 'track'}
 
 def painted_lines(tags, cls, two_way, samples, why):
   """A way's tags with the game files' lane lines where its lanes are the class layout's (paint_survey.lane_lines,
-  .unpainted): `lane_markings=no` (and no divider) on a minor road they show unpainted; else `change:lanes` (`:forward`
-  / `:backward`) where a painted line between its lanes is solid (or solid on one side), and `lane_markings:forward` /
-  `:backward=no` where a direction's lanes have no line between them but solid ones (OSM's direction suffix on
-  lane_markings, as divider:forward). Major roads keep their lines where the files show none: those are more likely
-  gaps in the files (the Great Ocean Hwy, some freeways) than unpainted."""
+  .unpainted): `lane_markings=no` (and no divider) on a minor road they show unpainted, else `change:lanes`
+  (`:forward` / `:backward`) where a painted line between its lanes is solid (or solid on one side). Major roads keep
+  their lines where the files show none: those are more likely gaps in the files (the Great Ocean Hwy, some freeways)
+  than unpainted."""
   road = WayLanes.from_tags(tags)
   if len(road.lanes) < 2:  # no lines to draw
     return tags
   if cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples):
     why['unpainted'] += 1
     return {**{k: v for k, v in tags.items() if not k.startswith('divider')}, 'lane_markings': 'no'}
-  found = paint_survey.lane_lines(samples, [(s.left, s.right, s.heading) for s in road.section()], two_way)
   out = dict(tags)
-  for key, got in found.items():
-    tag = f'change:lanes:{key}' if two_way else 'change:lanes'
-    if got['change'] and not any(k.startswith('change:lanes') for k in tags):
-      out[tag] = '|'.join(got['change'])
+  if not any(k.startswith('change:lanes') for k in tags):
+    for key, change in paint_survey.lane_lines(samples, [(s.left, s.right, s.heading) for s in road.section()]).items():
+      out[f'change:lanes:{key}' if two_way else 'change:lanes'] = '|'.join(change)
       why['lines not to cross'] += 1
-    if got['unmarked']:
-      out[f'lane_markings:{key}'] = 'no'
-      why['directions unmarked'] += 1
   return out
 
 

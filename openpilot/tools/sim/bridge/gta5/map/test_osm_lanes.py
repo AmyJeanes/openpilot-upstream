@@ -297,20 +297,6 @@ def test_median_edge_kinds():
   assert kinds(sides, BACKWARD) == ['solid', 'double_solid']
 
 
-def test_unmarked_direction():
-  # a left-turn bay filling the median, a solid line beside it, and no line between the two through lanes; the oncoming
-  # lanes unmarked too, but for the double yellow
-  tags = {'highway': 'primary', 'lanes': '5', 'lanes:forward': '3', 'lanes:backward': '2', 'width': '23',
-          'width:lanes:forward': '5.4|4.4|4.4', 'width:lanes:backward': '4.4|4.4', 'divider': 'double_solid_line',
-          'placement:forward': 'middle_of:1', 'change:lanes:forward': 'not_right|not_left|yes'}
-  white = lambda road, d=FORWARD: [(round(ln.offset, 2), ln.style) for ln in road.lines(d) if ln.kind == DIVIDER]  # noqa: E731
-  assert white(WayLanes.from_tags(tags)) == [(-7.1, 'dashed'), (2.7, 'solid'), (7.1, 'dashed')]
-  unmarked = WayLanes.from_tags({**tags, 'lane_markings:forward': 'no', 'lane_markings:backward': 'no'})
-  assert white(unmarked) == [(2.7, 'solid')]
-  assert white(unmarked, BACKWARD) == [(-2.7, 'solid')]
-  assert [ln.style for ln in unmarked.lines() if ln.kind == CENTRE] == ['double_solid']  # the centre is the divider's
-
-
 def test_median_turn_lane():
   from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_turns
   xy = {'P': (0, -100), 'Q': (0, -60), 'R': (0, -30), 'J': (0, 0), 'W': (-50, 0), 'E': (50, 0), 'N': (0, 50)}

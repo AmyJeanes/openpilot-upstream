@@ -29,7 +29,7 @@ lanes' widths alone; with more lanes one way the line is the centre's (placement
 Painted arrows (game files only, a sample's "arrows" or arrow "features") give each direction's lanes their turn arrows,
 where there is one per lane, and the game files' kinds of the lines between lanes (solid, solid on one half) their
 change:lanes. Where the lanes stay the class layout, lane_lines still reads the kinds of the lines between them, and
-which directions' lanes have none, and unpainted which roads have no lines at all. Other fields (z, a mark's width / cover / line id, kerb_step, hatched spans, stop lines, other
+unpainted which roads have no lines at all. Other fields (z, a mark's width / cover / line id, kerb_step, hatched spans, stop lines, other
 features) are read past.
 """
 import json
@@ -508,68 +508,49 @@ def correct_oneway(samples: list[dict], n: int, kerbs: tuple[float, float]):
 
 LINE_TOL = 0.3  # m short of halfway across the narrower lane beside a boundary: the painted white line nearer it is it
 INSIDE = 1.0  # m inside a direction's lanes' outer edges: white lines nearer them are its centre or edge lines
-UNMARKED = 0.8  # of the samples showing no white line between a direction's lanes: the paint has none there
 UNPAINTED = 0.9  # of the samples showing no centre or lane line at all: the road is unpainted
 UNPAINTED_SAMPLES = 3
 
 
-def _white_lines(d: dict, lo: float, hi: float) -> list[tuple[float, str]]:
-  return [(sum(m['pair']) / 2 if m.get('pair') else m['offset'], m['type']) for m in d['marks']
-          if m['conf'] >= CONF and m['colour'] == 'white' and m['type'] in CROSSING and lo + INSIDE < m['offset'] < hi - INSIDE]
-
-
-def lane_lines(samples: list[dict], section: list[tuple[float, float, int]], two_way: bool) -> dict[str, dict]:
-  """The game files' white lines between each direction's lanes where the map's lanes are its class layout's (not
-  corrected by correct / correct_oneway). `section`: the way's lanes [(left, right, 1 forward / -1 backward)], m right
-  of the link's line seen travelling a -> b. Returns {'forward' | 'backward': {'change': change:lanes values (each
-  lane left to right as seen travelling it) or None where every line may be crossed, 'unmarked': True where the paint
-  has no line between that direction's lanes but solid ones}}. A boundary takes the kind of the white line nearest it
-  (and nearer it than any other boundary, less than halfway across the lanes beside it: class layouts are often a metre
-  or two off the paint) in half the samples or more, else it's taken as dashed; it's unmarked where UNMARKED of the
-  samples show no white line across the two lanes either side of it. Unmarked is only said on a two-way link
-  whose yellow centre and asphalt edge (within KERB_REACH of where the lanes put it) show in half the samples: the
-  paint is read there and the lanes sit on it."""
+def lane_lines(samples: list[dict], section: list[tuple[float, float, int]]) -> dict[str, list[str]]:
+  """change:lanes for each direction's lanes from the game files' white lines between them, where the map's lanes are
+  its class layout's (not corrected by correct / correct_oneway): {'forward' | 'backward': [values, each lane left to
+  right as seen travelling it]}, only where a line may not be crossed. `section`: the way's lanes [(left, right, 1
+  forward / -1 backward)], m right of the link's line seen travelling a -> b. A boundary takes the kind of the white
+  line nearest it (nearer it than any other boundary, less than halfway across the lanes beside it: class layouts are
+  often a metre or two off the paint) in half the samples or more, else it's taken as dashed. No line there says
+  nothing: the files miss thin dashed lane lines the game paints (Vinewood Blvd's, seen from above in the game)."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
   if len(files) < MIN_SAMPLES:
     return {}
-  half = len(files) / 2
-  yellow = sum(any(m['colour'] == 'yellow' and m['conf'] >= CONF for m in d['marks']) for d in files) >= half
   out = {}
-  for key, heading, side in (('forward', 1, 'right'), ('backward', -1, 'left')):
+  for key, heading in (('forward', 1), ('backward', -1)):
     spans = [(a, b) for a, b, h in section if h == heading]
     if len(spans) < 2:
       continue
-    lo, hi = spans[0][0], spans[-1][1]
     bounds = [b for _, b in spans[:-1]]
     votes = [Counter() for _ in bounds]
     for d in files:
-      lines = _white_lines(d, lo, hi)
+      lines = [(sum(m['pair']) / 2 if m.get('pair') else m['offset'], m['type']) for m in d['marks']
+               if m['conf'] >= CONF and m['colour'] == 'white' and m['type'] in CROSSING]
       for i, (v, seen) in enumerate(zip(bounds, votes, strict=True)):
-        # the lines across the two lanes either side of the boundary
-        near = [q for q in lines if spans[i][0] + INSIDE < q[0] < spans[i + 1][1] - INSIDE]
+        near = [q for q in lines if spans[i][0] + INSIDE < q[0] < spans[i + 1][1] - INSIDE]  # across the lanes beside it
         if not near:
-          seen['none'] += 1
           continue
         o, kind = min(near, key=lambda q: abs(q[0] - v))
         reach = min(spans[i][1] - spans[i][0], spans[i + 1][1] - spans[i + 1][0]) / 2 - LINE_TOL
         mine = min(bounds, key=lambda b: abs(o - b)) == v  # not another boundary's line
-        seen[kind if abs(o - v) <= reach and mine else 'elsewhere'] += 1
-    kinds = []
-    for seen in votes:
-      kind, n = seen.most_common(1)[0]
-      kinds.append(kind if kind in CROSSING and n >= half else None)
-    outer = hi if heading == 1 else lo
-    kerb = sum((d.get('kerbs') or {}).get(side) is not None and abs(d['kerbs'][side] - outer) <= KERB_REACH for d in files) >= half
-    none = [seen['none'] >= UNMARKED * len(files) for seen in votes]
-    unmarked = two_way and yellow and kerb and any(none) and \
-      all(u or (k is not None and CROSSING[k] != (True, True)) for k, u in zip(kinds, none, strict=True))
-    crossing = [CROSSING[k] if k else (True, True) for k in kinds]
+        if abs(o - v) <= reach and mine:
+          seen[kind] += 1
+    kinds = [seen.most_common(1)[0][0] if seen and seen.most_common(1)[0][1] >= len(files) / 2 else 'dashed' for seen in votes]
+    crossing = [CROSSING[k] for k in kinds]
     if heading == -1:  # left to right as seen travelling b -> a: the other way round, each line's halves swapped
       crossing = [c[::-1] for c in reversed(crossing)]
     left = [True] + [c[1] for c in crossing]
     right = [c[0] for c in crossing] + [True]
     change = [CHANGE[(a, b)] for a, b in zip(left, right, strict=True)]
-    out[key] = {'change': change if set(change) != {'yes'} else None, 'unmarked': unmarked}
+    if set(change) != {'yes'}:
+      out[key] = change
   return out
 
 

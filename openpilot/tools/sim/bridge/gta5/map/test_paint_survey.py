@@ -188,26 +188,19 @@ def test_arrows_from_features():
 
 def test_lane_lines():
   # GTA's 2 + 2 with a bay folded in: [bay 5.4][4.4][4.4] forward around the line, [4.4][4.4] backward. The paint: a double
-  # yellow, a solid line beside the bay, nothing between the through lanes either way
+  # yellow, a solid line beside the bay, nothing read between the through lanes (the files miss thin dashes): dashed
   section = [(-11.5, -7.1, -1), (-7.1, -2.7, -1), (-2.7, 2.7, 1), (2.7, 7.1, 1), (7.1, 11.5, 1)]
-  kerbs = {'left': -11.3, 'right': 11.4}
   marks = [mark(-2.7, 'yellow', 'double_solid', pair=[-2.8, -2.6]), mark(2.7, kind='solid'), mark(11.4, kind='edge_line')]
-  files = [sample(marks, s, src='gamefiles', kerbs=kerbs) for s in (1, 4, 7, 10)]
-  assert lane_lines(files, section, True) == {'forward': {'change': ['not_right', 'not_left', 'yes'], 'unmarked': True},
-                                               'backward': {'change': None, 'unmarked': True}}
-  # a dashed line between the through lanes: marked, and seen from the other way the same lanes
-  dashed = [sample(marks + [mark(7.0), mark(-7.2)], s, src='gamefiles', kerbs=kerbs) for s in (1, 4, 7, 10)]
-  assert lane_lines(dashed, section, True) == {'forward': {'change': ['not_right', 'not_left', 'yes'], 'unmarked': False},
-                                                'backward': {'change': None, 'unmarked': False}}
-  flipped = [{**d, 'marks': [{**m, 'offset': -m['offset'], 'pair': None} for m in d['marks']]} for d in dashed]
+  files = [sample(marks, s, src='gamefiles') for s in (1, 4, 7, 10)]
+  assert lane_lines(files, section) == {'forward': ['not_right', 'not_left', 'yes']}
+  # the bay line 1.5 m off the layout's boundary is still its line; dashed ones say nothing
+  off = [sample([mark(1.2, kind='solid'), mark(7.0), mark(-7.2)], s, src='gamefiles') for s in (1, 4, 7, 10)]
+  assert lane_lines(off, section) == {'forward': ['not_right', 'not_left', 'yes']}
+  # seen from the other way: the same lanes
+  flipped = [{**d, 'marks': [{**m, 'offset': -m['offset'], 'pair': None} for m in d['marks']]} for d in off]
   back = [(-b, -a, -h) for a, b, h in section[::-1]]
-  assert lane_lines(flipped, back, True)['backward']['change'] == ['not_right', 'not_left', 'yes']  # the bay still leftmost
-  # no yellow, or the asphalt's edge far from the lanes' (the lanes aren't where the paint is): never unmarked
-  bare = [sample([mark(2.7, kind='solid')], s, src='gamefiles', kerbs=kerbs) for s in (1, 4, 7)]
-  assert not lane_lines(bare, section, True)['backward']['unmarked']
-  wide = [sample(marks, s, src='gamefiles', kerbs={'left': -16.0, 'right': 16.0}) for s in (1, 4, 7)]
-  assert not lane_lines(wide, section, True)['backward']['unmarked']
-  assert lane_lines(files[:1], section, True) == {}  # one sample says nothing
+  assert lane_lines(flipped, back) == {'backward': ['not_right', 'not_left', 'yes']}
+  assert lane_lines(files[:1], section) == {}  # one sample says nothing
 
 
 def test_unpainted():
