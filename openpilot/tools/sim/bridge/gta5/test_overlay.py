@@ -354,6 +354,24 @@ def fresh_marks(paths, osm):
   return ov.road_marks(paths, osm)
 
 
+def test_arrow_strokes():
+  strokes = ov.arrow_strokes(frozenset({"left", "through"}))
+  assert [k for k, _ in strokes] == ["T", "T", "T", "L", "L"]  # the shared shaft, then each turn's branch and head
+  tips = {k: path[-1] for k, path in strokes[1::2]}
+  assert tips["L"][0] < -1.0 and abs(tips["T"][0]) < 1e-9 and tips["T"][1] > 2.0
+  assert [k for k, _ in ov.arrow_strokes(frozenset({"right"}))] == ["R"] * 3
+  assert ov.arrow_strokes(frozenset({"none"})) == [] and ov.arrow_strokes(frozenset()) == []
+
+
+def test_lane_tags_marks_have_the_new_kinds(fresh_marks):
+  kinds = set(fresh_marks["kinds"].tolist()) | set(fresh_marks["shape_kind"].tolist())
+  # arrows of every turn, tapers, crossings, stop lines at lights, junctions
+  assert set("LTRtxlj") <= kinds, kinds
+  arrows = np.isin(fresh_marks["kinds"], list("LTR"))
+  print(f"{arrows.sum()} arrow segments, {(fresh_marks['kinds'] == 't').sum()} taper segments, "
+        f"{(fresh_marks['shape_kind'] == 'q').sum()} lane count flags, {(fresh_marks['shape_kind'] == 'k').sum()} give way lines")
+
+
 def test_cached_lines_equal_a_fresh_build(paths, osm, fresh_marks):
   key = ov.marks_key(paths, osm)
   assert key is not None
