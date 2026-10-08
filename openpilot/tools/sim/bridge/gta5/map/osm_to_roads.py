@@ -427,7 +427,8 @@ def main():
         continue
       for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.kind == DIVIDER):
         g = offset_line(geom, off) if off else geom
-        for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE)):
+        # a blend's lines move only at its other end: at a junction they're where its lanes put them
+        for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE, offset=line.offset if line.kind in PAINTED else None)):
           if line.kind != EDGE:
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue

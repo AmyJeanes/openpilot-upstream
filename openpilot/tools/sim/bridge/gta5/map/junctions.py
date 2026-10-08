@@ -772,7 +772,7 @@ class Junctions:
         if ma.start != mb.start or id(ma) in stopped or id(mb) in stopped or not (lines := self._meeting(ma, mb)):
           continue
         pair_rank, width = max(rank(ma), rank(mb)), min(a.width, b.width)
-        ok = not any(self._moving(m.ways[0][0]) or self._crossed(m) for m in (ma, mb)) and \
+        ok = not any(self.osm.taper(m.ways[0][0]) is not None or self._crossed(m) for m in (ma, mb)) and \
           not any(rank(m) < pair_rank and arm.width > width for arm in j.arms if arm is not a and arm is not b for m in arm.members)
         found.append(((pair_rank, -width, turn), {id(a), id(b)}, lines, ok))
     if not found:
@@ -783,10 +783,6 @@ class Junctions:
     if not best[3] or any(f[0][0] == best[0][0] and not f[1] & best[1] for f in found[1:]):
       return {}
     return best[2]
-
-  def _moving(self, way: int) -> bool:
-    """Whether a way's lines move across it (a taper or a blend), so aren't at one offset to carry on."""
-    return self.osm.taper(way) is not None or self.osm.blend(way) is not None
 
   def _crossed(self, m: Member) -> bool:
     """Whether a pedestrian crossing (`footway=crossing`) crosses the road near its junction: its lines stop there."""
