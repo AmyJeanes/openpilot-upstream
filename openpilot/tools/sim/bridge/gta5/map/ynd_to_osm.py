@@ -1187,15 +1187,18 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
     down its middle; bays both ways share the median, the line between them. Beside a one-way road it is a lane wide.
   - Where the paint was surveyed (`painted`: paint_survey.correct's widths each way and median), its lanes take the
     measured widths, kerbs where the layout has them; the line is the middle of the road between them, or the centre's
-    with more lanes one way (`source:width=survey`). A surveyed one-way link's painted lanes are centred on it.
+    with more lanes one way (`source:width=survey`). A surveyed one-way link's painted lanes are centred on it, or
+    placed by `placement` where it is one of several links side by side making up a carriageway.
   `lf` is the link's flags and `freeway` whether its nodes are a freeway's (a one-way freeway's lanes are wider);
   returns the tags."""
   w, offset = layout(lf, back, freeway)
   steps = ((lf[1] >> 4) & 7) * (-1 if lf[1] & 128 else 1)
   bf, bb = (int(v) for v in bays)
-  if painted and not back:  # centred on the link
+  if painted and not back:  # centred on the link, or placed in its carriageway
     tags = {'lanes': str(fwd), 'oneway': 'yes', 'width': metres(sum(painted['lanes'])),
             'width:lanes': '|'.join(map(metres, painted['lanes'])), 'source:width': 'survey'}
+    if 'placement' in painted:
+      tags['placement'] = painted['placement']
     if 'change' in painted:
       tags['change:lanes'] = '|'.join(painted['change'])
     return tags
@@ -1518,6 +1521,9 @@ def main():
       continue
     if not back:
       painted[wid], reason = paint_survey.correct_oneway(samples, fwd, (-fwd * w / 2, fwd * w / 2))
+      if not painted[wid] and reason != 'one-way, no game files':  # one of several links side by side, as on freeways
+        painted[wid], reason = paint_survey.correct_carriageway(samples, fwd)
+        reason = reason or 'measured one-way in its carriageway (game files)'
       why[reason or 'measured one-way (game files)'] += 1
       continue
     use, other = paint_survey.sources(samples, camera_corrects=not from_files)

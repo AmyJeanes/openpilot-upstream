@@ -64,7 +64,9 @@ work out, so they're kept in `~/.cache/gta5_lanes` (`GTA5_LANE_CACHE`) by the ma
 the background (`python -m openpilot.tools.sim.bridge.gta5.map.lane_match gta5.osm.pbf`) and by e2e when it starts. The
 map view draws the roads at their width and, from `lanes.json` (`osm_to_roads.py --lanes`) zoomed in, their lines:
 edges, white dashed lines between lanes one way (solid where `change:lanes` forbids crossing), the yellow line between
-the directions; and the plugin's debug overlay the same lines, from the map's tags. Zoomed in, junctions are drawn as
+the directions; and the plugin's debug overlay the same lines, from the map's tags. Kerbs are drawn only where the road
+surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
+between them, where the line between two such ways is a lane line (`side_by_side.py`). Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it, stop lines across
 the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
@@ -139,7 +141,10 @@ shown or a level changes.
     lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
     lanes between their painted edges, and the painted arrows as `turn:lanes` where there's one per lane. GTA's lane
-    counts stay on one-way links (freeways GTA draws as parallel links are painted as one carriageway). With
+    counts stay on one-way links. A freeway GTA draws as parallel links is painted as one carriageway: each link takes
+    the painted lanes about its line (`paint_survey.correct_carriageway`), placed by `placement` on the nearest lane
+    edge or middle (the lines move up to 1 m to fit), with `change:lanes` from the lines between them and the next
+    link's. With
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
