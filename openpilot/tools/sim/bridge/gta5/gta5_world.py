@@ -395,6 +395,7 @@ class GTA5World(World):
     except (OSError, ValueError, KeyError) as e:
       print(f"gta5: no lanes from {osm}: {e}")
       lanes = None
+    self.navigator.router.roads = lanes
     if lanes is not None and lanes.tagged:
       self.navigator.router.osm = lanes
       print(f"gta5: lanes from the map's tags ({osm})")
