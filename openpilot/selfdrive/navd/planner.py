@@ -181,8 +181,9 @@ class Tune:
     # the junction's centre, and too close to a right turn's corner the model goes straight on
     "signal_min_entry": 0.0,
     # m before the junction's entry a left turn's time-mode signal waits for (0: off); signalled well before its stop
-    # line, the model turns in early and can cut into the near, oncoming half of a split junction
-    "left_signal_max_entry": 0.5,
+    # line, the model turns in early and can cut into the near, oncoming half of a split junction. Distances are from
+    # the car's centre, so 3 m signals about as the front reaches the line
+    "left_signal_max_entry": 3.0,
     # m past a turn's point it is given up if the car hasn't started turning (0: MISSED_BY); a pulse still in the
     # model's memory after a miss turns it at the next opening, a wall as often as a road
     "unturned_cancel": 25.0,
