@@ -276,10 +276,11 @@ class Map:
     from openpilot.tools.sim.bridge.gta5.map.router import Router
     w = gta5_world.GTA5World.__new__(gta5_world.GTA5World)
     w.navigator = SimpleNamespace(router=Router(router or "http://127.0.0.1:1"))
-    w.lane_matcher, w.junction_areas = None, None
+    w.lane_matcher, w.junction_areas, w.gnss = None, None, None
     w._load_paths(os.path.join(map_dir, "paths.jsonl"))
     self.paths, self.osm = w.navigator.router.paths, w.navigator.router.osm
     self.lane_matcher, self.junction_areas = w.lane_matcher, w.junction_areas
+    self.graph = None  # navd's road graph, for GTA5_NAV_MATCH
     self.url, self.cache_path = router, cache
     self.cache = json.load(open(cache)) if os.path.exists(cache) else {}
     self.misses = 0
@@ -353,6 +354,13 @@ def _world(head: dict, mp: Map, rec: dict):
   w.navigator = Navigator(mp.router())
   _sync(w.navigator)
   w.lane_matcher, w.junction_areas = mp.lane_matcher, mp.junction_areas
+  if getattr(gta5_world, "NAV_MATCH", False):  # routing from navd's map match, on simulated 3X GNSS seeded alike each run
+    from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
+    from openpilot.tools.sim.bridge.gta5.gta5_gnss import Gnss
+    if mp.graph is None:
+      mp.graph = RoadGraph.from_osm(mp.osm)
+    w.gnss = Gnss("qcom3x", seed=0, pm=SimpleNamespace(send=lambda *a: None))
+    w.matcher, w.match_t = MapMatcher(mp.graph), None
   w.route_writer, w.lanes_writer = Writer(), Writer()
   w._overlay = lambda state, v: []
   return w, navd

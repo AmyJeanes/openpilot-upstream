@@ -17,6 +17,7 @@ from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.route_input import RouteInputWriter
 from openpilot.selfdrive.navd.lane_slots import PREVIEW_LEN, lane_slots_path, preview
+from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
 from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
 from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
@@ -62,6 +63,10 @@ NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 # NavigateOnOpenpilot param the UI's nav button sets (off: guidance only); "off" guidance only
 NOO = os.getenv("GTA5_NOO", "on")
 NOO_CHECK = 0.5  # s between reads of the param
+# routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
+# pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
+# lane for the car is wrong (replays ask for needless lane changes) until the lane comes from elsewhere.
+NAV_MATCH = os.getenv("GTA5_NAV_MATCH") == "1"
 # GTA has no speed limits; a guess from the street's name, mph: freeways, highways and routes, then anything else
 SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
 CITY_SPEED_LIMIT = 35
@@ -188,6 +193,8 @@ class GTA5World(World):
     self.cap = 0.0
     self.gps_route: list = []
     self.noo, self.noo_t = NOO != "off", 0.0
+    self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
+    self.match_t: float | None = None
 
   def _nav_drives(self) -> bool:
     """Navigate on openpilot: nav drives, rather than only guiding."""
@@ -327,7 +334,9 @@ class GTA5World(World):
     simulator_state.imu.gyroscope = vec3(yaw_rate, 0, 0)
     if self.gnss is not None:
       p = state["pos"]
-      self.gnss.update(time.monotonic(), p[0], p[1], p[2], simulator_state.velocity.x, simulator_state.velocity.y)
+      fix = self.gnss.update(time.monotonic(), p[0], p[1], p[2], simulator_state.velocity.x, simulator_state.velocity.y)
+      if self.matcher is not None:
+        self._match(fix, v, yaw_rate)
 
     user = state.get("user") or {}
     # driver input while engaged: gas overrides; the brake and steering disengage, since the game's steering has no torque
@@ -396,6 +405,9 @@ class GTA5World(World):
       print(f"gta5: no lanes from {osm}: {e}")
       lanes = None
     self.navigator.router.roads = lanes
+    if NAV_MATCH and lanes is not None and self.gnss is not None:
+      self.matcher = MapMatcher(RoadGraph.from_osm(lanes))
+      print("gta5: routing from navd's map match of the GNSS")
     if lanes is not None and lanes.tagged:
       self.navigator.router.osm = lanes
       print(f"gta5: lanes from the map's tags ({osm})")
@@ -404,12 +416,23 @@ class GTA5World(World):
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
 
+  def _match(self, fix, v: float, yaw_rate: float):
+    """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix."""
+    now = time.monotonic()
+    self.matcher.predict(0.0 if self.match_t is None else now - self.match_t, v, yaw_rate)
+    self.match_t = now
+    if fix is not None:
+      g = getattr(fix, self.gnss.profile.service)
+      x, y = to_game(g.latitude, g.longitude)
+      self.matcher.update(x, y, g.bearingDeg, g.bearingAccuracyDeg, g.speed, self.gnss.profile.latency)
+
   def _map_route(self, state: dict, bearing: float) -> dict:
     """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
     map along it. The destination is whichever was set last of the game map's waypoint and the map view's."""
     pos = np.array(state["pos"][:2], dtype=float)
     dest = self.destination.update(state.get("waypoint"), pos, self.map_view.take_destination() if self.map_view is not None else None)
-    route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2])
+    match = self.matcher.match if self.matcher is not None else None
+    route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
     self.routes += route is not None and route is not self.route
     self.route = route
     self._write_route_input(state)
