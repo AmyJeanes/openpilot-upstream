@@ -167,7 +167,7 @@ class NavCard:
     # what's drawn from each navInstruction, and the text's layout, kept until what they're made from changes
     self._words_key: tuple = ()
     self._words: tuple = ()
-    self._lanes_key = -1
+    self._lanes_key: tuple = ()
     self._lanes_cache: tuple = ([], None)
     self._layout_cache: dict[tuple, object] = {}
     self.camera_rect = rl.Rectangle(0, 0, 0, 0)
@@ -282,8 +282,9 @@ class NavCard:
   def _lanes(self):
     if not self.route_on:
       return [], None
-    if self._lanes_key != self.nav.updates:
-      self._lanes_key, self._lanes_cache = self.nav.updates, card_lanes(self.nav.guidance)
+    key = (self.nav.updates, self.nav.car_lane)
+    if self._lanes_key != key:
+      self._lanes_key, self._lanes_cache = key, card_lanes(self.nav.guidance, self.nav.car_lane)
     return self._lanes_cache
 
   def _guidance_words(self) -> tuple:
@@ -520,7 +521,7 @@ class NavCard:
 
   def _draw_lanes(self, m: rl.Rectangle, lanes, here: int | None, a: float, slide: float):
     """Floating over the map's top on a fade: the lanes that take the turn lit (route blue with Navigate on openpilot
-    on, white when it's only guiding), the rest dim, and the car under the lane we're in."""
+    on, white when it's only guiding), the rest dim, and the car under the lane the model puts it in, faint while unsure."""
     if a <= 0.01 or not lanes:
       return
     r = rl.Rectangle(m.x, m.y + slide, m.width, LANES_H)
@@ -541,7 +542,8 @@ class NavCard:
         else:
           lane_arrow(cx, cy, size, lane.arrow, lit if lane.straight_lit or lane.turn_lit else dim)
         if i == here:
-          draw_car(cx, r.y + 124, 44, premul(rl.WHITE, a))
+          sure = self.nav.car_lane is not None and self.nav.car_lane.sure
+          draw_car(cx, r.y + 124, 44, premul(rl.WHITE, a if sure else 0.4 * a))
 
   def _draw_button(self, now, pr, sp, grow, card, sec, sec_h, exp_right, stock_btn, content):
     """The top-right button, drawn after the lanes so its slide track covers what's under it."""
