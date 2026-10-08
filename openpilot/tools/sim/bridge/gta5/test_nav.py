@@ -73,6 +73,23 @@ def test_find_turn_on_its_last_segment():
   assert find_turn(np.array([(0.0, 0.0), (0.0, 4.0), (30.0, 4.0), (60.0, 4.0)]), 5.0) is None
 
 
+def test_find_turn_off_a_junction_link():
+  """A jog across a junction (a turn onto its short link, then the other way off it) is no turn where the way on, from
+  the road before the link, goes straight on or the other way; a real turn off the link still is."""
+  def jog(first: float, second: float, link: float = 10.0) -> np.ndarray:
+    pts, h = [np.array([0.0, 0.0]), np.array([0.0, 20.0])], 0.0
+    for turn, length in ((first, link), (second, 100.0)):
+      h += turn
+      pts.append(pts[-1] + length * np.array([-np.sin(np.radians(h)), np.cos(np.radians(h))]))
+    return np.array(pts)
+  assert find_turn(jog(-90.0, 90.0), 5.0) is None  # straight across
+  assert find_turn(jog(-90.0, 53.0), 5.0) is None  # bearing right, which a left off the link would miss
+  t = find_turn(jog(-25.0, 78.0), 5.0)  # a left turn, past a bear right onto the link
+  assert t is not None and t.side == "left"
+  t = find_turn(jog(-90.0, 53.0, 40.0), 5.0)  # a link too long to be across a junction: two turns
+  assert t is not None and t.side == "right"
+
+
 def test_entry_signal_past_the_entry():
   # sparse approach nodes, signalling 3 m past the default entry (12 m out): the turn must still be found there
   route = np.array([(0.0, y) for y in np.arange(0.0, 200.0, 20.0)] + [(x, 200.0) for x in np.arange(0.0, 100.0, 10.0)])

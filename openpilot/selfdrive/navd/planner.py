@@ -20,6 +20,7 @@ DEBUG = bool(os.getenv("NAVD_DEBUG") or os.getenv("GTA5_DEBUG"))
 TURN_ANGLE = 50.0  # deg of heading change along TURN_WINDOW m of route that makes a turn, not a bend
 TURN_WINDOW = 30.0  # m
 TURN_HOLDS = 20.0  # m past the turn where the route still heads the new way: a jog between lanes comes back
+JOG_LINK = 25.0  # m: a turn off a link this short across a junction (a jog between offset roads) is one from the road before it
 U_TURN_ANGLE = 135.0  # deg: the model can't make a U-turn, so drive on until GTA routes round instead
 TURN_SPEED = 4.5  # m/s for a square turn: slower turns tighter, and the lane turn desire works below 19 mph
 SHARP_TURN_SPEED = 4.0  # m/s beyond sharp_angle
@@ -435,6 +436,9 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
     exit_change = abs(wrap(heads[max(held, j)] - heads[i]))
     if exit_change < TURN_ANGLE:
       continue
+    jog = 0 < i < len(heads) - 1 and starts[i + 1] - starts[i] < JOG_LINK
+    if jog and np.sign(change[i]) * wrap(heads[max(held, j)] - heads[i - 1]) <= THROUGH_TURN:
+      continue  # off a junction's link (a jog): from the road before it, the way on is straight on, or the other way
     if exit_change > U_TURN_ANGLE:
       return None
     return Turn(float(starts[k]), "left" if change[i] > 0 else "right", float(heads[max(held, j)]), exit_change)

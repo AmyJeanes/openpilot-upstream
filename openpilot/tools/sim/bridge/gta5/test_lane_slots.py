@@ -336,6 +336,37 @@ def test_skewed_road_on_is_through():
   assert planner.throughs(bend.points, [a[:2] for a in arrows], []) == []  # by its angle alone: no
 
 
+def jog_route(first: int, second: int, link: tuple[float, float], out: tuple[float, float], first_name: list | None = None):
+  """North 100 m to a junction, a `first` turn onto a short link to `link`, a `second` turn there towards `out`."""
+  pts = np.array([(0.0, -100.0), (0.0, 0.0), link, out])
+  mans = [{'type': START, 'begin_shape_index': 0, 'street_names': ['South St'], 'time': 10.0},
+          {'type': first, 'begin_shape_index': 1, 'street_names': first_name or [], 'time': 1.0, 'length': 0.01},
+          {'type': second, 'begin_shape_index': 2, 'street_names': ['North St'], 'time': 9.0, 'length': 0.1},
+          {'type': DEST, 'begin_shape_index': 3, 'street_names': [], 'time': 0.0}]
+  return Route(pts, mans)
+
+
+def test_turns_through_a_junction_are_one():
+  """A turn onto a junction's unnamed link and the turn off it are one maneuver: a jog straight across is none, a bear
+  left then a right is one right turn, at the junction's entry, onto the second's road."""
+  from openpilot.selfdrive.navd import maneuvers as mv
+  from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
+  jog = jog_route(RIGHT, LEFT, (12.0, 0.0), (12.0, 100.0))
+  merged = mv.junction_maneuvers(jog)
+  assert [m['type'] for m in merged] == [START, mv.CONTINUE, DEST] and merged[1]['street_names'] == ['North St']
+  assert mv.maneuvers(jog) == [] and [m.type for m in nm.maneuvers(jog)] == ['arrive']
+  assert abs(nm.time_remaining(jog, 0.0) - 20.0) < 1e-6
+  right = jog_route(16, RIGHT, (-8.0, 15.0), (92.0, 15.0))
+  got = mv.maneuvers(right)
+  assert [(m.along, m.desire, round(m.exit_heading)) for m in got] == [(100.0, 'turnRight', -90)]
+  assert [(m.along, m.type, m.modifier, m.primary) for m in nm.maneuvers(right)][0] == (100.0, 'turn', 'right', 'North St')
+  # the first onto a named road, or the second too far on: two maneuvers, as the router gives them
+  named = jog_route(16, RIGHT, (-8.0, 15.0), (92.0, 15.0), ['Link Rd'])
+  assert [m.desire for m in mv.maneuvers(named)] == ['keepLeft', 'turnRight']
+  far = jog_route(16, RIGHT, (-20.0, 40.0), (80.0, 40.0))
+  assert len(mv.junction_maneuvers(far)) == 4
+
+
 def test_encode_is_cheap():
   slots, r = bay()
   t = time.perf_counter()
