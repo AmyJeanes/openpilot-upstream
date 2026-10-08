@@ -5,7 +5,9 @@ going through the card's own gesture handling. Run at the device's size on a tes
 
   OPENPILOT_PREFIX=uiport BIG=1 SCALE=1 python selfdrive/ui/tests/nav_shots.py --out <dir> [--camera <png>] [scenario ...]
 
-Each scenario starts the UI afresh and saves port_<shot>.png at the times it names. The perf scenario saves none: it
+Each scenario starts the UI afresh and saves port_<shot>.png at the times it names. Scenarios named check_* assert
+instead (exit status 1 on a failure); check_x_input clicks through the X server (XTest) rather than injecting touches,
+so it tests the whole input path at whatever SCALE it runs at (run it at SCALE=0.4, as the desktop UI). The perf scenario saves none: it
 times the frames (CPU, real time) through a drive past the turn, the card open with its lanes and map, and the split."""
 import argparse
 import os
@@ -20,7 +22,7 @@ os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 STEP = 0.05  # s of virtual time a frame
 LONG_PRESS = 6  # frames a slide's finger moves over
 NAMES = ("none", "start", "open", "slide", "end", "split", "split_start", "turn", "alert", "drag", "long", "arrive", "metric",
-         "drive")
+         "drive", "check_x_input", "check_routes", "check_full_alert")
 PERF_FROM = 1.0  # s, after the card is up
 
 
@@ -50,6 +52,23 @@ def scenarios(c):
     "arrive": [(0.0, c.scene("arrive")), (1.5, c.shot("arrive"))],
     "metric": [(0.0, c.metric()), (0.0, c.scene("approach")), (1.5, c.shot("metric"))],
     # driving from 450 m before the turn: the card opens for it by itself, then closes after it
+    # real clicks at the window's scale: the nav button toggles NoO, a tap on the camera brings up the sidebar
+    "check_x_input": [(0.0, c.scene("approach")), (2.0, c.xtap("button")), (3.0, c.check("NoO on after a click", lambda: c.noo())),
+                      (3.2, c.xtap("button")), (4.0, c.check("NoO off after a second click", lambda: not c.noo())),
+                      (4.2, c.xtap("camera")), (5.0, c.check("sidebar shown after a click on the camera", lambda: c.sidebar())),
+                      (5.2, c.xtap("camera")), (6.0, c.check("sidebar hidden after another", lambda: not c.sidebar())),
+                      (6.2, c.xtap("button", hold=0)), (7.0, c.check("NoO on after a quick click", lambda: c.noo()))],
+    # a new destination takes NoO from the setting; a reroute (the route sent again, guidance lost a moment) keeps the
+    # driver's choice; ending and setting a route again takes the setting again
+    "check_routes": [(0.0, c.setting(True)), (0.0, c.scene("approach")), (1.5, c.check("a new route starts with NoO on", lambda: c.noo())),
+                     (1.6, c.tap("button")), (2.2, c.check("tapped off", lambda: not c.noo())),
+                     (2.3, c.reroute()), (3.5, c.check("a reroute keeps it off", lambda: not c.noo())),
+                     (3.6, c.scene("none")), (4.0, c.scene("approach")), (5.5, c.check("guidance lost a moment keeps it off", lambda: not c.noo())),
+                     (5.6, c.new_destination()), (8.0, c.check("a new destination starts with NoO on", lambda: c.noo())),
+                     (8.1, c.setting(False)), (8.2, c.end()), (9.0, c.new_destination()), (11.0, c.check("off by the setting", lambda: not c.noo()))],
+    # a full-screen alert has the whole screen, in the split with the card open
+    "check_full_alert": [(0.0, c.pin()), (0.0, c.scene("approach")), (2.0, c.alert("TAKE CONTROL IMMEDIATELY", "Calibration Invalid", "full")),
+                         (2.5, c.shot("full_alert_split")), (2.55, c.check("the alert covers the screen", lambda: c.covered()))],
     "perf": [(0.0, c.drive(450.0)), (30.0, c.pin()), (45.0, c.stop())],
     "drive": [(0.0, c.drive(450.0)), (5.0, c.shot("drive_cruise")), (21.0, c.shot("drive_opening")),
               (25.0, c.shot("drive_lanes")), (36.8, c.shot("drive_turn")), (39.0, c.shot("drive_after_turn")),
@@ -75,6 +94,11 @@ class Context:
     self.cam = FakeCamera(camera) if camera else None
     self.frames: list[list] = []  # touch events for the frames to come
     self.card = None
+    self.layout = None
+    self.failed = False
+    self.last_shot = ""
+    self.xinput = None
+    self.release_in = 0
     self.clock = 0.0
     self.done = False
 
@@ -89,6 +113,60 @@ class Context:
     def f(_):
       from openpilot.selfdrive.ui.tests.nav_fake import TURN_AT
       self.nav.scene, self.nav.drive_s = "drive", TURN_AT - before_turn
+    return f
+
+  def noo(self) -> bool:
+    return self.card.noo and self.params.get_bool("NavigateOnOpenpilot")
+
+  def sidebar(self) -> bool:
+    return self.layout._sidebar.is_visible
+
+  def setting(self, on: bool):
+    def f(_):
+      self.params.put_bool("NavigateOnOpenpilotDefault", on)
+    return f
+
+  def reroute(self):
+    def f(_):  # a new route to the same destination: its points shift, its end stays
+      self.nav.reroute()
+    return f
+
+  def new_destination(self):
+    def f(_):
+      self.nav.new_destination()
+      self.nav.scene = "approach"
+    return f
+
+  def check(self, what: str, ok):
+    def f(rl):
+      good = bool(ok())
+      self.failed |= not good
+      print(f"{self.clock:5.2f} s {'PASS' if good else 'FAIL'}: {what}", flush=True)
+    f.is_shot = True
+    return f
+
+  def covered(self) -> bool:
+    """The camera view, which draws the alert, has the whole screen, and nothing of the card is left to draw or touch."""
+    from openpilot.system.ui.lib.application import gui_app
+    from openpilot.selfdrive.ui.layouts.main import MainState
+    r = self.layout._layouts[MainState.ONROAD].road_view.rect
+    c = self.card
+    print(f"   camera view {r.x:.0f},{r.y:.0f} {r.width:.0f}x{r.height:.0f}; card hit {c.hit_card.width:.0f}x{c.hit_card.height:.0f}",
+          flush=True)
+    return (r.x, r.y, r.width, r.height) == (0, 0, gui_app.width, gui_app.height) and c.hit_card.width == 0
+
+  def xtap(self, what: str, hold: int = 3):
+    """A click through the X server where `what` is drawn, held `hold` frames (0: released at once, as a quick click
+    whose press and release arrive between two frames)."""
+    def f(_):
+      import pyray as rl
+      from openpilot.system.ui.lib.application import gui_app
+      x, y = self._point(what)
+      wp = rl.get_window_position()
+      self.xinput.click(int(wp.x + x * gui_app._scale), int(wp.y + y * gui_app._scale))
+      self.release_in = hold
+      if not hold:
+        self.xinput.release()
     return f
 
   def stop(self):
@@ -125,6 +203,7 @@ class Context:
       img = rl.load_image_from_screen()
       path = os.path.join(self.out, f"port_{name}.png")
       rl.export_image(img, path)
+      self.last_shot = path
       rl.unload_image(img)
       c = self.card
       noo_param = self.params.get_bool("NavigateOnOpenpilot")
@@ -139,6 +218,8 @@ class Context:
       return c.hit_exp[0], c.hit_exp[1]
     if what == "pin":
       return c.hit_layout[0], c.hit_layout[1]
+    if what == "camera":
+      return c.camera_rect.x + c.camera_rect.width * 0.3, c.camera_rect.y + c.camera_rect.height * 0.6
     r = c.hit_card
     return r.x + r.width / 2, r.y + 80
 
@@ -187,6 +268,29 @@ class Context:
       self.cam.send()
 
 
+class XInput:
+  """Clicks through the X server (XTest), as a mouse on the desktop would."""
+  def __init__(self):
+    import ctypes
+    self.x11 = ctypes.CDLL("libX11.so.6")
+    self.xtst = ctypes.CDLL("libXtst.so.6")
+    self.x11.XOpenDisplay.restype = ctypes.c_void_p
+    self.x11.XFlush.argtypes = [ctypes.c_void_p]
+    self.xtst.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+    self.xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+    self.d = self.x11.XOpenDisplay(None)
+    assert self.d, "no X display"
+
+  def click(self, x: int, y: int):
+    self.xtst.XTestFakeMotionEvent(self.d, -1, x, y, 0)
+    self.xtst.XTestFakeButtonEvent(self.d, 1, 1, 0)
+    self.x11.XFlush(self.d)
+
+  def release(self):
+    self.xtst.XTestFakeButtonEvent(self.d, 1, 0, 0)
+    self.x11.XFlush(self.d)
+
+
 def timers(view) -> dict[str, list[float]]:
   """Times the card's update, its drawing and its map's, each frame, in real time."""
   perf: dict[str, list[float]] = {"onroad view": [], "card update": [], "card draw": [], "map": []}
@@ -224,7 +328,11 @@ def run(name: str, args):
     gui_app.init_window(f"nav shots {name}", fps=200)
     layout = MainLayout()
     ctx.card = layout._layouts[MainState.ONROAD].card
-    gui_app._mouse.get_events = lambda: ctx.frames.pop(0) if ctx.frames else []
+    ctx.layout = layout
+    if name == "check_x_input":
+      ctx.xinput = XInput()
+    else:
+      gui_app._mouse.get_events = lambda: ctx.frames.pop(0) if ctx.frames else []
     perf = timers(layout._layouts[MainState.ONROAD]) if name == "perf" else None
     while script and script[0][0] <= 0.0 and not getattr(script[0][1], "is_shot", False):
       script.pop(0)[1](ctx)
@@ -245,7 +353,13 @@ def run(name: str, args):
         script.pop(0)[1](ctx)
       ctx.publish()
       ui_state.update()
+      if ctx.release_in:
+        ctx.release_in -= 1
+        if not ctx.release_in:
+          ctx.xinput.release()
     gui_app.close()
+    if ctx.failed:
+      sys.exit(1)
     if perf is not None:
       import numpy as np
       for k, v in perf.items():
@@ -265,10 +379,12 @@ def main():
   names = args.names or list(NAMES)
   if len(names) > 1:  # each afresh, in its own process
     import subprocess
+    failed = False
     for n in names:
       print(f"== {n}", flush=True)
-      subprocess.run([sys.executable, __file__, "--out", args.out] + (["--camera", args.camera] if args.camera else []) + [n], check=False)
-    return
+      r = subprocess.run([sys.executable, __file__, "--out", args.out] + (["--camera", args.camera] if args.camera else []) + [n], check=False)
+      failed |= r.returncode != 0
+    sys.exit(1 if failed else 0)
   run(names[0], args)
 
 

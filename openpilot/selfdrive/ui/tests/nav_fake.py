@@ -38,8 +38,10 @@ def to_lat_lon(x: float, y: float) -> tuple[float, float]:
   return float(LAT0 + y / M_PER_DEG), float(LON0 + x / (M_PER_DEG * math.cos(math.radians(LAT0))))
 
 
-def route_points() -> np.ndarray:
-  return np.array([(0.0, 0.0), (0.0, TURN_AT), (AFTER, TURN_AT)])
+def route_points(after: float = AFTER, variant: int = 0) -> np.ndarray:
+  """variant > 0: the same route as a router sends it again (a reroute), with a point more along its way."""
+  extra = [(0.0, TURN_AT * variant / (variant + 1))] if variant else []
+  return np.array([(0.0, 0.0), *extra, (0.0, TURN_AT), (after, TURN_AT)])
 
 
 def pose_at(s: float) -> tuple[tuple[float, float], float]:
@@ -60,9 +62,9 @@ def nearby_roads() -> list[tuple[np.ndarray, float]]:
   return roads
 
 
-def route_message():
+def route_message(after: float = AFTER, variant: int = 0):
   msg = messaging.new_message("navRoute", valid=True)
-  pts = route_points()
+  pts = route_points(after, variant)
   coords = msg.navRoute.init("coordinates", len(pts))
   for c, (x, y) in zip(coords, pts, strict=True):
     c.latitude, c.longitude = to_lat_lon(x, y)
@@ -76,7 +78,7 @@ def route_message():
   return msg
 
 
-def instruction_message(s: float | None, road: str = "short", lanes: bool = True):
+def instruction_message(s: float | None, road: str = "short", lanes: bool = True, after: float = AFTER):
   """navInstruction for the car s m along the route; None for no route."""
   msg = messaging.new_message("navInstruction", valid=True)
   ni = msg.navInstruction
@@ -84,7 +86,7 @@ def instruction_message(s: float | None, road: str = "short", lanes: bool = True
     return msg
   ni.valid = True
   ni.destinationName = DESTINATION
-  end = TURN_AT + AFTER
+  end = TURN_AT + after
   ahead = [(TURN_AT, "turn", "right", ROADS[road]), (end, "arrive", "straight", "")]
   ahead = [m for m in ahead if m[0] > s]
   if ahead:
@@ -184,6 +186,16 @@ class FakeNav:
     self.scene, self.road = scene, road
     self.drive_s = drive_from
     self._route_t = -1e9
+    self.after, self.variant = AFTER, 0  # the destination, m on from the turn; reroutes so far
+
+  def reroute(self):
+    self.variant += 1
+    self._route_t = -1e9
+
+  def new_destination(self):
+    self.after += 400.0
+    self.variant = 0
+    self._route_t = -1e9
 
   def position(self) -> tuple[float | None, float]:
     """(m along, or None for no route; the car's speed)."""
@@ -195,14 +207,14 @@ class FakeNav:
 
   def send(self, now: float, dt: float = 0.0):
     if self.scene == "drive":
-      self.drive_s = (self.drive_s + DRIVE_SPEED * dt) % (TURN_AT + AFTER)
+      self.drive_s = (self.drive_s + DRIVE_SPEED * dt) % (TURN_AT + self.after)
     s, _ = self.position()
     if s is not None and now - self._route_t > 2.0:
-      self.pm.send("navRoute", route_message())
+      self.pm.send("navRoute", route_message(self.after, self.variant))
       self._route_t = now
     if s is None:
       self._route_t = -1e9
-    self.pm.send("navInstruction", instruction_message(s, self.road))
+    self.pm.send("navInstruction", instruction_message(s, self.road, after=self.after))
 
 
 def main():

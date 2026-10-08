@@ -1,5 +1,6 @@
 import pyray as rl
 
+from openpilot.cereal import log
 from openpilot.selfdrive.ui.nav.nav_state import NavState
 from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
 from openpilot.selfdrive.ui.onroad.nav_panel import NavCard
@@ -33,4 +34,12 @@ class NavSplitView(Widget):
       return
     self.card.update(rect)
     self.road_view.set_exp_button_visible(self.card.stock_button_shown)
+    alert = self.road_view.alert_renderer.get_alert(ui_state.sm)
+    if alert is not None and alert.size == log.SelfdriveState.AlertSize.full:
+      # full-screen alerts have the whole screen by design: no card or split while one shows
+      self.card.clear_hits()
+      self.road_view.overlay = None
+      self.road_view.render(rect)
+      self.road_view.overlay = self.card.draw
+      return
     self.road_view.render(self.card.camera_rect)
