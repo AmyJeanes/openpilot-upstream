@@ -222,9 +222,9 @@ def split_shared(nodes, info):
     lf = list(info[p[0]][8])
     lf[1] &= ~0xF0  # no offset between its directions
     lf[2] = (lf[2] & ~0xFC) | (1 << 5) | (1 << 2)  # a lane each way
+    cls = info[p[0]][5]  # its road's class: as a minor road, routers leave it out of long routes' turns across
     for a, b in [(ends[0][0], n), (n, ends[1][0])] if middle else [(ends[0][0], ends[1][0])]:
-      cls = highway(nodes, a, b, 1, 1)
-      info.append([next_id, a, b, 1, 1, cls, speed_limit(nodes, a, b, cls, 1, 1), None, lf])
+      info.append([next_id, a, b, 1, 1, cls, info[p[0]][6], None, lf])
       next_id += 1
     parted += 1
   return parted

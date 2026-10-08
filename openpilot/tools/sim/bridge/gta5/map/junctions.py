@@ -664,24 +664,25 @@ class Junctions:
       arms.append(Arm(g, widest.line, left, right, widest.heading, widest.edges[1] - widest.edges[0]))
     return arms
 
-  def flow(self, arm: Arm) -> bool | None:
-    """Whether an arm's traffic leaves the junction (True) or comes into it (False); None where it runs both ways."""
+  def flows(self, arm: Arm) -> set[bool]:
+    """Which ways an arm's one-way roads run: out of the junction (True), into it (False); none if any is two-way."""
     out = set()
     for m in arm.members:
       w, along = m.ways[0]
       way = oneway_of(self.ways[w][0])
       if not way:
-        return None
+        return set()
       out.add((way == 1) == along)
-    return out.pop() if len(out) == 1 else None
+    return out
 
   def square(self, arms: list[Arm]):
-    """Trims each of a divided road's carriageways out of the junction, one in and one out side by side, back at least
-    as far as the other: one trimmed short would leave the junction's area reaching out along the other only."""
-    flows = [self.flow(arm) for arm in arms]
+    """Trims each of a divided road's carriageways out of the junction, one in and one out side by side (with any turn
+    lanes beside them), back at least as far as the other: one trimmed short would leave the junction's area reaching
+    out along the other only."""
+    flows = [self.flows(arm) for arm in arms]
     for i, a in enumerate(arms):
       for j, b in enumerate(arms):
-        if i == j or flows[i] is None or flows[j] is None or flows[i] == flows[j]:
+        if i == j or not flows[i] or not flows[j] or len(flows[i] | flows[j]) < 2:
           continue
         if math.degrees(abs((b.heading - a.heading + math.pi) % (2 * math.pi) - math.pi)) > BUNDLE_ANGLE:
           continue
@@ -711,7 +712,8 @@ class Junctions:
     for i in range(n):
       a, b = arms[i], arms[(i + 1) % n]
       gap = (b.heading - a.heading) % (2 * math.pi)
-      hit = crossing(a.left, b.right, MAX_TRIM, MAX_TRIM) if 1e-3 < gap < math.pi - 1e-3 else None
+      # arms heading within BUNDLE_ANGLE of each other run side by side: their kerbs, carried back, cross only deep inside
+      hit = crossing(a.left, b.right, MAX_TRIM, MAX_TRIM) if math.radians(BUNDLE_ANGLE) < gap < math.pi - 1e-3 else None
       if hit is None:
         corners.append(None)
         continue
