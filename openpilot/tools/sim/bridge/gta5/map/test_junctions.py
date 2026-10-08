@@ -151,6 +151,22 @@ def test_stop_lines():
   assert len(j.stops) == 4 and sum(at_mouth) == 3  # the south one behind its crossing
 
 
+def test_surveyed_stop_lines():
+  # a stop line surveyed where it's painted (source:position=survey), 8 m from the crossroads' node, nearer than the
+  # road would be trimmed: the road ends there and the line is drawn at it, not moved out behind the crossing
+  nodes = {1: (0.0, 0.0), 2: (0.0, -20.0), 3: (0.0, -100.0), 4: (-100.0, 0.0), 5: (100.0, 0.0), 6: (0.0, 100.0),
+           7: (0.0, -8.0), 20: (-8.0, -6.0), 21: (8.0, -6.0)}
+  ways = {1: (TWO_WAY, [3, 2]), 2: (TWO_WAY, [2, 7]), 6: (TWO_WAY, [7, 1]), 3: (TWO_WAY, [1, 4]), 4: (TWO_WAY, [1, 5]),
+          5: (TWO_WAY, [1, 6]), 9: ({'highway': 'footway', 'footway': 'crossing'}, [20, 21])}
+  tags = {'highway': 'traffic_signals', 'traffic_signals:direction': 'forward'}
+  plain = only(Junctions(make(nodes, ways, {7: tags})))
+  assert plain.stops[0].along > 8.0 + 1.0  # unsurveyed: no nearer than the mouth, behind the crossing
+  j = only(Junctions(make(nodes, ways, {7: {**tags, 'source:position': 'survey'}})))
+  stop = j.stops[0]
+  assert len(j.stops) == 1 and abs(stop.along - 8.0) < 1e-6 and stop.member.trim <= 8.0 - STOP_SETBACK + 1e-6
+  assert all(m.trim > 8.0 for arm in j.arms for m in arm.members if m is not stop.member)
+
+
 def test_crossing_lines_on_the_road():
   nodes = {1: (0.0, 0.0), 2: (0.0, -100.0), 3: (-100.0, 0.0), 4: (100.0, 0.0), 20: (-10.0, -20.0), 21: (10.0, -20.0)}
   ways = {1: (TWO_WAY, [2, 1]), 2: (TWO_WAY, [3, 1]), 3: (TWO_WAY, [1, 4]),
