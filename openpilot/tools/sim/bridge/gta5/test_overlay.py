@@ -152,6 +152,54 @@ def test_update_sends_the_route_more_often(monkeypatch):
   assert overlay.snap["full"]  # one the worker hasn't got to yet stays full
 
 
+def drive(overlay: ov.Overlay, route, monkeypatch, steps: int = 150, paths=None, osm=None, pos=None) -> list[dict]:
+  """Overlay.update every 10 ms as the bridge calls it, the car driving along a straight route (or standing at pos) and
+  nav's lane plan line planned again every 0.5 s: the messages it hands on. The worker is kept in step: a thread's
+  snapshots are made here, the process waited for."""
+  now = [0.0]
+  monkeypatch.setattr(ov, "time", SimpleNamespace(monotonic=lambda: now[0]))
+  inline = not isinstance(overlay, ov.OverlayProcess)
+  if inline:
+    overlay.thread = object()
+  start, lane, sent = route.at, None, []
+  for n in range(steps):
+    now[0] = n * 0.01
+    if pos is None:
+      route.at = start + n * 0.2
+    if n % 50 == 0:
+      lane = lane_from(route, route.at, 1.75 if n < 100 else -1.75).tolist() if pos is None else route.rest()
+    state = {"pos": [0.5, route.at, ov.CAR_HEIGHT] if pos is None else pos, "vEgo": 20.0, "route": [[0.0, 0.0]],
+             "debug": {"on": True, "layers": ov.DEFAULT_LAYERS + "f"}}
+    sent += overlay.update(state, route, paths, lambda lane=lane: lane, lambda: (np.array([0.0, 300.0]), np.array([0.0, 250.0])),
+                           False, osm)
+    if inline:
+      if overlay.snap is not None:
+        snap, overlay.snap = overlay.snap, None
+        overlay.outbox = overlay.make(snap)
+    else:
+      overlay.wait()
+  return sent
+
+
+def test_process_makes_what_the_thread_makes(monkeypatch):
+  thread = drive(ov.Overlay(background=False), straight_route(), monkeypatch)
+  process = ov.OverlayProcess(wait_maps=True)
+  try:
+    assert drive(process, straight_route(), monkeypatch) == thread
+    assert not process.failed and process.proc is not None
+  finally:
+    process.close()
+  assert len(thread) > 10 and any(k == "m" for msg in thread for k, _ in decode(msg))
+
+
+def test_maps_not_read_from_their_files_stay_in_a_thread(monkeypatch):
+  osm = SimpleNamespace(path=None, project=to_game, defaults=None, drive_on_right=True, tagged=False)
+  assert ov.from_files(None, None) and not ov.from_files(None, osm)
+  overlay = ov.OverlayProcess()
+  drive(overlay, straight_route(), monkeypatch, steps=60, osm=osm)
+  assert overlay.failed and overlay.proc is None and overlay.thread is not None
+
+
 def test_within_splits_at_the_radius():
   line = np.column_stack([np.linspace(-300, 300, 61), np.zeros(61), np.zeros(61)])
   runs = ov.within(line, np.zeros(2), 150.0)
@@ -400,6 +448,20 @@ def test_cached_lines_equal_a_fresh_build(paths, osm, fresh_marks):
     a, b = fresh.near((x, y), z, ov.RADIUS, ov.DEFAULT_LAYERS), from_cache.near((x, y), z, ov.RADIUS, ov.DEFAULT_LAYERS)
     assert len(a) == len(b) > 0
     assert all(ka == kb and np.array_equal(la, lb) for (ka, la), (kb, lb) in zip(a, b, strict=True))
+
+
+@pytest.mark.parametrize("place", sorted(PLACES))
+def test_process_makes_what_the_thread_makes_on_the_map(paths, osm, fresh_marks, place, monkeypatch):
+  ov.save_marks(ov.marks_key(paths, osm), fresh_marks)
+  x, y, z, _ = PLACES[place]
+  pos = [x, y, z + ov.CAR_HEIGHT]
+  thread = drive(ov.Overlay(background=False), drive_route(paths, place, osm=osm), monkeypatch, 60, paths, osm, pos)
+  process = ov.OverlayProcess(wait_maps=True)  # reads the maps from their files, the lines from the cache
+  try:
+    got = drive(process, drive_route(paths, place, osm=osm), monkeypatch, 60, paths, osm, pos)
+  finally:
+    process.close()
+  assert got == thread and any(k == "e" for msg in got for k, _ in decode(msg))
 
 
 def test_lines_build_in_the_background_then_load_from_the_cache(paths, osm, fresh_marks, tmp_path, monkeypatch):

@@ -29,7 +29,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
-from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
+from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, GpsRoute, Overlay, OverlayProcess
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
@@ -171,7 +171,7 @@ class GTA5World(World):
     self.nav_msgs = NavMessages() if NAV_MSGS else None
     self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
     self.recorder = Recorder(RECORD, self) if RECORD else None
-    self.overlay = Overlay()  # the plugin map debug overlay, while it asks for it
+    self.overlay = OverlayProcess() if OVERLAY_PROCESS else Overlay()  # the plugin map debug overlay, while it asks for it
     self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
     if self.map_view:
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
@@ -689,6 +689,7 @@ class GTA5World(World):
       self.pinner.terminate()
     if self.map_view is not None:
       self.map_view.close()
+    self.overlay.close()
     self.exit_event.set()
     # the camera thread waits for each game frame, and none come once the game connection is gone; wake it so the bridge
     # process can exit, handing it a blank frame rather than the shared memory freed below
