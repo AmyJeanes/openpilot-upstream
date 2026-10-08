@@ -184,6 +184,18 @@ class JunctionRun(rr.Run):
     self.plan_path = plan_path
     self.picker: PlanPicker | None = None
 
+  def ensure_bridge(self):
+    """record_run's check over every variable of --bridge-extra (junction_rec.sh's turns the map overlay off, whose
+    thread stalls the bridge's frames), not only expert mode and recording."""
+    env = rr.bridge_env()
+    wrong = {k: env.get(k) for k, v in self.extra.items() if env.get(k) != v}
+    if not wrong:
+      return
+    if not self.args.fix_bridge:
+      raise rr.Stop(f"the bridge runs without {self.extra} (it has {wrong}): run with --fix-bridge")
+    self.restarts -= 1  # not a failure
+    self.restart_bridge(f"it runs with {wrong}")
+
   def drive(self, c: dict, settings: list[str], world: dict) -> dict:
     write_manifest(self.args.runs, self.args.name, self.plan_path)
     rec = super().drive(c, settings, world)

@@ -14,9 +14,9 @@ junction, and each way out ends AFTER m down its road. Every approach and way ou
 turn, ramp or roundabout before the junction, no U-turn and no detour: so the ways out are the legal ones. An approach
 needs two.
 
-Held out for eval, whole junctions: those of --eval-trips (the in-game A/B set, so it stays a test), driven from each
-trip's own start; no training junction lies within EVAL_BUFFER m of one. --bad-labels (a labels root) leaves out
-junctions where the expert collided, left the route or drove in the oncoming lanes before (the labeller's rejections).
+Held out for eval, whole junctions: those of --eval-trips (the in-game A/B set, so it stays a test, and the set it
+replaced), the first file's driven from each trip's own start; no training junction lies within EVAL_BUFFER m of one.
+--bad-labels (a labels root) leaves out junctions where the expert collided, left the route or drove in the oncoming lanes before (the labeller's rejections).
 Training approaches are picked by kind (kind_score: those nav and the model get wrong first), spread over the city
 (AREA_CELL), until --hours is filled at --train-reps passes; eval junctions are driven --eval-reps times, --fail-reps
 for the --fail-trips ones.
@@ -175,7 +175,8 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
   change = wrap(heading(s_out + 10, s_out + 30) - heading(s_in - 20, s_in - 5))
   bend = wrap(heading(s_in - 20, s_in - 5) - heading(max(s_in - BEND_FROM, 0.0), max(s_in - BEND_FROM + 20, 5.0)))
   geom =[[round(float(v), 1) for v in point(s)] for s in np.append(np.arange(0.0, along[-1], GEOM_STEP), along[-1])]
-  return {"ok": True, "length": round(float(along[-1])), "time": round(float(sum(m.get("time", 0) for m in r.maneuvers))),
+  first_real = min((m["s"] for m in mans if m["real"]), default=None)
+  return {"ok": True, "length": round(float(along[-1])), "first_real": first_real, "time": round(float(sum(m.get("time", 0) for m in r.maneuvers))),
           "s_in": round(s_in, 1), "s_out": round(s_out, 1), "kind": kind,
           "angle": round(at[0]["angle"]) if at and at[0]["angle"] is not None else None, "change": round(change),
           "bend": round(bend), "maneuvers": [e2e.TYPES.get(m["type"], str(m["type"])) for m in mans],
@@ -251,22 +252,22 @@ def approach_start(m, u, v, before: float, slack: float, least: float):
   return chain[i], chain[i - 1], dist[i], [m.nodes[k] for k in chain[1:i]]
 
 
-def exit_dest(m, a, b):
-  """The node to end at about AFTER m down the road out by a -> b: (node, m from a) or None."""
+def exit_dest(m, a, b, after: float = AFTER, least: float = MIN_AFTER):
+  """The node to end at about `after` m down the road out by a -> b: (node, m from a) or None."""
   d1 = m.gap(a, b)
-  on = [(b, d1)] + [(n, d1 + d) for n, d in m.walk(b, m.bearing(a, b), AFTER + AFTER_SLACK, back=False)[1:]]
-  ends = [(n, d) for n, d in on if d >= MIN_AFTER and not m.nodes[n]["f"][2] & 4]
+  on = [(b, d1)] + [(n, d1 + d) for n, d in m.walk(b, m.bearing(a, b), after + AFTER_SLACK, back=False)[1:]]
+  ends = [(n, d) for n, d in on if d >= least and not m.nodes[n]["f"][2] & 4]
   if not ends:
     return None
-  return min(ends, key=lambda e: abs(e[1] - AFTER))
+  return min(ends, key=lambda e: abs(e[1] - after))
 
 
-def ways_out(m, out_arms, b_in: float) -> list[dict]:
+def ways_out(m, out_arms, b_in: float, after: float = AFTER, least: float = MIN_AFTER) -> list[dict]:
   exits = []
   for a, b in out_arms:
     if abs(wrap(m.bearing(a, b) - b_in - 180.0)) <= UTURN_DEG:
       continue
-    d = exit_dest(m, a, b)
+    d = exit_dest(m, a, b, after, least)
     if d is None:
       continue
     dn, dd = d
@@ -283,14 +284,15 @@ def approach(m, u, v, exits: list[dict], start: dict, before: float, lanes_start
           "exits": [dict(e) for e in exits]}
 
 
-def candidates(m, cl: dict, before: float = BEFORE, slack: float = BEFORE_SLACK, least: float = MIN_BEFORE) -> list[dict]:
-  """Every approach of junction cl with a start node and two or more ways out on GTA's links (not routed yet)."""
+def candidates(m, cl: dict, before: float = BEFORE, slack: float = BEFORE_SLACK, least: float = MIN_BEFORE,
+               after: float = AFTER, after_least: float = MIN_AFTER, min_ways: int = 2) -> list[dict]:
+  """Every approach of junction cl with a start node and min_ways or more ways out on GTA's links (not routed yet)."""
   in_arms, out_arms = junction_arms(m, cl)
   found = []
   for u, v in in_arms:
     b_in = m.bearing(u, v)
-    exits = ways_out(m, out_arms, b_in)
-    if len(exits) < 2:
+    exits = ways_out(m, out_arms, b_in, after, after_least)
+    if len(exits) < min_ways:
       continue
     st = approach_start(m, u, v, before, slack, least)
     if st is None:
@@ -447,11 +449,14 @@ def make_plan(args) -> dict:
   # eval: the A/B trips' junctions, from each trip's own start
   fail = set(args.fail_trips.split(",")) if args.fail_trips else set()
   evals, eval_ids, eval_missing = [], set(), {}
-  for ep in (eval_points(args.eval_trips) if args.eval_trips else []):
+  # several files: the first one's trips are driven, a later file's junctions only add to those held out (old A/B sets)
+  for ep in [ep for path in (args.eval_trips or "").split(",") if path for ep in eval_points(path)]:
     c = min(cls, key=lambda c: math.hypot(c["x"] - ep["turn"][0], c["y"] - ep["turn"][1]))
     if math.hypot(c["x"] - ep["turn"][0], c["y"] - ep["turn"][1]) > 30.0 + c["size"]:
       eval_missing[ep["name"]] = "no junction at its turn"
       continue
+    if id(c) in eval_ids:
+      continue  # held out already, by another trip of it
     eval_ids.add(id(c))  # held out even when it can't be driven
     a = eval_approach(m, router, c, ep["spec"])
     v = verify(router, a) if a is not None else None
@@ -667,6 +672,138 @@ def figure(plan: dict, path: str):
   fig.savefig(path, dpi=130, bbox_inches="tight")
 
 
+# *** the A/B trips: still through the junction they were made for? ***
+
+AB_NOTE = re.compile(r"(left|right) ([+-]?\d+) at \((-?[\d.]+),\s*(-?[\d.]+)\), (.*?) \((\d+) lanes\) -> (.*?), \d+ m before")
+AB_TURN_NEAR = 30.0  # m from the noted turn: the route's maneuver there is that turn
+AB_FIRST = 60.0  # m: a turn nearer the start than this has no approach (the trips were made with 103-170 m)
+AB_SEARCH, AB_ANGLE = 800.0, 20.0  # m, deg: another junction with the same turn, where its own can't be driven
+AB_BEFORE, AB_SLACK, AB_MIN = 190.0, 30.0, 150.0  # a new start, as e2e's short trips but further back
+AB_AFTER, AB_AFTER_MIN = 120.0, 90.0  # e2e's SHORT_AFTER: the bridge arrives 20-40 m short
+
+
+def ab_check(router, spec: str, note: re.Match) -> tuple[str | None, dict]:
+  """Why an A/B trip no longer tests its noted turn on this router (None: it does), and what its route does."""
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  (sx, sy, sz, sh, dx, dy), _ = e2e.parse_spec(spec)
+  turn, side = np.array([float(note[3]), float(note[4])]), note[1]
+  try:
+    r = router.route(np.array([sx, sy]), (-sh) % 360, np.array([dx, dy]), sz)
+  except Exception as e:  # no route is an answer
+    return f"no route ({type(e).__name__})", {}
+  along, pts = r.along, r.points
+  real = [(float(along[min(m["begin_shape_index"], len(along) - 1)]), m) for m in r.maneuvers if m["type"] in e2e.REAL]
+  info = {"length": round(float(along[-1])), "first": round(real[0][0]) if real else None,
+          "first_kind": e2e.TYPES.get(real[0][1]["type"]) if real else None}
+  at = [(s, m) for s, m in real if np.hypot(*(pts[min(m["begin_shape_index"], len(pts) - 1)] - turn)) <= AB_TURN_NEAR]
+  if not at:
+    return f"its route doesn't turn at {turn.round().tolist()} (first turn: {info['first_kind']} after {info['first']} m, " + \
+           f"route {info['length']} m)", info
+  s_t, m_t = at[0]
+  if ("left" if m_t["type"] in e2e.LEFT else "right") != side:
+    return f"it turns {'left' if side == 'right' else 'right'} there", info
+  if any(s < s_t - NO_TURN_BEFORE for s, _ in real):
+    return f"another turn first ({info['first_kind']} after {info['first']} m)", info
+  if s_t < AB_FIRST:
+    return f"the turn comes {s_t:.0f} m after the start", info
+  return None, info
+
+
+def ab_repick(m, router, cls: list[dict], note: re.Match) -> tuple[dict, dict, str] | None:
+  """A start and destination for the noted turn, the turn the route's first maneuver with AB_BEFORE m of road before
+  it: at its junction, the way in and out it names (streets, side, angle) as near as the router drives one; else the
+  nearest junction within AB_SEARCH m with that turn (side, angle within AB_ANGLE, lanes in, a named or unnamed road
+  out). (approach, way out, where) or None."""
+  turn, angle, lanes = np.array([float(note[3]), float(note[4])]), float(note[2]), int(note[6])
+  st_in, st_out = note[5], note[7]
+
+  def pick(c, same: bool):
+    best = None
+    for before, slack, least in ((AB_BEFORE, AB_SLACK, AB_MIN), (BEFORE, BEFORE_SLACK, MIN_BEFORE)):
+      for a in candidates(m, c, before, slack, least, AB_AFTER, AB_AFTER_MIN, min_ways=1):
+        if not same and a["lanes_in"] != lanes:
+          continue
+        for e in a["exits"]:
+          if not same and (e["street"] is None) != (st_out == "None"):
+            continue
+          r = route_check(router, a["start"], e["dest"], a["via_in"], e["via_out"], max(a["before"], AB_BEFORE), e["after"])
+          if not r["ok"] or r["first_real"] is None or (r["change"] < 0) != (angle < 0) or \
+             abs(r["change"] - angle) > (40.0 if same else AB_ANGLE):
+            continue
+          if r["first_real"] < r["s_in"] - NO_TURN_BEFORE or r["s_in"] < AB_MIN:
+            continue  # another turn first, or too little road before it
+          score = abs(r["change"] - angle) + 0.1 * abs(r["s_in"] - AB_BEFORE)
+          if same:
+            score += 25.0 * (st_in != "None" and a["street"] != st_in) + 25.0 * (st_out != "None" and e["street"] != st_out)
+          if best is None or score < best[0]:
+            best = (score, a, {**e, **r})
+      if best is not None:
+        return best
+    return None
+
+  near = sorted(cls, key=lambda c: math.hypot(c["x"] - turn[0], c["y"] - turn[1]))
+  if math.hypot(near[0]["x"] - turn[0], near[0]["y"] - turn[1]) <= 30.0 + near[0]["size"]:
+    got = pick(near[0], True)
+    if got is not None:
+      return got[1], got[2], "its junction"
+  for c in near[1:]:
+    d = math.hypot(c["x"] - turn[0], c["y"] - turn[1])
+    if d > AB_SEARCH:
+      break
+    got = pick(c, False)
+    if got is not None:
+      return got[1], got[2], f"a junction {d:.0f} m away at ({c['x']:.0f},{c['y']:.0f})"
+  return None
+
+
+def cmd_abcheck(args):
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  e2e.MAP_DIR = args.map
+  router = make_router(args.map, args.router, args.valhalla)
+  m = cls = None
+  out, changes = [], []
+  for line in open(os.path.expanduser(args.trips)):
+    body, _, comment = line.rstrip("\n").partition("#")
+    parts = body.split()
+    note = AB_NOTE.search(comment)
+    if len(parts) != 2 or ">" not in parts[1] or note is None:
+      out.append(line.rstrip("\n"))
+      continue
+    why, info = ab_check(router, parts[1], note)
+    if why is None:
+      print(f"{parts[0]:6s} ok: turn after {info['first']} m, route {info['length']} m")
+      out.append(line.rstrip("\n"))
+      continue
+    print(f"{parts[0]:6s} BROKEN: {why}")
+    if m is None:
+      m = e2e.Map()
+      cls = clusters(m)
+    got = ab_repick(m, router, cls, note)
+    if got is None:
+      print("       no new start found: kept as it was")
+      out.append(line.rstrip("\n"))
+      continue
+    a, e, where = got
+    _, lane = e2e.parse_spec(parts[1])
+    s = a["start"]
+    spec = f"{s['x']:.1f},{s['y']:.1f},{s['z']:.1f},{s['heading']:.0f},{lane if lane is not None else 9}>{e['dest'][0]:.1f},{e['dest'][1]:.1f}"
+    name = parts[0] + args.suffix
+    ang = e["angle"] if e.get("angle") is not None else e["change"]
+    at = f"{note[3]},{note[4]}" if where == "its junction" else f"{a['via_in'][1][0]:.0f},{a['via_in'][1][1]:.0f}"
+    new = (f"{name} {spec}    # {note[1]} {ang:+d} at ({at}), {a['street']} ({a['lanes_in']} lanes) -> {e['street']}, " +
+           f"{e['s_in']:.0f} m before, {e['length'] - e['s_in']:.0f} m after, re-picked {time.strftime('%Y-%m-%d')} for {parts[0]} " +
+           f"at {where} ({why}); was {parts[1]}")
+    why2, info2 = ab_check(router, spec, AB_NOTE.search(new.partition("#")[2]))
+    print(f"       -> {new}\n       check: {why2 or 'ok'} {info2}")
+    out.append(new)
+    changes.append((parts[0], name, why))
+  if args.out:
+    hdr = (f"# {time.strftime('%Y-%m-%d')}: {os.path.basename(args.trips)} with the trips whose route no longer takes their " +
+           f"turn re-picked (junction_plan.py abcheck): {', '.join(f'{o} -> {n}' for o, n, _ in changes) or 'none'}")
+    Path(args.out).write_text("\n".join([hdr] + out) + "\n")
+    print(f"wrote {args.out}")
+
+
 def main():
   p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   sub = p.add_subparsers(dest="command", required=True)
@@ -680,8 +817,9 @@ def main():
   pl.add_argument("--eval-reps", type=int, default=1)
   pl.add_argument("--fail-reps", type=int, default=2, help="for --fail-trips' junctions")
   pl.add_argument("--extra-passes", type=int, default=1, help="more training passes after those, for a fast night")
-  pl.add_argument("--eval-trips", default=f"{HOME}/gta5test/e2e/short-ab.txt", help="e2e trips whose junctions are held out")
-  pl.add_argument("--fail-trips", default="SL7,SO05,SO06,SO10,SR1,SR4,SR6", help="those failing in every arm of the A/Bs")
+  pl.add_argument("--eval-trips", default=f"{HOME}/gta5test/e2e/short-ab-v2.txt,{HOME}/gta5test/e2e/short-ab.txt",
+                  help="e2e trips files whose junctions are held out, comma-separated: the first one's are driven for eval")
+  pl.add_argument("--fail-trips", default="SL7,SO05b,SO06,SO10,SR1,SR4b,SR6b", help="those failing in every arm of the A/Bs")
   pl.add_argument("--bad-labels", default=f"{HOME}/git/gta5-train/out/labels_overnight1",
                   help="a labels root: junctions where the expert was rejected for collisions, off route, oncoming are left out")
   pl.add_argument("--map-share", type=float, default=0.15, help="of junctions outside the city considered")
@@ -694,7 +832,16 @@ def main():
   sh.add_argument("plan")
   sh.add_argument("--hours", type=float)
   sh.add_argument("--fig")
+  ab = sub.add_parser("abcheck", help="whether an e2e trips file's trips still take their noted turn; re-pick those that don't")
+  ab.add_argument("--trips", required=True)
+  ab.add_argument("--out", help="the trips file again with the broken trips re-picked (renamed with --suffix)")
+  ab.add_argument("--suffix", default="b")
+  ab.add_argument("--map", default=DEFAULT_MAP)
+  ab.add_argument("--router", help="Valhalla's URL (default http://localhost:8002)")
+  ab.add_argument("--valhalla", help="a valhalla.json to route in process instead")
   a = p.parse_args()
+  if a.command == "abcheck":
+    return cmd_abcheck(a)
   if a.command == "plan":
     plan = make_plan(a)
     Path(a.out).write_text(json.dumps(plan, indent=1))
