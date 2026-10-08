@@ -63,6 +63,10 @@ NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 # guidance only); "on" nav drives regardless, as test runs need; "off" guidance only
 NOO = os.getenv("GTA5_NOO", "param")
 NOO_CHECK = 0.5  # s between reads of the param
+# how nav's speed cap reaches openpilot: "plan" (the default) publishes it as navSpeed for openpilot's longitudinal
+# planner, below the driver's set speed, which stays the car's; "can" lowers the simulated car's set speed to it instead
+NAV_SPEED = os.getenv("GTA5_NAV_SPEED", "plan")
+NAV_SPEED_EVERY = 0.05  # s
 # routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
 # pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
 # lane for the car is wrong (replays ask for needless lane changes) until the lane comes from elsewhere.
@@ -191,6 +195,9 @@ class GTA5World(World):
     self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
     self.cap = 0.0
+    self.cap_reason = ""
+    self.nav_speed_pm = messaging.PubMaster(["navSpeed"]) if NAV_SPEED != "can" else None
+    self.next_nav_speed = 0.0
     self.gps_route: list = []
     self.noo, self.noo_t = NOO != "off", 0.0
     self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
@@ -370,7 +377,7 @@ class GTA5World(World):
       self._send(msg)
     if self.expert.update(state, self.route, self.simulator_state.is_engaged):
       # the game's AI drives (gta5_expert.py): openpilot stays disengaged, and nav and pull-away wait
-      simulator_state.cruise_cap = self.cap = 0.0
+      self._set_cap(simulator_state, 0.0, "")
       self._set_blinkers(simulator_state)
       self._update_buttons(state)
       self._update_map(state, bearing, v)
@@ -381,7 +388,7 @@ class GTA5World(World):
     self.driver.act(out)
     for d in out.desires:
       self._set_nav_desire(d)
-    simulator_state.cruise_cap = self.cap = out.cap
+    self._set_cap(simulator_state, out.cap, out.cap_reason)
     self._set_blinkers(simulator_state)
     if out.arrived:
       self.destination.arrived()
@@ -389,6 +396,20 @@ class GTA5World(World):
     self._update_buttons(state)
     self._update_map(state, bearing, v)
     simulator_state.valid = True
+
+  def _set_cap(self, simulator_state: SimulatorState, cap: float, reason: str):
+    """nav's speed cap (m/s, 0 for none) to openpilot: as navSpeed for its planner, or as the car's set speed (NAV_SPEED)."""
+    simulator_state.cruise_cap = self.cap = cap
+    simulator_state.cap_set_speed = self.nav_speed_pm is None
+    now = time.monotonic()
+    if self.nav_speed_pm is None or (now < self.next_nav_speed and reason == self.cap_reason):
+      self.cap_reason = reason
+      return
+    self.cap_reason, self.next_nav_speed = reason, now + NAV_SPEED_EVERY
+    msg = messaging.new_message("navSpeed", valid=True)
+    msg.navSpeed.speedCap = cap
+    msg.navSpeed.reason = reason or "none"
+    self.nav_speed_pm.send("navSpeed", msg)
 
   def _load_paths(self, path: str):
     try:

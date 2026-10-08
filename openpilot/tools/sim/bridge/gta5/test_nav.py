@@ -40,6 +40,7 @@ class Drive:
     out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
     self.driver.act(out)
     self.desires += out.desires
+    self.reason = out.cap_reason
     if out.arrived:
       self._send({"type": "waypoint", "off": True})
     return out.cap, out.arrived
@@ -669,3 +670,28 @@ def test_guidance_only_drives_nothing():
   for _ in range(20):  # NavDesire is held a moment past a lane change, as openpilot reads it every 0.2 s
     d.step(route, y)
   assert d.nav.desire == "" and d.nav.changing is None and d.nav.signaled is None
+
+
+def test_cap_reasons():
+  # what sets the cap, for navSpeed and the UI: the turn ahead (by side), the arrival, a bend, a lower limit ahead
+  route = route_to_turn(150.0, "left")
+  d = Drive((0, 2), v=12.0)
+  y, reasons = 0.0, set()
+  while y < 140.0:
+    cap = d.step(route, y)[0]
+    if 0.0 < cap < d.v:
+      reasons.add(d.reason)
+    y += d.v * 0.05
+  assert "turnLeft" in reasons and reasons <= {"turnLeft", "bend"}  # the turn itself is a bend too, at the end
+  d = Drive((0, 1), v=10.0)
+  straight = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
+  assert d.step(straight, 0.0, {"routeEnd": 40.0})[0] < 10.0 and d.reason == "arrival"
+  d = Drive((0, 1), v=15.0)
+  d.drives = False
+  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": [], "limits": [[0.0, 20.0], [40.0, 5.0]]},
+                  True, None, {})[0] < 15.0 and d.reason == "speedLimit"
+  arc = [(20.0 - 20.0 * np.cos(a), 150.0 + 20.0 * np.sin(a)) for a in np.radians(np.arange(5.0, 91.0, 5.0))]
+  bend = np.array([(0.0, y) for y in np.arange(0.0, 150.0, 5.0)] + arc + [(20.0 + x, 170.0) for x in (20.0, 40.0, 80.0)])
+  assert d.step(bend, 100.0)[0] < 15.0 and d.reason == "bend"  # guiding only: no turn there at a junction
+  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": []}, False, None, {}) == (0.0, False)
+  assert d.reason == ""

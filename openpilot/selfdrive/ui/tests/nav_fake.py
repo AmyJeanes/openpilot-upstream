@@ -7,7 +7,8 @@ speed) and a still camera frame. The UI run separately on the same OPENPILOT_PRE
   OPENPILOT_PREFIX=uiport BIG=1 SCALE=1 python selfdrive/ui/ui.py
 
 Scenes: none (no route), cruise (the turn far ahead), approach (near it, with the lanes), turn, arrive, drive (the car
-drives the route from the start, through the turn to the destination, at a city speed)."""
+drives the route from the start, through the turn to the destination, at a city speed). --speed CAP:REASON also sends
+navigation's speed cap (navSpeed, m/s), e.g. --speed 6:turnRight."""
 import argparse
 import math
 import os
@@ -182,8 +183,9 @@ def nv12(path: str, w: int, h: int) -> bytes:
 class FakeNav:
   """navInstruction at 10 Hz and navRoute every 2 s, for a scene."""
   def __init__(self, scene: str = "cruise", road: str = "short", drive_from: float = 0.0):
-    self.pm = messaging.PubMaster(["navInstruction", "navRoute"])
+    self.pm = messaging.PubMaster(["navInstruction", "navRoute", "navSpeed"])
     self.scene, self.road = scene, road
+    self.speed: tuple[float, str] | None = None  # navSpeed's cap (m/s) and reason, sent while set
     self.drive_s = drive_from
     self._route_t = -1e9
     self.after, self.variant = AFTER, 0  # the destination, m on from the turn; reroutes so far
@@ -215,6 +217,10 @@ class FakeNav:
     if s is None:
       self._route_t = -1e9
     self.pm.send("navInstruction", instruction_message(s, self.road, after=self.after))
+    if self.speed is not None:
+      msg = messaging.new_message("navSpeed", valid=True)
+      msg.navSpeed.speedCap, msg.navSpeed.reason = self.speed
+      self.pm.send("navSpeed", msg)
 
 
 def main():
@@ -223,9 +229,13 @@ def main():
   ap.add_argument("--road", default="short", choices=list(ROADS))
   ap.add_argument("--onroad", action="store_true", help="also the openpilot state the onroad view needs")
   ap.add_argument("--camera", help="a still frame (png) as the road camera, with --onroad")
+  ap.add_argument("--speed", help="navigation's speed cap, CAP:REASON (m/s and a NavSpeed.Reason)")
   args = ap.parse_args()
   os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
   nav = FakeNav(args.scene, args.road)
+  if args.speed:
+    cap, reason = args.speed.split(":")
+    nav.speed = (float(cap), reason)
   op = FakeOnroad() if args.onroad else None
   cam = FakeCamera(args.camera) if args.onroad and args.camera else None
   last = time.monotonic()
