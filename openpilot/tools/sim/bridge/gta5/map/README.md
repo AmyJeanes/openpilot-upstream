@@ -144,6 +144,15 @@ shown or a level changes.
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
     rp_all/polylines.jsonl`.
+  - Where a link's lanes stay the class layout (the survey didn't correct them, turn bays folded in included), its
+    lines still come from the game files' (`paint_survey.lane_lines`): each line between two lanes one way is the
+    white line painted nearest it, less than halfway across the lanes beside it, in half the sections, and a solid one
+    (or solid on one side) is `change:lanes` (the line beside a left-turn bay, approaches' solid lines). Where the files
+    show no line between two lanes the line stays dashed: they miss thin dashed lane lines the game paints (Vinewood
+    Blvd's, seen from above in the game), so no direction is left unmarked from them. Residential roads, service roads
+    and tracks of two lanes or more the files show unpainted in 90% of 3 sections or more (the asphalt's edges read,
+    so not a gap in the files) are `lane_markings=no` (the Vinewood Hills' streets, car parks); major and unclassified
+    roads keep their lines there, being more likely gaps in the files (the Great Ocean Hwy, some freeways, Blaine roads).
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for

@@ -1240,6 +1240,30 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
   return tags
 
 
+# minor roads the game may leave unpainted (not unclassified: Blaine's country roads, where the files may miss paint)
+UNPAINTED_CLASSES = {'residential', 'service', 'track'}
+
+
+def painted_lines(tags, cls, two_way, samples, why):
+  """A way's tags with the game files' lane lines where its lanes are the class layout's (paint_survey.lane_lines,
+  .unpainted): `lane_markings=no` (and no divider) on a minor road they show unpainted, else `change:lanes`
+  (`:forward` / `:backward`) where a painted line between its lanes is solid (or solid on one side). Major roads keep
+  their lines where the files show none: those are more likely gaps in the files (the Great Ocean Hwy, some freeways)
+  than unpainted."""
+  road = WayLanes.from_tags(tags)
+  if len(road.lanes) < 2:  # no lines to draw
+    return tags
+  if cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples):
+    why['unpainted'] += 1
+    return {**{k: v for k, v in tags.items() if not k.startswith('divider')}, 'lane_markings': 'no'}
+  out = dict(tags)
+  if not any(k.startswith('change:lanes') for k in tags):
+    for key, change in paint_survey.lane_lines(samples, [(s.left, s.right, s.heading) for s in road.section()]).items():
+      out[f'change:lanes:{key}' if two_way else 'change:lanes'] = '|'.join(change)
+      why['lines not to cross'] += 1
+  return out
+
+
 def arrows(n, kinds, fewer_left=False):
   """The turn arrows of n lanes into a junction whose ways out turn `kinds` ways (left, through, right): every lane
   the same way at a forced turn; else the outer lanes also turn, from the outermost as GTA's cars do, and the others
@@ -1562,8 +1586,19 @@ def main():
 
   yellow = paint_survey.yellow_lines(args.survey_lines) if args.survey_lines else None
   tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow) if survey else []
+  link_ends = {r[0]: (r[1], r[2]) for r in info}  # GTA's links, before any are split
   info, parent, widen, piece_bays, applied = split_tapers(nodes, info, tapers, set(left_bays) | opened, arrows_at, bay_to,
                                                                recounted)
+
+  def link_samples(wid, a, b):  # the survey's samples on a way, a piece of a split link only those along it
+    a0, b0 = link_ends[parent.get(wid, wid)]
+    samples = paint_survey.along(survey, a0, b0) or []
+    if (a, b) == (a0, b0):
+      return samples
+    pa, pb = nodes[a], nodes[b]
+    dx, dy = pb['x'] - pa['x'], pb['y'] - pa['y']
+    return [d for d in samples if 'x' in d and
+            0.0 <= ((d['x'] - pa['x']) * dx + (d['y'] - pa['y']) * dy) / max(dx * dx + dy * dy, 1e-9) <= 1.0]
   if parent:
     for pid, wid in parent.items():  # a piece is its way's but for its lanes
       for d in (layer_of, destination):
@@ -1592,6 +1627,7 @@ def main():
   for wid in widen:
     painted.pop(wid, None)
   print(f"{len(tapers)} turn lanes opening where the game files paint it, {applied} widening from there: {len(parent)} links split")
+  lines_why = Counter()
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:
     n = nodes[k]
@@ -1643,6 +1679,9 @@ def main():
         tags['divider'] = left
       elif left != right:
         tags.update({k: v for k, v in (('divider:forward', right), ('divider:backward', left)) if v})
+    if survey and 'lane_markings' not in tags and tags.get('source:width') != 'survey' and \
+        not any(k.endswith((':start', ':end')) for k in tags) and (samples := link_samples(wid, a, b)):
+      tags = painted_lines(tags, cls, bool(back), samples, lines_why)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:
@@ -1658,6 +1697,8 @@ def main():
     if lf[2] & 1:
       tags['gta:no_nav'] = 'yes'
     w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)], tags=tags))
+  if survey:
+    print("lane lines from the game files' paint: " + ', '.join(f'{n} {k}' for k, n in lines_why.most_common()))
   for i, (kind, wi, via, wo) in enumerate(restrictions):
     via = [(t, node_id(ref) if t == 'n' else ref, 'via') for t, ref in via]
     w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': kind},
