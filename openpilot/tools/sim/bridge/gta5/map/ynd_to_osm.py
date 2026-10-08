@@ -129,6 +129,107 @@ def crossovers(nodes, es):
   return out
 
 
+SPLIT_NODE_AREA = 4097  # the nodes added where a divided road's carriageways are parted (split_shared) are (this, n)
+SHARED_BEND = 75.0  # deg: a carriageway bending less than this at a node goes on through it
+SHARED_AWAY = 2.0  # m: a node this far left of both its carriageways' own lines is in the median between them
+
+
+def split_shared(nodes, info):
+  """Parts the nodes where GTA runs both carriageways of a divided road through one node in the median between them, as
+  where a side road meets it at a gap in the median: each carriageway gets a node of its own on its line between its
+  nodes either side, and a two-way link across the median joins them, as GTA lays most such junctions itself (where
+  they're no more than JUNCTION_SPAN apart, as far as GTA's turn flags are read across a junction). The node's other
+  links go to the carriageway on their side; those whose far end is in the median too, as a turn lane, keep the node,
+  and the link across runs through it. A node two divided roads cross at is left alone, and so is one
+  with lanes going on through it between the carriageways: those are one road's lanes, laid as links side by side.
+  `info` rows are [way id, a, b, fwd, back, class, limit, name, link flags] with a -> b one way's direction: changed in
+  place, the links across added; returns how many nodes were parted."""
+  ins, outs, touching = defaultdict(list), defaultdict(list), defaultdict(list)
+  for r, (_, a, b, _, back, *_) in enumerate(info):
+    touching[a].append(r)
+    touching[b].append(r)
+    if not back:
+      outs[a].append(r)
+      ins[b].append(r)
+
+  def xy(k):
+    return nodes[k]['x'], nodes[k]['y']
+
+  def unit(p, q):
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    d = math.hypot(dx, dy) or 1.0
+    return dx / d, dy / d
+
+  def left_of(p, q, c):  # m left of the line p -> q
+    ux, uy = unit(p, q)
+    return ux * (c[1] - p[1]) - uy * (c[0] - p[0])
+
+  def angle(u, v):
+    return math.degrees(math.acos(max(-1.0, min(1.0, u[0] * v[0] + u[1] * v[1]))))
+
+  next_id, made, parted = max(r[0] for r in info) + 1, 0, 0
+  for n in sorted(ins):
+    if n not in outs or nodes[n]['f'][2] & FREEWAY or nodes[n]['f'][1] >> 3 == PED_CROSSING:
+      continue
+    pn = xy(n)
+    pairs = [(ri, ro, info[ri][1], info[ro][2]) for ri in ins[n] for ro in outs[n]  # carriageways on through n
+             if info[ri][1] != info[ro][2] and angle(unit(xy(info[ri][1]), pn), unit(pn, xy(info[ro][2]))) < SHARED_BEND]
+    found = []
+    for k, p in enumerate(pairs):
+      for q in pairs[k + 1:]:
+        if len({*p, *q}) < 8 or angle(unit(xy(p[2]), xy(p[3])), unit(xy(q[3]), xy(q[2]))) > 35.0:
+          continue
+        away = min(left_of(xy(p[2]), xy(p[3]), pn), left_of(xy(q[2]), xy(q[3]), pn))
+        if away >= SHARED_AWAY:
+          found.append((away, p, q))
+    if not found:
+      continue
+    _, p, q = max(found)
+    if any(not {*f[1][:2], *f[2][:2]} & {*p[:2], *q[:2]} for f in found):
+      continue  # two divided roads crossing
+    if len(touching[n]) == 4:
+      continue  # a gap in the median for U-turns only: no junction to lay out
+    at = []  # where n is along each carriageway's line
+    for _, _, i, o in (p, q):
+      dx, dy = nodes[o]['x'] - nodes[i]['x'], nodes[o]['y'] - nodes[i]['y']
+      at.append(((pn[0] - nodes[i]['x']) * dx + (pn[1] - nodes[i]['y']) * dy) / max(dx * dx + dy * dy, 1e-9))
+    if not all(0.1 < t < 0.9 for t in at):
+      continue
+    placed = [(nodes[i]['x'] + (nodes[o]['x'] - nodes[i]['x']) * t, nodes[i]['y'] + (nodes[o]['y'] - nodes[i]['y']) * t)
+              for (_, _, i, o), t in zip((p, q), at, strict=True)]
+    if math.dist(*placed) > JUNCTION_SPAN:
+      continue  # GTA's turn flags are read across a junction no further than this
+    middle = [r for r in touching[n] if r not in (p[0], p[1], q[0], q[1]) and  # the links between the carriageways
+              all(left_of(xy(i), xy(o), xy(info[r][2] if info[r][1] == n else info[r][1])) >= 0.0 for _, _, i, o in (p, q))]
+    if any(info[ri][2] == n and info[ro][1] == n and info[ri][1] != info[ro][2] and
+           angle(unit(xy(info[ri][1]), pn), unit(pn, xy(info[ro][2]))) < SHARED_BEND for ri in middle for ro in middle):
+      continue  # lanes going on through between them: one road's, not a median
+    ends = []  # (node, the carriageway's far nodes)
+    for (ri, ro, i, o), t in zip((p, q), at, strict=True):
+      a, b = nodes[i], nodes[o]
+      made += 1
+      k = (SPLIT_NODE_AREA, made)
+      nodes[k] = {**nodes[n], 'x': a['x'] + (b['x'] - a['x']) * t, 'y': a['y'] + (b['y'] - a['y']) * t,
+                  'z': a['z'] + (b['z'] - a['z']) * t}
+      info[ri][2], info[ro][1] = k, k
+      ends.append((k, i, o))
+    for r in touching[n]:
+      if r in (p[0], p[1], q[0], q[1]) or r in middle:
+        continue
+      row = info[r]
+      beyond = [k for k, i, o in ends if left_of(xy(i), xy(o), xy(row[2] if row[1] == n else row[1])) < 0.0]
+      row[1 if row[1] == n else 2] = beyond[0]  # past that carriageway, on its side
+    lf = list(info[p[0]][8])
+    lf[1] &= ~0xF0  # no offset between its directions
+    lf[2] = (lf[2] & ~0xFC) | (1 << 5) | (1 << 2)  # a lane each way
+    cls = info[p[0]][5]  # its road's class: as a minor road, routers leave it out of long routes' turns across
+    for a, b in [(ends[0][0], n), (n, ends[1][0])] if middle else [(ends[0][0], ends[1][0])]:
+      info.append([next_id, a, b, 1, 1, cls, info[p[0]][6], None, lf])
+      next_id += 1
+    parted += 1
+  return parted
+
+
 LANE_CHANGE_FLOW = 30.0  # deg: one-way links within this of their mean heading all run the same way
 LANE_CHANGE_AXIS = 50.0  # deg: a link within this of that heading crosses between them, as a lane change
 
@@ -1634,6 +1735,8 @@ def main():
     cls = cls or highway(nodes, a, b, fwd, back)
     st = nodes[a]['st'] if nodes[a]['st'] == nodes[b]['st'] else 0
     info.append([i + 1, a, b, fwd, back, cls, speed_limit(nodes, a, b, cls, fwd, back), streets.get(st), lf])
+  parted = split_shared(nodes, info)
+  print(f"{parted} nodes with both carriageways of a divided road through them parted, a link across the median between")
   out, into = defaultdict(list), defaultdict(list)
   for _, a, b, _, back, *_ in info:
     out[a].append(b)

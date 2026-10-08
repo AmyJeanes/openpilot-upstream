@@ -9,9 +9,12 @@ map as on our GTA V one.
 - Junction nodes joined by a road shorter than CLUSTER_LINK (and their widest road's width), or whose trimmed ends
   would overlap along a road shorter than MERGE_LINK, make one junction, as where a divided road crosses another
   (osm2streets merges such short roads into the junction); the roads between them are inside it. Junctions further
-  apart are trimmed back less, to fit.
+  apart are trimmed back less, to fit. So do the nodes on a divided road's two carriageways joined by a two-way road
+  across its median shorter than MEDIAN_LINK, as where a side road meets it at a gap in the median.
 - An arm is the road out of a junction, followed through nodes where only two roads meet. Arms that run side by side
   and overlap, as a turn lane mapped as its own way beside its road, are one arm: its kerbs are the outer ones.
+- A divided road's two carriageways out of a junction side by side, one in and one out, are trimmed back as far as each
+  other, so the area ends square across both at its median's nose.
 - The area fans out from the junction's centre to its outline, which can fold back on itself round a junction of many
   nodes (fill the triangles, in_fan). Its kerbs go round the outside of the roads inside it.
 - A stop line is at its node (`highway=traffic_signals` / `stop` / `give_way`), across the lanes towards the junction
@@ -39,6 +42,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, FORWARD, MEDIAN, OsmLanes, offset_line, oneway_of
 
 CLUSTER_LINK = 15.0  # m: junction nodes joined by a road this short (and shorter than their widest road is wide) are one junction
+MEDIAN_LINK = 25.0  # m: a two-way road this short across a divided road's median joins the junctions on its carriageways
 ARM_LENGTH = 60.0  # m of each road out of a junction that its geometry is worked out over
 BACK = 30.0  # m each kerb is carried on straight back into the junction, to find where it meets the next
 MAX_TRIM = 40.0  # m: a road is trimmed back no further than this from its junction node
@@ -48,6 +52,7 @@ MAX_TANGENT = 9.0  # m from where two kerbs would meet to where the rounded corn
 MAX_PUSH = 6.0  # m a kerb is moved out at most to go round the roads inside a junction
 BUNDLE_ANGLE = 12.0  # deg: arms heading within this of each other ...
 BUNDLE_GAP = 0.5  # m: ... and less than this apart (or overlapping) are one road
+MEDIAN_REACH = 25.0  # m apart at most: a divided road's carriageways out of a junction, its median's nose squared across
 STOP_REACH = 40.0  # m beyond a junction's mouth its stop lines can be
 STOP_SETBACK = 0.5  # m: a stop line at the mouth is this far out from it
 MERGE_GAP = 2.0  # m: junctions whose trimmed ends come closer than this along the road between them ...
@@ -434,6 +439,39 @@ class Junctions:
         return ways, nodes, length
       cur, (w, nxt, fwd) = nxt, on[0]
 
+  def carriageways(self, node: int) -> list[np.ndarray]:
+    """The directions of the carriageways going on through a node: a one-way way (not a freeway's) into it and one out
+    of it, running within STRAIGHT of each other."""
+    ins, outs = [], []
+    for w, nxt, fwd in self.steps.get(node, ()):
+      tags = self.ways[w][0]
+      way = oneway_of(tags)
+      if not way or self.freeway(tags):
+        continue
+      u = _unit(self.osm.node_xy(nxt) - self.osm.node_xy(node))
+      (outs if (way == 1) == fwd else ins).append(u)
+    return [(o - i) / 2 for i in ins for o in outs if float(-i @ o) > math.cos(math.radians(STRAIGHT))]
+
+  def across_median(self, ways: list[tuple[int, bool]], nodes: list[int]) -> bool:
+    """Whether a road (its ways from nodes[0] to nodes[-1]) runs two-way across a divided road's median, between its
+    two carriageways: one going on through either end, running opposite ways, the road crossing them."""
+    if any(oneway_of(self.ways[w][0]) for w, _ in ways) or len(nodes) < 2:
+      return False
+    across = _unit(self.osm.node_xy(nodes[-1]) - self.osm.node_xy(nodes[0]))
+    return any(float(_unit(u) @ _unit(v)) < -math.cos(math.radians(STRAIGHT)) and
+               abs(float(_unit(u) @ across)) < math.cos(math.radians(45.0))
+               for u in self.carriageways(nodes[0]) for v in self.carriageways(nodes[-1]))
+
+  def straight_on(self, ways: list[tuple[int, bool]], chain: list[int], other: list[int]) -> bool:
+    """Whether a two-way road (its ways along chain) is the road `other` (a chain of nodes) or runs straight on from it."""
+    if chain == other or chain == other[::-1]:
+      return True
+    if any(oneway_of(self.ways[w][0]) for w, _ in ways) or not {chain[0], chain[-1]} & {other[0], other[-1]}:
+      return False
+    u = _unit(self.osm.node_xy(chain[-1]) - self.osm.node_xy(chain[0]))
+    v = _unit(self.osm.node_xy(other[-1]) - self.osm.node_xy(other[0]))
+    return abs(float(u @ v)) > math.cos(math.radians(STRAIGHT))
+
   def member(self, node: int, step) -> Member | None:
     ways, nodes, _ = self.walk(node, step, ARM_LENGTH)
     pts = self.osm.xy[self.osm.data.index(nodes)]
@@ -463,8 +501,9 @@ class Junctions:
 
     for n in self.junction_nodes:
       for step in self.steps[n]:
-        _, nodes, length = self.walk(n, step, CLUSTER_LINK)
-        if nodes[-1] in self.junction_nodes and nodes[-1] != n and length < min(CLUSTER_LINK, max(self.widest(n), self.widest(nodes[-1]))):
+        ways, nodes, length = self.walk(n, step, MEDIAN_LINK)
+        if nodes[-1] in self.junction_nodes and nodes[-1] != n and \
+            (length < min(CLUSTER_LINK, max(self.widest(n), self.widest(nodes[-1]))) or self.across_median(ways, nodes)):
           parent[find(n)] = find(nodes[-1])
     # junctions whose trimmed ends overlap are one where the road between them is short; else both are trimmed less
     caps: dict[tuple[int, int], float] = {}  # (node, way) -> how far at most the road out of the node is trimmed
@@ -548,18 +587,24 @@ class Junctions:
     for arm in arms:
       arm.cap = min([MAX_TRIM] + [caps[k] for m in arm.members if (k := (m.start, m.ways[0][0])) in (caps or {})] +
                     [along - STOP_SETBACK for m in arm.members for along in self._surveyed_stops(m)])
-    polygon, kerbs = self.outline(arms, self.shape(arms))
+    corners = self.shape(arms)
+    self.square(arms)
+    polygon, kerbs = self.outline(arms, corners)
     for arm in arms:
       p = arm.line.at(arm.trim)
       for m in arm.members:
         m.trim = max(m.line.project(p), 0.0)
     # a road between the junction's own nodes is inside it, unless it runs mostly outside its area, as a slip road
-    # round a corner: that one is drawn as a road, its kerbs cut where it's inside
+    # round a corner: that one is drawn as a road, its kerbs cut where it's inside. A road across a divided road's
+    # median is inside it whatever its area, with the road it runs straight on into across the median
     inside = set()
+    across = [chain for ways, chain in links if self.across_median(ways, chain)]  # and through a node in the median
+    across += [c1 + c2[1:] for w1, c1 in links for w2, c2 in links if c1[-1] == c2[0] and c1[0] != c2[-1] and
+               self.across_median(w1 + w2, c1 + c2[1:])]
     for ways, chain in links:
       pts = self.osm.xy[self.osm.data.index(chain)]
       mids = np.vstack([pts[:-1] + (pts[1:] - pts[:-1]) * t for t in (0.25, 0.5, 0.75)])
-      if in_fan(mids, centre, polygon).mean() >= 0.5:
+      if in_fan(mids, centre, polygon).mean() >= 0.5 or any(self.straight_on(ways, chain, c) for c in across):
         inside |= {w for w, _ in ways}
     if inside:  # the kerbs go round the roads inside where they reach out past the corners
       samples = []
@@ -619,6 +664,33 @@ class Junctions:
       arms.append(Arm(g, widest.line, left, right, widest.heading, widest.edges[1] - widest.edges[0]))
     return arms
 
+  def flows(self, arm: Arm) -> set[bool]:
+    """Which ways an arm's one-way roads run: out of the junction (True), into it (False); none if any is two-way."""
+    out = set()
+    for m in arm.members:
+      w, along = m.ways[0]
+      way = oneway_of(self.ways[w][0])
+      if not way:
+        return set()
+      out.add((way == 1) == along)
+    return out
+
+  def square(self, arms: list[Arm]):
+    """Trims each of a divided road's carriageways out of the junction, one in and one out side by side (with any turn
+    lanes beside them), back at least as far as the other: one trimmed short would leave the junction's area reaching
+    out along the other only."""
+    flows = [self.flows(arm) for arm in arms]
+    for i, a in enumerate(arms):
+      for j, b in enumerate(arms):
+        if i == j or not flows[i] or not flows[j] or len(flows[i] | flows[j]) < 2:
+          continue
+        if math.degrees(abs((b.heading - a.heading + math.pi) % (2 * math.pi) - math.pi)) > BUNDLE_ANGLE:
+          continue
+        p = b.line.at(b.trim)
+        s = a.line.project(p)
+        if np.hypot(*(a.line.at(s) - p)) <= MEDIAN_REACH:
+          a.trim = min(max(a.trim, s), a.cap)
+
   @staticmethod
   def side_by_side(a: Member, b: Member) -> bool:
     turn = abs((b.heading - a.heading + math.pi) % (2 * math.pi) - math.pi)
@@ -640,7 +712,8 @@ class Junctions:
     for i in range(n):
       a, b = arms[i], arms[(i + 1) % n]
       gap = (b.heading - a.heading) % (2 * math.pi)
-      hit = crossing(a.left, b.right, MAX_TRIM, MAX_TRIM) if 1e-3 < gap < math.pi - 1e-3 else None
+      # arms heading within BUNDLE_ANGLE of each other run side by side: their kerbs, carried back, cross only deep inside
+      hit = crossing(a.left, b.right, MAX_TRIM, MAX_TRIM) if math.radians(BUNDLE_ANGLE) < gap < math.pi - 1e-3 else None
       if hit is None:
         corners.append(None)
         continue
