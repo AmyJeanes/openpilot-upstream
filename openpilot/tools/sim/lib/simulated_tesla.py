@@ -87,7 +87,8 @@ class SimulatedTesla:
 
     party, ap_party = CANBUS.party, CANBUS.autopilot_party
     speed_kph = simulator_state.speed * 3.6
-    set_speed = (min(self.set_speed, simulator_state.cruise_cap) if simulator_state.cruise_cap > 0 else self.set_speed) * (3.6 if self.metric else CV.MS_TO_MPH)
+    cap = simulator_state.cruise_cap if simulator_state.cap_set_speed else 0.0
+    set_speed = (min(self.set_speed, cap) if cap > 0 else self.set_speed) * (3.6 if self.metric else CV.MS_TO_MPH)
     # the car's torque sensor, from the bridge's Honda-scaled driver torque (left positive; a lane change nudge is 2000)
     torque_nm = max(-3.0, min(3.0, simulator_state.user_torque / 1000))
 
