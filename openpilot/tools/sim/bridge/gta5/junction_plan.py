@@ -53,7 +53,10 @@ UTURN_DEG = 30.0  # a way out within this of the way back
 PASS_NEAR = 10.0  # m: a route runs along a link this near, its way (PASS_DEG)
 PASS_DEG = 50.0
 NOT_BEFORE = {10, 11, 14, 15, 17, 18, 19, 20, 21, 26, 27}  # Valhalla turns, ramps, exits, roundabouts: none on the way in
-EXIT_KEEP = 15.0  # m: ways out whose routes pass the same point this near are one
+EXIT_SAME, SAME_OVER = 15.0, 100.0  # m: ways out whose routes stay this near over this far past the way in are one
+SPECIAL = {17, 18, 19, 20, 21, 22, 23, 24, 26, 27}  # Valhalla ramps, exits, forks, roundabouts: a way out's kind as they are
+STRAIGHT_DEG = 20.0  # deg of heading change through the junction, under which a way out is straight on
+TURN_BEFORE = 15.0  # m before the way in: a ramp or fork maneuver there is the junction's
 TURN_NEAR = 40.0  # m along from the junction: a maneuver there is the junction's
 NO_TURN_BEFORE = 40.0  # m before the junction: no NOT_BEFORE maneuver on the way in
 BEND_FROM = 100.0  # m before the junction: the road's bend from there in (SO05, SR1: 30-50 deg)
@@ -163,9 +166,6 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
     return {"ok": False, "why": "U-turn"}
   if any(m["type"] in NOT_BEFORE and m["s"] < s_in - NO_TURN_BEFORE for m in mans):
     return {"ok": False, "why": "a turn on the way in"}
-  at = [m for m in mans if m["real"] and s_in - NO_TURN_BEFORE <= m["s"] <= s_out + TURN_NEAR]
-  kind = maneuver_class(at[0]) if at else "straight"
-
   def point(s):
     return np.array([np.interp(s, along, pts[:, 0]), np.interp(s, along, pts[:, 1])])
 
@@ -174,13 +174,22 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
     return math.degrees(math.atan2(d[0], d[1])) % 360  # compass
   change = wrap(heading(s_out + 10, s_out + 30) - heading(s_in - 20, s_in - 5))
   bend = wrap(heading(s_in - 20, s_in - 5) - heading(max(s_in - BEND_FROM, 0.0), max(s_in - BEND_FROM + 20, 5.0)))
-  geom =[[round(float(v), 1) for v in point(s)] for s in np.append(np.arange(0.0, along[-1], GEOM_STEP), along[-1])]
+  # the turn as driven through the junction: Valhalla's maneuver nearby can be a bend in the road before it
+  special = [m for m in mans if m["type"] in SPECIAL and s_in - TURN_BEFORE <= m["s"] <= s_out + TURN_NEAR]
+  if special:
+    kind = maneuver_class(special[0])
+  elif abs(change) < STRAIGHT_DEG:
+    kind = "straight"
+  else:
+    kind = maneuver_class({"type": 10 if change > 0 else 15, "angle": change})
+  geom = [[round(float(v), 1) for v in point(s)] for s in np.append(np.arange(0.0, along[-1], GEOM_STEP), along[-1])]
   first_real = min((m["s"] for m in mans if m["real"]), default=None)
-  return {"ok": True, "length": round(float(along[-1])), "first_real": first_real, "time": round(float(sum(m.get("time", 0) for m in r.maneuvers))),
-          "s_in": round(s_in, 1), "s_out": round(s_out, 1), "kind": kind,
-          "angle": round(at[0]["angle"]) if at and at[0]["angle"] is not None else None, "change": round(change),
-          "bend": round(bend), "maneuvers": [e2e.TYPES.get(m["type"], str(m["type"])) for m in mans],
-          "exit_point": [round(float(v), 1) for v in point(s_out + 30)], "geom": geom}
+  way_out = [[round(float(v), 1) for v in point(s)] for s in s_in + np.arange(0.0, SAME_OVER + 1.0, 10.0)]
+  return {"ok": True, "length": round(float(along[-1])), "first_real": first_real,
+          "time": round(float(sum(m.get("time", 0) for m in r.maneuvers))), "s_in": round(s_in, 1), "s_out": round(s_out, 1),
+          "kind": kind, "angle": round(change), "change": round(change), "bend": round(bend),
+          "maneuvers": [e2e.TYPES.get(m["type"], str(m["type"])) for m in mans],
+          "exit_point": [round(float(v), 1) for v in point(s_out + 30)], "way_out": way_out, "geom": geom}
 
 
 # *** junctions on GTA's links ***
@@ -417,6 +426,12 @@ def tour(items: list[dict], start=(0.0, 0.0)) -> list[dict]:
   return out
 
 
+def same_way(a: list, b: list) -> bool:
+  """Whether two ways out (their routes' points every 10 m from the way in) stay within EXIT_SAME m of each other."""
+  n = min(len(a), len(b))
+  return bool(n) and float(np.hypot(*(np.asarray(a[:n]) - np.asarray(b[:n])).T).max()) < EXIT_SAME
+
+
 def verify(router, a: dict) -> dict | None:
   """The approach with its routed ways out (kind, length, geometry), or None with fewer than two."""
   kept = []
@@ -425,10 +440,11 @@ def verify(router, a: dict) -> dict | None:
     e["check"] = r.get("why", "ok")
     if not r["ok"]:
       continue
-    if any(math.hypot(r["exit_point"][0] - k["exit_point"][0], r["exit_point"][1] - k["exit_point"][1]) < EXIT_KEEP for k in kept):
+    if any(same_way(r["way_out"], k["way_out"]) for k in kept):
+      e["check"] = "the same way as another"
       continue
     kept.append({**e, **{k: r[k] for k in ("length", "time", "s_in", "s_out", "kind", "angle", "change", "bend", "maneuvers",
-                                             "exit_point", "geom")}})
+                                             "exit_point", "way_out", "geom")}})
   if len(kept) < 2:
     return None
   # the road's bend on the way in from its routes (GTA's links bend more over the 250 m from the start)
