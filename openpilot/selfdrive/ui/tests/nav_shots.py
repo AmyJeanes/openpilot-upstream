@@ -71,7 +71,8 @@ def scenarios(c):
                          (2.5, c.shot("full_alert_split")), (2.55, c.check("the alert covers the screen", lambda: c.covered()))],
     # navigation's speed cap under the MAX box (35 mph), for each reason; released, it fades; in the split, and metric
     "speed": [(0.0, c.scene("approach")), (0.0, c.speed(5.4, "turnRight")), (1.5, c.shot("speed_turn")),
-              (1.6, c.speed(11.2, "bend")), (2.5, c.shot("speed_bend")), (2.6, c.speed(13.0, "speedLimit")), (3.5, c.shot("speed_limit")),
+              (1.6, c.speed(11.2, "bendRight")), (2.0, c.shot("speed_bend")), (2.05, c.speed(11.2, "bendLeft")),
+              (2.5, c.shot("speed_bend_left")), (2.6, c.speed(13.0, "speedLimit")), (3.5, c.shot("speed_limit")),
               (3.6, c.speed(9.0, "laneChange")), (4.5, c.shot("speed_lane_change")), (4.6, c.speed(4.5, "bay")),
               (5.5, c.shot("speed_bay")), (5.6, c.scene("arrive")), (5.6, c.speed(3.1, "arrival")), (6.5, c.shot("speed_arrival")),
               (6.6, c.speed(20.0, "bend")), (6.7, c.shot("speed_above_set_fading")), (7.5, c.shot("speed_above_set_hidden")),

@@ -20,11 +20,13 @@ struct NavSpeed @0x81c2f05a394cf4af {
     none @0;
     turnLeft @1;
     turnRight @2;
-    bend @3;
-    speedLimit @4;  # a lower limit ahead
+    bend @3;  # its way unknown (bendLeft, bendRight)
+    speedLimit @4;  # the limit where the car is, or a lower one ahead
     laneChange @5;  # room to change lanes for a turn or fork
     bay @6;  # changing into a turn's bay
     arrival @7;
+    bendLeft @8;
+    bendRight @9;
   }
 }
 

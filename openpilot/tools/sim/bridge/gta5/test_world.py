@@ -131,5 +131,5 @@ def test_nav_speed_cap(monkeypatch):
   assert sent[-1] == ("navSpeed", 0.0, "none") and len(sent) == 3
 
   w.nav_speed_pm = None  # GTA5_NAV_SPEED=can
-  w._set_cap(s, 7.0, "bend")
+  w._set_cap(s, 7.0, "bendLeft")
   assert len(sent) == 3 and s.cruise_cap == 7.0 and s.cap_set_speed

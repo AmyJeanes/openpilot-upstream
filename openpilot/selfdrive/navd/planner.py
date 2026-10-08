@@ -450,14 +450,19 @@ def curve_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> float:
   """The speed now that leaves room to slow for the bends ahead, 0 for none. A bend's curvature is its heading change
   over CURVE_WINDOW m, but no more than over twice or four times the window: GTA's lanes jog sideways through junctions
   and where a freeway splits, turning one way and back, which isn't a bend."""
+  return bend_cap(route, v, tune)[0]
+
+
+def bend_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> tuple[float, str]:
+  """curve_cap, with the reason for it: the way the bend that sets it turns ("bendLeft" or "bendRight")."""
   heads, starts = headings(route)
   if len(heads) < 3:
-    return 0.0
+    return NO_CAP
   h = np.unwrap(np.radians(heads))
   mids = starts + np.diff(np.append(starts, starts[-1] + 5.0)) / 2
   s = np.arange(0.0, min(CURVE_LOOKAHEAD, float(mids[-1])), CURVE_STEP)
   if len(s) == 0:
-    return 0.0
+    return NO_CAP
   w = CURVE_WINDOW / 2
 
   def turned(a, b):
@@ -466,13 +471,16 @@ def curve_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> float:
   # the turns themselves have their own speed
   t = tune or TUNE
   speed = np.maximum(np.sqrt(t.curve_accel / np.maximum(curvature, 1e-4)), t.turn_speed_square)
-  return float(np.min(np.sqrt(speed ** 2 + 2 * t.slow_decel * np.maximum(s - w - v * SLOW_LAG, 0.0))))
+  caps = np.sqrt(speed ** 2 + 2 * t.slow_decel * np.maximum(s - w - v * SLOW_LAG, 0.0))
+  i = int(np.argmin(caps))
+  left = np.interp(s[i] + w, mids, h) > np.interp(s[i] - w, mids, h)  # headings turn counterclockwise to the left
+  return float(caps[i]), "bendLeft" if left else "bendRight"
 
 
 def limit_cap(limits: list, v: float) -> float:
-  """The speed now that leaves room to slow for lower speed limits ahead ([[m ahead, m/s or 0 unknown], ...]), 0 for
-  none; the set speed follows the limit where the car is."""
-  caps = [math.sqrt(limit ** 2 + 2 * LIMIT_DECEL * max(0.0, d - v * SLOW_LAG)) for d, limit in limits if limit > 0 and d > 0]
+  """The speed now: the limit where the car is, leaving room to slow for lower limits ahead ([[m ahead, m/s or 0
+  unknown], ...]); 0 for none. The set speed is the driver's, above or below it."""
+  caps = [math.sqrt(limit ** 2 + 2 * LIMIT_DECEL * max(0.0, d - v * SLOW_LAG)) for d, limit in limits if limit > 0]
   return min(caps) if caps else 0.0
 
 
@@ -783,7 +791,7 @@ class Planner:
           self.repeat_t = now
         self.stopped = False
     self._exit_watch(heading, yaw_rate, now)
-    caps.append((curve_cap(route, v, t), "bend"))
+    caps.append(bend_cap(route, v, t))
     caps.append((limit_cap(inp.limits or [], v), "speedLimit"))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
     self._keep_straight(turn, desire, v, now)
@@ -811,7 +819,7 @@ class Planner:
       if turn is not None:
         along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
         route = np.vstack([route[along < turn.dist], self._point(route, turn.dist)])
-      caps.append((curve_cap(route, inp.v, self.tune), "bend"))
+      caps.append(bend_cap(route, inp.v, self.tune))
     return lowest(caps)
 
   def _hold_cap(self, heading: float, yaw_rate: float, v: float, now: float) -> float:

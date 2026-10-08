@@ -8,7 +8,7 @@ from functools import lru_cache
 import pyray as rl
 
 from openpilot.common.constants import CV
-from openpilot.selfdrive.ui.nav.draw import Shape, clamp01, draw_maneuver, max_blend, premul, q, stroke_tris, with_alpha
+from openpilot.selfdrive.ui.nav.draw import Shape, arc, clamp01, draw_maneuver, max_blend, premul, q, stroke_tris, with_alpha
 from openpilot.selfdrive.ui.onroad.nav_panel import LIT_BLUE
 from openpilot.selfdrive.ui.ui_state import UIStatus, ui_state
 from openpilot.system.ui.lib.application import FontWeight, gui_app
@@ -24,12 +24,22 @@ FRESH_S = 1.0  # navSpeed older than this: navigation stopped sending
 FADE_S = 0.25
 
 
+def bend_paths() -> list[list[tuple[float, float]]]:
+  """A curve ahead to the right, as the warning sign's arrow, drawn as the card's turn arrow: a stem bending away along
+  a wide arc, and the same arrowhead."""
+  cx, cy, r, end = 32.0, 28.0, 16.0, 260.0  # the arc from the stem's top, round to `end` deg (screen angles, y down)
+  curve = [(cx - r, 42.0)] + arc(cx, cy, r, 180.0, end, 12)
+  dx, dy = -math.sin(math.radians(end)), math.cos(math.radians(end))  # the way the arc ends
+  tip = (curve[-1][0] + dx, curve[-1][1] + dy)
+  wings = [(tip[0] - 7 * dx + 7 * sx * dy, tip[1] - 7 * dy - 7 * sx * dx) for sx in (1, -1)]
+  return [curve, [wings[0], tip, wings[1]]]
+
+
 def icon_paths(reason: str) -> list[list[tuple[float, float]]]:
   """The icons with no maneuver of the card's to borrow, as strokes in a 48-unit box (y down)."""
-  if reason == "bend":  # a road's S-bend, as the warning sign's arrow
-    n = 16
-    curve = [(24 + 9 * math.sin(2 * math.pi * u) * math.sin(math.pi * u), 44 - 34 * u) for u in (i / n for i in range(n + 1))]
-    return [curve, [(15, 18), (24, 9), (33, 18)]]
+  if reason in ("bend", "bendLeft", "bendRight"):
+    paths = bend_paths()
+    return [[(48 - x, y) for x, y in p] for p in paths] if reason == "bendLeft" else paths
   # a lane change, for room to change lanes or into a turn's bay
   return [[(16, 44), (16, 34), (32, 18), (32, 10)], [(25, 15), (32, 8), (39, 15)], [(6, 8), (6, 16)], [(6, 26), (6, 34)],
           [(42, 26), (42, 34)], [(42, 40), (42, 46)]]

@@ -699,7 +699,7 @@ def test_cap_reasons():
     if 0.0 < cap < d.v:
       reasons.add(d.reason)
     y += d.v * 0.05
-  assert "turnLeft" in reasons and reasons <= {"turnLeft", "bend"}  # the turn itself is a bend too, at the end
+  assert "turnLeft" in reasons and reasons <= {"turnLeft", "bendLeft"}  # the turn itself is a bend too, at the end
   d = Drive((0, 1), v=10.0)
   straight = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
   assert d.step(straight, 0.0, {"routeEnd": 40.0})[0] < 10.0 and d.reason == "arrival"
@@ -709,6 +709,15 @@ def test_cap_reasons():
                   True, None, {})[0] < 15.0 and d.reason == "speedLimit"
   arc = [(20.0 - 20.0 * np.cos(a), 150.0 + 20.0 * np.sin(a)) for a in np.radians(np.arange(5.0, 91.0, 5.0))]
   bend = np.array([(0.0, y) for y in np.arange(0.0, 150.0, 5.0)] + arc + [(20.0 + x, 170.0) for x in (20.0, 40.0, 80.0)])
-  assert d.step(bend, 100.0)[0] < 15.0 and d.reason == "bend"  # guiding only: no turn there at a junction
+  assert d.step(bend, 100.0)[0] < 15.0 and d.reason == "bendRight"  # guiding only: no turn there at a junction
   assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": []}, False, None, {}) == (0.0, False)
   assert d.reason == ""
+
+
+def test_limit_cap_where_the_car_is():
+  # the set speed is the driver's: nav caps the speed at the limit where the car is, and slows for a lower one ahead
+  assert nav_mod.limit_cap([[0.0, 15.6]], 20.0) == 15.6
+  assert nav_mod.limit_cap([[0.0, 15.6], [400.0, 29.0]], 15.0) == 15.6  # a higher limit ahead is the driver's to take
+  ahead = nav_mod.limit_cap([[0.0, 29.0], [200.0, 15.6]], 29.0)
+  assert 15.6 < ahead < 29.0
+  assert nav_mod.limit_cap([[0.0, 0.0]], 10.0) == 0.0  # unknown

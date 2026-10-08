@@ -48,4 +48,4 @@ class NavOutputs:
   arrived: bool  # stopped at the destination: the destination is done, and the driver disengages
   requests: list[str]  # to the driver, in order
   desires: list[str]  # NavDesire's values set this step, in order ("" clears it)
-  cap_reason: str = ""  # what sets the cap, as cereal's NavSpeed.Reason ("turnLeft", "bend", ...), "" with none
+  cap_reason: str = ""  # what sets the cap, as cereal's NavSpeed.Reason ("turnLeft", "bendRight", ...), "" with none

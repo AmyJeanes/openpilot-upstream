@@ -90,9 +90,10 @@ off, no more pulses once begun), with keepRight for a moment if the car is still
 a turn (GTA's bays are short slip-lane links into the median), the car slows for the turn from there, changes into it
 from the lane beside it, and then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
 lane from the route counts only while the car heads along the route's link and agrees with the plugin's, if it has
-one. With the map's speed limits, engaging sets the limit where the car is, the set speed
-follows it as it changes along the route (`GTA5_FOLLOW_LIMIT=0` leaves the set speed alone), and a lower limit ahead
-slows the car before it. Routes avoid service roads (car parks, alleys, drives), which the model doesn't see as roads.
+one. With the map's speed limits, engaging sets the limit where the car is; after that the set speed is the driver's
+alone (the arrow keys), and nav caps the speed at the limit where the car is and slows for a lower one ahead
+(`GTA5_FOLLOW_LIMIT=1` has the set speed follow the limit instead, as before, for A/B runs). Routes avoid service
+roads (car parks, alleys, drives), which the model doesn't see as roads.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
 U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
 where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take

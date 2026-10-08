@@ -56,7 +56,9 @@ ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the m
 OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
 # route input v2's lane slots (navd/lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
-FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT", "1") != "0"  # the set speed follows the map's speed limits along the route
+# the car's set speed follows the map's speed limits along the route (GTA5_FOLLOW_LIMIT=1, as before navSpeed, for A/B runs);
+# off, the set speed is the driver's alone and nav caps the speed at the limit (navSpeed, reason speedLimit)
+FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT") == "1"
 # openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
 NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 # Navigate on openpilot: "param" (the default) follows the NavigateOnOpenpilot param the UI's nav button sets (off:
