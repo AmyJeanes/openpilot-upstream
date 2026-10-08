@@ -1,6 +1,11 @@
 # Keeps openpilot's UI window (a WSLg window titled "UI") and the route input viewer ("Route input") above the game. -Loop keeps pinning it, as when the UI restarts.
 param([switch]$Loop)
 
+# each bridge start launches a loop; one is enough
+$fresh = $false
+$mutex = New-Object System.Threading.Mutex($true, "gta5_pin_ui_loop", [ref]$fresh)
+if ($Loop -and -not $fresh) { exit 0 }
+
 Add-Type @"
 using System; using System.Runtime.InteropServices; using System.Text;
 public class PinUi {

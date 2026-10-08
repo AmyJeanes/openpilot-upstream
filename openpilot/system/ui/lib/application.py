@@ -45,6 +45,9 @@ RECORD_QUALITY = int(os.getenv("RECORD_QUALITY", "23"))  # Dynamic bitrate quali
 RECORD_BITRATE = os.getenv("RECORD_BITRATE", "")  # Target bitrate e.g. "2000k" (overrides RECORD_QUALITY when set)
 RECORD_SPEED = int(os.getenv("RECORD_SPEED", "1"))  # Speed multiplier
 OFFSCREEN = os.getenv("OFFSCREEN") == "1"  # Disable FPS limiting for fast offline rendering
+# PC: remembers where the window was moved to ("x,y" in the window system's coordinates) and opens it there again.
+# The window must be placed from inside: moving a WSLg window from Windows desyncs it and it stops taking input.
+WINDOW_POS_FILE = os.getenv("UI_WINDOW_POS_FILE", "")
 
 GL_VERSION = """
 #version 300 es
@@ -298,6 +301,17 @@ class GuiApplication:
       rl.set_config_flags(flags)
 
       rl.init_window(self._scaled_width, self._scaled_height, title)
+      self._window_pos = None
+      self._window_pos_set = None
+      self._window_pos_offset = (0, 0)
+      self._window_pos_check = 0.0
+      if PC and WINDOW_POS_FILE:
+        try:
+          x, y = (int(v) for v in Path(WINDOW_POS_FILE).read_text().split(","))
+          rl.set_window_position(x, y)
+          self._window_pos = self._window_pos_set = (x, y)
+        except (OSError, ValueError):
+          pass
 
       needs_render_texture = self._scale != 1.0 or BURN_IN_MODE or RECORD
       if self._scale != 1.0:
@@ -600,6 +614,21 @@ class GuiApplication:
   def last_mouse_event(self) -> MouseEvent:
     return self._last_mouse_event
 
+  def _save_window_pos(self, now: float):
+    self._window_pos_check = now
+    p = rl.get_window_position()
+    if self._window_pos_set is not None:
+      # the position read back differs from the one set by the window frame; save in the setter's terms so it doesn't creep
+      self._window_pos_offset = (self._window_pos_set[0] - int(p.x), self._window_pos_set[1] - int(p.y))
+      self._window_pos_set = None
+    pos = (int(p.x) + self._window_pos_offset[0], int(p.y) + self._window_pos_offset[1])
+    if pos != self._window_pos:
+      self._window_pos = pos
+      try:
+        Path(WINDOW_POS_FILE).write_text(f"{pos[0]},{pos[1]}")
+      except OSError:
+        pass
+
   def render(self):
     try:
       if self._profile_render_frames > 0:
@@ -614,6 +643,8 @@ class GuiApplication:
         if PC:
           # Thread is not used on PC, need to manually add mouse events
           self._mouse._handle_mouse_event()
+          if WINDOW_POS_FILE and frame_start - self._window_pos_check > 1.0:
+            self._save_window_pos(frame_start)
 
         # Store all mouse events for the current frame
         self._mouse_events = self._mouse.get_events()
