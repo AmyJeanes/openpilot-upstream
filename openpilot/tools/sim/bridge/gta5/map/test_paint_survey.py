@@ -6,7 +6,7 @@ import tempfile
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrow_marks, centre_kind, correct, correct_oneway, disagree, \
-  lane_lines, line_kinds, load, median_edges, opening_taper, sources, strips, swing_taper, unpainted
+  lane_lines, line_kinds, load, median_edges, median_runs_in, opening_taper, sources, strips, swing_taper, unpainted
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -171,6 +171,25 @@ def test_swing_taper():
   edge = (4, np.array([[2.7, 0.0], [2.7, 60.0]]))
   assert swing_taper([theirs, edge, oncoming], road, 2.7) is None
   assert swing_taper([oncoming], road, 2.7) is None
+  # GTA's median narrower than the paint's (4.5 m, edges painted 6 m apart): their swing is still theirs where our edge
+  # runs on where their line left it
+  wide = (5, np.array([[-3.0, 0.0], [-3.0, 60.0]]))
+  theirs = (6, np.array([[3.0, 5.0], [3.0, 20.0], [-3.0, 35.0]]))
+  assert swing_taper([theirs, (7, np.array([[3.0, 0.0], [3.0, 60.0]])), wide], road, 2.25) is None
+  assert swing_taper([theirs, wide], road, 2.25) is not None  # nothing runs on: ours
+
+
+def test_median_runs_in():
+  # a 4.5 m median by GTA's offset into a junction 12 m on: its right edge painted 6 m from the other up to the end
+  edges = [mark(-2.9, 'yellow', 'double_solid'), mark(3.1, 'yellow', 'double_solid')]
+  assert median_runs_in([sample(edges, s, src='gamefiles', len=12.0) for s in (1.5, 4.5, 7.5, 10.5)], 2.25, 12.0)
+  # swung across to the oncoming side before it: the median is the turn lane
+  swung = [mark(-2.9, 'yellow', 'double_solid'), mark(-2.3, 'yellow', 'double_solid'), mark(3.1, kind='solid')]
+  assert not median_runs_in([sample(edges, 1.5, src='gamefiles', len=12.0)] +
+                            [sample(swung, s, src='gamefiles', len=12.0) for s in (4.5, 7.5, 10.5)], 2.25, 12.0)
+  assert not median_runs_in([sample(edges, s, len=12.0) for s in (4.5, 7.5, 10.5)], 2.25, 12.0)  # the game files' only
+  arrow = sample(edges, 4.5, src='gamefiles', len=12.0, arrows=[{'kind': 'left', 'offset': 0.3, 's': 0.4, 'dir': 'ab', 'conf': 0.95}])
+  assert not median_runs_in([arrow, sample(edges, 10.5, src='gamefiles', len=12.0)], 2.25, 12.0)  # a left arrow painted in it
 
 
 def test_median_edges():

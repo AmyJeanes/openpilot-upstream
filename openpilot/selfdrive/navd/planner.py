@@ -377,6 +377,14 @@ class Through:
     return remap(self.targets, n, self.targets[0] == 0)
 
 
+class Opening:
+  """Lanes beginning on the left of ours along the road (a turn bay opening): the lane the car is in carries on as the
+  one that many further right."""
+  def __init__(self, dist: float, extra: int):
+    self.dist = dist  # m along the route to where the road's lane count rises
+    self.extra = extra
+
+
 def throughs(route: np.ndarray, arrows: list, moves: list, drops: list | None = None) -> list[Through]:
   """The junctions the route goes straight on through (no turn or fork near) where the arrows leave some lanes out, or
   where some lanes end (Route.info's laneDrops: [m ahead, first and last lane that carry on, of how many]). Straight on
@@ -502,12 +510,13 @@ def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> 
 
 
 def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
-              arrows: list | None = None, drops: list | None = None) -> list[tuple[float, float]]:
+              arrows: list | None = None, drops: list | None = None, opens: list | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
   in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
   turn or end (laneDrops), by where nav's changes for it must have ended, and arrives from a turn in its side's outside
-  lane. lanes_at(m, after) is the lanes the car's way just before (after: past) a point."""
+  lane. Where lanes begin on the left of ours (`opens`: [m ahead, how many]) it keeps to its lane, now numbered that
+  many further right. lanes_at(m, after) is the lanes the car's way just before (after: past) a point."""
   t = tune or TUNE
   arrows = parse_arrows(arrows)
   ahead: list[Turn | Fork | Through] = []
@@ -519,6 +528,7 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   for m in ahead:
     aim(m, arrows)
   ahead += throughs(route, arrows, ahead, drops if t.lane_drops else None)
+  ahead += [Opening(float(d), int(extra)) for d, extra in opens or [] if d > 0]
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
   keys = [(0.0, float(cur))]
@@ -531,6 +541,13 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
     if n <= 0:
       continue
     cur = min(cur, n - 1)
+    if isinstance(m, Opening):
+      # renumbered where the road widens: a renumbering, not a change, so also while changes are held off (free)
+      at = max(m.dist, keys[-1][0])
+      keys += [(at, float(cur)), (at, float(cur + m.extra))]
+      cur += m.extra
+      free = max(free, m.dist)
+      continue
     lo, hi = m.lanes(n)
     if not lo <= cur <= hi:
       want = lo if cur < lo else hi
@@ -546,7 +563,10 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
       new = min(cur, max(lanes_at(m.dist, True) - 1, 0))
       free = m.dist
     else:
-      new = max(cur - max(n - m.ours, 0), 0) if m.side == "right" else cur  # numbered from the branch's own left lane
+      # numbered from the branch's own left lane, of the lanes the map has on past it (a bay GTA forks off as its own link
+      # is a lane of the road there, which carries on)
+      after = lanes_at(m.dist, True)
+      new = max(cur - max(n - (after if after > 0 else m.ours), 0), 0) if m.side == "right" else cur
       free = m.dist
     keys += [(m.dist, float(cur)), (m.dist, float(new))]
     cur = new

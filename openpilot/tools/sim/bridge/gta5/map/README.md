@@ -59,7 +59,9 @@ direction, a lane widening from nothing over 30 m where a way's lane count rises
 joins, the turn arrows into each junction, from which nav takes the lanes for each turn, the junctions it goes straight
 on through onto fewer lanes, with the lanes that carry on (`continuing`: kerb to kerb where the road is as wide on both
 sides, else by its line), and the line through the lanes
-nav plans, on fillets from the lane in to the lane out through turns at junctions. A map without lane tags (only lane
+nav plans, on fillets from the lane in to the lane out through turns at junctions, moving across evenly over 10 m either
+side of a node where the ways' lanes jog sideways (one carriageway of a divided road joining the middle of the road it
+becomes), and keeping to its lane where a turn bay opens on its left. A map without lane tags (only lane
 counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
 on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map.
 `lane_match.py` reads the car's lane from the map's lane tags alone, route or not: the way at its height running its
@@ -144,7 +146,9 @@ shown or a level changes.
     (`placement:forward` / `:backward=left_of:N`), which keeps it on GTA's link as the bays widen.
   - Where a two-way road's median (2.5 m or more) runs in to a junction it may turn left at and GTA has no bay link,
     the game paints the median as a left-turn lane on the approach (seen on 4 of 4 such approaches): its links within
-    the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median.
+    the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median. Not
+    where the game files paint the median's edge on our side on into the junction with no arrow of ours in it
+    (`paint_survey.median_runs_in`): there the median stays a median, often with the other way's bay opening in it.
   - These widths are class rules, right on average. `--survey <file.jsonl> ...` corrects them where the game's paint
     was surveyed (format and rules in `paint_survey.py`): read from the game files' road meshes and marking decals
     (`"src": "gamefiles"`, exact to a few cm, the primary source); the map audit's top-down camera survey only
