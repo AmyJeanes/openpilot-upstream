@@ -1285,23 +1285,36 @@ def painted_lines(tags, cls, two_way, samples, why):
   return out
 
 
-def arrows(n, kinds, fewer_left=False):
-  """The turn arrows of n lanes into a junction whose ways out turn `kinds` ways (left, through, right), as GTA paints
-  most approaches it paints every lane of: every lane the same way at a forced turn; else the left lane turns left only
-  (2 in 3 such approaches), the right lane also turns right, and the others go through; with no way through, half turn
-  each way, the fewer on the side with fewer lanes out."""
-  order = [k for k in ('left', 'through', 'right') if k in kinds]
+def arrows(n, out):
+  """The turn arrows of n lanes into a junction from its ways out, `out` {move: lanes out that way (left, through,
+  right)}: the lanes taken in order from the left, each move as many as it has lanes out to go on in. Through takes
+  as many lanes as it has out (up to n), each turn one; lanes left over turn, left before right, while a turn has lanes
+  out to spare, else go through (with no way through, turn to the side with more lanes out). Lanes too few: the right
+  turn shares the right through lane, then the left turn the left one. So 3 lanes into 2 straight on: left | through
+  | through;right; into 1: left | through | right. Every lane the same way at a forced turn."""
+  order = [k for k in ('left', 'through', 'right') if k in out]
   if n == 1 or len(order) == 1:
     return [';'.join(order)] * n
-  if 'through' in order:
-    out = ['through'] * n
-    if 'left' in order:
-      out[0] = 'left'
-    if 'right' in order:
-      out[-1] = 'through;right'
-    return out
-  left = n // 2 if fewer_left else n - n // 2
-  return ['left'] * left + ['right'] * (n - left)
+  count = {k: min(out[k], n) if k == 'through' else 1 for k in order}
+  spare = n - sum(count.values())
+  while spare > 0:
+    k = next((k for k in ('left', 'right') if k in out and count[k] < out[k]), None)
+    if k is None:
+      k = 'through' if 'through' in out else max(('left', 'right'), key=lambda k: (out[k], k == 'left'))
+    count[k] += 1
+    spare -= 1
+  short = -spare
+  share_right = min(short, 1) if 'right' in out and 'through' in out else 0
+  share_left = short - share_right
+  lanes = [set() for _ in range(n)]
+  start = 0
+  for k, shared in (('left', share_left), ('through', share_right), ('right', 0)):
+    if k not in out:
+      continue
+    for i in range(start, start + count[k]):
+      lanes[i].add(k)
+    start += count[k] - (shared if k != 'right' else 0)
+  return [';'.join(t for t in ('left', 'through', 'right') if t in kinds) for kinds in lanes]
 
 
 def with_paint(lanes, seen, allowed):
@@ -1456,16 +1469,17 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
         continue
       # GTA paints a skewed road on as through or as a turn that way
       paintable = allowed | {'left' if found[k][0] > 0 else 'right' for k in kept if k in on and abs(found[k][0]) > TURN_FLAG}
-      fewer_left = max((m for k, m in exits if k == 'left'), default=0) < max((m for k, m in exits if k == 'right'), default=0)
-      lanes = arrows(n, allowed, fewer_left)
+      lanes_out = {k: sum(m for kk, m in exits if kk == k) for k in allowed}
+      but_left = {k: m for k, m in lanes_out.items() if k != 'left'}
+      lanes = arrows(n, lanes_out)
       if only and n > 1 and 'left' in allowed and allowed - {'left'}:
-        lanes = ['left', *arrows(n - 1, allowed - {'left'}, fewer_left)]
+        lanes = ['left', *arrows(n - 1, but_left)]
       seen, reach = painted_on(chain, n) if painted is not None else ({}, chain)
       inside = next((k for k, e in enumerate(chain) if e not in medians), len(chain))  # the median runs in to the junction
       shift = 0
       if median and 'left' in allowed and allowed - {'left'} and sum(length(*e) for e in chain[:inside]) >= MEDIAN_LANE_MIN:
         chain = chain[:inside]
-        lanes, shift = ['left', *arrows(n, allowed - {'left'}, fewer_left)], 1
+        lanes, shift = ['left', *arrows(n, but_left)], 1
         opened.update(chain)
       if painted is not None:
         seen = {lane + shift: kind for lane, kind in seen.items()}

@@ -162,9 +162,12 @@ shown or a level changes.
   - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it
     less those the restrictions forbid. Each lane takes the arrow the game files paint in it up to 90 m before the
     junction (`--survey-features rp_all/features.jsonl`, placed in the lanes by position), less any move the junction
-    has no way out for (through also where the road goes on skewed up to 55°). Lanes without paint take GTA's usual
-    painting (that of 2 in 3 approaches it paints every lane of): every lane the same way at a forced turn, else the
-    left lane left only, the right lane through and right, the others through, or half each way at a T; never turning
+    has no way out for (through also where the road goes on skewed up to 55°). Lanes without paint follow the
+    junction's ways out and their lane counts (GTA's paths connect a link, not a lane, to each way out): taken from
+    the left, through gets as many lanes as it has lanes out, a turn one, spare lanes turn while a turn has lanes out
+    to spare, and with too few the right turn shares the right through lane, then the left turn the left one. 3 lanes
+    into 2 straight on are `left|through|through;right`, into 1 `left|through|right`. This agrees with the paint on
+    95 of 149 approaches painted in every lane (a fixed left-only / through-and-right pattern: 69). They never turn
     across a painted lane. GTA lays many approaches as a link per lane, each with its own turn flags: each is its own
     approach, so a lane's arrows are the moves its own link has. On every way from 30 m before the junction, or from
     the furthest painted arrow (Valhalla reads them from the way into it); not on one-lane approaches other than GTA's
