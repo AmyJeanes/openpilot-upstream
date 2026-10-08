@@ -4,8 +4,9 @@ import numpy as np
 
 from openpilot.cereal import messaging
 from openpilot.selfdrive.ui.nav.draw import maneuver_kind
-from openpilot.selfdrive.ui.nav.nav_state import (M_PER_DEG, CardLane, NavState, PoseTracker, Projection, card_lanes, format_duration,
-                                                  format_trip_distance, instruction_guidance, maneuver_phase, wrap)
+from openpilot.selfdrive.ui.nav.nav_state import (M_PER_DEG, ROUTE_GONE_S, CardLane, NavState, PoseTracker, Projection, RouteStarts,
+                                                  card_lanes, format_duration, format_trip_distance, instruction_guidance, maneuver_phase,
+                                                  wrap)
 from openpilot.selfdrive.ui.nav.text import maneuver_road
 
 
@@ -142,6 +143,22 @@ def test_durations():
 def test_trip_distances():
   assert format_trip_distance(4100.0, True) == "4.1 km" and format_trip_distance(1609344.0, True) == "1,609 km"
   assert format_trip_distance(1609344.0, False) == "1,000 mi" and format_trip_distance(4023.0, False) == "2.5 mi"
+
+
+def test_route_starts_only_with_a_new_destination():
+  # a new route sets Navigate on openpilot from its setting; a reroute, the route sent again or a moment without
+  # guidance don't, so the driver's choice for the route stays
+  r, end = RouteStarts(), (34.02, -118.30)
+  assert not r.update(True, None, 0.0)  # the route's end not known yet
+  assert r.update(True, end, 0.1)
+  assert not r.update(True, end, 0.2)
+  assert not r.update(True, (end[0] + 20 / M_PER_DEG, end[1]), 0.3)  # rerouted to a snapped end 20 m on
+  assert not r.update(False, None, 1.0) and not r.update(True, end, 3.0)  # guidance lost for 2 s
+  assert r.update(True, (end[0] + 500 / M_PER_DEG, end[1]), 4.0)  # a new destination
+  assert not r.update(False, None, 5.0) and not r.update(False, None, 5.0 + ROUTE_GONE_S + 1)
+  assert r.update(True, (end[0] + 500 / M_PER_DEG, end[1]), 40.0)  # the same place again, long after: a new route
+  r.forget()  # ended by the driver
+  assert r.update(True, (end[0] + 500 / M_PER_DEG, end[1]), 41.0)
 
 
 if __name__ == '__main__':

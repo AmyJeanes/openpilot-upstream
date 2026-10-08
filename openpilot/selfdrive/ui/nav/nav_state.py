@@ -302,3 +302,35 @@ def card_lanes(g: Guidance) -> tuple[list[CardLane], int | None]:
     out.append(CardLane(arrow, straight_lit, lane.active and not straight_lit))
   here = next((i for i, lane in enumerate(ours) if lane.current), None)
   return out, here
+
+
+ROUTE_GONE_S = 30.0  # s without a route after which the next counts as new, even to the same place
+DEST_MOVED = 50.0  # m the route's end moves for a new destination
+
+
+class RouteStarts:
+  """Tells a new route (a new destination) from the same one again: a reroute, navRoute sent again, or a moment
+  without guidance. A new route is when Navigate on openpilot is set from its setting."""
+  def __init__(self):
+    self.end: tuple[float, float] | None = None  # lat, lon: the current route's end
+    self.last_seen = -1e9
+
+  def update(self, active: bool, end: tuple[float, float] | None, now: float) -> bool:
+    """True once for each new route. end: the route's end (NavState.route_end), None until it's known."""
+    if not active or end is None:
+      if now - self.last_seen > ROUTE_GONE_S:
+        self.end = None
+      return False
+    self.last_seen = now
+    new = self.end is None or distance_m(end, self.end) > DEST_MOVED
+    self.end = end
+    return new
+
+  def forget(self) -> None:
+    """The route was ended: the next one is new, wherever it goes."""
+    self.end = None
+
+
+def distance_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+  """Between two lat, lon points close together."""
+  return math.hypot((a[0] - b[0]) * M_PER_DEG, (a[1] - b[1]) * M_PER_DEG * math.cos(math.radians(a[0])))
