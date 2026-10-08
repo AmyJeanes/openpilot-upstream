@@ -143,6 +143,9 @@ inputs still carry the game's true pose and lane (`truth_*`). The bridge's side 
   `GTA5_GPS=qcom3x|ublox|perfect|off`, `GTA5_GPS_SEED`).
 - `nav_replay.py`: replays e2e trips (bridge log and traces) through the bridge's nav into decision logs, to check that
   a refactor leaves every decision as it was.
+- `match_replay.py`: replays the bridge log's drives through navd's map matching (`selfdrive/navd/map_match.py`) on
+  simulated 3X GNSS, scored against the game's own pose snapped to the map: wrong road and wrong way shares, episodes,
+  latency after turns, false and missed reroutes. `Navigator.update(..., match=...)` takes its matches.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
