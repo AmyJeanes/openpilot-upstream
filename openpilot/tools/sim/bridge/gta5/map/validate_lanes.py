@@ -98,8 +98,9 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
   for key in ('divider', 'divider:forward', 'divider:backward'):  # a median's two edges where they differ
     if key in tags and tags[key] not in DIVIDERS and not set(tags[key].split(';')) <= PHYSICAL_DIVIDERS:
       out.append(('divider', f"{key}={tags[key]}"))
-  if tags.get('lane_markings', 'yes') not in ('yes', 'no'):
-    out.append(('lane_markings', f"lane_markings={tags['lane_markings']}"))
+  for key in ('lane_markings', 'lane_markings:forward', 'lane_markings:backward'):
+    if tags.get(key, 'yes') not in ('yes', 'no'):
+      out.append(('lane_markings', f"{key}={tags[key]}"))
   for side in ('left', 'right', 'both'):
     if tags.get(f'parking:{side}', 'no') not in PARKING:
       out.append(('parking', f"parking:{side}={tags[f'parking:{side}']}"))

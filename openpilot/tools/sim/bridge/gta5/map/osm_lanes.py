@@ -19,7 +19,8 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   (and median) between the parking lanes.
 - `divider`: the marking between the directions, or both edges of a median between them (each one solid line by
   default). `divider:forward` / `divider:backward`: a median's edge beside that direction's lanes, where its two edges
-  differ. `lane_markings=no`: no lines between lanes at all.
+  differ. `lane_markings=no`: no lines between lanes at all. `lane_markings:forward` / `:backward=no`: no lines
+  between that direction's lanes but where `change:lanes` forbids crossing (the direction suffix, as on divider).
 - Missing tags fall back to OSM's defaults, then to `Defaults` by road class: lanes 1 each way (2 on a one-way motorway
   or trunk), a single track on tracks, the line in the middle.
 
@@ -173,6 +174,7 @@ class WayLanes:
     self.margin = margin  # m between each kerb (or parking lane) and its outer lane
     self.markings, self.divider = markings, divider
     self.median_edges: tuple[str | None, str | None] = (None, None)  # divider:forward, divider:backward
+    self.unmarked: frozenset[int] = frozenset()  # directions with no lines between their lanes but solid ones
     self.placed: dict[str, float] = {}  # where each placement tag puts the line, m from the left kerb
     self.tagged: tuple[float | None, float, int] = (None, 0.0, 0)  # width=*, the lanes' width:lanes total, lanes without
     self.single_track = all(lane.direction == BOTH_WAYS for lane in lanes)
@@ -242,6 +244,7 @@ class WayLanes:
     markings = tags.get('lane_markings') != 'no' and not (tags.get('lanes') is None and highway in UNMARKED)
     road = cls(lanes, width, spare if two_way else 0.0, 0.0 if two_way else spare / 2, markings, tags.get('divider'), parking)
     road.median_edges = (tags.get('divider:forward'), tags.get('divider:backward'))
+    road.unmarked = frozenset(d for d, key in ((FORWARD, 'forward'), (BACKWARD, 'backward')) if tags.get(f'lane_markings:{key}') == 'no')
 
     def place(value, d):  # m from the left kerb
       m = PLACEMENT.fullmatch(value or '')
@@ -304,8 +307,8 @@ class WayLanes:
 
   def lines(self, direction: int = FORWARD) -> list[Line]:
     """The lines on the road left to right: its edges, white lines between lanes one way (solid where change:lanes
-    forbids crossing), and the centre line between the directions (divider=*; by default dashed with one lane each way,
-    else double solid) or the edges of a median (divider=*, divider:forward / :backward; one solid line by default), and
+    forbids crossing; only those in a direction lane_markings:<direction>=no leaves unmarked), and the centre line
+    between the directions (divider=*; by default dashed with one lane each way, else double solid) or the edges of a median (divider=*, divider:forward / :backward; one solid line by default), and
     where a parking lane meets the lanes."""
     return [line for _, line in self.keyed_lines(direction)]
 
@@ -328,6 +331,8 @@ class WayLanes:
           a_may = a.lane.change_right if a.heading == 1 else a.lane.change_left
           b_may = b.lane.change_left if b.heading == 1 else b.lane.change_right
           style = {(True, True): 'dashed', (False, False): 'solid', (True, False): 'dashed_solid', (False, True): 'solid_dashed'}[(a_may, b_may)]
+          if style == 'dashed' and a.lane.direction in self.unmarked:
+            continue
           out.append((('lane', i), Line(DIVIDER, a.right, style)))
         elif 0 in (a.heading, b.heading):  # a centre turn lane's edge: dashed on its side
           out.append((('lane', i), Line(CENTRE, a.right, 'dashed_solid' if a.heading == 0 else 'solid_dashed')))
