@@ -566,7 +566,7 @@ class GTA5World(World):
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
     line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0)))
+                                 r.lane_drops(r.length, 0.0), r.lane_opens(r.length, 0.0)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

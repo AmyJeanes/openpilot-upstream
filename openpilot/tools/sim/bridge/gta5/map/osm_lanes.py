@@ -866,6 +866,7 @@ class RouteLanes:
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     self._corners: list[tuple[float, float]] | None = None
     self._drops: list[tuple[float, tuple[int, int, int]]] | None = None
+    self._openings: list[tuple[float, int]] | None = None
 
   @classmethod
   def from_osm(cls, points, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes) -> 'RouteLanes':
@@ -953,6 +954,18 @@ class RouteLanes:
           self._drops.append((s0, (min(on), max(on), into.lanes)))
     return self._drops
 
+  @property
+  def openings(self) -> list[tuple[float, int]]:
+    """Where lanes begin on the left of ours as the route's road widens, as a turn bay opens (opening): [(m along to
+    where its lane count rises, how many)]."""
+    if self._openings is None:
+      self._openings = []
+      for k in range(1, len(self.sections)):
+        few, many = self.sections[k - 1], self.sections[k]
+        if few is not None and many is not None and 0 < few.lanes < many.lanes and (o := self.opening(k)) is not None and o[2]:
+          self._openings.append((float(self.along[k]), many.lanes - few.lanes))
+    return self._openings
+
   def segment(self, s: float) -> int:
     return int(min(max(np.searchsorted(self.along, s, side='right') - 1, 0), max(len(self.sections) - 1, 0)))
 
@@ -1039,27 +1052,34 @@ class RouteLanes:
     if not keys or at >= self.along[-1] - 1e-6:
       return None
     back = max(at - FILLET_REACH - CORNER_CHORD, 0.0)  # from a little behind, so a corner the car is in still has its fillet
-    kx = np.array([at + d for d, _ in keys], dtype=float) + np.arange(len(keys)) * 1e-3  # a step where two share a place
+    kx = np.array([at + d for d, _ in keys], dtype=float)
     ky = np.array([lane for _, lane in keys], dtype=float)
+    near = np.clip(np.searchsorted(self.along, kx), 1, len(self.along) - 1)
+    near = np.where(np.abs(self.along[near - 1] - kx) < np.abs(self.along[near] - kx), near - 1, near)
+    kx = np.where(np.abs(self.along[near] - kx) < 1e-3, self.along[near], kx)  # a step at a node falls between its segments
     inside = self.along[(self.along > back) & (self.along < self.along[-1])]
     grid = np.arange(back, self.along[-1], step)
     s2 = np.unique(np.concatenate(([back], inside, grid, kx[(kx > back) & (kx < self.along[-1])], [self.along[-1]])))
     s2 = s2[np.concatenate(([True], np.diff(s2) > 1e-3))]
     xy = np.stack([np.interp(s2, self.along, self.points[:, 0]), np.interp(s2, self.along, self.points[:, 1])], axis=1)
-    lane = np.interp(s2, kx, ky)
+    lane_in, lane_out = _keyed(s2, kx, ky)
     seg = np.clip(np.searchsorted(self.along, (s2[:-1] + s2[1:]) / 2, side='right') - 1, 0, len(self.sections) - 1)
     offs = np.full(len(s2), np.nan)
+    jogs = []  # shared points where the lane in and the lane out don't line up
     for i, k in enumerate(seg):
-      for v in (i, i + 1):  # the piece's ends, averaged with the next's at a shared point
+      for v, lane in ((i, lane_out), (i + 1, lane_in)):  # the piece's ends, averaged with the next's at a shared point
         sec = self.section_at(s2[v], k)
         if sec is None or not sec.lanes:
           continue
         off = sec.offset(lane[v])
+        if not np.isnan(offs[v]) and abs(off - offs[v]) > JOG_MIN:
+          jogs.append(v)
         offs[v] = off if np.isnan(offs[v]) else (offs[v] + off) / 2
     known = ~np.isnan(offs)
     if not known.any():
       return None
     offs = np.interp(s2, s2[known], offs[known])
+    offs = _ease_jogs(s2, offs, [float(s2[v]) for v in jogs])
     line = offset_line(xy, offs)
     if len(line) != len(s2):
       return None
@@ -1102,6 +1122,40 @@ class RouteLanes:
     xy, sv = np.concatenate(out_xy), np.concatenate(out_s)
     keep = np.concatenate(([True], (np.diff(sv) > 1e-6) & (np.hypot(*np.diff(xy, axis=0).T) > 1e-3)))
     return xy[keep], sv[keep]
+
+
+JOG_MIN = 0.5  # m between the lane in and the lane out at a node that is a jog sideways, not a road's lanes carrying on
+JOG_REACH = 10.0  # m either side of such a node the lane line moves across over
+
+
+def _keyed(s: np.ndarray, kx: np.ndarray, ky: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+  """The lane keys [(kx m along, ky lane)] give at each s, ramping between two keys, and stepping where keys share a
+  place: (the lane arriving at s, the lane leaving it), which differ only at a step."""
+  ux, first = np.unique(kx, return_index=True)
+  last = len(kx) - 1 - np.unique(kx[::-1], return_index=True)[1]
+  lo, hi = ky[first], ky[last]  # each place's first and last key
+  j = np.clip(np.searchsorted(ux, s, side='right') - 1, 0, len(ux) - 1)
+  nxt = np.minimum(j + 1, len(ux) - 1)
+  span = ux[nxt] - ux[j]
+  t = np.clip(np.divide(s - ux[j], span, out=np.zeros_like(s), where=span > 0), 0.0, 1.0)
+  leaving = np.where(s < ux[0], lo[0], hi[j] + (lo[nxt] - hi[j]) * t)
+  arriving = np.where(s == ux[j], lo[j], leaving)
+  return arriving, leaving
+
+
+def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float]) -> np.ndarray:
+  """The lane line's offsets (m right of the route at s m along) moving across evenly over JOG_REACH either side of
+  each jog, as where one carriageway of a divided road joins the middle of the road it becomes: a car keeps to its lane
+  across it rather than following the ways' sideways step."""
+  out = offs.copy()
+  for n, sj in enumerate(jogs):
+    lo = sj - min(JOG_REACH, (sj - jogs[n - 1]) / 2 if n else JOG_REACH)
+    hi = sj + min(JOG_REACH, (jogs[n + 1] - sj) / 2 if n + 1 < len(jogs) else JOG_REACH)
+    lo, hi = max(lo, float(s[0])), min(hi, float(s[-1]))
+    inside = (s > lo) & (s < hi)
+    if hi > lo and inside.any():
+      out[inside] = np.interp(s[inside], [lo, hi], [np.interp(lo, s, offs), np.interp(hi, s, offs)])
+  return out
 
 
 OPENED = 0.5  # m: a lane narrower than this is still opening, the line beside it not yet painted

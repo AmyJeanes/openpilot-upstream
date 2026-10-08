@@ -336,6 +336,11 @@ class Route:
     arrows = self.lanes.arrows_moves if self.lanes is not None else []
     return [[round(a[0] - self.at, 1), [";".join(sorted(t)) for t in a[1]], *a[2:]] for a in arrows if -behind < a[0] - self.at < distance]
 
+  def lane_opens(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
+    """Where lanes begin on the left of ours within `distance` m (RouteLanes.openings): [[m ahead, how many]]."""
+    opens = self.lanes.openings if self.lanes is not None else []
+    return [[float(s - self.at), n] for s, n in opens if -behind < s - self.at < distance]
+
   def lane_drops(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
     """The junctions within `distance` m the route goes straight on through onto fewer lanes (RouteLanes.drops):
     [[m ahead, first and last lane into it that carry on, from the left, of how many]]."""

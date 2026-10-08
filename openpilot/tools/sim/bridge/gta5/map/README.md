@@ -59,7 +59,9 @@ direction, a lane widening from nothing over 30 m where a way's lane count rises
 joins, the turn arrows into each junction, from which nav takes the lanes for each turn, the junctions it goes straight
 on through onto fewer lanes, with the lanes that carry on (`continuing`: kerb to kerb where the road is as wide on both
 sides, else by its line), and the line through the lanes
-nav plans, on fillets from the lane in to the lane out through turns at junctions. A map without lane tags (only lane
+nav plans, on fillets from the lane in to the lane out through turns at junctions, moving across evenly over 10 m either
+side of a node where the ways' lanes jog sideways (one carriageway of a divided road joining the middle of the road it
+becomes), and keeping to its lane where a turn bay opens on its left. A map without lane tags (only lane
 counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
 on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map.
 `lane_match.py` reads the car's lane from the map's lane tags alone, route or not: the way at its height running its
