@@ -69,6 +69,9 @@ class UIState:
         "vehicleParameters",
         "testJoystick",
         "rawAudioData",
+        "navInstruction",
+        "navRoute",
+        "deviceMotion",
       ]
     )
 
