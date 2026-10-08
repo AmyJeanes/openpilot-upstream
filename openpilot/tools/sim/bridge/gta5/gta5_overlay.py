@@ -42,11 +42,13 @@ import contextlib
 import glob
 import hashlib
 import os
+import socket
 import subprocess
 import sys
 import threading
 import time
 from collections import defaultdict
+from multiprocessing.connection import Connection
 
 import numpy as np
 
@@ -92,6 +94,7 @@ GPS_MAX = 100  # points: GTA's custom GPS route limit isn't documented; the plug
 GPS_SIMPLIFY = 3.0  # m
 GPS_RESEND_BEFORE = 300.0  # m before the end of a capped route sent, the next part goes
 ENABLED = os.getenv("GTA5_OVERLAY", "1") != "0"
+PROCESS = os.getenv("GTA5_OVERLAY_PROCESS", "1") != "0"  # 0: made in a thread of the bridge's (OverlayProcess)
 # the lane tags' lines (road_marks) between bridge starts; empty: built each start
 CACHE_DIR = os.path.expanduser(os.getenv("GTA5_OVERLAY_CACHE", "~/.cache/gta5_overlay"))
 CACHE_KEEP = 3  # files
@@ -119,18 +122,26 @@ def offset_line(pts: np.ndarray, offs: np.ndarray) -> np.ndarray:
   return pts + vn * offs[:, None]
 
 
+def lane_middles(route) -> list[float | None]:
+  """m right of the route's line to the middle of the lanes it takes, per segment (None where they're unknown)."""
+  out: list[float | None] = []
+  for k in range(len(route.points) - 1):
+    sec = route.section(k)
+    out.append(None if sec is None or not sec.lanes else (sec.ours[0].left + sec.ours[-1].right) / 2)
+  return out
+
+
 def carriageway_line(route, step: float = 2.0, smooth_m: float = 6.0) -> tuple[np.ndarray, np.ndarray]:
   """The route moved into the middle of the lanes it takes (maprender.carriageway_line): (points [M, 2], m along)."""
   pts = np.asarray(route.points, np.float64)
   along = np.asarray(route.along, np.float64)
   if len(pts) < 2:
     return pts, along
+  middles = getattr(route, "middles", None)
   offs = np.full(len(pts), np.nan)
-  for k in range(len(pts) - 1):
-    sec = route.section(k)
-    if sec is None or not sec.lanes:
+  for k, off in enumerate(lane_middles(route) if middles is None else middles):
+    if off is None:
       continue
-    off = (sec.ours[0].left + sec.ours[-1].right) / 2
     for v in (k, k + 1):
       offs[v] = off if np.isnan(offs[v]) else (offs[v] + off) / 2
   known = ~np.isnan(offs)
@@ -611,16 +622,20 @@ def save_marks(key: str, marks: dict):
       os.remove(f)
 
 
+def child_env() -> dict:
+  """The environment for this module's commands in a process of their own, with this tree on the path."""
+  root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 5))
+  return {**os.environ, "GTA5_OVERLAY_CACHE": CACHE_DIR,
+          "PYTHONPATH": os.pathsep.join(p for p in (root, os.environ.get("PYTHONPATH")) if p)}
+
+
 def start_marks_build(paths, osm, key: str) -> subprocess.Popen:
   """road_marks in a separate process (this module's `cache` command), which saves them for load_marks: building them in
   a thread would hold the GIL for its 10 s and starve the bridge's frame loop."""
-  root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 5))
-  env = {**os.environ, "GTA5_OVERLAY_CACHE": CACHE_DIR,
-         "PYTHONPATH": os.pathsep.join(p for p in (root, os.environ.get("PYTHONPATH")) if p)}
   cmd = [sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_overlay", "cache", paths.path, osm.path, "--key", key]
   if not osm.drive_on_right:
     cmd.append("--left")
-  return subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
+  return subprocess.Popen(cmd, env=child_env(), stdin=subprocess.DEVNULL)
 
 
 class RoadGeometry:
@@ -1008,11 +1023,7 @@ class Overlay:
     self.builder: subprocess.Popen | None | bool = None  # building them in the background; False: it failed
 
   def update(self, state: dict, route, paths, lane_line, turn_points, recording: bool, osm=None) -> list[dict]:
-    out = []
-    with self.lock:
-      if self.outbox is not None:
-        out.append(self.outbox)
-        self.outbox = None
+    out = self._collect()
     debug = state.get("debug") or {}
     now = time.monotonic()
     if not ENABLED or not debug.get("on") or now < self.next_route:
@@ -1032,15 +1043,28 @@ class Overlay:
       points = turn_points()
       if points is not None:
         snap["turn"], snap["signal"] = points
+    self._hand(snap)
+    return out
+
+  def _collect(self) -> list[dict]:
+    """The message the worker made last, if not yet sent."""
     with self.lock:
-      if not full and self.snap is not None and self.snap["full"]:
+      out, self.outbox = self.outbox, None
+    return [] if out is None else [out]
+
+  def _hand(self, snap: dict):
+    """A snapshot to the worker, in place of any it hasn't taken."""
+    with self.lock:
+      if not snap["full"] and self.snap is not None and self.snap["full"]:
         snap = {**self.snap, **snap, "full": True}  # the worker hasn't got to the last full one: it stays one
       self.snap = snap
     if self.thread is None:
       self.thread = threading.Thread(target=self._run, name="gta5 overlay", daemon=True)
       self.thread.start()
     self.wake.set()
-    return out
+
+  def close(self):
+    pass
 
   def _run(self):
     while True:
@@ -1121,7 +1145,7 @@ class Overlay:
       else:
         print(f"gta5 overlay: the background build of the lines failed ({self.builder.returncode})", flush=True)
       self.builder = False  # build them here, once
-    marks = road_marks(paths, osm)
+    marks = road_marks(paths, osm.load() if isinstance(osm, OsmFile) else osm)
     if key:
       try:
         save_marks(key, marks)
@@ -1129,6 +1153,212 @@ class Overlay:
         print(f"gta5 overlay: can't cache the lines: {e}", flush=True)
     self.stats["geometry"] = "built"
     return RoadGeometry(paths, osm, marks)
+
+
+class RouteView:
+  """What the overlay reads of a router.Route, as plain data for its process: the points, m along them, the road's
+  heights, the middle of the lanes each segment takes (for carriageway_line) and where the car is."""
+
+  def __init__(self, route):
+    self.points, self.along, self.z = route.points, route.along, getattr(route, "z", None)
+    self.middles = lane_middles(route)
+    self.at = route.at
+
+
+class OsmFile:
+  """An osm_lanes.OsmLanes as the overlay's process has it: what keys its lines' cache (marks_key), and the file, read
+  only to build the lines there."""
+
+  def __init__(self, path: str, drive_on_right: bool, tagged: bool):
+    from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+    from openpilot.tools.sim.bridge.gta5.map.osm_lanes import GTA
+    self.path, self.drive_on_right, self.tagged = path, drive_on_right, tagged
+    self.project, self.defaults = to_game, GTA
+
+  def load(self):
+    from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+    return OsmLanes.load(self.path, self.project, drive_on_right=self.drive_on_right)
+
+
+def map_files(paths, osm) -> dict | None:
+  """The maps as the overlay's process reads them again (serve); None for none yet."""
+  if paths is None:
+    return None
+  return {"paths": paths.path, "osm": None if osm is None else {"path": osm.path, "drive_on_right": osm.drive_on_right,
+                                                                "tagged": osm.tagged}}
+
+
+def from_files(paths, osm) -> bool:
+  """Whether the overlay's process can read these maps again as they are: from their files, as the bridge reads them."""
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import GTA
+  return (paths is None or bool(getattr(paths, "path", None))) and \
+    (osm is None or bool(getattr(osm, "path", None)) and getattr(osm, "project", None) is to_game and getattr(osm, "defaults", None) is GTA)
+
+
+class OverlayProcess(Overlay):
+  """The overlay with make() in a process of its own (serve): the roads near the car and their packing are ~100 ms of
+  Python every EVERY s, which in the bridge's process hold the GIL from its camera and sensor threads. update() takes
+  the snapshots as before and sends them as plain data, the newest when the process is free, and hands on its messages
+  at the next update(). Maps the process can't read again (from_files) stay with Overlay's thread."""
+
+  def __init__(self, wait_maps: bool = False):
+    super().__init__()
+    self.wait_maps = wait_maps  # the process reads the maps before a snapshot, not while going on without them (tests)
+    self.proc: subprocess.Popen | None = None
+    self.conn: Connection | None = None
+    self.busy = False  # a snapshot sent, its message not yet back
+    self.pending: dict | None = None
+    self.sent: dict = {}  # the maps, route and lane line the process has, by their objects here
+    self.failed = False
+
+  def _collect(self) -> list[dict]:
+    if self.failed:
+      return super()._collect()
+    self._drain(0.0)
+    out, self.outbox = self.outbox, None
+    return [] if out is None else [out]
+
+  def _hand(self, snap: dict):
+    if self.failed or not from_files(snap.get("paths"), snap.get("osm")):
+      if not self.failed:
+        self._fail("maps not from their files")
+      super()._hand(snap)
+      return
+    if not snap["full"] and self.pending is not None and self.pending["full"]:
+      snap = {**self.pending, **snap, "full": True}  # the process hasn't had the last full one: it stays one
+    self.pending = snap
+    self._send()
+
+  def wait(self, timeout: float = 120.0):
+    """Until the process's message for the last snapshot is back (tests, and replays that keep it in step)."""
+    if self.busy and not self.failed:
+      self._drain(timeout)
+
+  def _drain(self, timeout: float):
+    try:
+      while self.conn is not None and self.busy and self.conn.poll(timeout):
+        msg, stats = self.conn.recv()
+        self.busy = False
+        self.stats.update(stats)
+        if msg is not None:
+          self.outbox = msg
+    except (EOFError, OSError) as e:
+      self._fail(f"its process ended ({type(e).__name__})")
+      return
+    self._send()
+
+  def _send(self):
+    if self.busy or self.pending is None or self.failed:
+      return
+    snap, self.pending = self.pending, None
+    route, lane, maps = snap.get("route"), snap.get("lane_line"), (snap.get("paths"), snap.get("osm"))
+    try:
+      if self.proc is None:
+        self._start()
+      assert self.conn is not None
+      if "maps" not in self.sent or any(a is not b for a, b in zip(self.sent["maps"], maps, strict=True)):
+        self.conn.send(("maps", map_files(*maps)))
+        self.sent["maps"] = maps
+      if "route" not in self.sent or self.sent["route"] is not route:
+        self.conn.send(("route", None if route is None else RouteView(route)))
+        self.sent["route"] = route
+      if "lane" not in self.sent or self.sent["lane"] is not lane:
+        self.conn.send(("lane", lane))
+        self.sent["lane"] = lane  # held, so the object isn't another one's by the next snapshot
+      data = {k: v for k, v in snap.items() if k not in ("route", "lane_line", "paths", "osm")}
+      if route is not None:
+        data["at"] = route.at  # as it is now: the route goes on moving with the car
+      self.conn.send(("snap", data))
+      self.busy = True
+    except OSError as e:
+      self.pending = snap
+      self._fail(f"its process failed: {e}")
+
+  def _start(self):
+    ours, theirs = socket.socketpair()
+    try:
+      cmd = [sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_overlay", "serve", str(theirs.fileno())]
+      self.proc = subprocess.Popen(cmd + (["--wait-maps"] if self.wait_maps else []), env=child_env(),
+                                   stdin=subprocess.DEVNULL, pass_fds=(theirs.fileno(),))
+    except OSError:
+      ours.close()
+      raise
+    finally:
+      theirs.close()
+    self.conn = Connection(ours.detach())
+
+  def _fail(self, why: str):
+    """Overlay's thread from here on."""
+    print(f"gta5 overlay: in a thread: {why}", flush=True)
+    self.failed = True
+    self.close()
+    if self.pending is not None:
+      super()._hand(self.pending)
+      self.pending = None
+
+  def close(self):
+    if self.conn is not None:
+      with contextlib.suppress(OSError):
+        self.conn.close()
+      self.conn = None
+    if self.proc is not None:
+      self.proc.terminate()
+      with contextlib.suppress(subprocess.TimeoutExpired):
+        self.proc.wait(2)
+      self.proc = None
+
+
+def serve(fd: int, wait_maps: bool = False):
+  """OverlayProcess's process: makes each snapshot's message in turn on the connection at fd, reading the maps from their
+  files in a thread while it goes on without them (but with wait_maps)."""
+  from openpilot.tools.sim.bridge.gta5.map.paths import Paths
+  conn = Connection(fd)
+  overlay = Overlay()
+  route, lane = None, None
+  maps: dict = {"files": None, "read": (None, None)}
+
+  def read(files: dict):
+    try:
+      paths = Paths(files["paths"])
+      paths.index()
+      osm = None if files["osm"] is None else OsmFile(**files["osm"])
+    except (OSError, ValueError, KeyError) as e:
+      print(f"gta5 overlay: can't read the maps: {type(e).__name__}: {e}", flush=True)
+      return
+    if maps["files"] == files:
+      maps["read"] = (paths, osm)
+
+  while True:
+    try:
+      kind, data = conn.recv()
+    except (EOFError, OSError):
+      return
+    if kind == "maps":
+      if data != maps["files"]:
+        maps["files"], maps["read"] = data, (None, None)
+        if data is not None:
+          if wait_maps:
+            read(data)
+          else:
+            threading.Thread(target=read, args=(data,), name="gta5 overlay maps", daemon=True).start()
+    elif kind == "route":
+      route = data
+    elif kind == "lane":
+      lane = data
+    elif kind == "snap":
+      if route is not None:
+        route.at = data.pop("at", route.at)
+      paths, osm = maps["read"]
+      try:
+        msg = overlay.make({**data, "route": route, "lane_line": lane, "paths": paths, "osm": osm})
+      except Exception as e:  # a debug aid mustn't take the bridge down
+        print(f"gta5 overlay: {type(e).__name__}: {e}", flush=True)
+        msg = None
+      try:
+        conn.send((msg, overlay.stats))
+      except OSError:
+        return
 
 
 def gps_points(route, max_points: int = GPS_MAX) -> tuple[str, float]:
@@ -1184,6 +1414,10 @@ def main(argv=None):
   from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
   from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
   from openpilot.tools.sim.bridge.gta5.map.paths import Paths
+  argv = sys.argv[1:] if argv is None else argv
+  if argv[:1] == ["serve"]:  # OverlayProcess's
+    serve(int(argv[1]), "--wait-maps" in argv[2:])
+    return
   ap = argparse.ArgumentParser(description=main.__doc__)
   ap.add_argument("command", choices=["cache"])
   ap.add_argument("paths")

@@ -1,3 +1,4 @@
+import gc
 import json
 import math
 import multiprocessing
@@ -28,7 +29,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
-from openpilot.tools.sim.bridge.gta5.gta5_overlay import GpsRoute, Overlay
+from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, GpsRoute, Overlay, OverlayProcess
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
@@ -80,6 +81,17 @@ CITY_SPEED_LIMIT = 35
 # the plugin reads the bridge's address from here when its gta5op.ini doesn't set one
 BRIDGE_FILE = Path(os.getenv("GTA5_BRIDGE_FILE", "/mnt/c/Users/Public/gta5op-bridge.txt"))
 PIN_UI = Path(__file__).parent / "pin_ui.ps1"
+# Python's full garbage collections walk every object the bridge holds (over a million, mostly the maps) with the GIL
+# held for 0.4-0.8 s, stalling the camera and sensor threads; the bridge makes next to no cyclic garbage, so they run
+# only once it has been idle (no game state, or on foot) this long, at most every FULL_GC_EVERY s
+FULL_GC_IDLE = 2.0  # s
+FULL_GC_EVERY = 60.0  # s
+
+
+def hold_full_collections():
+  """Automatic garbage collection only of the young generations, which take a few ms (GTA5World._idle_gc does the rest)."""
+  gen0, gen1, _ = gc.get_threshold()
+  gc.set_threshold(gen0, gen1, 1 << 30)
 
 
 def pin_ui() -> subprocess.Popen | None:
@@ -116,9 +128,12 @@ def speed_limit(street: str) -> float:
 class GTA5World(World):
   sets_blinkers = True
   sets_torque = True
+  idle_since: float | None = None  # when the bridge last stopped driving (_idle_gc)
+  next_full_gc = 0.0
 
   def __init__(self, simulator_state: SimulatorState, q: Queue, port: int):
     super().__init__(dual_camera=True)
+    hold_full_collections()
     self.simulator_state = simulator_state
     self.q = q
 
@@ -156,7 +171,7 @@ class GTA5World(World):
     self.nav_msgs = NavMessages() if NAV_MSGS else None
     self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
     self.recorder = Recorder(RECORD, self) if RECORD else None
-    self.overlay = Overlay()  # the plugin map debug overlay, while it asks for it
+    self.overlay = OverlayProcess() if OVERLAY_PROCESS else Overlay()  # the plugin map debug overlay, while it asks for it
     self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
     if self.map_view:
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
@@ -312,7 +327,9 @@ class GTA5World(World):
     if state is None or not fresh or not state.get("inVehicle"):
       simulator_state.valid = False
       simulator_state.user_torque = 0
+      self._idle_gc()
       return
+    self.idle_since = None
 
     v = state["vEgo"]
     yaw_rate = state["yawRate"]  # left-positive
@@ -399,6 +416,15 @@ class GTA5World(World):
     self._update_buttons(state)
     self._update_map(state, bearing, v)
     simulator_state.valid = True
+
+  def _idle_gc(self):
+    """The full garbage collection hold_full_collections leaves out, while nothing is driving."""
+    now = time.monotonic()
+    if self.idle_since is None:
+      self.idle_since = now
+    elif now - self.idle_since > FULL_GC_IDLE and now >= self.next_full_gc:
+      self.next_full_gc = now + FULL_GC_EVERY
+      gc.collect()
 
   def _set_cap(self, simulator_state: SimulatorState, cap: float, reason: str):
     """nav's speed cap (m/s, 0 for none) to openpilot: as navSpeed for its planner, or as the car's set speed (NAV_SPEED)."""
@@ -663,6 +689,7 @@ class GTA5World(World):
       self.pinner.terminate()
     if self.map_view is not None:
       self.map_view.close()
+    self.overlay.close()
     self.exit_event.set()
     # the camera thread waits for each game frame, and none come once the game connection is gone; wake it so the bridge
     # process can exit, handing it a blank frame rather than the shared memory freed below
