@@ -431,16 +431,24 @@ class Navigator:
     self.busy = False
     self.lock = threading.Lock()
 
-  def update(self, pos: np.ndarray, bearing: float, dest: np.ndarray | None, now: float, z: float | None = None) -> Route | None:
+  def update(self, pos: np.ndarray, bearing: float, dest: np.ndarray | None, now: float, z: float | None = None,
+             match=None) -> Route | None:
+    """pos and bearing (clockwise from north) are the car's; with a map match (navd's map_match.Match, from GNSS), the
+    car is where the match puts it on its road instead, heading that road's way if the match is sure of the direction
+    (else only its distance from the route counts), and without a height."""
     if dest is None:
       self.dest, self.route = None, None
       return None
     if self.dest is None or np.hypot(*(dest - self.dest)) > 1.0:
       self.dest, self.route, self.next_try = dest, None, 0.0
+    heading: float | None = -bearing
+    if match is not None:
+      pos, z, heading = np.asarray(match.point, float), None, match.heading if match.sure else None
+      bearing = bearing if heading is None else -heading
     with self.lock:
       route = self.route
     if route is not None:
-      off = route.locate(pos, z, -bearing)
+      off = route.locate(pos, z, heading)
       self.off_since = None if off < self.OFF_ROUTE else (self.off_since or now)
       if self.off_since is not None and now - self.off_since > self.OFF_FOR and now >= self.next_try:
         self._start(pos, bearing, dest, now, z)
