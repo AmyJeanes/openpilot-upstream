@@ -4,10 +4,13 @@ trip name, or 'x,y,z,heading[,lane]>dx,dy') is driven with gta5_cmd.py expert ro
 expert mode stops (arrived or aborted) or the timeout, and summed up from the expert log: one JSON line per trip.
 
   python -m openpilot.tools.sim.bridge.gta5.mapdrive_trials SL1 SR3 FX1 --out /tmp/mapdrive_trials.jsonl \\
-    [--log ~/gta5test/expert.jsonl] [--timeout 240] [--seed 1] [--mapdrive '{"preset":"normal"}']"""
+    [--log ~/gta5test/expert.jsonl] [--timeout 240] [--seed 1] [--mapdrive '{"preset":"normal"}']
+
+A spec starting with a minus ('-357.8,-1658.9,18.3,331,0>1468.2,-1050.9') is taken as a trip, not an option."""
 import argparse
 import json
 import os
+import sys
 import time
 
 from openpilot.tools.sim.bridge.gta5 import gta5_cmd
@@ -45,7 +48,10 @@ def main():
   ap.add_argument("--mapdrive", default="{}", help="more of the map driver's settings, JSON")
   ap.add_argument("--driver", default="map", choices=["map", "map+ai", "ai"])
   ap.add_argument("--settings", default="", help="more expert k=v settings, e.g. 'speed=14'")
-  args = ap.parse_args()
+  # a spec starting with a minus would be taken for an option: parsed as a stand-in, put back in its place
+  argv = [f"@spec{i}" if ">" in x and x.startswith("-") else x for i, x in enumerate(sys.argv[1:])]
+  args = ap.parse_intermixed_args(argv)
+  args.trips = [sys.argv[1:][int(x[5:])] if x.startswith("@spec") else x for x in args.trips]
   control = control_path() or CONTROL
   for n, trip in enumerate(args.trips):
     cfg = {"seed": args.seed + n, **json.loads(args.mapdrive)}

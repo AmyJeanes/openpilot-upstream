@@ -25,10 +25,12 @@ class LagCar:
   """The game car under the plugin's control: curvature and acceleration lag the commands (first order), the commands
   acting `delay` s after they're sent; a stop is held (the plugin's handbrake). Game heading: deg counterclockwise
   from north. Imperfections for robustness checks: `gain` scales the curvature the car takes (the plugin's adaptive
-  steering gain off), `noise` the pose's (m and deg, normal) and the yaw rate's (rad/s) noise, seeded."""
+  steering gain off), `noise` the pose's (m and deg, normal) and the yaw rate's (rad/s) noise, seeded. Its position
+  (x, y) is its middle, `wheel_base` / 2 ahead of the rear axle, which moves along its heading, as the game reports it."""
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
-               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0):
+               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8):
     self.x, self.y, self.h, self.v = x, y, heading, v
+    self.wheel_base = wheel_base
     self.k = self.a = self.lat_i = 0.0
     self.tau_k, self.tau_a, self.delay = tau_k, tau_a, delay
     self.gain, self.noise = gain, noise
@@ -44,7 +46,7 @@ class LagCar:
     n = self.rng.normal(0.0, self.noise, 4) if self.noise else np.zeros(4)
     return {"pos": [self.x + n[0], self.y + n[1], 0.0], "vEgo": self.v, "heading": self.h + 5 * n[2],
             "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
-            "t": int(self.t), "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
+            "t": int(self.t), "wheelBase": self.wheel_base, "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
             "ai": {"on": False}}
 
   def control(self, msg: dict | None):
@@ -71,10 +73,14 @@ class LagCar:
         self.v = 0.0  # the handbrake hold
       else:
         self.v = max(self.v + self.a * SUB, 0.0)
+      b = self.wheel_base / 2
+      hr = math.radians(self.h)
+      rx, ry = self.x + math.sin(hr) * b, self.y - math.cos(hr) * b  # the rear axle
       self.h += math.degrees(self.k * self.v * SUB)
       hr = math.radians(self.h)
-      self.x += -math.sin(hr) * self.v * SUB
-      self.y += math.cos(hr) * self.v * SUB
+      rx += -math.sin(hr) * self.v * SUB
+      ry += math.cos(hr) * self.v * SUB
+      self.x, self.y = rx - math.sin(hr) * b, ry + math.cos(hr) * b
       self.t += SUB
 
 
@@ -205,6 +211,45 @@ def recorded_route(segment: str, index: int = 0) -> tuple[Route, tuple[float, fl
   pose = (float(f[cols.index("x")]), float(f[cols.index("y")]), float(f[cols.index("heading")]))
   route.locate(np.array(pose[:2]), None, pose[2])
   return route, pose, float(f[cols.index("v_ego")])
+
+
+TRIP_CACHE = os.getenv("GTA5_TRIP_ROUTES", "/mnt/e/gta5_audit/mapdrive_trials/routes_cache.json")
+
+
+def trip_route(spec: str, router_url: str = "http://127.0.0.1:8002") -> tuple[Route, tuple[float, float, float]] | None:
+  """An e2e trip ('x,y,z,heading,lane>dx,dy') routed on the live map as the bridge routes it (points, maneuvers and
+  speed limits kept in TRIP_CACHE, so it's asked of the router once), and the car's pose in its start lane (9: the
+  rightmost); None without the map, or the router for a trip not yet cached."""
+  m = live_map()
+  if m is None:
+    return None
+  start, dest = spec.split(">")
+  x, y, z, heading, *lane = (float(v) for v in start.split(","))
+  dx, dy = (float(v) for v in dest.split(","))
+  cache = json.load(open(TRIP_CACHE)) if os.path.exists(TRIP_CACHE) else {}
+  if spec not in cache:
+    from openpilot.tools.sim.bridge.gta5.map.router import Router
+    try:
+      router = Router(router_url, timeout=10.0, paths=m["paths"], osm=m["osm"], roads=m["osm"])
+      r = router.route(np.array([x, y]), (-heading) % 360, np.array([dx, dy]), z)
+    except OSError:
+      return None
+    cache[spec] = {"points": r.points.round(3).tolist(), "maneuvers": r.maneuvers, "limits": np.asarray(r.limits).round(3).tolist()}
+    os.makedirs(os.path.dirname(TRIP_CACHE), exist_ok=True)
+    json.dump(cache, open(TRIP_CACHE, "w"))
+  c = cache[spec]
+  route = Route(np.array(c["points"], float), c["maneuvers"], m["paths"], np.array(c["limits"], float), m["osm"], m["stops"])
+  # where setup puts the car: in its lane where the spec's point is on the route's road, past the route's first jog
+  route.locate(np.array([x, y]), None, heading, search=200.0)
+  at = max(route.at, min(10.0, route.length / 4))
+  k = max(int(np.searchsorted(route.along, at, side="right")) - 1, 0)
+  sec = route.section(k)
+  want = (lane[0] if lane else 0.0)
+  if sec is not None and sec.lanes:
+    want = min(want, sec.lanes - 1)
+  px, py, ph = start_pose(route, want, at)
+  route.at, route.seg = 0.0, 0
+  return route, (px, py, ph)
 
 
 # *** a trip ***

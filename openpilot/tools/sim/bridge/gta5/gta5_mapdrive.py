@@ -2,28 +2,34 @@
 with driver=map; design in the openpilot-gta5 task's MAPDRIVER_DESIGN.md). Traffic off for now: no leads, no gaps.
 
 The plan is made once when a route arrives (and spliced on a reroute, past the lane change under way and 3 s on):
-nav's lane plan (planner.lane_plan, as the ribbon draws it) with absolute along-route keys, each lane change re-timed
-within its lane-slot window (by the trip's style, freeway ones within +-20 % of nav's schedule) and reshaped as a
-quintic (minimum-jerk) move, then put on the lanes by RouteLanes.lane_line (its offsets, jogs and fillets), bends the
-car can't take as drawn eased out (sharp_corner). That line is the intent, recorded as the path labels; the car aims for
-it plus a small, slow in-lane bias and wander (never periodic), joining it from where the car is. The plan is checked
-against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another lane,
+nav's lane plan (planner.lane_plan, as the ribbon draws it) with absolute along-route keys, each lane change placed
+within its lane-slot window (by the trip's style, freeway ones within +-20 % of nav's schedule), then re-placed to take
+its time (the style's t_lc, no quicker than its lateral acceleration allows) at the speed the car will drive it, its end
+kept, and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
+and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in. That
+line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and wander (never
+periodic, faded out through turns and junctions), joining it from where the car is. The plan is checked against the
+lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another lane,
 plan_check=fix (the default) changes into it by the target's end, event only logs it, abort ends the trip; each is a
 plan_slot_mismatch anomaly.
 
-Each game frame: pure pursuit (lookahead clamp(5, 0.6 v + 3, 25) m) from the pose `latency` (0.1) s on, plus the path's
-curvature `ff_preview` (0.38) s ahead as feedforward (the pursuit's own curve-cutting taken out), rate limited to 3x the style's lateral jerk and
-capped at 4.5 m/s^2; the speed follows a static profile (limit or road class x style, the path's curvature at the
-style's lateral acceleration and lateral jerk, nav's turn speeds) with stop signs (full stop and dwell), give way lines (slow, then on),
-traffic lights (no state to read: driven through and marked light_unknown +-5 s) and a gentle arrival stop_before m
-short of the end. Aborts (dev > 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s,
-lateral acceleration over 4.5, the driver's input, a failed plan) brake to a stop and end the trip (on_abort=ai hands it
-to the game's AI). Map anomalies (kerb_contact, lane_disagree, tracking_saturated, gta_link_offset, stop_line_far,
-plan_slot_mismatch, sharp_corner) are logged with their place, for the map-fix work.
+Each game frame: pure pursuit (lookahead clamp(5, 0.6 v + 3, 25) m) from the rear axle (the game's position is the
+car's middle, which moves inwards of its heading in a bend), predicted `latency` (0.1) s on, plus the path's curvature
+`ff_preview` (0.32) s ahead as feedforward (the pursuit's own curve-cutting taken out), rate limited to 3x the style's
+lateral jerk and capped at 4.5 m/s^2; the speed follows a static profile (limit or road class x style, the path's
+curvature at the style's lateral acceleration and lateral jerk, nav's turn speeds) with stop signs (full stop and
+dwell), give way lines (slow, then on), traffic lights (no state to read: driven through and marked light_unknown +-5 s)
+and a gentle arrival stop_before m short of the end. Aborts (dev > 1.5 m for 1 s, heading off by 30 deg, a collision,
+off the road, no progress for 20 s, lateral acceleration over 4.5, the driver's input, a failed plan) brake to a stop and
+end the trip (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place, for the map-fix work:
+kerb_contact (past a road's kerbs, or into a near-side turn's corner kerb, from its legs' cross-sections), gta_edge (the
+plan's lane near GTA's road edge where the map's road is wider), lane_disagree, tracking_saturated, gta_link_offset,
+stop_line_far, plan_slot_mismatch, sharp_corner.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
-0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.38}; bias_max
-0 and wander 0 drive exactly on the line."""
+0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
+"rear_axle": null}; bias_max 0 and wander 0 drive exactly on the line; rear_axle (m behind the car's position, default
+half the state's wheelBase) 0 steers from the car's middle."""
 import bisect
 import hashlib
 import math
@@ -46,13 +52,16 @@ SOURCES = ("none", "ai", "map", "ai_fallback")  # gta5.npz expert_src codes
 STEP = 1.0  # m between the path's points
 LANE_W = 5.5  # m, GTA's lanes
 FRONT = 2.4  # m from the car's origin to its front bumper
+WHEEL_BASE = 2.8  # m, where the plugin's state has none: the rear axle half of it behind the car's origin
 HALF_WIDTH = 1.0  # m
 LATENCY = 0.1  # s from the game's frame to the plugin acting on the control (the pose is predicted this far)
-FF_PREVIEW = 0.38  # s ahead the path's curvature is fed forward: the car's curvature lag (0.2-0.3 s) and the delay
+FF_PREVIEW = 0.32  # s ahead the path's curvature is fed forward: the car's curvature lag (about 0.2 s in game) and the delay
 LOOKAHEAD = (5.0, 0.6, 3.0, 25.0)  # m: min, s of speed, plus, max
 KAPPA_MAX = 0.2  # 1/m
 A_LAT_MAX = 4.5  # m/s^2 commanded at most, and an abort measured above it
 CURV_SMOOTH = 7.0  # m: the path's curvature averaged over this
+FADE_NEAR, FADE_OVER = 15.0, 25.0  # m: in-lane bias and wander gone this near a turn or junction node, back over this
+SOFT_IN, SOFT_OUT = 0.5, 1.5  # m an eased corner may come inside the line drawn, and swing outside it before and after
 JERK_SHARE = 2.0  # x the style's lateral jerk the speed profile allows where the path's curvature changes
 RATE_SHARE = 3.0  # x it the commanded curvature may change at: a safety limit above the profile's
 COMPUTE_EVERY = 0.1  # s: a new frame is computed at once, else at least this often; between, the last control is resent
@@ -66,7 +75,12 @@ GIVE_WAY_SPEED = 3.0  # m/s at the line
 LIGHT_MARK = 5.0  # s either side of a light passed without its state
 SIGNAL_TIME, SIGNAL_DIST = 5.0, 50.0  # s, m before a turn (as the AI expert)
 TURN_DONE_HEADING, TURN_DONE_AFTER, TURN_PAST, KEEP_PAST = 20.0, 5.0, 40.0, 30.0
-MIN_LC_M = 30.0  # m a lane change takes at the least
+MIN_LC_M = 20.0  # m a lane change takes at the least
+LC_A_LAT = 0.6  # x the style's lateral acceleration, a lane change's peak at most
+LC_MAX_S = 9.0  # s a change takes at the most
+LC_SHORTEST = 12.0  # m a change re-timed to its time takes at the least, a lane (pulling away, slowly)
+LC_FIT = 0.15  # a change timed more than this share off its time (by the speed it'll be driven at) is re-placed
+LC_MIN_SHARE = 0.6  # of its time a change squeezed by what's before it keeps at least, else it's left as it was
 JOIN_MAX = 8.0  # m from its lane line the car may start
 BEND_DEG = 20.0  # deg a route point turns that makes its road beside it unclear
 KAPPA_DRIVABLE = 0.1  # 1/m: a tighter bend in the lane line (a jog, a corner without a fillet) is eased out
@@ -83,6 +97,15 @@ OFF_ROAD_DEV = 0.75  # m off the path as well, for an off-road abort
 USER_STEER = 0.02
 # anomalies
 KERB_MARGIN = 0.2  # m the car's side may come past the kerb before it counts
+CORNER_LEG = 25.0  # m before and after a turn's point its legs' kerbs are taken, outside the junction
+CORNER_ANGLE = (55.0, 125.0)  # deg a turn checked against its corner kerb turns
+CORNER_NODE = 20.0  # m from the turn's point to a junction node, for a junction's corner
+CORNER_NEAR = 20.0  # m from the turn's point the kerb lines' corner may be
+CORNER_INSIDE = 1.0  # m the plan keeps inside each leg's kerb line, or the line isn't the kerb
+CORNER_SPAN = 40.0  # m either side of a turn's point checked against its corner kerb
+KERB_RADIUS = 6.0  # m: a junction's corner kerbs taken as rounded this much (the map has no corner geometry)
+EDGE_WIDER = 0.75  # m the map's road edge may lie past GTA's before a lane near GTA's edge is suspect
+EDGE_CLEAR = 0.8  # m from the car's side to GTA's road edge (its link's lanes) below which the plan is too near it
 JUNCTION_CLEAR = 25.0  # m from a junction node, where cross-sections don't describe the road, kerbs aren't checked
 LANE_DISAGREE_S = 2.0
 SATURATED_S = 0.5
@@ -105,7 +128,8 @@ STYLE_RANGES = {
 PRESETS = {"calm": 0.2, "normal": 0.5, "brisk": 0.8}
 DEFAULTS = {"seed": None, "preset": "normal", "style": {}, "bias_max": 0.3, "wander": 0.1, "wander_m": 300.0,
             "on_abort": "stop", "speed": None, "plan_check": "fix", "stop_before": 15.0, "hold_after": 3.0, "retime": True,
-            "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW}
+            "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW, "fit_durations": True,
+            "rear_axle": None}
 
 
 def pick_style(seed: int, preset: str = "normal", over: dict | None = None) -> dict:
@@ -167,14 +191,26 @@ def _ramp(keys, j: int) -> bool:
 
 def chains(keys: list[tuple[float, float]]) -> list[tuple[int, int]]:
   """Each lane change in the keys: (first key, last key), a run of ramps with any renumbering steps (two keys at one
-  place, where the road's lanes change) inside it."""
+  place, where the road's lanes change) inside it. Two ramps meeting in a lane's centre where it doesn't renumber
+  (keys alike), or turning back the other way, are two changes, one after the other."""
   out, i, n = [], 0, len(keys)
   while i < n - 1:
     if not _ramp(keys, i):
-      i += 1
-      continue
+      # a change can begin with a jump in its numbering where it starts (nav's ramp across a lane map at its start)
+      if not (i + 2 < n and keys[i + 1][0] - keys[i][0] <= EPS and abs(keys[i + 1][1] - round(keys[i + 1][1])) > 0.05 and
+              _ramp(keys, i + 1) and (keys[i + 2][1] - keys[i + 1][1]) * (keys[i + 1][1] - keys[i][1]) > 0):
+        i += 1
+        continue
     j = i
-    while j < n - 1 and (_ramp(keys, j) or (keys[j + 1][0] - keys[j][0] <= EPS and j + 1 < n - 1 and _ramp(keys, j + 1))):
+    way = keys[i + 1][1] - keys[i][1]
+
+    def same_way(m: int) -> bool:
+      return (keys[m + 1][1] - keys[m][1]) * way > 0
+    def joined(m: int) -> bool:  # keys m and m + 1 at one place, inside a change: renumbered, or not at a lane's centre
+      return keys[m + 1][0] - keys[m][0] <= EPS and (abs(keys[m + 1][1] - keys[m][1]) > EPS or
+                                                     abs(keys[m][1] - round(keys[m][1])) > 0.05)
+    while j < n - 1 and ((_ramp(keys, j) and same_way(j)) or
+                         (joined(j) and j + 1 < n - 1 and _ramp(keys, j + 1) and same_way(j + 1))):
       j += 1
     out.append((i, j))
     i = j
@@ -213,10 +249,11 @@ def shaped(keys: list[tuple[float, float]], step: float = 2.0) -> list[tuple[flo
 
 
 def lc_seconds(style: dict, lanes: float) -> float:
-  """s a change across `lanes` lanes takes: the style's, and no quicker than its lateral jerk allows (a quintic's peak
-  jerk is 60 D / T^3)."""
-  d = LANE_W * max(abs(lanes), 1.0)
-  return float(min(max(style["t_lc"] * math.sqrt(max(abs(lanes), 1.0)), (60.0 * d / style["j_lat"]) ** (1 / 3)), 9.0))
+  """s a change across `lanes` lanes takes: the style's (more lanes by their square root), and no quicker than a peak
+  lateral acceleration of LC_A_LAT x the style's allows (a quintic's peak is 5.77 D / T^2)."""
+  n = max(abs(lanes), 1.0)
+  a = LC_A_LAT * style["a_lat"]
+  return float(min(max(style["t_lc"] * math.sqrt(n), math.sqrt(5.77 * LANE_W * n / a)), LC_MAX_S))
 
 
 # *** the path ***
@@ -281,7 +318,8 @@ def soften(p: np.ndarray, kmax: float, iters: int = 400) -> tuple[np.ndarray, li
   for a, b in zip(e[::2], e[1::2], strict=True):
     # each bend in a window around it, the window's ends held
     lo, hi = max(int(a) - 60, 0), min(int(b) + 60, len(p))
-    w = p[lo:hi]
+    w = p[lo:hi].copy()
+    orig = w.copy()
     for _ in range(iters):
       _, bw = bends(w)
       bw[:3] = bw[-3:] = False
@@ -292,6 +330,19 @@ def soften(p: np.ndarray, kmax: float, iters: int = 400) -> tuple[np.ndarray, li
       mid = w.copy()
       mid[1:-1] = 0.5 * (w[:-2] + w[2:])
       w[m] += 0.5 * (mid[m] - w[m])
+    # easing a corner cuts inside it, towards the kerb's corner: no more than SOFT_IN, the curve moved out instead
+    # (up to SOFT_OUT, eased in and out over the window), as a driver swings wide for a corner too tight to take
+    peak = float(k[a:b][np.argmax(np.abs(k[a:b]))])
+    th = headings(orig)
+    inward = np.sign(peak) * np.stack([-np.sin(th), np.cos(th)], axis=1)  # towards the corner's centre
+    cut = np.einsum("ij,ij->i", w - orig, inward)
+    excess = min(float(cut.max()) - SOFT_IN, SOFT_OUT)
+    if excess > 0:
+      n = len(w)
+      x = np.arange(n) / max(n - 1, 1)
+      centre = (int((a + b) // 2) - lo) / max(n - 1, 1)
+      u = np.clip(np.where(x < centre, x / max(centre, 1e-6), (1 - x) / max(1 - centre, 1e-6)) * 1.6, 0.0, 1.0)
+      w -= inward * (excess * u * u * (3 - 2 * u))[:, None]
     p[lo:hi] = w
   return p, spots
 
@@ -410,6 +461,7 @@ class MapDriver:
     self._last_anomaly: dict[str, float] = {}
     self.path = None
     self.join_m = 0.0  # m of path from the car into its lane line, where the road's own checks wait
+    self.corners: list[dict] = []
     self.unclear = np.zeros(0)
 
   # *** what expert mode and recordings read ***
@@ -478,7 +530,11 @@ class MapDriver:
                      maps=route.lane_maps(route.length), turns=route.turns(route.length),
                      classes=route.changes(route.classes, route.length), limits=route.changes(route.limit_list, route.length),
                      fwy=FwyState(), crossings=[a - route.at for a in route.stops + route.junctions if a > route.at])
-    return [(route.at + d, float(lane)) for d, lane in keys]
+    out, last = [], -math.inf
+    for d, lane in keys:  # in order along: nav's can step back a few cm
+      last = max(last, route.at + d)
+      out.append((last, float(lane)))
+    return out
 
   def retime(self, route, keys: list[tuple[float, float]], slots) -> list[tuple[float, float]]:
     """Each single lane change over the style's time at the road's speed, its end placed by the style within its
@@ -492,7 +548,10 @@ class MapDriver:
       (s0, la), (s1, lb) = keys[a], keys[b]
       v = self._speed_at(route, s0)
       length = max(lc_seconds(self.style, lb - la) * v, MIN_LC_M * max(abs(lb - la), 1.0))
-      lower = keys[a - 1][0] if a > 0 else s0
+      j = a - 1  # back over holds in its lane to the change, step or start before it
+      while j > 0 and abs(keys[j - 1][1] - keys[j][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
+        j -= 1
+      lower = keys[j][0] if a > 0 else s0
       upper = keys[b + 1][0] if b + 1 < len(keys) else s1
       window = None
       if slots is not None:
@@ -525,6 +584,8 @@ class MapDriver:
               start, e = c - CROSSING_CLEAR - length, c - CROSSING_CLEAR
         if any(start - CROSSING_CLEAR < c < e for c in crossings) and not any(s0 - CROSSING_CLEAR < c < s1 for c in crossings):
           continue  # only nav's timing was clear of them
+      if not (lower - EPS <= start < e <= upper + EPS):
+        continue
       keys[a], keys[b] = (float(start), la), (float(e), lb)
     return keys
 
@@ -606,13 +667,20 @@ class MapDriver:
           i += 2
           continue
         i += 1  # a point of the plan's own change or hold: the lane stays
-      at_move = [k for k in keys if abs(k[0] - move) < EPS]
+      # past the move, the plan on from the lane it's now in: its own changes towards that lane already made (the gap
+      # taken up by them), renumbering steps carried
       rest = [k for k in keys if k[0] >= move - EPS]
-      if at_move:
-        rest[0] = (rest[0][0], lane)
-      else:
-        out.append((move, lane))
-      keys = out + rest
+      pv = lane_at(keys, move - 0.01)
+      gap = lane - pv
+      out.append((move, lane))
+      for n, (s, val) in enumerate(rest):
+        step = n > 0 and s - rest[n - 1][0] <= EPS and abs(val - rest[n - 1][1]) > EPS
+        dv = val - pv
+        if not step and abs(gap) > EPS and dv * gap > 0:
+          gap -= math.copysign(min(abs(dv), abs(gap)), gap)
+        out.append((s, val + gap))
+        pv = val
+      keys = out
     return keys
 
   def _make_plan(self, route, state: dict, t: float) -> bool:
@@ -640,9 +708,11 @@ class MapDriver:
     keys = self.retime(route, nav, slots) if self.c["retime"] else nav
     check = self.slot_check(route, keys, slots)
     fixed = []
-    if check["mismatches"] and self.c["plan_check"] == "fix":
-      fixed = check["mismatches"]
-      keys = self.follow_slots(route, keys, fixed, slots)
+    for _ in range(4 if self.c["plan_check"] == "fix" else 0):  # a fix can leave the next move wanting another lane
+      if not check["mismatches"]:
+        break
+      fixed += check["mismatches"]
+      keys = self.follow_slots(route, keys, check["mismatches"], slots)
       check = {**self.slot_check(route, keys, slots), "fixed": fixed}
     for bad in fixed:
       self._anomaly("plan_slot_mismatch", t, route_point(route, bad["s"]), bad["s"], fixed=True, **bad)
@@ -651,36 +721,17 @@ class MapDriver:
     if check["mismatches"] and self.c["plan_check"] == "abort":
       self._abort(f"plan: lane {check['mismatches'][0]['plan']} where the slots want {check['mismatches'][0]['want']}", t, state.get("pos"))
       return False
-    dense = shaped(keys)
     at0 = route.at
-    line = lanes.lane_line(at0, [(s - at0, lane_) for s, lane_ in dense if s >= at0 - 1e-6] or [(0.0, float(lane[0]))])
-    if line is None or len(line) < 3:
-      self._abort("plan: no lane line", t, state.get("pos"))
+    built = self._build(route, keys, lane, state, t)
+    if built is None:
       return False
-    intent, s_path = resample(np.asarray(line, float))
-    if len(intent) < 3:
-      self._abort("plan: lane line too short", t, state.get("pos"))
-      return False
-    sharp: list = []
-    for n in range(4):  # a near reversal can take more than one pass
-      intent, found = soften(intent, KAPPA_DRIVABLE)
-      intent, s_path = resample(intent)
-      sharp = found if n == 0 else sharp
-      if not found:
-        break
-    bias = self.style["bias"] * float(self.c["bias_max"])
-    off, knots = wander(s_path, self.rng, float(self.c["wander"]), float(self.c["wander_m"]) / 2)
-    off = np.clip(bias + off, -0.45, 0.45) * np.clip(s_path / 20.0, 0.0, 1.0)
-    # from where the car is, across to the line as a lane change would (setup places it in a lane, a reroute may not)
-    e0 = self._offset_from(intent, np.asarray(state["pos"][:2], float))
-    if abs(e0) > JOIN_MAX:
-      self._abort(f"plan: the car is {e0:+.1f} m from its lane line", t, state.get("pos"))
-      return False
-    v0 = max(float(state.get("vEgo") or 0.0), 5.0)
-    join = max(MIN_LC_M, lc_seconds(self.style, e0 / LANE_W) * v0) if abs(e0) > 0.5 else 15.0
-    off = off + e0 * (1.0 - quintic(s_path / join))
-    self.join_m = max(join, 30.0)
-    self._derive(route, intent, off, t, start=(np.asarray(state["pos"][:2], float), float(state.get("heading") or 0.0), v0))
+    fitted = self.fit_durations(route, keys, float(state.get("vEgo") or 0.0)) if self.c["fit_durations"] else keys
+    if fitted != keys:
+      keys = fitted
+      built = self._build(route, keys, lane, state, t)
+      if built is None:
+        return False
+    intent, sharp, knots, bias = built
     for i, k in sharp:
       self._anomaly("sharp_corner", t, intent[min(i, len(intent) - 1)], i * STEP, kappa=round(k, 3))
     self.keys, self.nav_plan = keys, nav
@@ -692,6 +743,162 @@ class MapDriver:
     self.changes = self._changes(keys)  # each lane change on the path: (path m from, to, side, m across)
     self._plan_anomalies(route, t)
     return True
+
+  def _build(self, route, keys: list[tuple[float, float]], lane, state: dict, t: float):
+    """The path for keys from the car (_derive's): (intent, sharp bends eased, wander knots, bias), None (an abort)
+    where there's no line."""
+    lanes = route.lanes
+    dense = shaped(keys)
+    at0 = route.at
+    line = lanes.lane_line(at0, [(s - at0, lane_) for s, lane_ in dense if s >= at0 - 1e-6] or [(0.0, float(lane[0]))])
+    if line is None or len(line) < 3:
+      self._abort("plan: no lane line", t, state.get("pos"))
+      return None
+    intent, s_path = resample(np.asarray(line, float))
+    if len(intent) < 3:
+      self._abort("plan: lane line too short", t, state.get("pos"))
+      return None
+    sharp: list = []
+    for n in range(4):  # a near reversal can take more than one pass
+      intent, found = soften(intent, KAPPA_DRIVABLE)
+      intent, s_path = resample(intent)
+      sharp = found if n == 0 else sharp
+      if not found:
+        break
+    bias = self.style["bias"] * float(self.c["bias_max"])
+    off, knots = wander(s_path, random.Random(self.seed + 1), float(self.c["wander"]), float(self.c["wander_m"]) / 2)
+    off = np.clip(bias + off, -0.45, 0.45) * np.clip(s_path / 20.0, 0.0, 1.0) * self._fade(route, intent)
+    # from where the car is, across to the line as a lane change would (setup places it in a lane, a reroute may not)
+    e0 = self._offset_from(intent, np.asarray(state["pos"][:2], float))
+    if abs(e0) > JOIN_MAX:
+      self._abort(f"plan: the car is {e0:+.1f} m from its lane line", t, state.get("pos"))
+      return None
+    v0 = max(float(state.get("vEgo") or 0.0), 5.0)
+    join = max(MIN_LC_M, lc_seconds(self.style, e0 / LANE_W) * v0) if abs(e0) > 0.5 else 15.0
+    off = off + e0 * (1.0 - quintic(s_path / join))
+    self.join_m = max(join, 30.0)
+    self._derive(route, intent, off, t, start=(np.asarray(state["pos"][:2], float), float(state.get("heading") or 0.0), v0))
+    return intent, sharp, knots, bias
+
+  def _fade(self, route, intent: np.ndarray) -> np.ndarray:
+    """1 along the line, easing to 0 within FADE_NEAR m of the route's turns, junction nodes and sharp bends, where the
+    car keeps to the line itself."""
+    along, _ = along_route(route, intent, route.at - 5.0)
+    d = np.diff(route.points[:, :2], axis=0)
+    h = np.arctan2(d[:, 1], d[:, 0])
+    bend = np.degrees(np.abs((np.diff(h) + np.pi) % (2 * np.pi) - np.pi))
+    spots = np.concatenate((np.asarray(route.junctions, float), route.along[1:-1][bend > BEND_DEG],
+                            [route.at + tr[0] for tr in route.turns(route.length)]))
+    if not len(spots):
+      return np.ones(len(intent))
+    spots = np.sort(spots)
+    i = np.clip(np.searchsorted(spots, along), 1, len(spots) - 1) if len(spots) > 1 else np.zeros(len(along), int)
+    near = np.minimum(np.abs(spots[i] - along), np.abs(spots[np.maximum(i - 1, 0)] - along))
+    u = np.clip((near - FADE_NEAR) / FADE_OVER, 0.0, 1.0)
+    return u * u * (3 - 2 * u)
+
+  def drive_speeds(self, v0: float) -> np.ndarray:
+    """The speed the car will drive the path at (m/s, at least 1): the static profile, stopping at stop signs, and
+    no quicker up to it than the style's acceleration from v0 (as from a standstill, or after a stop)."""
+    v = self.v_static.copy()
+    sp = self.s_path
+    b, a = self.style["decel"] * 0.8, self.style["accel"] * 0.8
+    for st in self.stops:
+      if st["kind"] == "stop":
+        i = int(np.clip(np.searchsorted(sp, st["target"]), 0, len(v) - 1))
+        v[i] = 0.0
+        for j in range(i - 1, -1, -1):
+          lim = math.sqrt(v[j + 1] ** 2 + 2 * b * (sp[j + 1] - sp[j]))
+          if lim >= v[j]:
+            break
+          v[j] = lim
+    v[0] = min(v[0], max(v0, 0.0))
+    for j in range(len(v) - 1):
+      v[j + 1] = min(v[j + 1], math.sqrt(v[j] ** 2 + 2 * a * (sp[j + 1] - sp[j])))
+    return np.maximum(v, 1.0)
+
+  def fit_durations(self, route, keys: list[tuple[float, float]], v0: float) -> list[tuple[float, float]]:
+    """The keys with each lane change re-placed to take its time (lc_seconds) at the speed the car will drive it
+    (drive_speeds of the path just built), its end kept: started later where it'd be slow, earlier where quick, never
+    before the key before it; city ones not across a stop line or junction node it didn't cross already. Where that
+    leaves it short and it's the move into the plan's lanes from the car's (at the plan's start), it ends later
+    instead, up to the key after. Renumbering steps inside a change stay at their places."""
+    original, keys = keys, list(keys)
+    v = self.drive_speeds(v0)
+    sp = self.s_path
+    tcum = np.concatenate(([0.0], np.cumsum(np.diff(sp) / np.maximum(0.5 * (v[1:] + v[:-1]), 1.0))))
+    crossings = sorted(route.stops + route.junctions)
+
+    def path_s(along):
+      return float(np.interp(along, self.route_s, sp))
+
+    def along_of(ps):
+      return float(np.interp(ps, sp, self.route_s))
+
+    def secs(s_a, s_b):
+      return float(np.interp(path_s(s_b), sp, tcum) - np.interp(path_s(s_a), sp, tcum))
+
+    def at_time(s_from, dt):
+      return along_of(float(np.interp(np.interp(path_s(s_from), sp, tcum) + dt, tcum, sp)))
+
+    for a, b in reversed(chains(keys)):  # from the last, so earlier indices hold as keys come and go
+      (s0, la), (s1, _) = keys[a], keys[b]
+      lanes = abs(self._chain_lanes(keys, a, b))
+      want = lc_seconds(self.style, lanes)
+      if abs(secs(s0, s1) - want) <= LC_FIT * want:
+        continue
+      j = a - 1  # back over holds in its lane to the change, step or start before it
+      while j > 0 and abs(keys[j - 1][1] - keys[j][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
+        j -= 1
+      lower = keys[j][0] if a > 0 else s0
+      upper = keys[b + 1][0] if b + 1 < len(keys) and abs(keys[b + 1][1] - keys[b][1]) < EPS else s1
+      shortest = LC_SHORTEST * max(lanes, 1.0)
+      s_new = min(max(at_time(s1, -want), lower), along_of(path_s(s1) - shortest))
+      k = segment_of(route, s0)
+      fwy = (route.classes[k] if k < len(route.classes) else "") in FREEWAY
+      if not fwy and any(s_new - CROSSING_CLEAR < c < s1 for c in crossings) and not any(s0 - CROSSING_CLEAR < c < s1 for c in crossings):
+        s_new = max(c for c in crossings if s_new - CROSSING_CLEAR < c < s1) + CROSSING_CLEAR
+      e_new = s1
+      if secs(s_new, s1) < (1 - LC_FIT) * want and s0 <= keys[0][0] + 1.0:
+        e_new = max(s1, min(at_time(s_new, want), upper - 1.0))
+      if abs(secs(s_new, e_new) - want) >= abs(secs(s0, s1) - want) or e_new - s_new < shortest - 1e-6:
+        continue  # no better than it was
+      first = a
+      while first > 0 and keys[first - 1][0] > s_new + EPS:  # holds it now starts before
+        first -= 1
+      after = b + 1
+      while after < len(keys) and keys[after][0] < e_new - EPS:  # holds it now ends after
+        after += 1
+      keys[first:after] = self._replace_chain(keys, a, b, s_new, e_new)
+    if any(k2[0] < k1[0] - EPS for k1, k2 in zip(keys, keys[1:], strict=False)):
+      return original  # a re-placing gone wrong: as it was
+    return keys
+
+  @staticmethod
+  def _chain_lanes(keys, a: int, b: int) -> float:
+    """Lanes a change crosses: its ramps' changes, without its renumbering steps."""
+    return sum(keys[j + 1][1] - keys[j][1] for j in range(a, b) if keys[j + 1][0] - keys[j][0] > EPS)
+
+  @staticmethod
+  def _replace_chain(keys, a: int, b: int, s0: float, s1: float) -> list[tuple[float, float]]:
+    """A change's keys (a to b) moved to run from s0 to s1, linearly across (shaped() makes it a quintic): its lanes
+    moved, in the end's numbering, at the new share for each place, and its renumbering steps (two keys at one place)
+    where they were, each lane before one in the numbering before it."""
+    steps = [(keys[j][0], keys[j + 1][1] - keys[j][1]) for j in range(a, b)
+             if keys[j + 1][0] - keys[j][0] <= EPS and abs(keys[j + 1][1] - keys[j][1]) > EPS]
+    moved = sum(keys[j + 1][1] - keys[j][1] for j in range(a, b) if keys[j + 1][0] - keys[j][0] > EPS)
+    end = keys[b][1]
+
+    def lane(s: float, before: bool = False) -> float:
+      """In the numbering at s (before a step there, with `before`)."""
+      f = min(max((s - s0) / max(s1 - s0, EPS), 0.0), 1.0)
+      later = sum(jump for pos, jump in steps if pos > s + EPS or (before and abs(pos - s) <= EPS))
+      return end - moved * (1.0 - f) - later
+    out = [(s0, lane(s0, before=True))]
+    for pos, _ in steps:
+      out += [(pos, lane(pos, before=True)), (pos, lane(pos))]
+    out.append((s1, lane(s1)))
+    return sorted(out, key=lambda k: k[0])
 
   def _unclear(self, along: float) -> bool:
     """Whether a place (m along the route) is near a junction node or a sharp bend of the route's line."""
@@ -771,6 +978,7 @@ class MapDriver:
         v[i], why[i] = lim_b, why[i + 1]
     self.v_static, self.why_static = v, why
     self.mans = maneuvers(route)
+    self.corners = self._corners(route)
     self.done_mans: set[int] = set()
 
   def _changes(self, keys):
@@ -813,6 +1021,14 @@ class MapDriver:
         if link.lanes != sec.lanes or link.back != back:
           found.setdefault(("gta_link_offset", "lane counts"), []).append((i, {"map": [sec.lanes, back], "gta": [link.lanes, link.back]}))
           continue
+        gta_lo, gta_hi = link.inner - link.back * link.width, link.inner + link.lanes * link.width
+        room = min(rr - gta_lo, gta_hi - rr) - HALF_WIDTH
+        # the map's road wider than GTA's on the near side (its lane placed out towards GTA's barrier or kerb)
+        wider = (lo < gta_lo - EDGE_WIDER) if rr - gta_lo < gta_hi - rr else (hi > gta_hi + EDGE_WIDER)
+        if room < EDGE_CLEAR and wider:
+          found.setdefault(("gta_edge", ""), []).append((i, {"room": round(float(room), 2), "right": round(float(rr), 2),
+                                                            "gta_edges": [round(gta_lo, 2), round(gta_hi, 2)],
+                                                            "map_edges": [round(float(lo), 2), round(float(hi), 2)]}))
         gta = link.inner + (round(lane) + 0.5) * link.width
         mine = float(sec.offset(round(lane)))
         if abs(gta - mine) > GTA_OFFSET:
@@ -829,12 +1045,104 @@ class MapDriver:
         extra = {"why": why} if why else {}
         self._anomaly(kind, t, self.path[i], float(self.s_path[i]), planned=True, length=round(float(self.s_path[run[-1][0]] - self.s_path[run[0][0]]) + every, 1),
                       **extra, **detail)
+    for c in self.corners:  # the plan cutting a junction's corner kerb
+      hits = [i for i in range(len(self.path)) if abs(self.route_s[i] - c["along"]) < CORNER_SPAN and
+              (self._corner_hit(c, self.path[i], float(self.theta[i])) or 0.0) > KERB_MARGIN]
+      if hits:
+        i = hits[len(hits) // 2]
+        self._anomaly("kerb_contact", t, self.path[i], float(self.s_path[i]), planned=True, corner=c["side"],
+                      depth=round(max(self._corner_hit(c, self.path[j], float(self.theta[j])) for j in hits), 2),
+                      corner_at=[round(float(v), 1) for v in c["corner"]])
     for st in self.stops:
       after = junctions[junctions > st["along"] - 1.0] if len(junctions) else junctions
       gap = float(after[0] - st["along"]) if len(after) else math.inf
       if gap > STOP_LINE_FAR:
         self._anomaly("stop_line_far", t, route_point(route, st["along"]), st["s"], kind_line=st["kind"],
                       to_junction=None if math.isinf(gap) else round(gap, 1))
+
+  def _corners(self, route) -> list[dict]:
+    """Each near-side turn's corner kerb (right turns where traffic drives on the right): the kerb lines of the road in
+    and the road out (the map's cross-sections CORNER_LEG m from the turn's point, outside the junction, carried on
+    straight), meeting at the corner. Only where that's a junction's corner the plan clears: a turn of CORNER_ANGLE at a
+    junction node, the corner near the turn's point, and the plan inside both kerb lines on the legs. A far-side turn's
+    corner lies across the oncoming lanes, whose kerbs the legs' cross-sections don't place reliably at junctions."""
+    out = []
+    lanes = route.lanes
+    near_side = "right" if self.c["drive_on_right"] else "left"
+    junctions = np.asarray(route.junctions, float)
+    route.turns(0.0)
+    for tr in getattr(route, "_turns", None) or []:
+      a, b = tr.dist - CORNER_LEG, tr.dist + CORNER_LEG
+      if tr.side != near_side or not CORNER_ANGLE[0] <= abs(tr.angle) <= CORNER_ANGLE[1] or a < 10.0 or b > route.length - 10.0:
+        continue
+      if not len(junctions) or np.abs(junctions - tr.dist).min() > CORNER_NODE:
+        continue
+      sa, sb = lanes.section_at(a), lanes.section_at(b)
+      if sa is None or sb is None or not sa.lanes or not sb.lanes:
+        continue
+      pa, pb = route_point(route, a), route_point(route, b)
+      da, db = pa - route_point(route, a - 10.0), route_point(route, b + 10.0) - pb
+      da, db = da / max(np.hypot(*da), 1e-6), db / max(np.hypot(*db), 1e-6)
+      right = tr.side == "right"
+      # outward of the road, into the corner block
+      na = np.array([da[1], -da[0]]) * (1 if right else -1)
+      nb = np.array([db[1], -db[0]]) * (1 if right else -1)
+      ka = pa + np.array([da[1], -da[0]]) * (sa.edges[1] if right else sa.edges[0])
+      kb = pb + np.array([db[1], -db[0]]) * (sb.edges[1] if right else sb.edges[0])
+      m = np.array([da, -db]).T
+      if abs(np.linalg.det(m)) < 0.2:
+        continue  # the legs near parallel: no corner to speak of
+      u = np.linalg.solve(m, kb - ka)
+      corner = ka + da * u[0]
+      if np.hypot(*(corner - route_point(route, tr.dist))) > CORNER_NEAR:
+        continue
+      if self._road_in_block(route, a, b, ka, na, kb, nb, right):
+        continue  # the map's own kerb runs inside the block: a bend, a slip or a wide corner, not a square one
+      ia, ib = (int(np.argmin(np.abs(self.route_s - x))) for x in (a, b))
+      if (self.path[ia] - ka) @ na > -CORNER_INSIDE or (self.path[ib] - kb) @ nb > -CORNER_INSIDE:
+        continue  # the plan outside a leg's kerb line: the line isn't the kerb
+      out.append({"along": float(tr.dist), "side": tr.side, "ka": ka, "na": na, "kb": kb, "nb": nb, "corner": corner})
+    return out
+
+  @staticmethod
+  def _road_in_block(route, a: float, b: float, ka, na, kb, nb, right: bool) -> bool:
+    """Whether the map's near-side kerb between a and b m along (the route's cross-sections there, every 2 m) reaches
+    more than 1 m into the corner block the two kerb lines make."""
+    lanes = route.lanes
+    for s_ in np.arange(a, b, 2.0):
+      k = segment_of(route, float(s_))
+      sec = lanes.section_at(float(s_), k)
+      if sec is None or not sec.lanes:
+        continue
+      p0, p1 = route.points[k], route.points[k + 1]
+      d = (p1 - p0) / max(float(np.hypot(*(p1 - p0))), 1e-6)
+      e = route_point(route, float(s_)) + np.array([d[1], -d[0]]) * (sec.edges[1] if right else sec.edges[0])
+      if min(float((e - ka) @ na), float((e - kb) @ nb)) > 1.0:
+        return True
+    return False
+
+  @staticmethod
+  def _corner_hit(c: dict, pos, theta: float) -> float | None:
+    """How deep (m) the car (its middle at pos, heading theta radians from east) reaches into a corner's kerb block,
+    the block's corner rounded KERB_RADIUS; None where it doesn't."""
+    f = np.array([math.cos(theta), math.sin(theta)])
+    lat = np.array([-f[1], f[0]])
+    r = KERB_RADIUS
+    deepest = None
+    for fx in (FRONT, -FRONT):
+      for lx in (HALF_WIDTH, -HALF_WIDTH):
+        q = np.asarray(pos, float) + f * fx + lat * lx
+        d1, d2 = float((q - c["ka"]) @ c["na"]), float((q - c["kb"]) @ c["nb"])
+        if d1 <= 0 or d2 <= 0:
+          continue
+        if d1 < r and d2 < r:
+          depth = r - math.hypot(r - d1, r - d2)  # into the rounded corner
+          if depth <= 0:
+            continue
+        else:
+          depth = min(d1, d2)
+        deepest = depth if deepest is None else max(deepest, depth)
+    return deepest
 
   def _splice(self, route, state: dict, t: float):
     """A new route under way: the old path kept past the lane change under way and 3 s on, then the new plan's."""
@@ -1055,6 +1363,12 @@ class MapDriver:
     pos = np.asarray(state["pos"][:2], float)
     h = float(state.get("heading") or 0.0)
     yaw = float(state.get("yawRate") or 0.0)
+    # steered from the rear axle, which moves along the car's heading: the game's position is the car's middle, which in
+    # a bend moves inwards of its heading (b x curvature), and steering from it cuts every corner by about b x
+    # curvature x lookahead (0.7 m in a square turn)
+    back = float(self.c["rear_axle"]) if self.c.get("rear_axle") is not None else float(state.get("wheelBase") or WHEEL_BASE) / 2
+    hr = math.radians(h)
+    pos = pos - back * np.array([-math.sin(hr), math.cos(hr)])
     # the pose when the control acts
     lat = float(self.c["latency"])
     hm = math.radians(h + math.degrees(yaw * lat) / 2)
@@ -1117,6 +1431,12 @@ class MapDriver:
   def _watch(self, route, state: dict, v: float, t: float):
     """Live map anomalies: the car's side over the kerb, the map's lane matching disagreeing with the plan."""
     pos = state["pos"]
+    for c in self.corners:
+      if abs(route.at - c["along"]) < CORNER_SPAN:
+        depth = self._corner_hit(c, pos[:2], math.radians(float(state.get("heading") or 0.0) + 90.0))
+        if depth is not None and depth > KERB_MARGIN:
+          self._anomaly("kerb_contact", t, pos, self.s, planned=False, corner=c["side"], depth=round(depth, 2),
+                        corner_at=[round(float(v), 1) for v in c["corner"]])
     near_j = self._unclear(route.at)
     if route.off < 30.0 and not route.elsewhere and not near_j and self.s >= self.join_m:
       sec = route.section(route.seg)

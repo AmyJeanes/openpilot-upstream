@@ -76,9 +76,10 @@ def test_style():
   brisk = np.mean([pick_style(s, "brisk")["speed"] for s in range(40)])
   assert calm < brisk
   assert pick_style(3, over={"t_lc": 5.0})["t_lc"] == 5.0
-  # a lane change no quicker than the style's lateral jerk allows
-  st = {"t_lc": 4.0, "j_lat": 1.2}
-  assert lc_seconds(st, 1) >= (60 * LANE_W / 1.2) ** (1 / 3) - 1e-6
+  # a lane change takes the style's time, no quicker than its peak lateral acceleration allows
+  assert lc_seconds({"t_lc": 5.0, "a_lat": 2.5}, 1) == 5.0
+  st = {"t_lc": 4.0, "a_lat": 1.5}
+  assert abs(lc_seconds(st, 1) - math.sqrt(5.77 * LANE_W / (0.6 * 1.5))) < 1e-6
   print("style: ok")
 
 
@@ -166,6 +167,99 @@ def test_lane_change_for_turn():
   ends = [ms.drive(r, {"seed": seed}, lane=1, seconds=1.0).md.changes[0][1] for seed in (11, 12, 13, 14)]
   assert max(ends) - min(ends) > 5.0, ends
   print("lane change for a turn: ok")
+
+
+def test_lane_change_takes_its_time():
+  """A change is timed by the speed it's driven at: pulling away from a standstill, or nav's ramp across a whole window
+  (the city's too slow drift seen in game), it takes the style's time (+-25 %), not the ramp's length."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
+  r = ms.junction_turn("left", lead=400.0, stop=None)
+  for seed in (1, 4):
+    for v0 in (0.0, 12.0):
+      trip = ms.drive(r, {"seed": seed}, lane=1, v0=v0)
+      md = trip.md
+      s0, s1, _, _ = md.changes[0]
+      t, s = trip.col(0), trip.col(9)
+      dt, want = np.interp(s1, s, t) - np.interp(s0, s, t), lc_seconds(md.style, 1)
+      assert abs(dt - want) < 0.25 * want, (seed, v0, dt, want)
+  # nav's slow ramp (160 m, 10 s here; SR3 had 90 m at 11 m/s) re-placed to its time, its end kept
+  trip = ms.drive(r, {"seed": 2}, lane=1, v0=11.0, seconds=0.2)
+  keys = [(0.0, 1.0), (170.0, 1.0), (330.0, 0.0), (400.0, 0.0)]
+  fitted = trip.md.fit_durations(r, keys, 11.0)
+  assert fitted[2] == (330.0, 0.0) and fitted[1][0] > 240.0, fitted
+  # a change with a renumbering step inside keeps the step at its place
+  keys = [(0.0, 1.0), (200.0, 1.0), (280.0, 0.5), (280.0, 1.5), (330.0, 1.0), (400.0, 1.0)]
+  out = MapDriver._replace_chain(keys, 1, 4, 270.0, 330.0)
+  assert len([k for k in out if k[0] == 280.0]) == 2 and out[0] == (270.0, 1.0) and out[-1] == (330.0, 1.0), out
+  print("lane changes take their time: ok")
+
+
+def inside_error(trip, side: str) -> float:
+  """The car's mean offset (m) towards the inside of the bend from its path, where the path bends."""
+  md, out = trip.md, []
+  for x_, y_, sv in zip(trip.col(1), trip.col(2), trip.col(9)):
+    j = int(min(np.searchsorted(md.s_path, sv), len(md.s_path) - 2))
+    if abs(md.kappa_path[j]) < 0.04:
+      continue
+    a_, b_ = md.path[j], md.path[j + 1]
+    right = ((x_ - a_[0]) * (b_[1] - a_[1]) - (y_ - a_[1]) * (b_[0] - a_[0])) / max(np.hypot(*(b_ - a_)), 1e-6)
+    out.append(right if side == "right" else -right)
+  return float(np.mean(out))
+
+
+def test_turns_from_the_rear_axle():
+  """The game reports the car's middle, which moves inwards of its heading in a bend: steered from it, the car cuts
+  every corner (0.4-0.8 m in game); steered from the rear axle it keeps to the line."""
+  for side in ("left", "right"):
+    r = ms.junction_turn(side, stop=None)
+    lane = 0 if side == "left" else 1
+    new = inside_error(ms.drive(r, {"seed": 3, "bias_max": 0, "wander": 0}, lane=lane, tau=0.16), side)
+    old = inside_error(ms.drive(r, {"seed": 3, "bias_max": 0, "wander": 0, "rear_axle": 0.0}, lane=lane, tau=0.16), side)
+    assert abs(new) < 0.15 and old > 0.3, (side, new, old)
+  print("turns from the rear axle: ok")
+
+
+def test_bias_fades_in_turns_and_soften_holds_outside():
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import soften
+  r = ms.junction_turn("right", stop=None)
+  trip = ms.drive(r, {"seed": 5, "bias_max": 0.3, "wander": 0.0, "style": {"bias": 1.0}}, lane=1, seconds=0.2)
+  md = trip.md
+  off = np.hypot(*(md.path - md.intent).T)
+  near = np.abs(md.route_s - 200.0) < 14.0
+  far = (np.abs(md.route_s - 200.0) > 50.0) & (md.s_path > 40.0)
+  assert off[near].max() < 0.02 and off[far].min() > 0.25, (off[near].max(), off[far].min())
+  # a square corner without a fillet, eased out: swung out up to SOFT_OUT rather than all of it cut inside
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+  pts = np.array([[0.0, y] for y in np.arange(0.0, 100.0, 1.0)] + [[x, 100.0] for x in np.arange(0.0, 100.0, 1.0)])
+
+  def cut(q):  # the eased curve's nearest to the corner as drawn
+    return float(np.min(np.hypot(*(q - np.array([0.0, 100.0])).T)))
+  soft, spots = soften(pts, 0.1)
+  saved = g.SOFT_OUT
+  g.SOFT_OUT = 0.0
+  free, _ = soften(pts, 0.1)
+  g.SOFT_OUT = saved
+  assert spots and cut(soft) < cut(free) - 0.9 * g.SOFT_OUT, (cut(soft), cut(free))
+  k = np.abs(np.gradient(np.unwrap(np.arctan2(*np.gradient(soft, axis=0).T[::-1]))))
+  assert k.max() < 0.5, k.max()  # eased, if not to 0.1 1/m
+  print("bias fades in turns, soften holds outside: ok")
+
+
+def test_corner_kerb():
+  """A junction's inside corner kerb from its legs' cross-sections: a car over it is a kerb_contact, the plan's own
+  line isn't."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
+  r = ms.junction_turn("right", stop=None)  # north 200 m, right (east); two lanes each way, 5.5 m
+  trip = ms.drive(r, {"seed": 3, "bias_max": 0, "wander": 0}, lane=1)
+  md = trip.md
+  assert len(md.corners) == 1 and not [a for a in md.anomalies if a["kind"] == "kerb_contact"], md.anomalies
+  c = md.corners[0]
+  assert np.allclose(c["corner"], [11.0, 189.0], atol=0.2), c["corner"]
+  diag = math.radians(-45.0 + 90.0)  # heading south-east, round the turn
+  assert MapDriver._corner_hit(c, np.array([14.0, 186.0]), diag) > 1.0  # its middle over the corner
+  assert MapDriver._corner_hit(c, np.array([9.5, 190.5]), diag) is None  # inside the kerb's rounding
+  assert MapDriver._corner_hit(c, np.array([5.0, 195.0]), diag) is None
+  print("corner kerb: ok")
 
 
 def test_arrival():
@@ -342,6 +436,10 @@ if __name__ == "__main__":
   test_junction_turn_and_stop_sign()
   test_give_way_and_lights()
   test_lane_change_for_turn()
+  test_lane_change_takes_its_time()
+  test_turns_from_the_rear_axle()
+  test_bias_fades_in_turns_and_soften_holds_outside()
+  test_corner_kerb()
   test_arrival()
   test_aborts()
   test_no_oscillation()
