@@ -22,7 +22,7 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
-from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, clip_outside, hull, off_islands
+from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, apart, clip_outside, hull, off_islands
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
@@ -493,10 +493,15 @@ def main():
   if junctions.island_outlines:  # painted islands' outlines, in their paint, at their nearest road node's height
     road_nodes = sorted({n for _, refs in junctions.ways.values() for n in refs})
     near_xy, near_z = points(road_nodes), heights(road_nodes) if high else None
+    # (but where the road's own lines draw them already)
+    kinds_of = {'yellow': {KINDS.index(k) for k in ('centre', 'centre_dashed')}, 'white': {KINDS.index(k) for k in ('solid', 'dashed', 'edge')}}
+    drawn_segs = {c: np.concatenate([np.stack([p[:-1], p[1:]], 1) for ln in lines if ln[0] in ks
+                                      for p in [np.array(ln[1:]).reshape(-1, 2)]] or [np.zeros((0, 2, 2))]) for c, ks in kinds_of.items()}
     for xy, colour in junctions.island_outlines:
       ring = np.vstack([xy, xy[:1]]) if np.hypot(*(xy[-1] - xy[0])) > 1e-6 else xy
       z = near_z[np.argmin(np.hypot(*(near_xy - ring.mean(0)).T))] if high else None
-      add(KINDS.index('centre' if colour == 'yellow' else 'solid'), ring, 0, None if z is None else np.full(len(ring), z))
+      for piece in apart(ring, drawn_segs[colour]):
+        add(KINDS.index('centre' if colour == 'yellow' else 'solid'), piece, 0, None if z is None else np.full(len(piece), z))
   crossings = junctions.crossing_lines()
   if high:  # a crossing's height is its nearest road node's
     road_nodes = sorted({n for _, refs in junctions.ways.values() for n in refs})

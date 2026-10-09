@@ -5,7 +5,8 @@ as round a raised island, so the map's kerbs went round and through them; they'r
 junctions.ISLAND_REACH of one (junctions.off_islands), and the map view and the overlay draw its outline in that colour.
 
 - An outline is a white or yellow solid polyline closed on itself, or up to three of a colour meeting end to end into
-  a ring (JOIN), of AREA m^2.
+  a ring (JOIN), of AREA m^2; or the edges of a hatched area (`hatched`: strokes painted from one edge line to another,
+  as a hatched median whose edges run on into the centre lines), between its tips.
 - It's painted, not raised, where roadpaint's height-layered tiles (5 cm; road, kerb, pavement or gutter at each
   height) read it as road inside (INSIDE of it) and in a band BAND m outside its outline (AROUND of that), at its
   height: a raised island is pavement or kerb, and an outline at the road's edge has kerb or pavement beside it.
@@ -131,6 +132,10 @@ def islands(lines_path, tiles_dir, osm=None) -> list[Island]:
   carriageways (gaps) but those inside an outline already."""
   from openpilot.tools.sim.bridge.gta5.map.stop_paint import inside
   found = painted(outlines(lines_path), tiles_dir)
+  for h in painted(hatched(lines_path), tiles_dir):  # hatched areas whose edges aren't closed
+    c = h.ring[:-1, :2].mean(0)
+    if not any(inside(c[None], f.ring[:, :2])[0] for f in found):
+      found.append(h)
   for g in gaps(osm, tiles_dir) if osm is not None else []:
     c = g.ring[:-1, :2].mean(0)
     if not any(inside(c[None], f.ring[:, :2])[0] for f in found):
@@ -138,9 +143,10 @@ def islands(lines_path, tiles_dir, osm=None) -> list[Island]:
   return found
 
 
-def add(path: str, found: list[Island], new_node_id, to_lat_lon, surfaces=()) -> int:
+def add(path: str, found: list[Island], to_lat_lon, surfaces=()) -> int:
   """Writes the map at `path` again with each island, and each road surface strip [(outline [N, 2] at z, class, z)]
-  (flush_strips), as a closed way of new nodes; returns how many."""
+  (flush_strips), as a closed way of new nodes, numbered on from the map's highest (they're GTA's nodes by area, a
+  65536 each: there are too many for the area tapers and stop lines take theirs from); returns how many."""
   import osmium
   nodes, ways, rels = [], [], []
   for o in osmium.FileProcessor(path):
@@ -152,13 +158,14 @@ def add(path: str, found: list[Island], new_node_id, to_lat_lon, surfaces=()) ->
       rels.append(osmium.osm.mutable.Relation(id=o.id, version=1, tags=dict(o.tags),
                                               members=[(m.type, m.ref, m.role) for m in o.members]))
   next_way = max(w.id for w in ways) + 1
+  next_node = max(n.id for n in nodes) + 1
   areas = [(island.ring[:-1], {'area': 'yes', 'traffic_calming': 'painted_island',
                                 **({'colour': island.colour} if island.colour else {})}) for island in found]
   areas += [(np.column_stack([xy, np.full(len(xy), z)]), {'area:highway': cls}) for xy, cls, z in surfaces]
   for ring, tags in areas:
     refs = []
     for x, y, z in ring:
-      nid = new_node_id()
+      nid, next_node = next_node, next_node + 1
       lat, lon = to_lat_lon(float(x), float(y))
       nodes.append(osmium.osm.mutable.Node(id=nid, version=1, location=(lon, lat), tags={'ele': f'{z:.1f}'}))
       refs.append(nid)
@@ -501,3 +508,171 @@ def flush_strips(osm, tiles_dir, ways=None) -> list[tuple[np.ndarray, str, float
       k = j + 1
     start += len(e)
   return strips
+
+
+# *** hatched areas: strokes painted across between two edge lines ***
+
+STROKE = (1.0, 8.0)  # m: a hatched area's strokes (chevrons, diagonals) are this long
+STROKES = 3  # at least, between the same two edges
+TOUCH = 0.5  # m from a stroke's end to the edge line it meets
+TIP = 0.5  # m: where a hatched area's two edges come this near, it ends in a tip
+TIP_REACH = 15.0  # m beyond its last stroke a tip is looked for
+TIP_CLOSING = 0.1  # m the edges come nearer each other a metre on, at least, towards a tip
+HCELL = 5.0  # m
+
+
+def _arc(pts: np.ndarray) -> np.ndarray:
+  return np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(pts[:, :2], axis=0).T))))
+
+
+def _at(pts: np.ndarray, s: np.ndarray, at: float) -> np.ndarray:
+  return np.array([np.interp(at, s, pts[:, c]) for c in range(pts.shape[1])])
+
+
+def _nearest(pts: np.ndarray, s: np.ndarray, q: np.ndarray) -> tuple[float, float]:
+  """(m along a polyline, m off it) of the place on it nearest q (in plan)."""
+  a, ab = pts[:-1, :2], np.diff(pts[:, :2], axis=0)
+  t = np.clip(((q - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+  d = np.hypot(*(a + ab * t[:, None] - q).T)
+  k = int(np.argmin(d))
+  return float(s[k] + t[k] * (s[k + 1] - s[k])), float(d[k])
+
+
+JOIN_TURN = 30.0  # deg: lines meeting end to end that turn less than this one into the other are one
+
+
+def _joined_lines(lines: list[tuple[str, np.ndarray]]) -> list[tuple[str, np.ndarray]]:
+  """Lines [(colour, points [N, 3])] of a colour meeting end to end (JOIN) and running on (JOIN_TURN) joined into one,
+  where only the one runs on there: an edge line the game files lay as several polylines."""
+  ends = defaultdict(list)
+
+  def key(q):
+    return round(float(q[0]) / JOIN), round(float(q[1]) / JOIN)
+  for n, (_, pts) in enumerate(lines):
+    for e in (0, -1):
+      ends[key(pts[e])].append((n, e))
+
+  def heading(pts, e):  # leaving the line at end e, outwards
+    d = pts[-1, :2] - pts[-2, :2] if e == -1 else pts[0, :2] - pts[1, :2]
+    return d / max(float(np.hypot(*d)), 1e-9)
+
+  def onward(n, e):
+    c, pts = lines[n]
+    q, h = pts[e, :2], heading(pts, e)
+    k = key(q)
+    found = [(float(np.hypot(*(lines[m][1][f, :2] - q))), m, f) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+             for m, f in ends.get((k[0] + dx, k[1] + dy), ())
+             if m != n and lines[m][0] == c and np.hypot(*(lines[m][1][f, :2] - q)) < JOIN and
+             float(h @ -heading(lines[m][1], f)) > np.cos(np.radians(JOIN_TURN))]
+    return min(found)[1:] if found else None  # (the nearest: a double line's two lines each run on into their own)
+
+  out, used = [], set()
+  for n in range(len(lines)):
+    if n in used:
+      continue
+    head, tail, used_here = [], [], {n}
+    for e in (-1, 0):
+      cur, end = n, e
+      while (nxt := onward(cur, end)) is not None and nxt[0] not in used_here:
+        m, f = nxt
+        pts = lines[m][1] if f == (0 if e == -1 else -1) else lines[m][1][::-1]
+        if e == -1:
+          tail.append(pts[1:])
+        else:
+          head.insert(0, pts[:-1])
+        used_here.add(m)
+        cur, end = m, (-1 if f == 0 else 0)
+    used |= used_here
+    out.append((lines[n][0], np.vstack([*head, lines[n][1], *tail])))
+  return out
+
+
+def hatched(path) -> list[Island]:
+  """Hatched areas the game files paint (polylines.jsonl): at least STROKES short strokes (STROKE) each from one edge
+  line to another of their colour (TOUCH), the area between the edges from tip to tip (TIP, looked for TIP_REACH
+  beyond the strokes) or from the first stroke to the last, outlined in the edges' colour: a painted median or gore
+  whose edges run on into other lines, so it isn't closed itself (Vinewood Blvd's hatched medians)."""
+  strokes, edges = [], []
+  with open(path) as f:
+    for row in f:
+      p = json.loads(row)
+      if p['colour'] not in ('white', 'yellow') or p['style'] == 'dashed':
+        continue
+      pts = np.array(p['pts'], float)
+      if len(pts) < 2:
+        continue
+      if STROKE[0] <= p['len'] <= STROKE[1] and np.hypot(*(pts[-1, :2] - pts[0, :2])) >= 0.9 * p['len']:
+        strokes.append((p['colour'], pts))
+      if p['len'] > STROKE[1]:
+        edges.append((p['colour'], pts))
+  edges = [(c, pts, _arc(pts)) for c, pts in _joined_lines(edges)]
+  cells = defaultdict(set)
+  for n, (_, pts, _) in enumerate(edges):
+    seg = np.hypot(*np.diff(pts[:, :2], axis=0).T)
+    dense = np.vstack([pts[k, :2] + np.outer(np.arange(0.0, 1.0, min(1.0, HCELL / 2 / max(seg[k], 1e-6))), pts[k + 1, :2] - pts[k, :2])
+                       for k in range(len(pts) - 1)] + [pts[-1:, :2]])
+    for x, y in dense:
+      cells[(int(x // HCELL), int(y // HCELL))].add(n)
+
+  def touched(colour, q):
+    best = None
+    for n in cells.get((int(q[0] // HCELL), int(q[1] // HCELL)), ()):
+      c, pts, s = edges[n]
+      if c != colour:
+        continue
+      along, off = _nearest(pts, s, q)
+      if off <= TOUCH and (best is None or off < best[2]):
+        best = (n, along, off)
+    return best
+
+  groups = defaultdict(list)  # (edge, edge) -> [(m along the first, m along the second)]
+  for colour, pts in strokes:
+    a, b = touched(colour, pts[0, :2]), touched(colour, pts[-1, :2])
+    if a is None or b is None or (a[0] == b[0] and abs(a[1] - b[1]) < 2.0):
+      continue
+    if (a[0], a[1]) > (b[0], b[1]):
+      a, b = b, a
+    groups[(a[0], b[0])].append((a[1], b[1]))
+  out = []
+  for (ia, ib), hits in groups.items():
+    if len(hits) < STROKES:
+      continue
+    colour, pa, sa = edges[ia]
+    _, pb, sb = edges[ib]
+    along_a, along_b = np.array([h[0] for h in hits]), np.array([h[1] for h in hits])
+    a0, a1 = float(along_a.min()), float(along_a.max())
+    # the second edge's place for each end of the first's span: its strokes run from one to the other
+    b0 = float(along_b[int(np.argmin(along_a))])
+    b1 = float(along_b[int(np.argmax(along_a))])
+    ends = []
+    for a_end, b_end, step in ((a0, b0, -1.0), (a1, b1, 1.0)):
+      tip, off0 = None, _nearest(pb, sb, _at(pa, sa, a_end)[:2])[1]
+      for d in np.arange(0.25, TIP_REACH, 0.25):
+        q = _at(pa, sa, a_end + step * d)
+        if not 0.0 <= a_end + step * d <= sa[-1]:
+          break
+        sb_q, off = _nearest(pb, sb, q[:2])
+        if off <= TIP:
+          tip = (a_end + step * d, sb_q)
+          break
+        if off > off0 - TIP_CLOSING * d:  # the edges not closing in on a tip: the area ends at its last stroke
+          break
+      ends.append(tip or (a_end, b_end))
+    (ta0, tb0), (ta1, tb1) = ends
+    side_a = [_at(pa, sa, v) for v in np.concatenate(([ta0], sa[(sa > ta0) & (sa < ta1)], [ta1]))]
+    lo, hi = min(tb0, tb1), max(tb0, tb1)
+    side_b = [_at(pb, sb, v) for v in np.concatenate(([lo], sb[(sb > lo) & (sb < hi)], [hi]))]
+    if tb0 > tb1:  # the second edge drawn the other way
+      side_b = side_b[::-1]
+    ring = np.vstack([side_a, side_b[::-1]])
+    if area(ring) < AREA[0]:
+      continue
+    out.append(Island(np.vstack([ring, ring[:1]]), colour))
+  # a double edge line's two lines each make the area: the largest of those lying over each other
+  from openpilot.tools.sim.bridge.gta5.map.stop_paint import inside
+  out.sort(key=lambda i: -area(i.ring[:-1]))
+  kept = []
+  for i in out:
+    if not any(inside(i.ring[:-1, :2].mean(0)[None], k.ring[:, :2])[0] for k in kept):
+      kept.append(i)
+  return kept

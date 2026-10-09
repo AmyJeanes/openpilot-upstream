@@ -416,6 +416,27 @@ def test_median_turn_lane():
   assert turns(set()) == (None, set())  # no median: one lane, no arrows
 
 
+def test_painted_median_lane():
+  # a left arrow painted in a median GTA has no lane for (a hatched median ended, the lane opening in its room): the
+  # median is a lane from that link on to the junction ahead; not from an arrow in a lane, nor a through arrow
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import PaintedArrows, painted_median_lanes
+  xy = {'P': (0, -100), 'Q': (0, -40), 'R': (0, -20), 'J': (0, 0), 'W': (-50, 0), 'E': (50, 0), 'N': (0, 50)}
+  nodes = {k: {'x': x, 'y': y} for k, (x, y) in xy.items()}
+  ways = [(1, 'P', 'Q', True), (2, 'Q', 'R', True), (3, 'R', 'J', True), (4, 'W', 'J', True), (5, 'J', 'E', True), (6, 'J', 'N', True)]
+  lanes_to = {e: 1 for _, a, b, _ in ways for e in ((a, b), (b, a))}
+  road = [(1, 'P', 'Q'), (2, 'Q', 'R'), (3, 'R', 'J')]
+  medians = {e for _, a, b in road for e in ((a, b), (b, a))}
+  spans = {e: [(2.7, 7.1)] for e in medians}  # each way's lane beyond a 5.4 m median
+
+  def chains(mark):
+    return painted_median_lanes(nodes, ways, lanes_to, medians, PaintedArrows([mark]), spans, lambda k: k == 'J')
+  assert chains((0.3, -70.0, 0.0, 0.0, 'left')) == [[('P', 'Q'), ('Q', 'R'), ('R', 'J')]]
+  assert chains((0.3, -30.0, 0.0, 0.0, 'left')) == [[('Q', 'R'), ('R', 'J')]]
+  assert chains((4.5, -70.0, 0.0, 0.0, 'left')) == []  # in the lane
+  assert chains((0.3, -70.0, 0.0, 0.0, 'through')) == []
+  assert chains((-0.3, -70.0, 0.0, 180.0, 'left')) == [[('Q', 'P')]]  # the other way's, on to where its road ends
+
+
 def test_painted_turn_lanes():
   from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import PaintedArrows, arrows, lane_turns, road_on, with_paint
   everything = {'left', 'through', 'right'}
