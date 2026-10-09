@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Image-based check of the lane map against the game's own paint and kerbs, from top-down tiles of the game.
 
-  run.py plan RUN [--area city|sample|all] [--classes roads|main] [--limit N]   tiles along the roads (RUN/plan.json)
+  run.py plan RUN [--area city|sample|all] [--classes roads|main] [--limit N] [--under]
+                                                         tiles along the roads (RUN/plan.json); --under: under bridge
+                                                         decks, the camera below the deck (a second pass)
   run.py capture RUN [--minutes M] [--desktop] [--png]    shoot the plan's tiles in the game (needs the bridge running
                                                          and the player in a car; resumable)
   run.py import-survey RUN [GLOB]                        use the map audit's survey shots (topcam poses in their
@@ -54,6 +56,7 @@ def main(argv=None):
   ap.add_argument("--classes", default="roads", choices=list(tiles.CLASSES))
   ap.add_argument("--step", type=float, default=tiles.STEP)
   ap.add_argument("--limit", type=int)
+  ap.add_argument("--under", action="store_true", help="plan: tiles under bridge decks (the second pass)")
   ap.add_argument("--minutes", type=float)
   ap.add_argument("--desktop", action="store_true", help="screen captures instead of the plugin's grab")
   ap.add_argument("--png", action="store_true", help="keep tiles as PNG (default JPEG, quality 94)")
@@ -64,9 +67,9 @@ def main(argv=None):
   os.makedirs(a.run, exist_ok=True)
   if a.command == "plan":
     md = MapData()
-    plan = tiles.plan(md, a.area, a.classes, a.step, a.limit)
+    plan = tiles.plan(md, a.area, a.classes, a.step, a.limit, a.under)
     est = tiles.estimate(plan)
-    tiles.save(plan, os.path.join(a.run, "plan.json"), {"area": a.area, "classes": a.classes, "step": a.step, "height": tiles.HEIGHT,
+    tiles.save(plan, os.path.join(a.run, "plan.json"), {"area": a.area, "classes": a.classes, "step": a.step, "under": a.under, "height": tiles.HEIGHT,
                                                        "fov": tiles.FOV, "map_hash": md.map_hash, "estimate": est})
     print(json.dumps(est))
   elif a.command == "capture":

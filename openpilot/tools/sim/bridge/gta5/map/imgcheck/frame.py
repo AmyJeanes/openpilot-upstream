@@ -336,13 +336,13 @@ class TileMap:
     mpp = self.cam.m_per_px
     z = (self.road_a[:, 2] + self.road_b[:, 2]) / 2
     for k in np.argsort(z):
-      if self.road_st[k] == 2 or z[k] < self.level + ABOVE - 0.5:
+      if self.road_st[k] == 2 or z[k] < self.level + ABOVE - 0.5 or self.cam.game_z(z[k]) > self.cam.zcam - 0.5:  # not above the camera
         continue
       uv = self.cam.project(np.array([self.road_a[k], self.road_b[k]]))
       wpx = max(1, int(round((self.road_w[k] + 1.0) / mpp)))
       dr.line([tuple(uv[0]), tuple(uv[1])], fill=float(z[k]), width=wpx)
     for poly, zz in sorted(self.areas, key=lambda a: a[1]):
-      if zz < self.level + ABOVE - 0.5:
+      if zz < self.level + ABOVE - 0.5 or self.cam.game_z(zz) > self.cam.zcam - 0.5:
         continue
       uv = self.cam.project(np.column_stack([poly, np.full(len(poly), zz)]))
       for i in range(1, len(uv)):

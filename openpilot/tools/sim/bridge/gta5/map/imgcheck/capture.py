@@ -183,7 +183,8 @@ class Shooter:
     return None
 
   def shoot(self, t: Tile, wait: float, scene_every: float = 60.0) -> bool:
-    self.send({"type": "topcam", "on": 1, "x": t.x, "y": t.y, "z": t.z, "heading": t.heading, "height": HEIGHT, "fov": FOV, "hud": 0})
+    self.send({"type": "topcam", "on": 1, "x": t.x, "y": t.y, "z": t.z, "heading": t.heading, "height": t.height, "fov": t.fov, "hud": 0,
+               "abs": int(t.under)})
     time.sleep(wait)
     st = self.state()
     if st is None or not isinstance(st.get("topcam"), dict):

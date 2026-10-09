@@ -25,6 +25,7 @@ from openpilot.tools.sim.bridge.gta5.map.imgcheck.tiles import CITY
 LINK = 8.0  # m
 CROP_M = 32.0  # m: a crop's side
 TOP = 150  # spots with crops in the report
+HIDDEN_MIN = 0.05  # share of a tile's road a deck hides before the place is listed as not judged
 TYPE_COLOURS = {k: v for k, v in render.ISSUE_COLOURS.items()} | {"offset": (255, 255, 255)}
 
 _md: MapData | None = None
@@ -251,15 +252,45 @@ def write(run_dir: str, procs: int = 8, top: int = TOP, log=print) -> str:
            "covered": sum(bool(r["summary"].get("covered")) for r in checked), "errors": sum("error" in r for r in results),
            "spots": len(spot_list), "by_type": dict(Counter(s["type"] for s in spot_list)), "map_hash": _md.map_hash,
            "marks": os.path.basename(_md.marks_file), "made": time.strftime("%Y-%m-%d %H:%M")}
+  review = hidden_places(results, sides)
+  stats["hidden_places"] = len(review)
   with open(os.path.join(rep, "spots.json"), "w") as f:
-    json.dump({"stats": stats, "spots": spot_list}, f, indent=1)
+    json.dump({"stats": stats, "spots": spot_list, "hidden": review}, f, indent=1)
   with open(os.path.join(rep, "index.html"), "w") as f:
-    f.write(page(stats, spot_list[:top], spot_list))
+    f.write(page(stats, spot_list[:top], spot_list, review))
   log(f"imgcheck: report {rep}/index.html: {json.dumps(stats)}")
   return os.path.join(rep, "index.html")
 
 
-def page(stats: dict, shown: list[dict], everything: list[dict]) -> str:
+def hidden_places(results: list[dict], sides: dict) -> list[dict]:
+  """Places the top-down shots couldn't judge: road under a deck (stacked roads; judged from under-deck shots where
+  the run has them nearby) and tiles that looked down on something over the road. Grouped within 40 m."""
+  rows = []
+  for r in results:
+    if "summary" not in r:
+      continue
+    s, cam = r["summary"], r["camera"]
+    under = bool(sides.get(r["name"], {}).get("target", {}).get("under"))
+    if s.get("covered") or (s.get("hidden_share", 0) > HIDDEN_MIN and not under):
+      rows.append((cam["x"], cam["y"], "covered" if s.get("covered") else "under a deck", s.get("hidden_share", 0), r["name"]))
+  if not rows:
+    return []
+  unders = np.array([[r["camera"]["x"], r["camera"]["y"]] for r in results
+                     if "camera" in r and sides.get(r["name"], {}).get("target", {}).get("under")]).reshape(-1, 2)
+  xy = np.array([[r[0], r[1]] for r in rows])
+  groups = cluster(xy, 40.0)
+  out = []
+  for g in np.unique(groups):
+    members = [rows[k] for k in np.flatnonzero(groups == g)]
+    c = np.array([[m[0], m[1]] for m in members]).mean(0)
+    near_under = int((np.hypot(*(unders - c).T) < 40).sum()) if len(unders) else 0
+    out.append({"x": round(float(c[0]), 1), "y": round(float(c[1]), 1), "why": sorted({m[2] for m in members}),
+                "hidden_share": round(max(m[3] for m in members), 2), "tiles": [m[4] for m in members], "under_shots": near_under})
+  out.sort(key=lambda h: (-len(h["tiles"]), -h["hidden_share"]))
+  return out
+
+
+def page(stats: dict, shown: list[dict], everything: list[dict], review: list[dict] = ()) -> str:
   rows = []
   for s in shown:
     lines = "".join(f"<li><b>{html.escape(i['kind'])}</b> {html.escape(i['detail'])} <span class=d>({i['x']:.1f}, {i['y']:.1f}; "
@@ -289,4 +320,10 @@ lines red/orange, arrows, junction outlines blue); the paint found (white, yello
 <p><a href="heatmap_city.png"><img src="heatmap_city.png" alt="city heat map" style="max-width:640px"></a>
 <a href="heatmap_all.png">whole map</a></p>
 {''.join(rows)}<h2>More spots</h2><table><tr><td>#</td><td>type</td><td>score</td><td>x, y</td><td>seen</td><td>main issue</td></tr>
-{table}</table></body></html>"""
+{table}</table>
+<h2>Not judged from above ({len(review)} places)</h2><p class=d>Road under a bridge deck (stacked roads: the deck is judged,
+the road under it is left out, not called missing) and tiles looking down on something over the road. Under-deck shots
+(<code>plan --under</code>) cover the first where the deck is high enough; the rest need a look by hand.</p>
+<table><tr><td>x, y</td><td>why</td><td>hidden share</td><td>tiles</td><td>under-deck shots</td></tr>
+{''.join(f"<tr><td>{h['x']}, {h['y']}</td><td>{', '.join(h['why'])}</td><td>{h['hidden_share']}</td><td>{len(h['tiles'])}</td>"
+         f"<td>{h['under_shots']}</td></tr>" for h in review)}</table></body></html>"""

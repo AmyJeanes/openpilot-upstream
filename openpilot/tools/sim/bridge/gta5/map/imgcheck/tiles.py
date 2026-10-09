@@ -19,6 +19,10 @@ FOV = 50.0  # deg, vertical
 ASPECT = 16 / 9
 STEP = 55.0  # m between centres along a road (the tile spans ~75 m)
 DEDUP = 14.0  # m
+UNDER_STEP = 10.0  # m between tiles under a deck (one covers about 17 m by 10 m at 5 m up)
+UNDER_FOV = 90.0
+UNDER_MAX = 5.0  # m above the road
+UNDER_CLEARANCE = 3.0  # m under the deck's surface (its thickness, and a margin for the map's heights)
 # city: Los Santos south of the Vinewood Hills, plus the freeways out of it
 CITY = (-3300.0, -3900.0, 1600.0, 1400.0)  # x0, y0, x1, y1
 # a few districts for a first look: downtown, Vinewood, Little Seoul, Del Perro, the Olympic interchange, Mirror Park
@@ -37,6 +41,52 @@ class Tile:
   heading: float  # the camera's (GTA deg)
   road: str  # the road's class
   hop: float = 0.0  # m from the tile before
+  height: float = HEIGHT  # the camera's, m above the ground (above z itself with under)
+  fov: float = FOV
+  under: bool = False  # a shot under a bridge deck: the camera at z + height, below the deck (topcam abs=1)
+
+
+def under_decks(md: MapData, boxes=None, classes: str = "roads", step: float = UNDER_STEP) -> list[list[Tile]]:
+  """Tiles under bridge decks: points every `step` m along roads where another road's surface lies 5-30 m above,
+  with the camera below the deck (UNDER_CLEARANCE m under the deck's surface, UNDER_MAX m above the road at most), a
+  wide field, the image's long side along the road. Where the deck is too low for that, no tile."""
+  wanted = {md.classes.index(c) for c in CLASSES[classes]}
+  a, b, w, cls = md.road_a, md.road_b, md.road_w, md.road_cls
+  mid = (a + b) / 2
+  out = []
+  for k in np.flatnonzero(np.isin(cls, list(wanted)) & (md.road_st != 2)):
+    p, q = a[k], b[k]
+    if boxes is not None and not any(in_box(mid[k:k + 1, :2], bx)[0] for bx in boxes):
+      continue
+    seg = q[:2] - p[:2]
+    length = float(np.hypot(*seg))
+    if length < 1.0:
+      continue
+    near = md._near(md.road_cells, mid[k, :2], length / 2 + 30.0)
+    row = []
+    for s in np.arange(step / 2, length, step):
+      pt = p + (q - p) * (s / length)
+      d = _seg_dist(pt[:2], a[near, :2], b[near, :2])
+      zz = (a[near, 2] + b[near, 2]) / 2
+      over = near[(d < w[near] / 2) & (zz > pt[2] + 5.0) & (zz < pt[2] + 30.0)]
+      if not len(over):
+        continue
+      deck = float(((a[over, 2] + b[over, 2]) / 2).min())
+      height = min(UNDER_MAX, deck - pt[2] - UNDER_CLEARANCE)
+      if height < 1.5:
+        continue
+      road = heading_of(*seg)
+      row.append(Tile("", float(pt[0]), float(pt[1]), float(pt[2]), (road + 90.0) % 360.0, md.classes[cls[k]], 0.0, round(height, 1),
+                      UNDER_FOV, True))
+    if row:
+      out.append(row)
+  return out
+
+
+def _seg_dist(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+  ab = b - a
+  t = np.clip(((p - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-9), 0, 1)
+  return np.hypot(*(a + ab * t[:, None] - p).T)
 
 
 def footprint(height: float = HEIGHT, fov: float = FOV) -> tuple[float, float]:
@@ -122,8 +172,15 @@ def order(rows: list[list[Tile]], start=(0.0, 0.0)) -> list[Tile]:
   return out
 
 
-def plan(md: MapData, area: str = "city", classes: str = "roads", step: float = STEP, limit: int | None = None) -> list[Tile]:
-  """The tiles to shoot, in order; for the sample, `limit` is shared out over its districts, each walked in turn."""
+def plan(md: MapData, area: str = "city", classes: str = "roads", step: float = STEP, limit: int | None = None,
+         under: bool = False) -> list[Tile]:
+  """The tiles to shoot, in order; for the sample, `limit` is shared out over its districts, each walked in turn.
+  under: the second pass, under bridge decks, for the roads the top-down tiles see only the decks of."""
+  if under:
+    boxes = {"city": [CITY], "all": None, "sample": SAMPLE_AREAS}[area]
+    rows = dedup(under_decks(md, boxes, classes, UNDER_STEP), radius=UNDER_STEP * 0.6)
+    tiles = order(rows, start=(boxes[0][0], boxes[0][1]) if boxes else (0.0, 0.0))
+    return tiles[:limit] if limit else tiles
   if area == "sample":
     out: list[Tile] = []
     each = None if not limit else max(1, limit // len(SAMPLE_AREAS))

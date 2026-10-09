@@ -133,7 +133,10 @@ class TileCheck:
     self.road = self.map.surface(self.size, grow=ROAD_GROW) & ~self.hidden
     self.road_class = self.map.classes(self.size)
     self.sharp = self.paint.sharpness()
-    self.road_share = float(self.map.surface(self.size).mean())
+    surface = self.map.surface(self.size)
+    self.road_share = float(surface.mean())
+    # the share of this level's road a deck above hides: judged from a shot under the deck, if there is one
+    self.hidden_share = float((surface & self.hidden).sum() / max(surface.sum(), 1))
     k = self.px(1.0) | 1
     self.asphalt_near = box_sum(self.paint.asphalt, k) >= 0.6 * k * k
 
@@ -446,4 +449,4 @@ def summary(tc: TileCheck) -> dict:
     by[i.kind][1] += i.score
   return {"score": round(sum(i.score for i in tc.issues), 1), "by_kind": {k: [n, round(s, 1)] for k, (n, s) in by.items()},
           "sharp": round(tc.sharp, 1), "road_share": round(tc.road_share, 3), "unloaded": unloaded(tc), "covered": tc.covered,
-          "m_per_px": round(tc.mpp, 4), "level": round(tc.map.level, 2)}
+          "m_per_px": round(tc.mpp, 4), "level": round(tc.map.level, 2), "hidden_share": round(tc.hidden_share, 3)}
