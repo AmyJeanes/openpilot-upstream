@@ -1253,7 +1253,11 @@ class RouteLanes:
       pa, pb = self.points[r[1] + 1], self.points[q[0]]
       na, nb = (_right_normal(self.points[k + 1] - self.points[k]) for k in (r[1], q[0]))
       ours_a = [(float((pa + na * x - pb) @ nb), float((pa + na * y - pb) @ nb)) for x, y in ours_a]
-    side = _turn_side(self._arrowed(r, sa, -1) or a, self._arrowed(q, sb, 1) or b)
+    ta, tb = self._arrowed(r, sa, -1) or a, self._arrowed(q, sb, 1) or b
+    side = _turn_side(ta, tb)
+    if side and _both_sides(ta, tb) and sb - sa <= EPS:
+      # the arrows have a new turn lane on each side: where the lanes lie at the node tells which is the road's own
+      side = _side_by_place(a, b, side)
     if side is None:
       side = _median_side(a, b)
     if side is None and sb - sa <= EPS and b.lanes > a.lanes and q[0] in self.merges:
@@ -1672,8 +1676,8 @@ SIDE_MARGIN = 0.5  # m a lane
 def _turn_side(a: Section, b: Section) -> bool | None:
   """Where the road's lanes change from a to b in number, the side the lanes begin or end on by their turn arrows:
   True on the left (a lane that only turns left is new in b, or a's ends), False on the right (one that only turns
-  right), the left where both are (a left bay opening as the kerb lane becomes a right-turn lane); None where the
-  arrows don't say. A bay opens where its road widens the other side as often as on its own (the lanes moving across
+  right), the left where both are (a left bay opening as the kerb lane becomes a right-turn lane, unless where the
+  lanes lie says otherwise: _match); None where the arrows don't say. A bay opens where its road widens the other side as often as on its own (the lanes moving across
   over its taper), so where the lanes lie can't tell."""
   few, many = (a, b) if a.lanes < b.lanes else (b, a)
   if few.lanes == many.lanes or not few.lanes:
@@ -1681,6 +1685,25 @@ def _turn_side(a: Section, b: Section) -> bool | None:
   if _left_only(many) and not _left_only(few):
     return True
   return False if _right_only(many) and not _right_only(few) else None
+
+
+def _both_sides(a: Section, b: Section) -> bool:
+  few, many = (a, b) if a.lanes < b.lanes else (b, a)
+  return _left_only(many) and not _left_only(few) and _right_only(many) and not _right_only(few)
+
+
+def _side_by_place(a: Section, b: Section, default: bool) -> bool:
+  """Where a road's lanes change from a to b in number (seen from one line), whether the lanes begin or end on the
+  left: our lanes in the fewer lining up with the right of the more's (True) or their left (False), by SIDE_MARGIN m a
+  lane; `default` where neither does."""
+  few, many = (a, b) if a.lanes < b.lanes else (b, a)
+  extra = many.lanes - few.lanes
+  fc, mc = [x.centre for x in few.ours], [x.centre for x in many.ours]
+  left = sum(abs(p - q) for p, q in zip(fc, mc[extra:], strict=True))
+  right = sum(abs(p - q) for p, q in zip(fc, mc[:few.lanes], strict=True))
+  if abs(left - right) < SIDE_MARGIN * few.lanes:
+    return default
+  return left < right
 
 
 ARROWS_BACK = 250.0  # m before a junction its lanes' arrows show from, while the lanes carry on unchanged (turns_at)

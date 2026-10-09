@@ -124,6 +124,9 @@ BAY_CHANGE = os.getenv("NAVD_BAY", os.getenv("GTA5_BAY", "1")) != "0"
 BAY_OPEN = 3.0  # m before it opens
 BAY_LAST = 18.0  # m before the turn
 BAY_SPEED = 4.5  # m/s, changing into it
+# the lane plan's change into it: from this far past where the map opens it, where there's room for BAY_RAMP_MIN m of
+# change before the turn's stop line (else BAY_LAST before the turn); else from where it opens
+BAY_ENTER, BAY_RAMP_MIN = 6.0, 12.0  # m
 # Bends and ramps: no faster than this sideways acceleration, measured over CURVE_WINDOW m of route. The Tesla's
 # steering is limited to 3.6 m/s^2 (3 m/s^2 and road roll) and in our drives saturated at about 3.
 CURVE_ACCEL = 2.0  # m/s^2
@@ -981,8 +984,10 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune,
           cur = hold(cur, start)
           ramp(cur, start, beside, opens)
           cur, pos = beside, opens
-        start = max(pos, opens)
-        end = max(min(start + LANE_LINE_CHANGE, end), start)
+        # once the bay is fully open, a little past where the map has it (its kerb's nose), by the turn's stop line
+        late = min([m.dist - BAY_LAST] + [c - 1.0 for c in crossings if opens < c < m.dist])
+        start = max(pos, opens + BAY_ENTER if late - opens - BAY_ENTER >= BAY_RAMP_MIN else opens)
+        end = max(min(start + LANE_LINE_CHANGE, max(late, end)), start)
       elif t.plan_city_early:
         # as nav changes for it (Planner._change_for): from city_lead before the last place, past any stop line on
         # the way, each change over LANE_LINE_CHANGE m; as late as allowed where there's no room for that

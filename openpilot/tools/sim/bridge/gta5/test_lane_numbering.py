@@ -383,6 +383,7 @@ def bridge_line(r: Route, lane) -> np.ndarray:
   from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
   w = GTA5World.__new__(GTA5World)
   w.nav, w.route, w.lane_line = Planner(), r, (None, 0.0, [])
+  w.expert = SimpleNamespace(md=None, md_fallback=False)  # no map driver driving
   return np.array(w._lane_line({"lane": lane}, 0.0))
 
 
@@ -478,19 +479,38 @@ def test_live_hairpin_is_no_turn():
 
 
 def test_live_alta_bay_from_its_opening():
-  # Alta St (227.2, 276.2), left at the junction 85 m on, its left-turn bay opening 34 m on: into the bay from where it
-  # opens, the change to the lane beside it first, not as late as the turn allows
+  # Alta St (227.2, 276.2), left at the junction 85 m on, its left-turn bay opening 34 m on: beside the bay as it
+  # opens, then into it once fully open (BAY_ENTER on), by the stop line, not as late as the turn allows
+  from openpilot.selfdrive.navd.planner import BAY_ENTER
   router = live_router()
   if router is None:
     print("skipped: no live map")
     return
   r, keys, ramps = live_plan(router, 227.24, 276.22, 105.19, 159.0, (1727.2, 1403.26), lane=[1, 2])
   opens = next(s for s, m, n in r.lane_maps_along() if n > len(m)) - r.at
+  stop = min(a - r.at for a in r.stops if a > r.at + opens)
   assert round(opens) == 34
   before = [c for c in ramps if c[1] <= opens + 0.1]
   into = [c for c in ramps if opens - 0.1 <= c[0] < 85.0]
   assert before == [(0.0, opens, 1.0, 0.0)] or before[-1][1:] == (opens, 1.0, 0.0)  # beside the bay as it opens
-  assert len(into) == 1 and abs(into[0][0] - opens) < 0.1 and into[0][3] == 0.0  # and into it from there
+  assert len(into) == 1 and abs(into[0][0] - opens - BAY_ENTER) < 0.1 and into[0][1] < stop and into[0][3] == 0.0
+
+
+def test_live_sr4b_through_lane_past_a_left_bay_into_the_right_bay():
+  # SR4b, Strawberry Ave south (373.5, -626.2) to the right onto San Andreas Ave 245 m on: a left bay opens at 191 m,
+  # then a right-turn bay at 201 m beside it (left | through | right). The through lane carries on as the through lane
+  # (taking both arrows for new lanes on the left put it in the right bay at its first node, across its kerb's nose);
+  # the move into the right bay starts once it's open and ends by the stop line at 222 m
+  from openpilot.selfdrive.navd.planner import BAY_ENTER
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  r, keys, ramps = live_plan(router, 373.5, -626.2, 28.0, 158.0, (197.0, -818.5))
+  maps = [(round(s - r.at), list(m)) for s, m, _ in r.lane_maps_along()][:2]
+  assert maps == [(191, [1]), (201, [0, 1])], maps
+  into = [c for c in ramps if c[3] == 2.0]
+  assert len(into) == 1 and abs(into[0][0] - 201.3 - BAY_ENTER) < 0.5 and into[0][1] <= 222.3, ramps
 
 
 if __name__ == "__main__":
