@@ -70,12 +70,53 @@ def node_key(s: str) -> tuple[int, int]:
 SOLID_PAINTED = 0.7  # of a line's length painted: solid with worn or hidden stretches, not dashed
 DASH_PERIOD = 4.0  # m: a "dashed" line repeating faster than this is a solid one laid as tiled decals
 MARKER_KERB = 1.0  # m: raised markers this near the asphalt's edge or the kerb are the gutter's edge, not paint
+DASH_PIECE = 6.0  # m: a solid polyline no longer than this with another in line a gap ahead or behind is one dash
+DASH_GAP = 14.0  # m at most between two such dashes' ends
+IN_LINE = 0.3  # m between one dash's middle and the other's line, and IN_LINE_BEND more a metre ahead (on a bend)
+IN_LINE_BEND = 0.15
+DASH_TURN = 20.0  # deg at most between two dashes' headings
+LOCAL = 12.0  # m either side of a section that a line's dashes are read over, for its kind there
+SOLID_STRETCH = 20.0  # m: a dash this long is a solid stretch of the line
+DASH_APART = 1.0  # m at least between dashes
+DASH_EVEN = 1.0  # m at most between the longest and shortest of evenly laid dashes, and of their gaps
 
 
-def line_kinds(path) -> dict[int, str]:
+class LineKinds(dict):
+  """{polyline id: its kind by its whole length}, and where the dashes of lines with dashes are (local), so a section
+  reads the kind a line has where it crosses it (kind_at): a dashed line painted solid for a stretch, or the other way."""
+  def __init__(self):
+    super().__init__()
+    self.local: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}  # id -> (points [N, 2], m along each, dashes [D, 2])
+
+  def kind_at(self, i, x: float | None = None, y: float | None = None) -> str | None:
+    kind = self.get(i)
+    if kind is None or i not in self.local or x is None or y is None:
+      return kind
+    pts, arc, dashes = self.local[i]
+    s = float(_project(pts, np.array([[x, y]], dtype=float))[0][0])
+    s *= float(arc[-1]) / max(float(np.hypot(*np.diff(pts, axis=0).T).sum()), 1e-9)  # along the line's own (3D) length
+    inside = dashes[(dashes[:, 0] <= s) & (dashes[:, 1] >= s)]
+    if len(inside) and float((inside[:, 1] - inside[:, 0]).max()) >= SOLID_STRETCH:
+      return 'solid'
+    near = dashes[(dashes[:, 1] > s - LOCAL) & (dashes[:, 0] < s + LOCAL)]
+    if len(near) < 2:
+      return kind
+    painted = float((np.minimum(near[:, 1], s + LOCAL) - np.maximum(near[:, 0], s - LOCAL)).sum()) / (2 * LOCAL)
+    lengths, gaps = near[:, 1] - near[:, 0], near[1:, 0] - near[:-1, 1]
+    # dashes: short, apart, and mostly gap or evenly laid (a worn solid line's breaks aren't)
+    regular = len(near) >= 3 and np.ptp(lengths) <= DASH_EVEN and np.ptp(gaps) <= DASH_EVEN
+    if float(lengths.max()) <= DASH_PIECE and float(gaps.min()) >= DASH_APART and float(np.diff(near[:, 0]).min()) >= DASH_PERIOD \
+       and (painted < 0.5 or regular):
+      return 'dashed'
+    return kind
+
+
+def line_kinds(path) -> LineKinds:
   """Whether each of the game files' polylines (polylines.jsonl: id, style, painted, dashes) is solid or dashed, by its
-  whole length: a section's reading can call a solid line dashed where it's worn, interrupted or tiled."""
-  out = {}
+  whole length: a section's reading can call a solid line dashed where it's worn, interrupted or tiled. Where its
+  dashes (and pts) show a stretch painted otherwise, a section there reads that (LineKinds.kind_at: Senora Rd's
+  centre, solid for 900 m, then dashed). A line laid a decal a dash is short solid polylines in line: each is dashed."""
+  out, pieces = LineKinds(), []
   with open(path) as f:
     for line in f:
       try:
@@ -86,6 +127,30 @@ def line_kinds(path) -> dict[int, str]:
       period = float(np.median(np.diff(starts))) if len(starts) >= 3 else None
       solid = p['style'] == 'solid' or p.get('painted', 0) >= SOLID_PAINTED or (period is not None and period < DASH_PERIOD)
       out[p['id']] = 'solid' if solid else p['style']
+      pts = np.array(p.get('pts') or [], dtype=float)
+      if len(pts) < 2:
+        continue
+      if p['style'] == 'solid' and p.get('len', math.inf) <= DASH_PIECE:
+        pieces.append((p['id'], p.get('colour'), pts[0, :2], pts[-1, :2]))
+      elif len(starts) >= 2:
+        arc = np.concatenate(([0.0], np.cumsum(np.sqrt((np.diff(pts, axis=0) ** 2).sum(1)))))
+        out.local[p['id']] = (pts[:, :2], arc, np.array(p['dashes'], dtype=float))
+  cells = defaultdict(list)
+  for k, (_, _, a, b) in enumerate(pieces):
+    cells[tuple(np.floor((a + b) / 2 / DASH_GAP).astype(int))].append(k)
+  for i, colour, a, b in pieces:
+    length = float(np.hypot(*(b - a)))
+    u, mid = (b - a) / max(length, 1e-9), (a + b) / 2
+    cx, cy = np.floor(mid / DASH_GAP).astype(int)
+    for n in (n for dx in (-1, 0, 1) for dy in (-1, 0, 1) for n in cells.get((cx + dx, cy + dy), ())):
+      j, other, c, d = pieces[n]
+      v, m = d - c, (c + d) / 2
+      ahead = abs(float((m - mid) @ u))
+      gap = ahead - (length + float(np.hypot(*v))) / 2
+      if j != i and other == colour and abs(float(v @ u)) >= math.cos(math.radians(DASH_TURN)) * float(np.hypot(*v)) and \
+         abs(float((m - mid) @ np.array([-u[1], u[0]]))) <= IN_LINE + IN_LINE_BEND * ahead and DASH_PERIOD / 2 <= gap <= DASH_GAP:
+        out[i] = 'dashed'
+        break
   return out
 
 
@@ -101,7 +166,7 @@ def _clean(d: dict, lines: dict[int, str]) -> dict:
     if m['type'] == 'markers' and any(abs(m['offset'] - v) <= MARKER_KERB for v in kerbs):
       continue
     ids = m.get('line') if isinstance(m.get('line'), list) else [m.get('line')]
-    kinds = [lines.get(i) for i in ids]
+    kinds = [lines.kind_at(i, d.get('x'), d.get('y')) if isinstance(lines, LineKinds) else lines.get(i) for i in ids]
     if None not in kinds and m['type'] in ('dashed', 'solid') and len(kinds) == 1:
       m = {**m, 'type': kinds[0]}
     elif None not in kinds and len(kinds) == 2 and kinds[0] == kinds[1] and m['type'] in HALVES.values():
@@ -502,20 +567,57 @@ def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]
 
 
 def centre_kind(samples: list[dict], at: float = 0.0, tol: float = AGREE) -> str | None:
-  """divider=* for the one yellow centre line the game files show near `at` m right of the line in half their samples or
-  more; None where they show none, or a median."""
+  """divider=* for the one centre line the game files show near `at` m right of the line (centre_line); None where they
+  show none, or a median."""
+  found = centre_line(samples, at, tol)
+  return found[0] if found else None
+
+
+WHITE_CENTRE_REACH = 2.0  # m: white lines further from a two-way link's line are lane or edge lines, not its centre
+# m: a thinner white centre is the port's thin double yellow line read off the road's texture (Buccaneer Way)
+WHITE_CENTRE_WIDTH = 0.1
+DASHES_SEEN = 0.2  # of the sections at least that cross one of a dashed centre's dashes, the rest its gaps
+
+
+def centre_line(samples: list[dict], at: float = 0.0, tol: float = AGREE) -> tuple[str, str] | None:
+  """(divider=*, colour) of the one centre line the game files show near `at` m right of the line in half their samples
+  or more: yellow, or white where a section shows no yellow (Greenwich Pkwy's and the port's dashed ones). A dashed
+  line laid a decal a dash shows only in the sections that cross a dash: in DASHES_SEEN of them, the others showing no
+  line at all, it's dashed. None where they show none, or a median."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
-  seen = Counter()
-  # a white centre where no yellow shows at all (Greenwich Pkwy's dashed one)
-  colour = 'yellow' if any(m['colour'] == 'yellow' for d in files for m in d['marks']) else 'white'
-  reach = CENTRE_REACH + 3.5 if colour == 'yellow' else 2.0  # white lines further out are lane or edge lines
+  seen, gaps = Counter(), 0
+  def near(lines):
+    return [m['type'] for m in lines if abs((sum(m['pair']) / 2 if m.get('pair') else m['offset']) - at) <= tol]
   for d in files:
-    yellow = [m for m in d['marks'] if m['colour'] == colour and m['conf'] >= CONF and abs(m['offset']) <= reach]
-    near = [m['type'] for m in yellow if abs((sum(m['pair']) / 2 if m.get('pair') else m['offset']) - at) <= tol]
-    if len(near) == 1 and len(yellow) == 1:
-      seen[near[0]] += 1
-  kind, n = seen.most_common(1)[0] if seen else (None, 0)
-  return DIVIDER.get(kind) if n >= MIN_SAMPLES and n * 2 >= len(files) else None
+    marks = [m for m in d['marks'] if m['conf'] >= CONF]
+    yellow = [m for m in marks if m['colour'] == 'yellow' and abs(m['offset']) <= CENTRE_REACH + 3.5]
+    white = [m for m in marks if m['colour'] == 'white' and m['type'] != 'edge_line' and abs(m['offset']) <= WHITE_CENTRE_REACH
+             and m.get('width', WHITE_CENTRE_WIDTH) >= WHITE_CENTRE_WIDTH]
+    # the yellow line, else a white one where no yellow is near (yellow lines further out being edge lines)
+    lines, colour = (yellow, 'yellow') if near(yellow) or not near(white) else (white, 'white')
+    if len(near(lines)) == 1 and len(lines) == 1:
+      seen[(near(lines)[0], colour)] += 1
+    gaps += not yellow and not white
+  (kind, colour), n = seen.most_common(1)[0] if seen else ((None, None), 0)
+  if kind in DIVIDER and (n >= MIN_SAMPLES and n * 2 >= len(files) or
+                          kind == 'dashed' and len(seen) == 1 and n >= DASHES_SEEN * len(files) and (n + gaps) * 2 >= len(files)):
+    return DIVIDER[kind], colour
+  return None
+
+
+def centre_bare(samples: list[dict]) -> bool:
+  """Whether the game files show a two-way link with no centre line: MIN_SAMPLES or more sections, the asphalt's edges
+  read in half of them (the road is in the files, not a gap in them), and no line near the link in any (no yellow
+  within its centre's reach, a metre more for a median's edges, no white but edge lines within WHITE_CENTRE_REACH). A
+  dashed line laid a decal a dash can fall between sections: check the line along the link itself too (ynd_to_osm)."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < MIN_SAMPLES:
+    return False
+  edges = sum((d.get('kerbs') or {}).get('left') is not None and (d.get('kerbs') or {}).get('right') is not None for d in files)
+  return edges * 2 >= len(files) and not any(
+    m['conf'] >= CONF and (m['colour'] == 'yellow' and abs(m['offset']) <= CENTRE_REACH + 1.0 or
+                           m['colour'] == 'white' and m['type'] != 'edge_line' and abs(m['offset']) <= WHITE_CENTRE_REACH)
+    for d in files for m in d['marks'])
 
 
 EDGE_REACH = 2.5  # m between a one-way road's painted edge and where the class layout has its kerb
@@ -702,6 +804,30 @@ def outer_lines(samples: list[dict], edges: tuple[float, float]) -> tuple[bool |
         seen[min(near)[1]] += 1
     kind, n = seen.most_common(1)[0] if seen else (None, 0)
     out.append(CROSSING[kind][1 - i] if kind and n * 2 >= len(files) else None)  # the half facing the link's lanes
+  return out[0], out[1]
+
+
+EDGE_LINE_REACH = 1.5  # m between a one-way link's lane edge and a yellow line painted along it
+
+
+def edge_lines(samples: list[dict], edges: tuple[float, float]) -> tuple[str | None, str | None]:
+  """divider=* for the yellow lines the game files paint along a one-way link's lane edges (`edges`, m right of its
+  line), as along a carriageway's left edge beside a median or barrier: each edge takes the kind of the yellow line
+  nearest it within EDGE_LINE_REACH in half the samples or more (a solid one for raised markers or an edge line).
+  (left, right); None where none is."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < MIN_SAMPLES:
+    return None, None
+  out = []
+  for edge in edges:
+    seen = Counter()
+    for d in files:
+      near = [(abs(o - edge), m['type']) for m in d['marks'] if m['conf'] >= CONF and m['colour'] == 'yellow' and
+              abs((o := sum(m['pair']) / 2 if m.get('pair') else m['offset']) - edge) <= EDGE_LINE_REACH]
+      if near:
+        seen[min(near)[1]] += 1
+    kind, n = seen.most_common(1)[0] if seen else (None, 0)
+    out.append(DIVIDER.get(kind, 'solid_line') if kind and n * 2 >= len(files) else None)
   return out[0], out[1]
 
 

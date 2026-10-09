@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.lane_parity import compare, swapped
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, UK, US, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, EDGE_LINE, FORWARD, MEDIAN, PARKING, UK, US, \
   Section, WayLanes, _opens_left, lane_counts, offset_line
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
 
@@ -399,6 +399,88 @@ def test_median_edge_kinds():
   sides = {**base, 'divider:forward': 'solid_line', 'divider:backward': 'double_solid_line'}
   assert kinds(sides) == ['double_solid', 'solid']  # left to right: beside the oncoming lanes, beside ours
   assert kinds(sides, BACKWARD) == ['solid', 'double_solid']
+
+
+def test_line_colours():
+  # a white dashed centre (the port's); lane lines one way are white
+  two = {'highway': 'residential', 'lanes': '2', 'lanes:forward': '1', 'lanes:backward': '1', 'width': '11', 'divider': 'dashed_line'}
+  centre = [line for line in WayLanes.from_tags({**two, 'divider:colour': 'white'}).lines() if line.kind == CENTRE]
+  assert [(line.style, line.white) for line in centre] == [('dashed', True)]
+  assert [line.white for line in WayLanes.from_tags(two).lines() if line.kind == CENTRE] == [False]
+  oneway = WayLanes.from_tags({'highway': 'primary', 'lanes': '2', 'oneway': 'yes', 'width': '11'})
+  assert [line.white for line in oneway.lines() if line.kind == DIVIDER] == [True]
+
+
+def test_edge_lines():
+  # a one-way carriageway's yellow left edge beside its median (divider:left), seen either way along it
+  tags = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12', 'divider:left': 'solid_line'}
+  road = WayLanes.from_tags(tags)
+  assert [(ln.kind, ln.offset, ln.style, ln.white) for ln in road.lines() if ln.kind in (EDGE, EDGE_LINE)] == \
+    [(EDGE, -6.0, None, False), (EDGE_LINE, -6.0, 'solid', False), (EDGE, 6.0, None, False)]
+  assert [ln.offset for ln in road.lines(BACKWARD) if ln.kind == EDGE_LINE] == [6.0]  # its lanes' left, on the right seen backward
+  both = WayLanes.from_tags({**tags, 'divider:right': 'double_solid_line'})
+  assert [(ln.offset, ln.style) for ln in both.lines() if ln.kind == EDGE_LINE] == [(-6.0, 'solid'), (6.0, 'double_solid')]
+  assert not [ln for ln in WayLanes.from_tags({**tags, 'lane_markings': 'no'}).lines() if ln.kind == EDGE_LINE]
+  # a two-way way has no such edges
+  two = {'highway': 'residential', 'lanes': '2', 'width': '11', 'divider:left': 'solid_line'}
+  assert not [ln for ln in WayLanes.from_tags(two).lines() if ln.kind == EDGE_LINE]
+
+
+def test_street_centres():
+  # East Galileo Ave: a link given the class default between one painted dashed and a junction; carried on past another
+  # default up to the nearest painted way, the halves of a centre seen the other way swapped
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import street_centres
+
+  def node(x, y=0.0):
+    return {'x': x, 'y': y}
+  nodes = {'A': node(0), 'B': node(30), 'C': node(40), 'D': node(70), 'E': node(40, 30)}
+  two = {'highway': 'residential', 'lanes': '2', 'lanes:forward': '1', 'lanes:backward': '1', 'width': '11', 'name': 'East Galileo Ave'}
+  ways = [(1, 'A', 'B', {**two, 'divider': 'dashed_line'}), (2, 'B', 'C', {**two, 'divider': 'double_solid_line'}),
+          (3, 'C', 'D', {**two, 'divider': 'double_solid_line'})]
+  assert street_centres(nodes, ways, {2, 3}) == {2: {'divider': 'dashed_line'}, 3: {'divider': 'dashed_line'}}
+  # the nearer side; white with its colour, the halves swapped where the way is drawn the other way
+  ways[2] = (3, 'D', 'C', {**two, 'divider': 'solid_line;dashed_line', 'divider:colour': 'white'})
+  ways[0] = (1, 'A', 'B', {**two, 'divider': 'double_solid_line'})
+  nodes['A'], nodes['Z'] = node(-200), node(-260)  # 230 m on to its painted side ahead: further than CENTRE_CARRY
+  assert street_centres(nodes, [(0, 'Z', 'A', {**two, 'divider': 'solid_line'})] + ways, {1, 2}) == \
+    {1: {'divider': 'solid_line'}, 2: {'divider': 'dashed_line;solid_line', 'divider:colour': 'white'}}
+  # an unpainted road on: no centre; another street, or a road turning off, gives nothing
+  ways[2] = (3, 'C', 'D', {**two, 'lane_markings': 'no'})
+  assert street_centres(nodes, ways, {1, 2}) == {1: {'divider': 'no'}, 2: {'divider': 'no'}}
+  # a way given the default then found unpainted itself keeps that, and is unpainted to the ways beside it
+  ways[2] = (3, 'C', 'D', {**two, 'divider': 'dashed_line'})
+  ways[1] = (2, 'B', 'C', {**two, 'lane_markings': 'no'})
+  assert street_centres(nodes, ways, {1, 2}) == {1: {'divider': 'no'}}
+  ways = [(2, 'B', 'C', {**two, 'divider': 'double_solid_line'}), (3, 'C', 'D', {**two, 'divider': 'dashed_line', 'name': 'Other St'}),
+          (4, 'C', 'E', {**two, 'divider': 'dashed_line'})]
+  assert street_centres(nodes, ways, {2}) == {}
+
+
+def test_carried_edges():
+  # a short link without sections between two whose yellow left edge the files show; not where only one side has it
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import carried_edges
+  nodes = {k: {'x': x, 'y': 0.0} for k, x in (('A', 0.0), ('B', 40.0), ('C', 50.0), ('D', 90.0))}
+  one = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}
+  ways = [(1, 'A', 'B', {**one, 'divider:left': 'solid_line', 'divider:right': 'solid_line'}), (2, 'B', 'C', one),
+          (3, 'C', 'D', {**one, 'divider:left': 'solid_line'})]
+  assert carried_edges(nodes, ways, {2}) == {2: {'divider:left': 'solid_line'}}
+  assert carried_edges(nodes, ways[:2], {2}) == {}
+
+
+def test_painted_along():
+  # paint along a link's line (a dash or two), not paint across its ends (a stop line, a crossing's stripe)
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import painted_along
+  nodes = {'A': {'x': 0.0, 'y': 0.0, 'z': 0.0}, 'B': {'x': 30.0, 'y': 0.0, 'z': 0.0}, 'C': {'x': 6.0, 'y': 0.0, 'z': 0.0}}
+
+  class Paint:
+    def __init__(self, spans):
+      self.spans = spans
+
+    def near(self, p, z):
+      return any(a <= p[0] <= b and abs(p[1]) < 0.6 for a, b in self.spans)
+  assert painted_along(Paint([(10.0, 14.0)]), nodes, 'A', 'B')
+  assert not painted_along(Paint([(0.0, 3.0), (27.0, 30.0), (15.0, 15.4)]), nodes, 'A', 'B')
+  assert painted_along(Paint([]), nodes, 'A', 'C')  # too short to tell
 
 
 def test_median_turn_lane():

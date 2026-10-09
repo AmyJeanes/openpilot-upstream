@@ -52,7 +52,7 @@ from multiprocessing.connection import Connection
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, DIVIDER, EDGE, FORWARD, PARKING, Section, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, EDGE, EDGE_LINE, FORWARD, PARKING, Section, \
   offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
@@ -333,7 +333,7 @@ def marking_kinds(line) -> list[tuple[str, float]]:
     return [("e", 0.0)]
   if line.kind == PARKING:
     return [("p", 0.0)]
-  dashed, solid = ("d", "w") if line.kind == DIVIDER else ("y", "c")
+  dashed, solid = ("d", "w") if line.white else ("y", "c")
   return {"dashed": [(dashed, 0.0)], "solid": [(solid, 0.0)], "double_solid": [(solid, -DOUBLE), (solid, DOUBLE)],
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
 
@@ -549,6 +549,7 @@ def road_marks(paths, osm) -> dict:
       add("t", middle, (a, b))
     geometry = osm.line_geometry(wid)
     right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
+    painted_edges = {round(line.offset, 2) for line, _ in geometry if line.kind == EDGE_LINE}
     for line, base in geometry:
       if wid in junctions.inside and (line.kind == EDGE or round(line.offset, 2) not in carried_inside[wid]):
         continue  # inside a junction, only the lines carried across it
@@ -569,7 +570,7 @@ def road_marks(paths, osm) -> dict:
           kerbs, between = side.kerb(piece, pz, layer, {wid}, line.offset == right)  # none between ways side by side
           for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # nor round painted islands
             add(kind, np.column_stack([p, z_along(p, piece, pz)]), (a, b))
-          for p, style in between:
+          for p, style in between if round(line.offset, 2) not in painted_edges else ():  # its own line is in its paint
             add("d" if style == "dashed" else "w", np.column_stack([p, z_along(p, piece, pz)]), (a, b))
   shape_pts, shape_len, shape_kind, shape_node = [], [], [], []
 

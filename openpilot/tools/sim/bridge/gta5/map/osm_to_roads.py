@@ -23,7 +23,8 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, apart, clip_outside, hull, off_islands
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, EDGE_LINE, FORWARD, MEDIAN, PARKING, OsmLanes, \
+  offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
@@ -157,9 +158,9 @@ def packed(z) -> int | list[int]:
   return z[0] if min(z) == max(z) else z
 
 
-def marks(style: str | None, divider: bool) -> list[tuple[int, float]]:
-  """A line's style as lanes.json kinds and offsets from it: [(kind, m right)]."""
-  dashed, solid = (1, 2) if divider else (4, 3)
+def marks(style: str | None, white: bool) -> list[tuple[int, float]]:
+  """A line's style as lanes.json kinds and offsets from it, white or yellow: [(kind, m right)]."""
+  dashed, solid = (1, 2) if white else (4, 3)
   return {'dashed': [(dashed, 0.0)], 'solid': [(solid, 0.0)], 'double_solid': [(solid, -DOUBLE), (solid, DOUBLE)],
           'dashed_solid': [(dashed, -DOUBLE), (solid, DOUBLE)], 'solid_dashed': [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(style or '', [])
 
@@ -354,11 +355,11 @@ def main():
     if wid not in junctions.inside and (osm.taper(wid) is not None or osm.blend(wid) is not None):
       tapered.append(wid)  # its lines move along it: drawn on their own
     elif wid not in junctions.inside:
-      lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or (road.markings
-                    and ln.kind != PARKING)) + tuple((PARKING_STRIP, round((a + b) / 2, 2), None) for a, b in road.parking_lanes(FORWARD))
+      lines = tuple((ln.kind, round(ln.offset, 2), ln.style, ln.white) for ln in road.lines(FORWARD) if ln.kind == EDGE or (road.markings
+                    and ln.kind != PARKING)) + tuple((PARKING_STRIP, round((a + b) / 2, 2), None, True) for a, b in road.parking_lanes(FORWARD))
       layouts.append(((levels[wid][0], lines), True, refs))  # lines are offsets along a way's direction: join only ways going on
     elif carried_inside.get(wid) and road.markings:  # inside a junction, only the lines carried across it
-      lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD)
+      lines = tuple((ln.kind, round(ln.offset, 2), ln.style, ln.white) for ln in road.lines(FORWARD)
                     if ln.kind in (CENTRE, DIVIDER, MEDIAN) and round(ln.offset, 2) in carried_inside[wid])
       if lines:
         layouts.append(((levels[wid][0], lines), True, refs))
@@ -441,10 +442,11 @@ def main():
     pts = points(nodes)
     z = heights(nodes) if high else None
     ways = {osm.pairs[(a, b)][0] for a, b in zip(nodes[:-1], nodes[1:], strict=True)}
-    right = max((offset for kind, offset, _ in sig if kind == EDGE), default=None)
-    for kind, offset, style in sig:
+    right = max((offset for kind, offset, *_ in sig if kind == EDGE), default=None)
+    painted_edges = {offset for kind, offset, *_ in sig if kind == EDGE_LINE}
+    for kind, offset, style, white in sig:
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
-          marks(style, kind == DIVIDER):
+          marks(style, white):
         geom = osm.offset_nodes(nodes, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE, offset=offset if kind in PAINTED else None)):
           if kind != EDGE:
@@ -453,7 +455,7 @@ def main():
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, ways, offset == right)
           for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):
             add(k, p, layer, z_along(p, pts, z) if high else None)
-          for p, s in between:
+          for p, s in between if offset not in painted_edges else ():  # its own line is in its paint
             add(KINDS.index(s), p, layer, z_along(p, pts, z) if high else None)
   for wid in tapered:  # lanes opening or closing along it (osm_lanes.OsmLanes.taper)
     refs, road, layer = junctions.ways[wid][1], osm.lanes(wid), levels[wid][0]
@@ -461,10 +463,11 @@ def main():
     z = heights(refs) if high else None
     geometry = osm.line_geometry(wid)
     right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
+    painted_edges = {round(line.offset, 2) for line, _ in geometry if line.kind == EDGE_LINE}
     for line, geom in geometry:
       if line.kind != EDGE and (not road.markings or line.kind == PARKING):
         continue
-      for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.kind == DIVIDER):
+      for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.white):
         g = offset_line(geom, off) if off else geom
         # a blend's lines move only at its other end: at a junction they're where its lanes put them
         for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE, offset=line.offset if line.kind in PAINTED else None)):
@@ -474,7 +477,7 @@ def main():
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, {wid}, line.offset == right)
           for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # as for the ways above
             add(k, p, layer, z_along(p, pts, z) if high else None)
-          for p, st in between:
+          for p, st in between if round(line.offset, 2) not in painted_edges else ():
             add(KINDS.index(st), p, layer, z_along(p, pts, z) if high else None)
     for a, b in road.parking_lanes(FORWARD):
       g = offset_line(pts, (a + b) / 2)
