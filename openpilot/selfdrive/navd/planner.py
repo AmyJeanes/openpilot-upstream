@@ -108,7 +108,7 @@ TAKEN_NEAR = 12.0  # m, or near a turn taken, as a turn may follow straight afte
 FORK_TURN = 80.0  # m: a turn this soon after a fork left to the route goes with it, as from a road's lanes split at a junction
 # Forks: the route's branch and its lanes come from the map; the keep desire towards it (the model's fork desires)
 # holds the model to that side through the split.
-FORK_LOOKAHEAD = 1000.0  # m
+FORK_LOOKAHEAD = 3500.0  # m, as far as a freeway move's changes may start (fwy_lane_time)
 FORK_LAST = 2.0  # s before a fork, the last a lane change for it starts
 FORK_LAST_DIST = 40.0  # m, at least
 FORK_KEEP = 4.0  # s before a fork that the keep desire starts
@@ -152,6 +152,19 @@ LEFT_SIGNAL_AFTER_CHANGE = 8.0  # s after a lane change towards a left turn its 
 # ending this near the turn's point (in the junction)
 ARROWS_BEFORE, ARROWS_AFTER = 30.0, 5.0  # m
 THROUGH_TURN = 20.0  # deg at most the route turns through a junction it goes straight on through, where the arrows don't say
+# Freeways (Route.info's roadClasses): exits and forks come up fast across several lanes, so nav moves over for them
+# far ahead, by the Tune's fwy_ settings: that many s of travel per lane at the road's limit (the car's speed if
+# higher), the changes evenly spread and done by fwy_clear m before the gore; from fwy_settle s past the maneuver
+# before (a fork or keep, a turn, an on-ramp's merge), and never into lanes that leave the route on the way
+FREEWAY = frozenset({"motorway", "motorway_link", "trunk", "trunk_link"})
+MAINLINE = frozenset({"motorway", "trunk"})
+FWY_RAMP_TIME = 4.0  # s a lane change takes on the lane line
+FWY_NEAR = 20.0  # m: a barrier or a move's frozen spacing (FwyState) this near a move is its own
+FWY_MARKS_BEHIND = 1000.0  # m: barriers further behind are forgotten
+# by the model's lane, which may lag a lane change: no change after one until it reads the new lane or this long has
+# passed, nor one back the other way this soon after
+MODEL_CATCHUP = 4.0  # s
+MODEL_REVERSE_GAP = 10.0  # s
 
 
 def wrap(deg: float) -> float:
@@ -234,6 +247,19 @@ class Tune:
     "turned_unwrapped": False,
     # no re-pulse of a turn once the car has come round past its way out (as after a stop mid-turn)
     "no_repulse_past_exit": False,
+    # freeway exits and forks (FREEWAY): s of travel per lane to cross, at the road's limit or the car's speed if
+    # higher (0: as on any road); the changes done this far before the gore where there's room; no sooner than this
+    # long past the maneuver before; and at least this long apart where the room is short
+    "fwy_lane_time": 30.0,  # s
+    "fwy_clear": 300.0,  # m
+    "fwy_settle": 5.0,  # s
+    "fwy_min_gap": LANE_CHANGE_TIME,  # s
+    # the lane nav plans from: "map" (the bridge's reading on the route, a stand-in for the truth), "model" (the driving
+    # model's current-lane head, modelV2.laneHead, as a real car has, once sure), or "fused" (the model's once sure and
+    # counting as many lanes as the map, else the map's)
+    "lane_source": os.getenv("NAVD_LANE_SOURCE", "fused"),
+    "model_lane_prob": 0.7,  # the model's lane counts once its probability is at least this
+    "model_lane_hold": 1.0,  # s, holding the same lane that sure
   }
   CHECK_EVERY = 1.0  # s
 
@@ -546,6 +572,86 @@ def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> 
   return math.sqrt(speed ** 2 + 2 * decel * max(0.0, dist - v * SLOW_LAG))
 
 
+def value_at(changes: list | None, d: float, default=None):
+  """A per-stretch value d m on, from [[m ahead, value], ...] where it changes (Route.info's limits, roadClasses)."""
+  out = default
+  for at, value in changes or []:
+    if at > d:
+      break
+    out = value
+  return out
+
+
+def freeway_move(m, classes: list | None) -> bool:
+  """Whether a move ahead (not a turn) is on a freeway, by the road just before it; never without the road classes."""
+  return not isinstance(m, Turn) and value_at(classes, m.dist - 1.0, "") in FREEWAY
+
+
+def barrier(m) -> float | None:
+  """Where past a maneuver the route takes (a turn, or a fork or keep it takes a branch of) changes for a freeway move
+  after it may start, before fwy_settle; None for the others, which only keep the car out of lanes leaving the route."""
+  if isinstance(m, Turn):
+    return m.dist + TURN_HOLDS
+  return m.dist if isinstance(m, Fork) and m.keep else None
+
+
+def merges(classes: list | None) -> list[float]:
+  """m ahead where the route joins a freeway's mainline from another road, as from an on-ramp (Route.info's
+  roadClasses)."""
+  out, prev = [], ""
+  for d, c in classes or []:
+    if d > 0 and c in MAINLINE and prev and prev not in MAINLINE:
+      out.append(d)
+    prev = c or prev
+  return out
+
+
+def fwy_free(dist: float, barriers: list[float], v: float, t: Tune) -> float:
+  """m on from which changes for a freeway move `dist` m on may start: fwy_settle past the last of the barriers (m on,
+  behind the car too) before it."""
+  before = [b for b in barriers if b < dist - FWY_NEAR]
+  return max(0.0, max(before) + t.fwy_settle * max(v, LANE_CHANGE_MIN_SPEED)) if before else 0.0
+
+
+def fwy_start(dist: float, total: int, pos: float, barriers: list[float], v: float, last: float, t: Tune) -> float:
+  """m on from which `total` changes for a freeway move `dist` m on may start, no sooner than `pos`: settled past the
+  barriers before it, but no later than leaves room for them, one lane change and gap each, by `last` m before it."""
+  latest = dist - last - total * (FWY_RAMP_TIME + LANE_CHANGE_GAP) * max(v, LANE_CHANGE_MIN_SPEED)
+  return max(pos, min(fwy_free(dist, barriers, v, t), latest))
+
+
+def fwy_speed(v: float, limits: list | None, d: float = 0.0) -> float:
+  """The speed a freeway move's changes are timed at: the road's limit d m on, or the car's speed if higher."""
+  return max(v, value_at(limits, d, 0.0) or 0.0, LANE_CHANGE_MIN_SPEED)
+
+
+def fwy_schedule(dist: float, n: int, start: float, v: float, vref: float, last: float, t: Tune,
+                 slot: float | None = None) -> tuple[float, float]:
+  """(end, slot) for n lane changes for a freeway move `dist` m on, the first no sooner than `start` m on: the k-th
+  (from 0) starts at end - (n - k) * slot, the last done by end. Each lane gets fwy_lane_time s of travel at vref,
+  ending fwy_clear m before the move; where there isn't that room, spread evenly over what there is, at least
+  fwy_min_gap apart (as late as `last` m before it, at the latest). `slot`: the spacing frozen as the first began."""
+  gap = t.fwy_min_gap * max(v, LANE_CHANGE_MIN_SPEED)
+  end = min(dist - last, max(dist - t.fwy_clear, start + n * gap))
+  each = min(t.fwy_lane_time * vref, max(end - start, 0.0) / max(n, 1))
+  if slot is not None:
+    each = slot
+  return end, each
+
+
+class FwyState:
+  """What the live planner keeps for freeway changes, for the lane plan to time them as it does: the barriers it has
+  seen (m on from the car, negative behind it, as an on-ramp's merge just passed), and the spacing of each move's
+  changes ([(x, y, m)] by the move's point), frozen as the first began so that the rest stay evenly spread."""
+  def __init__(self, barriers: list | None = None, slots: list | None = None):
+    self.barriers = barriers or []
+    self.slots = slots or []
+
+  def slot(self, point: np.ndarray) -> float | None:
+    near = [s for x, y, s in self.slots if math.hypot(x - point[0], y - point[1]) < FWY_NEAR]
+    return near[0] if near else None
+
+
 MAP_AT = 0.5  # m: a lane map this near a maneuver is its junction's or fork's own, past it (Route.info rounds to 0.1 m)
 
 
@@ -606,7 +712,8 @@ class LaneMaps:
 
 def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
               arrows: list | None = None, drops: list | None = None, opens: list | None = None,
-              maps: list | None = None, turns: list | None = None) -> list[tuple[float, float]]:
+              maps: list | None = None, turns: list | None = None, classes: list | None = None,
+              limits: list | None = None, fwy: FwyState | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
   in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
@@ -615,7 +722,9 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   at a node or across a junction) it keeps to its lane as its number changes, a lane that ends merging into the
   nearest. Without maps, only where lanes begin on the left of ours (`opens`: [m ahead, how many]) is it renumbered.
   lanes_at(m, after) is the lanes the car's way just before (after: past) a point. `turns`: the route's own turns
-  (next_turn), else found on `route`."""
+  (next_turn), else found on `route`. With the maps, freeway moves' changes are timed as the live planner times them
+  (fwy_schedule), by the road classes and speed limits ahead (Route.info's roadClasses, limits) and what the planner
+  keeps for them (`fwy`, Planner.fwy_state)."""
   t = tune or TUNE
   arrows = parse_arrows(arrows)
   ahead: list[Turn | Fork | Through] = []
@@ -633,7 +742,7 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
     for m in ahead:
       aim_fork(m, maps.maps)
     ahead += lane_ends(maps.maps, ahead)
-    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), maps, lane, lanes_at, v, t)
+    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), maps, lane, lanes_at, v, t, route, classes, limits, fwy)
   ahead += [Opening(float(d), int(extra)) for d, extra in opens or [] if d > 0]
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
@@ -709,7 +818,8 @@ def bay_opens(maps: list, lane: int) -> float | None:
   return None
 
 
-def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune) -> list[tuple[float, float]]:
+def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune, route: np.ndarray, classes: list | None = None,
+                 limits: list | None = None, fwy: FwyState | None = None) -> list[tuple[float, float]]:
   """lane_plan with the lane maps: the lane followed across each change of the road's lanes by a step in its number
   where it changes (as keys at one place, which lane_line puts either side of the node), also part way through a lane
   change."""
@@ -757,9 +867,60 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune)
       keys.extend([(d, xs[k] + (ys[k] - xs[k]) * f), (d, xs[k + 1] + (ys[k + 1] - xs[k + 1]) * f)])
     keys.append((s1, float(y)))
 
+  def along(lane: int, s0: float, s1: float) -> int:
+    """The lane numbered as the road is at s0 (not before pos), carried on to s1 through the maps not yet passed."""
+    for _, mp, _ in todo[upto(s0):upto(s1)]:
+      lane = carry(mp, lane)
+    return lane
+
+  def count_at(s: float) -> int:
+    k = upto(s)
+    return len(todo[k][1]) if k < len(todo) else lanes_at(s, False)
+
+  # freeway moves (FwyState, fwy_schedule): the barriers before them, and the moves the car keeps to the lanes of, not
+  # yet laid past, as their changes may start before those but not into lanes leaving the route there: (m, lo, hi)
+  fwy_on = classes is not None and t.fwy_lane_time > 0
+  barriers = (list(fwy.barriers) if fwy is not None else []) + merges(classes)
+  keeps: list[tuple[float, int, int]] = []
+
+  def fwy_changes(m, at: int, want: int, last: float):
+    """Lays the changes from lane `at` to `want` (numbered as at m) for a freeway move, as the live planner times them;
+    those it can't fit before `last` m before the move are left to the usual late changes."""
+    nonlocal cur, pos
+    total, d = abs(want - at), 1 if want > at else -1
+    start = fwy_start(m.dist, total, pos, barriers, v, last, t)
+    slot = fwy.slot(Planner._point(route, m.dist)) if fwy is not None and len(route) >= 2 else None
+    end, each = fwy_schedule(m.dist, total, start, v, fwy_speed(v, limits, m.dist - 1.0), last, t, slot)
+    length = max(LANE_LINE_CHANGE, FWY_RAMP_TIME * v)
+    done_at = -math.inf
+    for k in range(total):
+      s = max(end - (total - k) * each, pos, done_at + LANE_CHANGE_GAP * v)
+      while s < m.dist - last:
+        x = along(cur, pos, s)
+        y = x + d
+        n_s = count_at(s)
+        if n_s > 0 and not 0 <= y < n_s:  # the lane it moves into only begins further on (a lane opening)
+          nxt = upto(s)
+          s = todo[nxt][0] + 2 * MAP_AT if nxt < len(todo) and todo[nxt][0] < m.dist else math.inf
+          continue
+        # not into lanes leaving the route before the move: past them first
+        bad = [c for c, lo_c, hi_c in keeps if c > s and not lo_c <= along(y, s, c) <= hi_c]
+        if not bad:
+          break
+        s = max(bad) + 2 * MAP_AT  # past its lane maps too
+      if s >= m.dist - last:
+        return
+      e = min(s + length, m.dist - last)
+      cur = hold(cur, s)
+      y = along(cur, s, e) + d
+      ramp(cur, s, y, e)
+      cur, pos, done_at = y, e, e
+
   if pos > 0.0:
     cur = hold(cur, pos, mark=False)  # out of the oncoming lanes meanwhile
   for m in ahead:
+    if barrier(m) is not None:
+      barriers.append(barrier(m))  # past it, so only for the moves after it
     n = lanes_at(m.dist, False)
     if n <= 0:
       continue
@@ -770,6 +931,14 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune)
     lo, hi = m.lanes(n)
     if isinstance(m, Fork) and (lo, hi) == (0, n - 1):
       continue  # any lane will do: nothing to keep changes for the next move from starting before it
+    fwy_move = fwy_on and freeway_move(m, classes)
+    if fwy_move and not lo <= at <= hi:
+      fwy_changes(m, at, lo if at < lo else hi, max(FORK_LAST_DIST, FORK_LAST * v) if isinstance(m, Fork) else t.lane_change_last)
+      at = min(along(cur, pos, m.dist), n - 1)
+    elif fwy_move and lo <= at <= hi and barrier(m) is None:
+      keeps.append((m.dist, lo, hi))  # laid past later, as changes for a freeway move after it may start before it
+      free = max(free, m.dist)
+      continue
     if not lo <= at <= hi:
       want = lo if at < lo else hi
       last = max(FORK_LAST_DIST, FORK_LAST * v) if isinstance(m, Fork) else t.lane_change_last
@@ -804,6 +973,7 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune)
       cur, pos = to, end
     cur = min(hold(cur, m.dist), n - 1)
     pos = m.dist
+    keeps = [c for c in keeps if c[0] > pos]
     if isinstance(m, Turn):
       # out of the junction in its side's outside lane, of the road out past any of the junction's own links
       out = max(lanes_at(m.dist, True), lanes_at(m.dist + TURN_HOLDS, False))
@@ -904,6 +1074,18 @@ class Planner:
     self.fork_keep_to = 0.0  # self.driven until which it's held, past the fork
     self.keep_gap_until = 0.0  # repeating a keep desire: off until then
     self.keep_stopped = False
+    self.classes: list | None = None  # the road classes ahead (NavInputs.road_classes)
+    self.limits: list | None = None
+    self.fwy_marks: list[float] = []  # self.driven at the barriers seen (fwy_free), behind the car too
+    self.fwy_slots: list[tuple[float, float, float]] = []  # FwyState.slots
+    # the car's lane by each source (lane_source): the map's once steady, the model's once sure and held
+    self.map_lane: tuple[int, int] | None = None
+    self.model_lane: tuple[int, int] | None = None
+    self.model_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
+    self.model_raw: list | None = None  # this step's laneHead reading [index, count, prob]
+    self.lane_src = ""  # where self.lane is from: "map" or "model"
+    self.lane_log = None  # NAVD_LANE_LOG's file, opened on the first step
+    self.lane_disagree: bool | None = None
 
   def update(self, inp: NavInputs) -> NavOutputs:
     """The step's cruise cap, arrival, requests to the driver and NavDesire's changes."""
@@ -927,8 +1109,9 @@ class Planner:
     self.driven += step
     route = inp.route
     pos = np.array(inp.pos[:2], dtype=float)
-    self._read_lane(inp.truth_lane, now)
+    self._read_lane(inp.truth_lane, now, inp.model_lane)
     self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
+    self.classes, self.limits = inp.road_classes, inp.limits
     if not engaged:
       self._cancel(indicator)
       self._end_change(indicator)
@@ -1037,6 +1220,7 @@ class Planner:
     ahead = moves + [m for m in throughs(route, arrows, moves, drops) if turn is None or m.dist < turn.dist]
     if self.maps is not None:
       ahead += [m for m in lane_ends(self.maps.maps, moves) if turn is None or m.dist < turn.dist]
+    self._mark_barriers(ahead, pos, heading)
     caps = [(self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now), "laneChange")]
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, inp.stops or [], inp.junctions or [])
@@ -1204,15 +1388,66 @@ class Planner:
     h = math.radians(heading)
     return bool((p - pos) @ np.array([-math.sin(h), math.cos(h)]) < -SKIP_PAST)
 
-  def _read_lane(self, lane: list[int] | None, now: float):
-    """The lane reading, once it has held for a moment: it's noisy where roads join. None once it hasn't for a while."""
+  def _read_lane(self, lane: list[int] | None, now: float, model: list | None = None):
+    """The car's lane by the lane source (Tune's lane_source) from the map's reading, once it has held for a moment
+    (it's noisy where roads join; None once it hasn't for a while), and the model's (_read_model_lane)."""
     reading = tuple(lane) if lane else None
     if reading != self.lane_seen[0]:
       self.lane_seen = (reading, now)
     elif now - self.lane_seen[1] >= LANE_STEADY:
-      self.lane, self.lane_t = reading, now
+      self.map_lane, self.lane_t = reading, now
     if now - self.lane_t > LANE_STALE:
-      self.lane = None
+      self.map_lane = None
+    self._read_model_lane(model, now)
+    self.lane, self.lane_src = self._pick_lane()
+    self._log_lane(now)
+
+  def _read_model_lane(self, model: list | None, now: float):
+    """The model's lane (laneHead's [index, count, prob]) once it has been sure of it for model_lane_hold s, and kept
+    until it has been sure of another, or unsure, that long: a flicker doesn't move it."""
+    t = self.tune
+    self.model_raw = list(model) if model else None
+    sure = None
+    if model and 0 <= int(model[0]) < int(model[1]) and float(model[2]) >= t.model_lane_prob:
+      sure = (int(model[0]), int(model[1]))
+    if sure != self.model_seen[0]:
+      self.model_seen = (sure, now)
+    if now - self.model_seen[1] >= t.model_lane_hold:
+      self.model_lane = sure
+
+  def _pick_lane(self) -> tuple[tuple[int, int] | None, str]:
+    """The lane nav plans from, and its source: the map's, or the model's where lane_source allows it ("fused": once
+    the map has the car in one of as many lanes of ours as the model counts)."""
+    src, mapped, model = self.tune.lane_source, self.map_lane, self.model_lane
+    if src == "model":
+      return model, "model" if model is not None else ""
+    if src == "fused" and model is not None and mapped is not None and mapped[0] >= 0 and mapped[1] == model[1]:
+      return model, "model"
+    return mapped, "map" if mapped is not None else ""
+
+  def _log_lane(self, now: float):
+    """Each step's lane by each source to NAVD_LANE_LOG (JSON lines), to score the model's against the map's; and with
+    DEBUG, where they start or stop disagreeing."""
+    mapped, model = self.map_lane, self.model_lane
+    disagree = None if mapped is None or model is None else tuple(mapped) != tuple(model)
+    if DEBUG and disagree is not None and disagree != self.lane_disagree:
+      print(f"nav: lane by the model {model} {'disagrees with' if disagree else 'agrees with'} the map's {mapped}")
+    self.lane_disagree = disagree
+    path = os.getenv("NAVD_LANE_LOG")
+    if not path:
+      return
+    if self.lane_log is None:
+      try:
+        self.lane_log = open(path, "a", buffering=1)
+      except OSError as e:
+        print(f"nav: lane log {path}: {e}")
+        os.environ.pop("NAVD_LANE_LOG", None)
+        return
+    raw = self.model_raw
+    self.lane_log.write(json.dumps({
+      "t": round(now, 3), "map": mapped and list(mapped), "model": model and list(model),
+      "raw": raw and [int(raw[0]), int(raw[1]), round(float(raw[2]), 3)], "used": self.lane and list(self.lane),
+      "src": self.lane_src, "disagree": disagree, "changing": self.changing}) + "\n")
 
   def _signal(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, heading: float, bay: float):
     """Signals the turn once near and slow enough, from its lane; one that can't be taken from the car's lane is left."""
@@ -1321,7 +1556,7 @@ class Planner:
     """Into the turn bay or slip lane for the turn ahead as it opens, from the lane beside it."""
     if not self._bay_beside(turn, bay) or self.driven < self.bay_to or self.changing is not None:
       return
-    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED:
+    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED or not self._clear_to_change(turn.side):
       return
     self.bay_to = self.driven + turn.dist + TURN_HOLDS
     self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m")
@@ -1386,16 +1621,80 @@ class Planner:
       self.skip_turns_to = self.driven + m.dist + FORK_TURN
       return 0.0
     cap = max(FORK_MIN_SPEED if fork else self.tune.lane_change_min_speed, room / need) if room < need * v else 0.0
-    early = self.tune.lane_change_early + (self.tune.lane_change_fast_early if v > FAST else 0.0)
-    if (self.changing is None and room > 0 and room < (need + early) * max(v, LANE_CHANGE_MIN_SPEED)
-        and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING):
+    side = "left" if i > hi else "right"
+    if self.tune.fwy_lane_time > 0 and freeway_move(m, self.classes):
+      first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
+      if first and len(first[0][1]) != n:
+        return cap  # a lane reading from before the road's lanes changed (just past a split): its targets are a guess
+      total = self._lanes_to(m, changes)
+      start = fwy_start(m.dist, total, 0.0, [b - self.driven for b in self.fwy_marks], v, last, self.tune)
+      slot = self._fwy_slot(where)
+      end, each = fwy_schedule(m.dist, total, start, v, fwy_speed(v, self.limits, m.dist - 1.0), last, self.tune, slot)
+      due = end - total * each <= 0.0
+    else:
+      early = self.tune.lane_change_early + (self.tune.lane_change_fast_early if v > FAST else 0.0)
+      due, each = room < (need + early) * max(v, LANE_CHANGE_MIN_SPEED), None
+    if (self.changing is None and room > 0 and due and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP
+        and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)
+        and self._clear_to_change(side)):
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
+      if each is not None and self._fwy_slot(where) is None:
+        self.fwy_slots.append((float(where[0]), float(where[1]), each))
       what = "way straight on" if isinstance(m, Through) else "lane ending" if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
-      self._start_change("left" if i > hi else "right", f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
+      self._start_change(side, f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
                          turn=isinstance(m, Turn))
     return cap
+
+  def _lanes_to(self, m, changes: int) -> int:
+    """The lane changes into a move's lanes from the car's, counting those into lanes still to open on the way (where
+    _lanes_for gives the lane beside them)."""
+    i, n = self.lane
+    if self.maps is None:
+      return changes
+    first = self.maps.between(-1.0, m.dist)
+    if first and len(first[0][1]) != n:
+      return changes
+    lo, hi = m.lanes(first[-1][2] if first else n)
+    at = self.maps.carry(i, -1.0, m.dist)
+    return max(changes, lo - at if at < lo else at - hi if at > hi else 0)
+
+  def _fwy_slot(self, where: np.ndarray) -> float | None:
+    return FwyState(slots=self.fwy_slots).slot(where)
+
+  def _mark_barriers(self, ahead: list, pos: np.ndarray, heading: float):
+    """Remembers where the barriers ahead (fwy_free) are, by distance driven, to settle past them once behind the car;
+    and forgets the freeway moves' frozen spacing once past them."""
+    for b in [barrier(m) for m in ahead] + merges(self.classes):
+      if b is None or b <= 0.0:
+        continue
+      at = self.driven + b
+      near = [k for k, mk in enumerate(self.fwy_marks) if abs(mk - at) < FWY_NEAR]
+      if near:
+        self.fwy_marks[near[0]] = at
+      else:
+        self.fwy_marks.append(at)
+    self.fwy_marks = [mk for mk in self.fwy_marks if mk > self.driven - FWY_MARKS_BEHIND]
+    self.fwy_slots = [s for s in self.fwy_slots if not self._passed(np.array(s[:2]), pos, heading)]
+
+  def fwy_state(self) -> FwyState:
+    """What the live planner keeps for freeway moves, for lane_plan."""
+    return FwyState([mk - self.driven for mk in self.fwy_marks], list(self.fwy_slots))
+
+  def _lane_settled(self, side: str, now: float) -> bool:
+    """Whether a lane change for a turn or fork may go by the model's lane: not while it may still be reading the lane
+    before the last change, nor back the other way soon after one (a lane flipping across the target's)."""
+    if self.lane_src != "model":
+      return True
+    if self.change_from == self.lane and now - self.change_t < MODEL_CATCHUP:
+      return False
+    return not (self.change_side is not None and side != self.change_side and now - self.change_t < MODEL_REVERSE_GAP)
+
+  def _clear_to_change(self, side: str) -> bool:
+    """Whether nav may start a lane change to `side` now: every change it starts (for a turn or fork, into a bay, out
+    of the oncoming lanes) asks here first, and asks again each step while it isn't."""
+    return True
 
   def _keep_fork(self, fork: Fork | None, turn: Turn | None, desire: dict[str, float], v: float, now: float):
     """The keep desire towards the route's branch, from a little before the fork to past it, but not against a turn
@@ -1463,7 +1762,7 @@ class Planner:
       return
     self.wrong_side_t = self.wrong_side_t or now
     if (self.changing is None and self.turn is None and now - self.wrong_side_t > WRONG_SIDE_FOR and v > LANE_CHANGE_SPEED
-        and now - self.change_t > LANE_CHANGE_GAP):
+        and now - self.change_t > LANE_CHANGE_GAP and self._clear_to_change("right")):
       self._start_change("right", f"out of oncoming lane {-lane[0]}")
 
   def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float, map_lane: dict | None = None):

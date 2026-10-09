@@ -37,7 +37,11 @@ class NavInputs:
   # after], ...], the first at 0 m from the car's lanes as truth_lane numbers them where they differ from the road's
   lane_maps: list | None = None
   turns: list | None = None  # the route's own turns, found once along it: [[m ahead, side, exit heading, deg turned], ...]
+  road_classes: list | None = None  # [[m ahead, the road's class (OSM highway tag, "" unknown)], ...] where it changes
   two_way: bool | None = None  # the road here, None unknown
+  # the driving model's current-lane head (modelV2.laneHead): [lane from the left of ours, lanes, probability]; None
+  # without a fresh one
+  model_lane: list | None = None
   # truth
   pos: tuple | list = (0.0, 0.0)  # [x, y] m
   heading: float = 0.0  # deg

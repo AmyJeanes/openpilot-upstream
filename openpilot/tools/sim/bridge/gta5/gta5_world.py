@@ -53,7 +53,9 @@ MAP_EVERY = 0.1  # s
 LANE_LINE_EVERY = 0.5  # s
 ON_PATH = 15.0  # m: the overlay's turn markers go on nav's lane line where it passes this near their route points
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
-ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
+# m: the route nav gets, in the form of the plugin's GTA route (500 m), as far as a freeway move's lane changes may start
+ROUTE_AHEAD, ROUTE_STEP = 3500.0, 5.0
+MODEL_STALE = 0.5  # s: the model's lane (modelV2.laneHead) for nav from a message no older
 # s the car's last lane reading by the map's lanes stands while there's none: the plugin's own reading counts GTA's
 # link, one of several side by side on a wide road (a 1-lane link reads [0, 1] in any lane), so it's used only on a
 # map without lane tags
@@ -424,6 +426,7 @@ class GTA5World(World):
       self._update_map(state, bearing, v)
       simulator_state.valid = True
       return
+    state = {**state, "modelLane": self._model_lane()}
     drives = self._nav_drives()
     out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic(), drives))
     self.driver.act(out)
@@ -437,6 +440,14 @@ class GTA5World(World):
     self._update_buttons(state)
     self._update_map(state, bearing, v)
     simulator_state.valid = True
+
+  def _model_lane(self) -> list | None:
+    """The driving model's lane for nav (modelV2.laneHead): [index from the left of ours, count, probability], None
+    without a fresh one or from a model without the head."""
+    if self.sm.recv_frame['modelV2'] <= 0 or time.monotonic() - self.sm.recv_time['modelV2'] > MODEL_STALE:
+      return None
+    lh = self.sm['modelV2'].laneHead
+    return [int(lh.laneIdx), int(lh.laneCount), round(float(lh.prob), 3)] if 0 <= lh.laneIdx < lh.laneCount else None
 
   def _idle_gc(self):
     """The full garbage collection hold_full_collections leaves out, while nothing is driving."""
@@ -667,8 +678,11 @@ class GTA5World(World):
     if r is self.lane_line[0] and now < self.lane_line[1]:
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
-    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length)))
+    lane = list(self.nav.lane) if self.nav.lane is not None else state.get("lane")  # the lane nav plans from
+    line = r.lane_line(lane_plan(r.rest(), forks, lane, r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
+                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length),
+                                 classes=r.changes(r.classes, r.length), limits=r.changes(r.limit_list, r.length),
+                                 fwy=self.nav.fwy_state()))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 
