@@ -154,10 +154,13 @@ def lane_guide(slots, s: float, v: float, car_lane: list[int] | None) -> LaneGui
   use = (FORK_DIRECTION if fork else TARGET_DIRECTION).get(side, "straight")
   current = here.first + car_lane[0] if car_lane else None
   lanes, inside = [], False
+  turns_at = getattr(slots.lanes, "turns_at", None)
+  ahead = turns_at(s, opened=True) if turns_at is not None else []  # the next junction's, for the lanes going on into it
+  ahead = ahead if len(ahead) == here.lanes and not any(here.turns) else here.turns
   for i, span in enumerate(here.spans):
     ours = here.first <= i < here.first + here.lanes
     shared = span.heading == 0 and not ours  # a centre turn lane
-    dirs = directions(span.lane.turns)
+    dirs = directions(ahead[i - here.first] if ours else span.lane.turns)
     if shared:
       dirs = [d for d in dirs if d != "straight"] or ["left" if span.lane.turns & LEFTS else "right" if span.lane.turns & RIGHTS else "straight"]
     active = (ours and i - here.first in want) or (shared and centre)

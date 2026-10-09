@@ -112,14 +112,16 @@ def test_short_room_spread_evenly():
 
 
 def test_city_roads_keep_their_timing():
-  # the same road as a primary road, or without road classes: the changes as before, (8 s each + 12 s) back from the end
+  # the same road as a primary road, or without road classes: nav's changes as before, (8 s each + 12 s) back from the end
   for cls in ("primary", None):
     f = Freeway(cls=cls)
     changes, _, ribbon = f.drive(0, start=2000.0)
     last = max(nav_mod.FORK_LAST_DIST, nav_mod.FORK_LAST * V)
     early = (3 * nav_mod.LANE_CHANGE_TIME + nav_mod.LANE_CHANGE_EARLY + nav_mod.FAST_EARLY) * V
     assert abs(changes[0][0] - (f.exit_at - last - early)) < 60.0, (cls, changes)
-    assert ribbon == [(f.exit_at - last - 3 * nav_mod.LANE_LINE_CHANGE, f.exit_at - last, 3.0)], (cls, ribbon)
+    # the lane plan draws them where nav starts them (plan_city_early), each over LANE_LINE_CHANGE m
+    assert len(ribbon) == 1 and abs(ribbon[0][0] - changes[0][0]) < 60.0, (cls, ribbon, changes)
+    assert abs(ribbon[0][1] - ribbon[0][0] - 3 * nav_mod.LANE_LINE_CHANGE) < 1.0 and ribbon[0][2] == 3.0, (cls, ribbon)
   # and the tune turns it off
   changes, _, _ = Freeway().drive(0, start=2000.0, tune={"fwy_lane_time": 0.0})
   assert abs(changes[0][0] - (4000.0 - last - early)) < 60.0, changes

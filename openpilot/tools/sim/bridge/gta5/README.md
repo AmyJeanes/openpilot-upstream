@@ -45,13 +45,13 @@ openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that
 ## Controls
 | Key | openpilot |
 |---|---|
-| F6 | Engage / disengage |
+| Insert | Engage / disengage (F5-F8 are GTA's character switch) |
 | Brake (S, left trigger), steering | Disengage |
 | Gas | Override, without disengaging |
 | Up / down arrow | Cruise speed up / down (hold to repeat); the phone is blocked while connected |
 | Shift + up / down arrow | Cruise speed to the next multiple of 5 up / down |
 | Left / right arrow | Left / right blinker: a lane change at 20 mph or more, below that the next turn (it cancels once taken) |
-| F7 | Map debug overlay on / off (`key_debug` in gta5op.ini) |
+| Delete | Map debug overlay on / off (`key_debug` in gta5op.ini) |
 
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
@@ -194,7 +194,7 @@ inputs still carry the game's true pose and lane (`truth_*`). The bridge's side 
   route's lane for the car is wrong). `nav_replay.py run` follows the same variable.
 
 ### Map debug overlay and GPS route
-`gta5_cmd.py debug on` (or F7) draws the map around the car into the world, from the player's camera, to spot map
+`gta5_cmd.py debug on` (or Delete) draws the map around the car into the world, from the player's camera, to spot map
 problems while driving (`gta5_overlay.py`, drawn by `core.cpp` DrawDebug). Each kind is a strip of its own width lying
 on the game's ground, colours as the map view's where it has them:
 
@@ -238,7 +238,7 @@ starts (it places the car, so run it only with nothing else driving).
 
 Both reset when the plugin's core reloads (a DLL swap, a GTA restart), so the bridge keeps them: it merges every
 `debug` and `gpsroute` command sent through it, takes up what the plugin's state shows (settings from before the bridge
-started, F7), and sets them again each time the game connects, which a reload does. `GTA5_DEBUG_OVERLAY` and
+started, Delete), and sets them again each time the game connects, which a reload does. `GTA5_DEBUG_OVERLAY` and
 `GTA5_GPSROUTE`, written as `gta5_cmd.py`'s arguments after `debug` or `gpsroute` (`GTA5_DEBUG_OVERLAY="on layers=all"`,
 `GTA5_GPSROUTE=on`), set them from the bridge's start; unset, the bridge sets nothing until told or the state shows one on.
 

@@ -25,7 +25,15 @@ slowing rate above 12 m/s. unstick: stopped unstick_after s not at a light, the 
 (steering round a parked car) until it has moved unstick_dist m or unstick_for s have passed. The engage key stops
 the AI and expert mode; so does arriving, hold_after s after stopping, and the control file is set off. With expert
 mode off, the bridge turns off a plugin AI driver left on (always without GTA5_EXPERT, else once the bridge starts or
-while openpilot is engaged)."""
+while openpilot is engaged).
+
+Forks and GTA's shortcut links: a target just past a fork can be nearer the other branch's nodes, so where the route
+keeps to one side of a fork or crosses a shortcut link a target lands FORK_PAST m past it, on the route's branch once
+the branches have parted. GTA splits wide roads (freeways most) into parallel node chains joined by shortcut links, and
+the AI never takes those without UseShortCutLinks, which also opens car park cuts: shortcuts=route adds it only from
+when a target could lie past one of the route's own shortcut links until just past it (forks: also around the route's
+forks on freeways, where the branches' shortcut links let the AI cross to its branch from the wrong lane), off never,
+always throughout."""
 import json
 import math
 import os
@@ -46,7 +54,8 @@ DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "ag
             "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "launch": None, "decel": 0.0, "turn_speed": 6.0,
             "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0,
             "speed_by_class": None, "decel_fast": 0.0, "unstick": False, "unstick_after": 10.0,
-            "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0, "wrongway": None}
+            "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0, "wrongway": None,
+            "shortcuts": "route"}
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
 LIMIT_LOOKAHEAD = 600.0  # m, lower speed limits ahead slowed for
@@ -70,6 +79,11 @@ TURN_PAST = 40.0  # m past it, at the latest
 KEEP_PAST = 30.0  # m
 # Valhalla maneuver types
 NOT_EVENTS = {0, 1, 2, 3, 4, 5, 6}  # start and destination
+USE_SHORTCUTS = 262144  # driving style flag UseShortCutLinks
+FORK_PAST = 50.0  # m past a fork or a shortcut link to a target on the route's side of it
+SHORTCUT_PAST = 30.0  # m past one that UseShortCutLinks stays on
+FAST_CLASSES = {"motorway", "motorway_link", "trunk", "trunk_link", "ramp"}  # the map's and Valhalla's, for shortcuts=forks
+RETASK_MOVE = 2.0  # m a target moves on so the plugin tasks the AI again (it ignores a target under 1 m from the last)
 
 
 def control_path() -> Path | None:
@@ -117,6 +131,10 @@ class Expert:
   def _reset(self):
     self.route = None
     self.events: list[float] = []
+    self.parts: list[tuple[float, float]] = []  # (m along from, to) the route's forks and shortcut links, a target past
+    self.shortcut_spans: list[tuple[float, float]] = []  # m along where the AI may take shortcut links
+    self.shortcuts_on = False
+    self.parts_for: tuple = (None, None)  # the route and Valhalla classes parts were found with
     self.mans: list[Maneuver] = []
     self.done: set[int] = set()
     self.target: np.ndarray | None = None
@@ -168,6 +186,8 @@ class Expert:
       if self.log is None:
         self.log = open(log_path(), "a", buffering=1)
     elif self.active:
+      if self.route is not None:
+        self._find_parts(self.route)  # shortcuts may have changed
       self._send_settings()  # settings changed while driving
 
   @staticmethod
@@ -185,9 +205,15 @@ class Expert:
     """The game's AI drives our route (what recordings mark as expert driving), not a wrong-way clip's controller."""
     return self.active and not self.ww_driving
 
+  def _style(self) -> int:
+    """The driving style now: unstick_style while steering round a blockage, with UseShortCutLinks where allowed."""
+    c = self.cfg
+    style = int(c["unstick_style"] if self.unstick_from is not None else c["style"])
+    return style | USE_SHORTCUTS if self.shortcuts_on else style
+
   def _settings(self, speed: float | None = None) -> dict:
     c = self.cfg
-    out = {"style": int(c["style"]), "ability": float(c["ability"]), "aggr": float(c["aggr"]), "task": str(c["task"])}
+    out = {"style": self._style(), "ability": float(c["ability"]), "aggr": float(c["aggr"]), "task": str(c["task"])}
     if speed is not None:
       out["speed"] = round(speed, 2)
       self.sent_speed = speed
@@ -319,7 +345,7 @@ class Expert:
     if route is not None and self._class_caps() and ROUTER:
       threading.Thread(target=self._fetch_classes, args=(route,), daemon=True).start()
     if route is None:
-      self.mans, self.events = [], []
+      self.mans, self.events, self.parts, self.shortcut_spans = [], [], [], []
       if self.sent_target is not None:
         self.send({"type": "ai", "clear": 1})  # the waypoint, or wandering
         self.sent_target = None
@@ -330,9 +356,49 @@ class Expert:
     events |= {float(route.along[m["begin_shape_index"]]) for m in route.maneuvers
                if m.get("type") not in NOT_EVENTS and m.get("begin_shape_index", 0) < len(route.along)}
     self.events = sorted(events)
+    self._find_parts(route)
+
+  def _find_parts(self, route):
+    """The route's forks (where it keeps to one side of another road) and shortcut links, and where around them the AI
+    may take shortcut links (the docstring's shortcuts)."""
+    links = getattr(route, "links", [])
+    shortcuts = [(float(route.along[k]), float(route.along[k + 1])) for k, link in enumerate(links)
+                 if link is not None and link.shortcut]
+    forks = [(f.along, f.along) for f in getattr(route, "forks", []) if f.keep and not f.slip and 0.0 < f.along < route.length]
+    self.parts = sorted(shortcuts + forks)
+    mode = str(self.cfg.get("shortcuts") or "off")
+    # from when a target could first land past one (ahead_max on, or FORK_PAST past a part just beyond it)
+    lead = float(self.cfg["ahead_max"]) + FORK_PAST
+    spans = shortcuts if mode in ("route", "forks") else []
+    if mode == "forks":
+      spans = sorted(spans + [(s, s + FORK_PAST) for s, _ in forks if self._fast(route, s)])
+    self.shortcut_spans = [(s0 - lead, s1 + SHORTCUT_PAST) for s0, s1 in spans]
+    self.parts_for = (route, self.classes[1] if self.classes[0] is route else None)
+
+  def _fast(self, route, s: float) -> bool:
+    """Whether the route is on a freeway (or its ramps) at s m along: the map's road class there, else Valhalla's."""
+    k = min(max(int(np.searchsorted(route.along, s, side="right")) - 1, 0), max(len(route.points) - 2, 0))
+    classes = getattr(route, "classes", None) or []
+    name = classes[k] if k < len(classes) else ""
+    if not name and self.classes[0] is route and k < len(self.classes[1]):
+      name = self.classes[1][k] or ""
+    return name in FAST_CLASSES
 
   def _pick(self, route) -> tuple[float, float | None, bool]:
     """The next target: m along the route, the junction or maneuver it's just past, and whether it's the route's end."""
+    target, anchor, final = self._pick_at(route)
+    if final:
+      return target, anchor, final
+    past = float(self.cfg["past"])
+    for s0, s1 in self.parts:
+      # landing at a fork or a shortcut link, or just short of it: on past it, where the route's branch has parted
+      if s1 > route.at + EVENT_MIN and s0 - past <= target < s1 + FORK_PAST:
+        target = s1 + FORK_PAST
+    if target >= route.length:
+      return route.length, None, True
+    return target, anchor, False
+
+  def _pick_at(self, route) -> tuple[float, float | None, bool]:
     c, at = self.cfg, route.at
     lo, hi, past = at + float(c["ahead_min"]), at + float(c["ahead_max"]), float(c["past"])
     if route.length <= hi:
@@ -362,19 +428,31 @@ class Expert:
     if self.cfg["unstick"]:
       self._unstick(route, state)
     at, c = route.at, self.cfg
-    due = self.target is None or (not self.final and (self.target_along - at < RETARGET_NEAR or (
+    if self.parts_for[0] is not route or self.parts_for[1] is not (self.classes[1] if self.classes[0] is route else None):
+      self._find_parts(route)  # Valhalla's road classes came, for forks on freeways
+    shortcuts = c.get("shortcuts") == "always" or any(s0 <= at <= s1 for s0, s1 in self.shortcut_spans)
+    retask = shortcuts != self.shortcuts_on
+    if retask:
+      self.shortcuts_on = shortcuts
+      self._event("shortcuts", on=shortcuts, at=round(at, 1))
+    due = self.target is None or retask or (not self.final and (self.target_along - at < RETARGET_NEAR or (
       now - self.target_t >= float(c["retarget_every"]) and
       ((self.anchor is not None and at > self.anchor + EVENT_MIN) or
        (self.anchor is None and self.target_along - at < float(c["ahead_min"]))))))
     if due:
       self.target_t = now
       self.target_along, self.anchor, self.final = self._pick(route)
+      if retask and self.sent_target is not None and not self.final and \
+         np.hypot(*(route_point(route, self.target_along) - self.sent_target[:2])) < 1.0 + RETASK_MOVE / 2:
+        # the plugin tasks the AI again, so the new style plans its path, only for a target that moved
+        self.target_along = min(self.target_along + RETASK_MOVE, route.length)
       xy = route_point(route, self.target_along)
       z = float(np.interp(self.target_along, route.along, route.z)) if not np.isnan(route.z).any() else state["pos"][2]
       self.target = np.array([xy[0], xy[1], z])
     t = tuple(round(float(v), 1) for v in self.target)
-    if t != self.sent_target:
-      self.send({"type": "ai", "x": t[0], "y": t[1], "z": t[2], "stop": FINAL_STOP if self.final else STOP_RANGE})
+    if t != self.sent_target or retask:
+      msg = {"type": "ai", "x": t[0], "y": t[1], "z": t[2], "stop": FINAL_STOP if self.final else STOP_RANGE}
+      self.send({**msg, "style": self._style()} if retask else msg)
       self.sent_target = t
     v = state.get("vEgo", 0.0)
     cap = self._speed(route, v, self.game_t)
@@ -398,7 +476,7 @@ class Expert:
       t0, at0 = self.unstick_from
       if route.at - at0 >= float(c["unstick_dist"]) or t - t0 >= float(c["unstick_for"]):
         self.unstick_from, self.stopped_since = None, None
-        self.send({"type": "ai", "style": int(c["style"])})
+        self.send({"type": "ai", "style": self._style()})
         self._event("unstick", phase="end", moved=round(route.at - at0, 1), secs=round(t - t0, 1))
       return
     ai = state.get("ai") or {}
@@ -411,7 +489,7 @@ class Expert:
       self.stopped_since = t
     elif t - self.stopped_since > float(c["unstick_after"]):
       self.unstick_from = (t, route.at)
-      self.send({"type": "ai", "style": int(c["unstick_style"])})
+      self.send({"type": "ai", "style": self._style()})
       self.target = None  # a fresh target: the plugin tasks the AI again with the new style
       print(f"gta5: expert unstick: stopped {t - self.stopped_since:.0f} s, not at a light", flush=True)
       self._event("unstick", phase="start", stopped=round(t - self.stopped_since, 1), pos=state.get("pos"))
@@ -610,5 +688,6 @@ class Expert:
       "oncoming": any(bool(x) and x[0] < 0 for x in (lane, plugin)), "traffic": state.get("traffic"),
       "collisions": state.get("collisions", 0) - self.collisions0 if self.active else 0,
       "collisionsTotal": state.get("collisions"), "street": state.get("street"), "unstick": self.unstick_from is not None,
+      "shortcuts": self.shortcuts_on,
       **({"ww": self.ww.info(), "wwDriving": self.ww_driving, "laneMap": state.get("laneMap")} if self.ww is not None else {}),
     }) + "\n")

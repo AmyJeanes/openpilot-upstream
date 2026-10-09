@@ -1253,7 +1253,9 @@ class RouteLanes:
       pa, pb = self.points[r[1] + 1], self.points[q[0]]
       na, nb = (_right_normal(self.points[k + 1] - self.points[k]) for k in (r[1], q[0]))
       ours_a = [(float((pa + na * x - pb) @ nb), float((pa + na * y - pb) @ nb)) for x, y in ours_a]
-    side = _turn_side(a, b)
+    side = _turn_side(self._arrowed(r, sa, -1) or a, self._arrowed(q, sb, 1) or b)
+    if side is None:
+      side = _median_side(a, b)
     if side is None and sb - sa <= EPS and b.lanes > a.lanes and q[0] in self.merges:
       side = self.merges[q[0]]  # another road's lanes join ours on its side: two ways' lines meet at the node anyhow
     if side is None and sb - sa <= EPS and b.lanes < a.lanes and q[0] in self.splits:
@@ -1262,6 +1264,46 @@ class RouteLanes:
       shift = (b.lanes - a.lanes) if side else 0
       return [i + shift if 0 <= i + shift < b.lanes else None for i in range(a.lanes)]
     return match_lanes(ours_a, [(s.left, s.right) for s in b.ours])
+
+  def turns_at(self, s: float, opened: bool = False) -> list[frozenset[str]]:
+    """Our lanes' turn arrows s m along: their own, else those of the lanes they carry on as (lane_maps) into the next
+    junction with arrows within ARROWS_BACK m, the route not turning on the way (mappers, and our map, tag them on the
+    way into the junction alone). With `opened`, of the lanes there as opened_at has them."""
+    k = self.segment(s)
+    sec = self.section_at(s, k) if 0 <= k < len(self.sections) else None
+    if sec is None or not sec.lanes:
+      return []
+    turns = sec.turns
+    if not any(turns):
+      ahead = next((j for j in range(k + 1, len(self.sections)) if self.sections[j] is not None and any(self.sections[j].turns)
+                    and self.along[j] - s <= ARROWS_BACK), None)
+      if ahead is not None and not any(s < sc < self.along[ahead] + FILLET_REACH for sc, _ in self.corners):
+        maps = [mp for d, mp, _ in self.lane_maps if s < d <= self.along[ahead] + EPS]
+        if (len(maps[0]) if maps else self.sections[ahead].lanes) == sec.lanes:
+          far = self.sections[ahead].turns
+          turns = []
+          for i in range(sec.lanes):
+            j = i
+            for mp in maps:
+              j = mp[j] if j is not None else None
+            turns.append(far[j] if j is not None and j < len(far) else frozenset())
+    opening = self.opening(k) if opened else None
+    if opening is not None and s < opening[0]:
+      _, extra, left = opening
+      turns = list(turns[extra:]) if left else list(turns[:len(turns) - extra])
+    return list(turns)
+
+  def _arrowed(self, run: list[int], s: float, step: int) -> Section | None:
+    """The first cross-section with turn arrows in a run of segments of one layout, from its end at s (step -1: back
+    from its last segment; 1: on from its first) within ARROWS_REACH m; None for none."""
+    ks = range(run[1], run[0] - 1, -1) if step < 0 else range(run[0], run[1] + 1)
+    for k in ks:
+      if (s - self.along[k + 1] if step < 0 else self.along[k] - s) > ARROWS_REACH:
+        break
+      sec = self.sections[k]
+      if sec is not None and any(sec.turns):
+        return sec
+    return None
 
   def segment(self, s: float) -> int:
     return int(min(max(np.searchsorted(self.along, s, side='right') - 1, 0), max(len(self.sections) - 1, 0)))
@@ -1393,10 +1435,11 @@ class RouteLanes:
     if not known.any():
       return None
     offs = np.interp(s2, s2[known], offs[known])
-    offs = _ease_jogs(s2, offs, [float(s2[v]) for v in jogs])
+    offs = _ease_jogs(s2, offs, [float(s2[v]) for v in jogs], self.points, self.along)
     line = offset_line(xy, offs)
     if len(line) != len(s2):
       return None
+    line = _smooth_line(_unfold(line, xy), s2)
     line, s2 = self._fillets(line, s2)
     k = int(np.searchsorted(s2, at, side='right'))
     if k >= len(s2):
@@ -1458,6 +1501,40 @@ def _right_normal(d) -> np.ndarray:
 
 JOG_MIN = 0.5  # m between the lane in and the lane out at a node that is a jog sideways, not a road's lanes carrying on
 JOG_REACH = 10.0  # m either side of such a node the lane line moves across over
+JOG_SPAN = 30.0  # m either side of it to the route's points the move across may start or end at instead
+JOG_BETTER = 0.5  # m the lane line must come nearer straight for that
+JOG_STRAIGHT = 20.0  # deg at most the route turns from before such a stretch to after it
+
+
+def _unfold(line: np.ndarray, xy: np.ndarray) -> np.ndarray:
+  """An offset line (one point per route point xy) without the loops it makes inside a corner of the route sharper
+  than its offset rounds (each point no further back along the route than the one before): held where it would go
+  back."""
+  t = np.gradient(xy, axis=0)
+  back = np.einsum('ij,ij->i', np.diff(line, axis=0), t[1:]) < 0
+  if not back.any():
+    return line
+  out = line.copy()
+  for i in range(1, len(out)):
+    if float((out[i] - out[i - 1]) @ t[i]) < 0:
+      out[i] = out[i - 1]
+  return out
+
+
+SMOOTH_M = 5.0  # m either side over which the lane line's points are averaged: the route's kinks at its nodes rounded
+
+
+def _smooth_line(line: np.ndarray, s: np.ndarray) -> np.ndarray:
+  """The lane line (points at s m along) each point the mean of those within SMOOTH_M along, its ends kept: GTA's
+  links kink by 5-20 deg at nodes (a ramp joining a freeway), which a car's path rounds."""
+  if len(line) < 3:
+    return line
+  c = np.concatenate(([[0.0, 0.0]], np.cumsum(line, axis=0)))
+  lo = np.searchsorted(s, s - SMOOTH_M, side='left')
+  hi = np.searchsorted(s, s + SMOOTH_M, side='right')
+  out = (c[hi] - c[lo]) / (hi - lo)[:, None]
+  out[0], out[-1] = line[0], line[-1]
+  return out
 
 
 def _keyed(s: np.ndarray, kx: np.ndarray, ky: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1475,18 +1552,62 @@ def _keyed(s: np.ndarray, kx: np.ndarray, ky: np.ndarray) -> tuple[np.ndarray, n
   return arriving, leaving
 
 
-def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float]) -> np.ndarray:
-  """The lane line's offsets (m right of the route at s m along) moving across evenly over JOG_REACH either side of
-  each jog, as where one carriageway of a divided road joins the middle of the road it becomes: a car keeps to its lane
-  across it rather than following the ways' sideways step."""
+def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float], points: np.ndarray | None = None,
+               along: np.ndarray | None = None) -> np.ndarray:
+  """The lane line's offsets (m right of the route at s m along) moving across evenly through each jog, as where one
+  carriageway of a divided road joins the middle of the road it becomes: a car keeps to its lane across it rather than
+  following the ways' sideways step. Over JOG_REACH either side of it; with the route's points (and m along to them),
+  instead between whichever two of them within JOG_SPAN leave the lane line straightest (by JOG_BETTER m), on a road
+  heading on within JOG_STRAIGHT: as where a carriageway's last link angles across to the line of the road it
+  becomes, the lane line then moves across along that link and runs on straight."""
   out = offs.copy()
+  xy = normals = None
   for n, sj in enumerate(jogs):
-    lo = sj - min(JOG_REACH, (sj - jogs[n - 1]) / 2 if n else JOG_REACH)
-    hi = sj + min(JOG_REACH, (jogs[n + 1] - sj) / 2 if n + 1 < len(jogs) else JOG_REACH)
-    lo, hi = max(lo, float(s[0])), min(hi, float(s[-1]))
-    inside = (s > lo) & (s < hi)
+    lo_lim = max(sj - ((sj - jogs[n - 1]) / 2 if n else math.inf), float(s[0]))
+    hi_lim = min(sj + ((jogs[n + 1] - sj) / 2 if n + 1 < len(jogs) else math.inf), float(s[-1]))
+    before, after = s < sj - 1e-6, s > sj + 1e-6
+    if not before.any() or not after.any():
+      continue
+    o_in, o_out = float(offs[before][-1]), float(offs[after][0])  # the lane's offsets either side of the step
+
+    def ends(a, b):  # the offsets at a and b, either side of the jog (or at it)
+      return (o_in if a >= sj - 1e-6 else float(np.interp(a, s, offs)), o_out if b <= sj + 1e-6 else float(np.interp(b, s, offs)))
+    lo, hi = max(sj - JOG_REACH, lo_lim), min(sj + JOG_REACH, hi_lim)
+    if points is not None and along is not None:
+      def at(v):
+        return np.array([np.interp(v, along, points[:, 0]), np.interp(v, along, points[:, 1])])
+      if normals is None:
+        xy = np.stack([np.interp(s, along, points[:, 0]), np.interp(s, along, points[:, 1])], axis=1)
+        d = np.gradient(xy, axis=0)
+        normals = np.stack([d[:, 1], -d[:, 0]], axis=1) / np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-9)[:, None]
+
+      f0, f1 = max(sj - JOG_SPAN, lo_lim), min(sj + JOG_SPAN, hi_lim)
+      u_in, u_out = at(f0 + JOG_REACH) - at(f0), at(f1) - at(f1 - JOG_REACH)
+      span = (s >= f0) & (s <= f1)
+      straight = min(np.hypot(*u_in), np.hypot(*u_out)) > 1e-6 and span.sum() >= 3 and abs(math.degrees(
+        (heading_of(u_out) - heading_of(u_in) + math.pi) % (2 * math.pi) - math.pi)) <= JOG_STRAIGHT
+
+      def bend(a, b):  # how far the lane line strays from straight over the stretch, moving across from a to b
+        o = offs[span].copy()
+        inside = (s[span] >= a) & (s[span] <= b)
+        o[inside] = np.interp(s[span][inside], [a, b], ends(a, b))
+        if b <= sj + 1e-6:
+          o[s[span] > sj - 1e-6] = np.where(s[span][s[span] > sj - 1e-6] > b, o[s[span] > sj - 1e-6], o_out)
+        p = xy[span] + normals[span] * o[:, None]
+        chord = p[-1] - p[0]
+        length = float(np.hypot(*chord))
+        return float(np.abs((p - p[0]) @ np.array([chord[1], -chord[0]]) / length).max()) if length > 1e-6 else math.inf
+      if straight and (best := bend(lo, hi)) > JOG_BETTER:  # nothing to gain where the lane line already runs on
+        near = [float(v) for v in along if f0 <= v <= f1]
+        for a in [lo] + [v for v in near if v <= sj + 1e-6]:
+          for b in [hi] + [v for v in near if v >= sj - 1e-6]:
+            if b - a >= 1.0 and (cost := bend(a, b)) < best - JOG_BETTER:
+              best, lo, hi = cost, a, b
+    inside = (s >= lo) & (s <= hi)
     if hi > lo and inside.any():
-      out[inside] = np.interp(s[inside], [lo, hi], [np.interp(lo, s, offs), np.interp(hi, s, offs)])
+      out[inside] = np.interp(s[inside], [lo, hi], ends(lo, hi))
+      if hi <= sj + 1e-6:
+        out[(s >= sj - 1e-6) & (s <= sj + 1e-6)] = o_out
   return out
 
 
@@ -1560,6 +1681,25 @@ def _turn_side(a: Section, b: Section) -> bool | None:
   if _left_only(many) and not _left_only(few):
     return True
   return False if _right_only(many) and not _right_only(few) else None
+
+
+ARROWS_BACK = 250.0  # m before a junction its lanes' arrows show from, while the lanes carry on unchanged (turns_at)
+ARROWS_REACH = 60.0  # m past a change of our lanes that the arrows of the lanes there say which side they changed on
+
+
+def _median_side(a: Section, b: Section) -> bool | None:
+  """Where one direction's carriageway of a divided road and the two-way road it becomes meet (a one-way's lanes and
+  a road's with oncoming lanes, as many or not), the side our lanes begin or end on: the side the other direction is
+  on, where the median was (True: on the left). The outside kerb carries on, whatever the ways' lines say. None
+  otherwise."""
+  if a.lanes == b.lanes or not a.lanes or not b.lanes:
+    return None
+  one, two = (a, b) if not a.two_way else (b, a)
+  if one.two_way or not two.two_way:
+    return None
+  left = any(sp.heading == -1 for sp in two.spans[:two.first])
+  right = any(sp.heading == -1 for sp in two.spans[two.first + two.lanes:])
+  return None if left == right else left
 
 
 LANE_GAP = 0.5  # of a lane's width: the cost of a lane carrying on as none, matching lanes across a change by place

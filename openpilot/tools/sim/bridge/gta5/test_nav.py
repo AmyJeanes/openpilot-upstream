@@ -787,3 +787,21 @@ def test_route_68_turns_hold_still():
   found = replay_turns(r, 480.0, own=True)
   assert all(t is not None and t > at and min(abs(t - e) for e in ends) < 0.11 for at, t in found)
   assert len({round(t / 10.0) for _, t in found}) == 2  # the right at the start, then the left
+
+
+def test_city_turn_changes_drawn_where_nav_starts_them():
+  # a right turn 400 m on from the left of two lanes at 10 m/s: the lane plan draws the change where nav starts it
+  # (8 s + 4 s before the last place, 30 m before the turn), not as late as allowed; not across a stop line on the way
+  route = route_to_turn(400.0)
+  turn = find_turn(route, nav_mod.MIN_AHEAD_MAP).dist
+
+  def change(**kw):
+    keys = lane_plan(route, [], [0, 2], lambda d, after=False: 2, 10.0, kw.pop('tune', None), maps=[], **kw)
+    return next((a[0], b[0]) for a, b in zip(keys, keys[1:]) if b[0] > a[0] and b[1] != a[1])
+  start, end = change()
+  assert abs(start - (turn - 30.0 - 120.0)) < 1.0 and abs(end - start - nav_mod.LANE_LINE_CHANGE) < 1.0
+  start2, _ = change(crossings=[start + 10.0])
+  assert abs(start2 - (start + 15.0)) < 1.0  # from just past the stop line
+  late = nav_mod.Tune()
+  late.values['plan_city_early'] = False
+  assert abs(change(tune=late)[1] - (turn - 30.0)) < 1.0
