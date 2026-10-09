@@ -716,12 +716,69 @@ class OsmLanes:
     lb = 0.0 if self.taper(nb) is not None else min(BLEND_M, self.length(nb) / 2)
     return min(BLEND_M, self.length(way) / 2), lb, other
 
+  def _carriageway_end(self, way: int, node: int, at_end: bool, own: Section) -> tuple[float, float, Section] | None:
+    """Where a divided road's one-way carriageway joins the two-way road it becomes at its end node (or, at its first,
+    parts from it): at the node, the other carriageway running about the opposite way and one two-way road going on
+    within CARRIAGEWAY_TURN (and any side roads). GTA lays the carriageway's last link angled across to the road's
+    line, so its lanes, laid along it, stepped across to the road's at the node where the lanes painted run on: they
+    move across to where the road's lanes are (ours, right-aligned: the road's extra lanes are the median's), over up
+    to CARRIAGEWAY_BLEND of this way, the road's staying put. (m of this way, 0, the cross-section there.)"""
+    if self.degree.get(node, 0) < 3 or oneway_of(self.ways[way][0]) != 1 or not own.lanes:
+      return None
+    pts = self.way_points(way)
+    u = pts[-1] - pts[-2] if at_end else pts[1] - pts[0]
+    if (n := float(np.hypot(*u))) < 1e-6:
+      return None
+    u = u / n
+    road = other_cw = None
+    for w in self._ends_at(node):
+      if w == way:
+        continue
+      refs = self.ways[w][1]
+      q = self.node_xy(refs[1] if refs[0] == node else refs[-2])
+      v = q - self.node_xy(node)  # out of the node along w
+      if (nv := float(np.hypot(*v))) < 1e-6:
+        return None
+      v = v / nv
+      along = float(v @ (u if at_end else -u))  # w heading on the way this one goes (at its end) or came (at its start)
+      if not oneway_of(self.ways[w][0]):
+        if along >= math.cos(math.radians(CARRIAGEWAY_TURN)):  # (side roads at the node are left be)
+          if road is not None:
+            return None
+          road = w, v
+      elif along < -math.cos(math.radians(CARRIAGEWAY_TURN * 2)):
+        other_cw = w
+    if road is None or other_cw is None:
+      return None
+    w, v = road
+    d = FORWARD if self.ways[w][1][0] == node else BACKWARD  # travelling w away from the node
+    sec = Section.of(self.lanes(w), d if at_end else -d)  # seen travelling the way this carriageway goes
+    if sec.lanes < own.lanes:
+      return None
+    scale = abs(float(v @ u))  # the road's offsets square to it, onto this way's square
+    ours = sec.ours[sec.lanes - own.lanes:]
+    spans = [Span(o.lane, t.left * scale, t.right * scale, o.heading) for o, t in zip(own.ours, ours, strict=True)]
+    other = Section(spans, (ours[0].left * scale, sec.edges[1] * scale))
+    if not _same_lanes(own, other) or _apart(own, other) < EPS:
+      return None
+    la = min(CARRIAGEWAY_BLEND, self.length(way))
+    return (la, 0.0, other) if la >= 1.0 else None
+
+  def _ends_at(self, node: int) -> list[int]:
+    if self._at is None:
+      self._at = {}
+      for w, (_, refs) in self.ways.items():
+        for n in {refs[0], refs[-1]}:
+          self._at.setdefault(n, []).append(w)
+    return self._at.get(node, [])
+
   def blend(self, way: int) -> tuple[int, list[tuple[float, Section]]] | None:
     """Where the road carries on from this way onto another with the same lanes in other places (other widths or
     line, as where the paint survey measured one way and not the next): the lanes move across from one to the other on
     a smoothstep, over up to BLEND_M either side of the node (half of a shorter way), so that the lines and kerbs run on
-    without a step. As taper() gives a taper (seen FORWARD); None where neither end moves, and on a tapered way (the
-    way beyond takes it all)."""
+    without a step. Likewise a divided road's carriageway onto the road it joins (or from the road it parts from) at
+    its end (_carriageway_end). As taper() gives a taper (seen FORWARD); None where neither end moves, and on a tapered
+    way (the way beyond takes it all)."""
     if way in self._blends:
       return self._blends[way]
     out = None
@@ -729,10 +786,19 @@ class OsmLanes:
       refs, length = self.ways[way][1], self.length(way)
       own = Section.of(self.lanes(way), FORWARD)
       knots = []
-      for node, at_end in ((refs[0], False), (refs[-1], True)):
-        found = self._join(way, node, at_end, own)
-        if found is None:
-          continue
+      # a carriageway's end takes what of the way it needs first; where the road carries on at the other end, that
+      # change goes in what's left
+      cws = [self._carriageway_end(way, node, at_end, own) for node, at_end in ((refs[0], False), (refs[-1], True))]
+      need = sum(found[0] for found in cws if found is not None)
+      fit = min(1.0, length / need) if need > EPS else 1.0
+      ends = []
+      for (node, at_end), found in zip(((refs[0], False), (refs[-1], True)), cws, strict=True):
+        if found is not None:
+          ends.append((node, at_end, (found[0] * fit, *found[1:])))
+        elif (found := self._join(way, node, at_end, own)) is not None:
+          if (la := min(found[0], length - need)) >= 1.0 or not need:
+            ends.append((node, at_end, (la, *found[1:])))
+      for _node, at_end, found in ends:
         la, lb, other = found
         for x in np.linspace(0.0, la, BLEND_KNOTS + 1):  # m from the node
           u = (la - x) / (la + lb) if at_end else (x + lb) / (la + lb)  # 0-1 across the whole change, this way first
@@ -1439,11 +1505,13 @@ class RouteLanes:
     if not known.any():
       return None
     offs = np.interp(s2, s2[known], offs[known])
-    offs = _ease_jogs(s2, offs, [float(s2[v]) for v in jogs], self.points, self.along)
+    windows: list[tuple[float, float]] = []
+    offs = _ease_jogs(s2, offs, [float(s2[v]) for v in jogs], self.points, self.along, windows)
     line = offset_line(xy, offs)
     if len(line) != len(s2):
       return None
-    line = _smooth_line(_unfold(line, xy), s2)
+    line = _curve_jogs(_unfold(line, xy), s2, windows)
+    line = _smooth_line(line, s2)
     line, s2 = self._fillets(line, s2)
     k = int(np.searchsorted(s2, at, side='right'))
     if k >= len(s2):
@@ -1525,6 +1593,38 @@ def _unfold(line: np.ndarray, xy: np.ndarray) -> np.ndarray:
   return out
 
 
+JOG_CURVE = 5.0  # m before and after where the lane line moves across a jog that it curves from the lane in to the lane out
+JOG_TANGENT = 3.0  # m of the lane line just outside the curve its ends' headings are taken over
+
+
+def _curve_jogs(line: np.ndarray, s: np.ndarray, windows: list) -> np.ndarray:
+  """The lane line (points at s m along) where it moves across each jog (_ease_jogs' windows) a smooth curve (cubic
+  Hermite) from the lane in, JOG_CURVE before, to the lane out, JOG_CURVE after, leaving each at its heading there:
+  the move across is even in the offset from the route, but where the route kinks within it (a divided road's
+  carriageway whose last link angles across to the road it becomes) the line it makes kinks or snakes too, where the
+  lanes painted run on smoothly."""
+  out = line.copy()
+
+  def at(v):
+    return np.array([np.interp(v, s, line[:, 0]), np.interp(v, s, line[:, 1])])
+  for lo, hi, lo_lim, hi_lim in windows:
+    s0, s1 = max(lo - JOG_CURVE, lo_lim + JOG_TANGENT), min(hi + JOG_CURVE, hi_lim - JOG_TANGENT)
+    if s1 - s0 < 2.0:
+      continue
+    p0, p1 = at(s0), at(s1)
+    t0, t1 = p0 - at(s0 - JOG_TANGENT), at(s1 + JOG_TANGENT) - p1
+    n0, n1 = float(np.hypot(*t0)), float(np.hypot(*t1))
+    chord = float(np.hypot(*(p1 - p0)))
+    if n0 < 1e-6 or n1 < 1e-6 or chord < 1e-6:
+      continue
+    m0, m1 = t0 / n0 * chord, t1 / n1 * chord
+    inside = (s > s0) & (s < s1)
+    t = ((s[inside] - s0) / (s1 - s0))[:, None]
+    out[inside] = (2 * t ** 3 - 3 * t ** 2 + 1) * p0 + (t ** 3 - 2 * t ** 2 + t) * m0 + (-2 * t ** 3 + 3 * t ** 2) * p1 + \
+      (t ** 3 - t ** 2) * m1
+  return out
+
+
 SMOOTH_M = 5.0  # m either side over which the lane line's points are averaged: the route's kinks at its nodes rounded
 
 
@@ -1557,7 +1657,7 @@ def _keyed(s: np.ndarray, kx: np.ndarray, ky: np.ndarray) -> tuple[np.ndarray, n
 
 
 def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float], points: np.ndarray | None = None,
-               along: np.ndarray | None = None) -> np.ndarray:
+               along: np.ndarray | None = None, windows: list | None = None) -> np.ndarray:
   """The lane line's offsets (m right of the route at s m along) moving across evenly through each jog, as where one
   carriageway of a divided road joins the middle of the road it becomes: a car keeps to its lane across it rather than
   following the ways' sideways step. Over JOG_REACH either side of it; with the route's points (and m along to them),
@@ -1608,6 +1708,8 @@ def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float], points: np.nd
             if b - a >= 1.0 and (cost := bend(a, b)) < best - JOG_BETTER:
               best, lo, hi = cost, a, b
     inside = (s >= lo) & (s <= hi)
+    if windows is not None and hi > lo:
+      windows.append((lo, hi, lo_lim, hi_lim))  # where it moves across, and how far it may reach
     if hi > lo and inside.any():
       out[inside] = np.interp(s[inside], [lo, hi], ends(lo, hi))
       if hi <= sj + 1e-6:
@@ -1801,6 +1903,8 @@ def _blend(few: Section, many: Section, t: float) -> Section:
 
 BLEND_M = 10.0  # m either side of a node the lanes move across over where a road carries on from one way to the next
 BLEND_KNOTS = 4  # straight pieces the smoothstep is drawn in on each side
+CARRIAGEWAY_TURN = 30.0  # deg: a two-way road going on this straight from a carriageway's end is the road it joins
+CARRIAGEWAY_BLEND = 30.0  # m of a carriageway the lanes move across to the road's over, at most
 
 
 def _same_lanes(a: Section, b: Section) -> bool:
