@@ -183,6 +183,7 @@ def test_scene_check():
   assert scene_ok(good)[0]
   assert not scene_ok({**good, "world": {**good["world"], "hour": 21}})[0]
   assert not scene_ok({**good, "density": {"set": True, "vehicles": 1, "peds": 0, "parked": 0}})[0]
+  assert not scene_ok({**good, "debug": {"on": True}})[0] and scene_ok({**good, "debug": {"on": False}})[0]
 
 
 class FakeGame:

@@ -31,6 +31,7 @@ from openpilot.tools.sim.bridge.gta5.map.imgcheck.tiles import FOV, HEIGHT, Tile
 SCENE_WORLD = {"type": "world", "hour": 13, "minute": 0, "weather": "EXTRASUNNY", "freeze": 1, "rain": 0}
 SCENE_TRAFFIC = {"type": "traffic", "on": 0, "vehicles": 0, "peds": 0, "parked": 0}
 SCENE_SHADOWS = {"type": "shadows", "bounds": 0.0}  # cascade shadow bounds 0: no cast shadows
+SCENE_DEBUG = {"type": "debug", "on": 0}  # a restarted bridge turns the map debug overlay (and its status text) back on
 GRAB_WAIT = 6.0  # s for the plugin to write a grab
 RETRY_WAITS = (4.0, 8.0)  # s before shooting an unloaded tile again
 RECONNECT_WAIT = 300.0  # s a bridge restart may take
@@ -57,6 +58,8 @@ def scene_ok(state: dict) -> tuple[bool, str]:
   sh = state.get("shadows")
   if sh is not None and not (sh.get("set") and sh.get("bounds") == 0):
     bad.append(f"shadows {sh}")
+  if (state.get("debug") or {}).get("on"):
+    bad.append("map debug overlay on")
   return not bad, ", ".join(bad)
 
 
@@ -112,7 +115,7 @@ class Shooter:
     return st
 
   def set_scene(self, near: tuple[float, float] | None = None) -> dict:
-    self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS)
+    self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS, SCENE_DEBUG)
     time.sleep(1.0)
     if near is not None:  # the focus away and back, so the cars that were there go
       self.send({"type": "topcam", "on": 1, "x": near[0] + 900.0, "y": near[1] + 900.0, "height": HEIGHT, "fov": FOV, "hud": 0})
@@ -125,7 +128,7 @@ class Shooter:
       if ok:
         return st
       self.log(f"imgcheck: scene not set yet: {why}")
-      self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS)
+      self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS, SCENE_DEBUG)
       time.sleep(1.5)
     raise RuntimeError("imgcheck: the game won't take the scene (noon, sunny, no traffic)")
 
@@ -135,7 +138,6 @@ class Shooter:
     stamp = int(time.time())  # noqa: TID251  (a wall clock name)
     with open(os.path.join(self.run_dir, f"scene_before_{stamp}.json"), "w") as f:
       json.dump({**self.initial, "topcam": st.get("topcam")}, f, indent=1)
-    self.send({"type": "debug", "on": 0})
     self.set_scene((first.x, first.y))
 
   def finish(self) -> None:
