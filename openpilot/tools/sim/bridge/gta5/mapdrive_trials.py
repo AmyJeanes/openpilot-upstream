@@ -17,7 +17,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_expert import CONTROL, control_path
 def summary(lines: list[dict]) -> dict:
   """A trip's outcome from its expert log rows."""
   ev = [r for r in lines if "event" in r]
-  rows = [r for r in lines if "map" in r]
+  rows = [r for r in lines if isinstance(r.get("map"), dict)]  # anomaly events carry the map's offset under "map"
   phases = [r.get("phase") for r in ev if r["event"] == "mapdrive" and r.get("phase")]
   stop = next((r.get("why") for r in ev if r["event"] == "stop"), None)
   anomalies: dict[str, int] = {}
