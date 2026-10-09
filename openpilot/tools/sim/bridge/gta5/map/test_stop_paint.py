@@ -97,6 +97,23 @@ def test_new_stop_lines():
   assert counts.get('new: a crossing ahead') == 1
 
 
+def test_stop_line_for_the_other_way():
+  # GTA's stop node 15 m south of a crossroads on the south road, its direction for traffic heading south (to the
+  # junction 45 m on): the paint beside it is across the northbound lanes, into the crossroads, and none is on
+  # its own approach; its sign goes to the paint, the way it faces
+  nodes = {1: (0.0, 0.0), 2: (0.0, -15.0), 3: (0.0, -60.0), 4: (-100.0, 0.0), 5: (100.0, 0.0), 6: (0.0, 100.0),
+           7: (-100.0, -60.0), 8: (100.0, -60.0), 9: (0.0, -160.0)}
+  ways = {1: (TWO_WAY, [3, 2]), 2: (TWO_WAY, [2, 1]), 3: (TWO_WAY, [1, 4]), 4: (TWO_WAY, [1, 5]), 5: (TWO_WAY, [1, 6]),
+          6: (TWO_WAY, [3, 7]), 7: (TWO_WAY, [3, 8]), 8: (TWO_WAY, [3, 9])}
+  js = Junctions(make(nodes, ways, {2: {'highway': 'stop', 'direction': 'backward'}}))
+  assert [(j.nodes, len(j.stops)) for j in js.junctions if j.stops] == [([3], 1)]  # the south junction's
+  placed, counts = StopPaint(js, [line(7, 0.3, 5.2, -13.0)]).place()
+  assert counts.get('moved to the paint the other way') == 1 and len(placed) == 1
+  p = placed[0]
+  assert p.moved_from == [2] and p.tags == {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey'}
+  assert np.allclose(p.xy, [0.0, -13.0])
+
+
 def test_widths_at_the_cut():
   tags = {'width:lanes:forward:start': '0|3.5', 'width:lanes:forward:end': '3|3.5', 'lanes': '2'}
   first, second = _interpolate(tags, 0.5)

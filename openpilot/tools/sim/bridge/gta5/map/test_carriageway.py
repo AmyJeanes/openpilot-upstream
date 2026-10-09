@@ -79,6 +79,36 @@ def test_no_kerbs_between_ways_side_by_side():
   assert len(kept) == 1 and np.array_equal(kept[0], line) and not between
 
 
+def test_no_kerbs_across_a_diverge():
+  # a carriageway of four 6 m lanes along y = 0 parts at x = 0 into two of two lanes, both starting from its middle (as
+  # GTA lays them), one bearing left to (100, 20), one right to (100, -20); and they merge again from x = 200 to 300
+  wide, half = {**FREEWAY, 'lanes': '4', 'width': '24'}, {**FREEWAY, 'lanes': '2', 'width': '12'}
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 20.0), 4: (100.0, -20.0), 5: (200.0, 20.0), 6: (200.0, -20.0),
+           7: (300.0, 0.0), 8: (400.0, 0.0)}
+  ways = {1: (wide, [1, 2]), 2: (half, [2, 3]), 3: (half, [2, 4]), 4: (half, [3, 5]), 5: (half, [4, 6]), 6: (half, [5, 7]),
+          7: (half, [6, 7]), 8: (wide, [7, 8])}
+  osm = make(nodes, ways)
+  side = SideBySide(osm, list(ways), lambda w: 0)
+
+  def kept(wid, right):
+    pts = osm.way_points(wid)
+    lo, hi = osm.lanes(wid).edges(FORWARD)
+    return side.kerb(offset_line(pts, hi if right else lo), None, 0, {wid}, right)[0]
+
+  def xs(pieces):
+    return [(round(float(p[0, 0])), round(float(p[-1, 0]))) for p in pieces]
+  # the left branch's outer kerb from where it nears the wide carriageway's edge (y = 12 - SHARED, x ~ 23), not across
+  # its lanes; its inner kerb (the gore's edge) from GORE m on, where the branches have parted
+  outer, inner = xs(kept(2, False)), xs(kept(2, True))
+  assert len(outer) == 1 and 20 <= outer[0][0] <= 26 and outer[0][1] == 99, outer
+  assert len(inner) == 1 and 38 <= inner[0][0] <= 42 and inner[0][1] == 101, inner
+  assert xs(kept(1, False)) == [(-100, 0)] and xs(kept(1, True)) == [(-100, 0)]  # the wide carriageway's own
+  # merging: the mirror image, back from the wide carriageway's start
+  outer = xs(kept(6, False))
+  assert len(outer) == 1 and outer[0][0] == 201 and 274 <= outer[0][1] <= 280, outer
+  assert xs(kept(8, True)) == [(300, 400)]
+
+
 def test_outer_lines_and_missing_lane_lines():
   # a one-way link's lanes from -6 to 6: a solid line at its left edge, dashed at its right, the next links' lines
   samples = [sample([mark(-6.1, kind='solid'), mark(5.9), mark(12.0)], s) for s in (2.0, 5.0, 8.0)]
@@ -112,6 +142,13 @@ def test_no_junction_where_lanes_only_merge():
   nodes = {1: (0.0, 0.0), 2: (50.0, 0.0), 3: (100.0, 0.0), 4: (100.0, 18.0)}
   ways = {1: (oneway, [1, 2]), 2: (oneway, [2, 3]), 3: (oneway, [2, 4])}
   assert not Junctions(make(nodes, ways)).junctions
+  # a freeway's exit lane leaving it, with GTA's lane changes between them as links at ~60 degrees, the lane classed
+  # as a minor road: lanes parting, no junction areas across the carriageway
+  fwy, link, lane = ({'highway': h, 'oneway': 'yes', 'lanes': '1'} for h in ('motorway', 'motorway_link', 'residential'))
+  lattice = {1: (0.0, 0.0), 2: (50.0, 0.0), 3: (60.0, 0.0), 4: (150.0, 0.0), 5: (53.0, -6.0), 6: (63.0, -6.0), 7: (150.0, -6.0),
+             8: (0.0, -6.0)}
+  assert not Junctions(make(lattice, {1: (fwy, [1, 2]), 2: (fwy, [2, 3]), 3: (fwy, [3, 4]), 4: (link, [2, 5]), 5: (lane, [8, 5]),
+                                      6: (lane, [5, 6]), 7: (link, [3, 6]), 8: (lane, [6, 7])})).junctions
   # a one-way side street joining at 80 degrees: a junction
   nodes[4] = (60.0, 57.0)
   ways[3] = (oneway, [4, 2])

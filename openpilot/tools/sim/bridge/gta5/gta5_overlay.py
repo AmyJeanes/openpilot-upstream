@@ -63,6 +63,8 @@ ROUTE_LEAD = 0.13
 ROUTE_SLACK = 150  # points (and ROUTE_SLACK * 20 characters) the roads leave for the route to grow by till they go again
 LANE_SEARCH = 100.0  # m along nav's lane plan line from its start (where the car was when it was planned) to find the car
 TRAIL_JUMP = 10.0  # m off the lane plan line the route behind ends: it starts again from the car
+TRAIL_TURN = 60.0  # deg between the route behind's end and the lane plan line there: a new route the other way, as after
+# turning round, starts again from the car rather than joining the old route's line across the junction
 RADIUS = 150.0  # m around the car
 LEVEL = 40.0  # m above or below the car: tunnels and bridges further off are left out
 BEHIND = 30.0  # m of route behind the car
@@ -941,6 +943,19 @@ def piece(line: np.ndarray, s: np.ndarray, lo: float, hi: float) -> np.ndarray:
   return np.vstack([ends[0], line[(s > lo) & (s < hi)], ends[1]])
 
 
+def trail_turn(trail: np.ndarray, line: np.ndarray, s: np.ndarray, at: float) -> float:
+  """Deg between the heading of a trail's last metre or more [N, 2+] and a polyline's (s: arc(line)) at m along it."""
+  st = arc(trail)
+  if len(trail) < 2 or st[-1] < 0.5 or len(line) < 2:
+    return 0.0
+  k = int(np.searchsorted(st, st[-1] - 1.0, side="right")) - 1
+  a = trail[-1, :2] - trail[max(k, 0), :2]
+  j = int(np.clip(np.searchsorted(s, at, side="right") - 1, 0, len(line) - 2))
+  b = line[j + 1, :2] - line[j, :2]
+  cos = float(a @ b) / max(float(np.hypot(*a) * np.hypot(*b)), 1e-9)
+  return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+
 class Ribbon:
   """The route's ribbon: from where the car will be while the plugin draws it on (r; n with the route layer off), along
   nav's lane plan line, which can be up to gta5_world's LANE_LINE_EVERY old; and behind the car (b) the lines it was
@@ -992,7 +1007,8 @@ class Ribbon:
     trail, done = self.trail, 0.0
     if len(trail):
       done, off = nearest_along(line, s, trail[-1, :2], LANE_SEARCH)
-      if off > TRAIL_JUMP:  # a jump (respawned, or a new route elsewhere): it starts again here
+      # a jump (respawned, or a new route elsewhere), or a new route heading off another way: it starts again here
+      if off > TRAIL_JUMP or trail_turn(trail, line, s, done) > TRAIL_TURN:
         trail, done = trail[:0], 0.0
     if start > done + 0.05:
       new = piece(line, s, done, start)
