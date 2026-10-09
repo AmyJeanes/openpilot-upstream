@@ -329,25 +329,28 @@ class TileMap:
         dr.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=int(self.road_cls[k]))
     return np.asarray(im)
 
-  def overhead(self, size: tuple[int, int]) -> np.ndarray:
-    """The highest map road surface over each pixel, in map metres (-inf where there is none): float32 [h, w]."""
-    im = Image.new("F", size, -1e9)
-    dr = ImageDraw.Draw(im)
+  def stack(self, size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """The highest and the lowest map road surface over each pixel (roads below the camera, tunnels left out), in map
+    metres (NaN where there is none): float32 [h, w] each. Where they're more than ABOVE apart, roads are stacked
+    there, the lower hidden under the higher; a road climbing a hill differs from itself only along itself."""
     mpp = self.cam.m_per_px
     z = (self.road_a[:, 2] + self.road_b[:, 2]) / 2
-    for k in np.argsort(z):
-      if self.road_st[k] == 2 or z[k] < self.level + ABOVE - 0.5 or self.cam.game_z(z[k]) > self.cam.zcam - 0.5:  # not above the camera
-        continue
-      uv = self.cam.project(np.array([self.road_a[k], self.road_b[k]]))
-      wpx = max(1, int(round((self.road_w[k] + 1.0) / mpp)))
-      dr.line([tuple(uv[0]), tuple(uv[1])], fill=float(z[k]), width=wpx)
-    for poly, zz in sorted(self.areas, key=lambda a: a[1]):
-      if zz < self.level + ABOVE - 0.5 or self.cam.game_z(zz) > self.cam.zcam - 0.5:
-        continue
-      uv = self.cam.project(np.column_stack([poly, np.full(len(poly), zz)]))
-      for i in range(1, len(uv)):
-        dr.polygon([tuple(uv[0]), tuple(uv[i]), tuple(uv[i % (len(uv) - 1) + 1])], fill=float(zz))
-    return np.asarray(im, np.float32)
+    keep = [k for k in range(len(z)) if self.road_st[k] != 2 and self.cam.game_z(z[k]) < self.cam.zcam - 0.5]
+    areas = [(p, zz) for p, zz in self.areas if self.cam.game_z(zz) < self.cam.zcam - 0.5]
+    out = []
+    for top in (True, False):  # drawn in height order, so the last drawn (highest, or lowest) wins
+      im = Image.new("F", size, np.nan)
+      dr = ImageDraw.Draw(im)
+      for k in sorted(keep, key=lambda k: z[k], reverse=not top):
+        uv = self.cam.project(np.array([self.road_a[k], self.road_b[k]]))
+        wpx = max(1, int(round((self.road_w[k] + 1.0) / mpp)))
+        dr.line([tuple(uv[0]), tuple(uv[1])], fill=float(z[k]), width=wpx)
+      for poly, zz in sorted(areas, key=lambda a: a[1], reverse=not top):
+        uv = self.cam.project(np.column_stack([poly, np.full(len(poly), zz)]))
+        for i in range(1, len(uv)):
+          dr.polygon([tuple(uv[0]), tuple(uv[i]), tuple(uv[i % (len(uv) - 1) + 1])], fill=float(zz))
+      out.append(np.asarray(im, np.float32))
+    return out[0], out[1]
 
 
 def load_image(path: str) -> np.ndarray:

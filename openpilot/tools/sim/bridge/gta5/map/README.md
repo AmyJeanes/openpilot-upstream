@@ -123,7 +123,13 @@ has the options).
   warmth over the road's, `imgcheck/paint.py`): paint with no map line within 0.4 m, map lines with no paint, the wrong
   colour, kerbs over even road surface (painted medians, kerbs across lanes), stop lines off the painted bar, and
   line-like paint inside junction areas (`imgcheck/compare.py`). Tiles whose ground under the camera is off the map's
-  road height (something over the road) are left out; service roads count a quarter.
+  road height (something over the road) are left out; service roads count a quarter. Where the map's roads are
+  stacked (a road surface more than 4 m over another, by roads.json's heights), a tile judges its road only where it
+  is the top layer: under a deck it's hidden, not missing. `plan --under` lays a second pass along the roads under
+  decks, the camera below the deck (topcam `abs=1`, 5 m above the road, a 90 degree field, a tile about every 10 m).
+- `trial.py` shoots chosen tiles under several lighting settings (hour, weather, the plugin's `shadows` command for
+  the cascade shadow natives) and compares how much of the road is in shadow and how many of the map's lines have
+  their paint seen.
 - `report` gathers the issues into spots across overlapping tiles and writes `RUN/report/index.html` (ranked, with
   crops: the game, our map over it, the paint found), `spots.json` and city heat maps.
 `run.py import-survey RUN` takes the map audit's survey shots (`/mnt/e/gta5_audit/map_audit/survey_trips_*`, with their

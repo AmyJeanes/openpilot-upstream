@@ -208,11 +208,12 @@ def wait_for(hop: float) -> float:
   return 5.0
 
 
-def estimate(tiles: list[Tile], shot_s: float = 0.9) -> dict:
-  """Shots, waits and storage for a plan (shot_s: the grab, its write and the state check per tile)."""
+def estimate(tiles: list[Tile], shot_s: float = 0.35) -> dict:
+  """Shots, waits and storage for a plan (shot_s: the grab, its write and the state check per tile; the sample run
+  measured 1.14 s a tile in all, with 0.8 s waits)."""
   wait = sum(wait_for(t.hop) for t in tiles)
   return {"tiles": len(tiles), "hours": round((wait + shot_s * len(tiles)) / 3600, 2), "long_hops": sum(t.hop >= 600 for t in tiles),
-          "gb_png": round(len(tiles) * 5.5 / 1024, 1), "gb_jpg": round(len(tiles) * 1.2 / 1024, 1)}
+          "gb_png": round(len(tiles) * 5.5 / 1024, 1), "gb_jpg": round(len(tiles) * 1.55 / 1024, 1)}
 
 
 def save(tiles: list[Tile], path: str, meta: dict):

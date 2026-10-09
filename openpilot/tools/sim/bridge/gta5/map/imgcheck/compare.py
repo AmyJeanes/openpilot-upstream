@@ -128,8 +128,12 @@ class TileCheck:
     b = int(BORDER * min(h, w))
     self.inside = np.zeros((h, w), bool)
     self.inside[b:h - b, b:w - b] = True
-    self.overhead = self.map.overhead(self.size)
-    self.hidden = self.overhead > self.map.level + ABOVE
+    # stacked roads: where one map road lies over another, the lower is hidden (a tile judges the top layer where its
+    # road is the top, and leaves its road out where a deck lies over it)
+    self.overhead, floor = self.map.stack(self.size)
+    lvl = self.map.level
+    with np.errstate(invalid="ignore"):
+      self.hidden = (self.overhead - floor > ABOVE) & (np.abs(floor - lvl) < np.abs(self.overhead - lvl))
     self.road = self.map.surface(self.size, grow=ROAD_GROW) & ~self.hidden
     self.road_class = self.map.classes(self.size)
     self.sharp = self.paint.sharpness()
@@ -280,7 +284,7 @@ class TileCheck:
     iu, iv = np.round(uv[:, 0]).astype(int), np.round(uv[:, 1]).astype(int)
     inside = (iu >= 0) & (iu < w) & (iv >= 0) & (iv < h)
     iu, iv = np.clip(iu, 0, w - 1), np.clip(iv, 0, h - 1)
-    judged = inside & self.inside[iv, iu] & ~(self.overhead[iv, iu] > q[:, 2] + ABOVE) & self.asphalt_near[iv, iu]
+    judged = inside & self.inside[iv, iu] & ~(np.nan_to_num(self.overhead[iv, iu], nan=-1e9) > q[:, 2] + ABOVE) & self.asphalt_near[iv, iu]
     return q, t, uv, iu, iv, judged
 
   def check_lines(self):
