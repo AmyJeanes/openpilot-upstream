@@ -2,14 +2,16 @@
 there, and brings it back, for training the driving model to tell it's in an oncoming lane and to steer back out.
 
 A clip is an expert route trip (gta5_cmd.py expert route) whose control file has `wrongway`, a JSON object:
-  {"clip": "W003p0", "lane": -1, "approach_m": 70, "drift_m": 60, "hold_s": 3, "speed": 10, "recover": "ai",
+  {"clip": "W003p0", "depth": 1, "approach_m": 70, "drift_m": 60, "hold_s": 3, "speed": 10, "recover": "ai",
    "recover_m": 60, "after_m": 40}
 The bridge (gta5_expert.py) drives it with a pure pursuit controller (the plugin's curvature and acceleration control,
 the game's AI off) along a path planned once at the start on the route's lanes (router.Route.lane_line): in the start
-lane for approach_m (`approach`), ramping into lane `lane` (-1 the nearest oncoming lane, -0.5 straddling the centre
-line, -2 the far one) over drift_m (`drift`), there for hold_s at `speed` (`hold`), then back into the start lane:
-recover "ai" hands the car to the game's AI, driving the trip's route on to its destination as expert mode always does
-(`ai_recover` until the plugin's lane reading is one of ours again, then `done`); recover "path" has the controller
+lane for approach_m (`approach`), ramping into the target lane over drift_m (`drift`), there for hold_s at `speed`
+(`hold`), then back into the start lane. The target is by the map's lane directions where it drifts: depth 1 the
+nearest oncoming lane, 2 the next, "straddle" astride the nearest one's edge (target_lane); without a depth, `lane`
+(from the left of ours, negative oncoming). recover "ai" hands the car to the game's AI, driving the trip's route on
+to its destination as expert mode always does (`ai_recover` until the map's lane matching, else the plugin's reading,
+has it in one of our lanes for RECOVERED_S, then `done`); recover "path" has the controller
 ramp back over recover_m (`recover`), drive after_m on in lane (`done`) and stop. A collision, an off-road or off-path
 reading, losing every lane reading, an unsuitable road or the AI not recovering ends the clip (`abort`): the car is
 braked to a stop and expert mode stops with "wrongway abort: <why>".
@@ -299,8 +301,11 @@ class WrongWay:
       return {"type": "control", "active": True, "curvature": 0.0, "accel": -ABORT_DECEL}
 
     if self.phase == "ai_recover":
+      # back in one of our lanes by the map's lane directions (lane_match), else by the plugin's reading, which flicks
+      # to the oncoming lane on one-lane roads
+      m = state.get("laneMap") or {}
       plugin = state.get("lanePlugin", state.get("lane"))
-      ours = plugin is not None and plugin[0] >= 0
+      ours = m["kind"] == "own" if m.get("kind") else plugin is not None and plugin[0] >= 0
       self.ok_lane_t = (self.ok_lane_t if self.ok_lane_t is not None else t) if ours else None
       if self.ok_lane_t is not None and t - self.ok_lane_t >= RECOVERED_S:
         self._set("done", t, recovered_s=round(self.ok_lane_t - self.phase_t, 2))

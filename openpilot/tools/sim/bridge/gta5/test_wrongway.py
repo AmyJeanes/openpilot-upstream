@@ -145,11 +145,15 @@ def test_targets():
   print("targets: ok")
 
 
-def test_expert():
-  """Expert mode with a clip: the AI off and the controller's controls, then the AI on for the recovery."""
+def test_expert(map_lane: bool = False, collide_in_recovery: bool = False):
+  """Expert mode with a clip: the AI off and the controller's controls, then the AI on for the recovery, each phase an
+  event row in the expert log; with map_lane, the recovery judged by the map's lane matching (laneMap's kind)."""
+  import io
+  import json
   sent = []
   e = Expert(sent.append, lambda: None, lambda: None)
-  e.cfg = {**e.cfg, "on": True, "wrongway": {"clip": "t", "lane": -1, "speed": 10.0, "drift_m": 60.0, "hold_s": 2.0}}
+  e.log = io.StringIO()
+  e.cfg = {**e.cfg, "on": True, "wrongway": json.dumps({"clip": "t", "depth": 1, "speed": 10.0, "drift_m": 60.0, "hold_s": 2.0})}
   e.on = True
   e.ww = e._wrongway(e.cfg["wrongway"])
   route = road(1)
@@ -157,7 +161,14 @@ def test_expert():
   ai_on_at = None
   for _ in range(4000):
     s = car.state()
-    assert e.update(s, route, False)
+    s["t"] = car.t  # a new game frame each step
+    if map_lane:
+      s["lanePlugin"] = [-1, 1]  # the plugin's reading flicking to the oncoming lane: the map's says otherwise
+      s["laneMap"] = {"lane": s["lane"][0], "kind": "own" if s["lane"][0] >= 0 else "oncoming"}
+    if collide_in_recovery and e.ww.phase == "ai_recover":
+      car.collisions = 1
+    if not e.update(s, route, False):
+      break
     ctl = [m for m in sent if m.get("type") == "control"]
     if e.ww.phase == "approach":
       assert not e.ai_drives and e.ww_driving
@@ -167,12 +178,30 @@ def test_expert():
       car.move(ctl[-1]["curvature"], ctl[-1]["accel"])
     else:
       car.ai_drive(0, 10.0)
-    if e.ww.finished:
+    if e.ww is None or e.ww.finished:
       break
   assert sent[0] == {"type": "ai", "on": 0, "indicator": "off"}, sent[0]
   assert ai_on_at == "ai_recover", ai_on_at
+  rows = [json.loads(line) for line in e.log.getvalue().splitlines()]
+  events = [r for r in rows if r.get("event") == "wrongway"]
+  phases = [r["phase"] for r in events]
+  if collide_in_recovery:
+    assert phases == ["approach", "drift", "hold", "ai_recover", "abort", "end"], phases
+    assert any(r.get("event") == "stop" and "wrongway abort: collision" in r["why"] for r in rows)
+    assert {"type": "ai", "on": 0, "indicator": "off"} in sent[sent.index(next(m for m in sent if m.get("on") == 1)):]
+    assert not e.on and e.ww is None
+    print("expert, collision in the AI's recovery: ok")
+    return
+  assert phases == ["approach", "drift", "hold", "ai_recover", "done", "end"], phases
+  assert all("mono" in r and "t" in r for r in events)
+  assert events[0]["plan"]["path"] and events[0]["plan"]["road"]["directions"] == "<>" and events[0]["plan"]["cfg"]["lane"] == -1.0
+  done = events[4]
+  assert 0 < done["recovered_s"] < 10, done
+  ww_rows = [r for r in rows if "ww" in r]
+  assert {r["ww"]["phase"] for r in ww_rows} >= {"approach", "drift", "hold", "ai_recover", "done"}
+  assert all(r["wwDriving"] == (r["ww"]["phase"] in ("approach", "drift", "hold")) for r in ww_rows if r["ww"]["phase"])
   assert e.ai_drives and e.ww.finished == "done"
-  print("expert: ok")
+  print(f"expert{' (map lane)' if map_lane else ''}: ok, back in lane in {done['recovered_s']} s")
 
 
 def test_record_rows():
@@ -202,4 +231,6 @@ if __name__ == "__main__":
   test_ai_clip()
   test_aborts()
   test_expert()
+  test_expert(map_lane=True)
+  test_expert(collide_in_recovery=True)
   test_record_rows()
