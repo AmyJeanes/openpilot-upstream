@@ -436,7 +436,7 @@ def main():
     if high:
       line_z.append(packed(z))
   # kerbs only where the road surface ends, not between one-way ways side by side (side_by_side.py)
-  side = SideBySide(osm, [w for w in junctions.ways if w not in junctions.inside], lambda w: levels[w][0])
+  side = SideBySide(osm, [w for w in junctions.ways if w not in junctions.inside], lambda w: levels[w][0], paint)
   for (layer, sig), _, nodes in join(layouts):
     pts = points(nodes)
     z = heights(nodes) if high else None

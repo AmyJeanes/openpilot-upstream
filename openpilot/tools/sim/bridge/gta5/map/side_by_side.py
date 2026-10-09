@@ -17,7 +17,10 @@ them, not a barrier: it's drawn as the solid line painted at the lanes' edge the
 
 A one-way way's kerb is also left out on a two-way road's carriageway, running along it either way: GTA lays a turn bay
 beside a two-way road as a one-way way leaving it from its middle, with lane changes to and from it across its lanes
-(junctions.py's lane_split: no junction there), and their kerbs crossed its lanes.
+(junctions.py's lane_split: no junction there), and their kerbs crossed its lanes. Where the road carries on narrower on
+the bay's side (GTA lays the bay's lane in the wider road) and the bay's outer edge ends on the wider road's kerb
+carried straight on, that kerb is carried on along the bay's mouth to its end: the kerb outside the bay and road. A city
+lane change (as to and from such a bay) parts no carriageway: the ways it parts into keep their kerbs.
 
 GTA also lays lane changes (junctions.lane_changes: a one-way way up to LANE_CHANGE_M long turning off a carriageway
 that goes on, into another that came from elsewhere, all running about one way) across the painted gore where two carriageways part or meet, and
@@ -28,8 +31,8 @@ from collections import defaultdict
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.junctions import SAME_WAY, Junctions, densify, in_fan, lane_changes
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, oneway_of
+from openpilot.tools.sim.bridge.gta5.map.junctions import SAME_WAY, Junctions, clip_outside, densify, in_fan, lane_changes
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import EDGE, FORWARD, oneway_of
 
 # m: a kerb this near another way's carriageway, or on it, is inside the road surface (lanes at their class
 # width often fall short of the paint between GTA's links)
@@ -49,9 +52,9 @@ GORE_SHARED = 5.0  # m: a freeway's kerb this near another carriageway running i
 
 class SideBySide:
   """The one-way ways among `ways` (way ids of an osm_lanes.OsmLanes) and their carriageways, a quadrilateral for each
-  segment; `layer_of(way)` is its layer."""
-  def __init__(self, osm, ways, layer_of):
-    self.osm, self.layer_of = osm, layer_of
+  segment; `layer_of(way)` is its layer. `paint` (osm_to_roads.PaintAreas) cuts kerbs carried on out of junctions' areas."""
+  def __init__(self, osm, ways, layer_of, paint=None):
+    self.osm, self.layer_of, self.paint = osm, layer_of, paint
     self.first, self.last = {}, {}
     self._crosses: dict[int, bool] = {}
     self.two_way: set[int] = set()  # the two-way roads among them, whose carriageways a one-way way's kerb can lie on
@@ -76,10 +79,22 @@ class SideBySide:
     self.across = {w for w in changes if self._gap(w) > GAP_M}
     for wid in sorted(changes - self.across):
       self._add_quads(wid)
+    for wid in ways:
+      tags, refs = osm.ways[wid]
+      if oneway_of(tags) == 0 and len(refs) >= 2:
+        self.two_way.add(wid)
+        self._add_quads(wid)
+    at = defaultdict(list)
+    for wid in ways:
+      refs = osm.ways[wid][1]
+      at[refs[0]].append(wid)
+      at[refs[-1]].append(wid)
+    self.node_ways = {n: len(v) for n, v in at.items()}
     for wid in self.first:
       refs = osm.ways[wid][1]
       lo, hi = osm.lanes(wid).edges(FORWARD)
-      if hi - lo <= 2 * SHARED or wid in self.across:
+      # a city lane change is no carriageway of its own whose lanes the ways it parts into cross
+      if hi - lo <= 2 * SHARED or wid in self.across or self._city_change(wid):
         continue
       pts, z = osm.xy[osm.data.index(refs)], self._heights(refs)
       for node, (p, q), zz in ((refs[-1], pts[-2:], None if z is None else z[-1]), (refs[0], pts[1::-1], None if z is None else z[0])):
@@ -92,19 +107,10 @@ class SideBySide:
         near = q - u * SHARED  # from just before its end: a branch's kerb starts beside its first node
         inner = np.array([near + r * (lo + SHARED), far + r * (lo + SHARED), far + r * (hi - SHARED), near + r * (hi - SHARED)])
         self.gores[node].append((inner, u if node == refs[-1] else -u, layer_of(wid), None if zz is None else float(zz)))
-    for wid in ways:
-      tags, refs = osm.ways[wid]
-      if oneway_of(tags) == 0 and len(refs) >= 2:
-        self.two_way.add(wid)
-        self._add_quads(wid)
+    # way -> [(where a kerb of it ends at a bay's mouth, the kerb carried on from there)]
+    self.carried: dict[int, list[tuple[np.ndarray, np.ndarray]]] = defaultdict(list)
     # a two-way road that a turn bay parts from (or joins) where it carries on as another, narrower: carried on past
     # the node both ways, as a one-way carriageway that parts is (GTA starts the bay from the road's middle)
-    at = defaultdict(list)
-    for wid in ways:
-      refs = osm.ways[wid][1]
-      at[refs[0]].append(wid)
-      at[refs[-1]].append(wid)
-    self.node_ways = {n: len(v) for n, v in at.items()}
     for wid in self.two_way:
       refs = osm.ways[wid][1]
       lo, hi = osm.lanes(wid).edges(FORWARD)
@@ -117,8 +123,65 @@ class SideBySide:
         r = np.array([u[1], -u[0]]) * (1.0 if node == refs[-1] else -1.0)  # right of the way's direction
         far, near = q + u * GORE, q - u * SHARED
         inner = np.array([near + r * (lo + SHARED), far + r * (lo + SHARED), far + r * (hi - SHARED), near + r * (hi - SHARED)])
-        for heading in (u, -u):
-          self.gores[node].append((inner, heading, layer_of(wid), None if zz is None else float(zz)))
+        quads = [inner]
+        for right, reach in self._carry_kerbs(wid, node, u, others, at).items():  # a bay's kerb along it is that kerb
+          edge, to = hi if right else lo, q + u * reach
+          quads.append(np.array([q + r * (edge - SHARED), to + r * (edge - SHARED), to + r * (edge + SHARED), q + r * (edge + SHARED)]))
+        for quad in quads:
+          for heading in (u, -u):
+            self.gores[node].append((quad, heading, layer_of(wid), None if zz is None else float(zz)))
+
+  def _carry_kerbs(self, wid: int, node: int, u: np.ndarray, others: list[int], at: dict) -> dict[bool, float]:
+    """Where a turn bay (one-way, in `others` at `node`) leaves a two-way road (wid, heading u out past the node) that
+    carries on narrower on the bay's side, and the bay's outer edge ends against the road's kerb carried straight on:
+    GTA lays the bay's lane in the wider road but starts its way from the road's middle. The road's kerb is carried on
+    to the bay's end (or the ways' going on from there), along the outside of the bay (self.carried), up to a junction's
+    area. Returns how far each of the way's kerbs (right-hand: True) that is is carried on."""
+    osm, sides = self.osm, {}
+    refs = osm.ways[wid][1]
+    q = osm.node_xy(node)
+    ru = np.array([u[1], -u[0]])
+    narrow = next(w for w in others if w in self.two_way)
+    for bay in others:
+      if bay not in self.first:
+        continue
+      brefs = osm.ways[bay][1]
+      end = brefs[-1] if brefs[0] == node else brefs[0]
+      v = osm.node_xy(end) - q
+      if float(v @ u) <= 0:
+        continue  # it runs along this way, not the narrower one
+      out = 1.0 if float(v @ ru) > 0 else -1.0  # the bay's side, right of u
+      rs = ru * out
+      right = (node == refs[-1]) == (out > 0)  # that side is the way's right-hand kerb
+      lo, hi = osm.lanes(wid).edges(FORWARD)
+      nlo, nhi = osm.lanes(narrow).edges(FORWARD)
+      n_right = (osm.ways[narrow][1][0] == node) == (out > 0)
+      if (hi if right else -lo) - (nhi if n_right else -nlo) <= SHARED:
+        continue
+      kerb = _edge_end(osm, wid, hi if right else lo, q + rs * (hi if right else -lo))
+      if kerb is None:
+        continue
+      e, d = kerb
+      tips = {w: _edge_tips(osm, w, osm.node_xy(end)) for w in at[end] if w in self.first}
+      outer = max(tips[bay], key=lambda t: float((t - e) @ rs), default=None)
+      if outer is None or abs(float((outer - e) @ rs)) > SHARED:
+        continue  # the bay's outer edge ends off the road's kerb carried on
+      # on to the nearest of the ways' going on from there whose edge starts on it
+      reach = float((outer - e) @ d)
+      on = [float((t - e) @ d) for w, ts in tips.items() if w != bay for t in ts if abs(float((t - e) @ rs)) <= SHARED]
+      reach = max(reach, min(on, default=reach))
+      if not MIN_PIECE <= reach <= GORE:
+        continue
+      line = np.array([e, e + d * reach])
+      if self.paint is not None:  # from the kerb's end (not in a junction's area) up to one
+        tail = np.array([e - d * MEETS, e, line[-1]])
+        piece = next((p for p in clip_outside(tail, self.paint.near(tail, self.layer_of(wid), {wid}, True))
+                      if np.hypot(*(p[0] - tail[0])) <= MIN_PIECE), None)
+        line = None if piece is None or float((piece[-1] - e) @ d) < MIN_PIECE else np.array([e, piece[-1]])
+      if line is not None and _length(line) >= MIN_PIECE:
+        self.carried[wid].append((e, line))
+        sides[right] = max(sides.get(right, 0.0), _length(line))
+    return sides
 
   def _add_quads(self, wid: int):
     refs = self.osm.ways[wid][1]
@@ -166,7 +229,8 @@ class SideBySide:
     line = np.asarray(line, float)[:, :2]
     ways = set(ways)
     if len(line) >= 2 and ways and ways <= self.two_way:
-      return self._two_way_kerb(line, z, layer, ways, right)
+      kept, lines = self._two_way_kerb(line, z, layer, ways, right)
+      return self._carry_on(kept, line, ways), lines
     if len(line) < 2 or not all(w in self.first for w in ways):  # roads not given keep their kerbs
       return ([line] if len(line) >= 2 else []), []
     if ways <= self.across or all(self._city_change(w) for w in ways):
@@ -199,6 +263,22 @@ class SideBySide:
     kept = [pts[a:b + 1] for a, b in _runs(~covered & ~gore)]  # inside a wider road it carries on from: the bay's line
     lines = [(pts[a:b + 1], 'solid') for a, b in _runs((beside >= 0) | (gore & ~covered))]
     return [p for p in kept if _length(p) >= MIN_PIECE], [(p, st) for p, st in lines if _length(p) >= MIN_PIECE]
+
+  def _carry_on(self, kept: list[np.ndarray], line: np.ndarray, ways: set) -> list[np.ndarray]:
+    """The kerb's pieces, the one ending where it's carried on along a bay's mouth (self.carried) carried on."""
+    for e, extra in (c for w in ways for c in self.carried.get(w, ())):
+      if min(np.hypot(*(line[0] - e)), np.hypot(*(line[-1] - e))) > MIN_PIECE:
+        continue  # (not this piece of it: cut short by a junction's area)
+      for k, piece in enumerate(kept):
+        if np.hypot(*(piece[-1] - e)) <= MIN_PIECE:
+          kept[k] = np.vstack([piece, extra[1:]])
+          break
+        if np.hypot(*(piece[0] - e)) <= MIN_PIECE:
+          kept[k] = np.vstack([extra[:0:-1], piece])
+          break
+      else:
+        kept.append(extra)
+    return kept
 
   def _city_change(self, wid: int) -> bool:
     """Whether a way off the freeways is a lane change between carriageways (as GTA lays them to and from a turn bay):
@@ -316,3 +396,26 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
 
 def _length(p: np.ndarray) -> float:
   return float(np.hypot(*np.diff(p, axis=0).T).sum()) if len(p) >= 2 else 0.0
+
+
+def _edge_tips(osm, wid: int, at: np.ndarray) -> list[np.ndarray]:
+  """The ends of a way's edges at the end of it nearer `at`."""
+  tips = []
+  for line, base in osm.line_geometry(wid):
+    if line.kind == EDGE and len(base) >= 2:
+      tips.append(base[0] if np.hypot(*(base[0] - at)) < np.hypot(*(base[-1] - at)) else base[-1])
+  return tips
+
+
+def _edge_end(osm, wid: int, offset: float, near: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+  """Where the way's edge at `offset` ends nearest `near` (within MEETS), and its heading out past that end."""
+  for line, base in osm.line_geometry(wid):
+    if line.kind != EDGE or abs(line.offset - offset) > 0.01 or len(base) < 2:
+      continue
+    base = np.asarray(base, float)
+    if np.hypot(*(base[0] - near)) < np.hypot(*(base[-1] - near)):
+      base = base[::-1]
+    d = base[-1] - base[-2]
+    if np.hypot(*(base[-1] - near)) <= MEETS and np.hypot(*d) > 0.01:
+      return base[-1], d / np.hypot(*d)
+  return None

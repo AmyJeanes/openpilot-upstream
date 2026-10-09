@@ -85,7 +85,9 @@ the directions; and the plugin's debug overlay the same lines, from the map's ta
 surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
 cutting across between them, where the line between two such ways is a lane line, solid where either's `change:lanes`
 says so (`side_by_side.py`). GTA's lane changes across the painted gore where two such carriageways part or meet have
-no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. Where every road at a node
+no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. A turn bay GTA starts from
+a two-way road's middle, where the road carries on narrower by the bay's lane, has the wider road's kerb carried on
+straight along its outside to the bay's end, where its outer edge meets it (Vinewood Blvd before Meteor St). Where every road at a node
 is one-way and all run about one way (lanes merging, parting or changing across a carriageway) there is no junction
 area; GTA's lane changes (`junctions.lane_changes`), cutting across at up to 60 degrees, don't count against that
 where two carriageways are left to say it (the hatched slip island by Vinewood Blvd's stop line). Nor round painted
