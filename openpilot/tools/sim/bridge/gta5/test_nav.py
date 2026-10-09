@@ -724,10 +724,12 @@ def test_limit_cap_where_the_car_is():
 
 
 def jogging_route() -> Route:
-  """North 300 m with a 52 deg bend 2 m long half way (GTA's links jogging through a junction), then a right turn."""
+  """North 300 m with a 52 deg bend 2 m long half way (GTA's links jogging through a junction), then a right turn,
+  which Valhalla calls one."""
   pts = [(0.0, y) for y in (0.0, 60.0, 120.0, 148.0)] + [(1.6, 149.2)] + [(1.6, y) for y in (180.0, 240.0, 300.0)]
   pts += [(x, 300.0) for x in (40.0, 80.0, 120.0)]
-  return Route(np.array(pts), [{'type': 1, 'begin_shape_index': 0}, {'type': 4, 'begin_shape_index': len(pts) - 1}])
+  return Route(np.array(pts), [{'type': 1, 'begin_shape_index': 0}, {'type': 10, 'begin_shape_index': 7},  # Valhalla's right
+                                {'type': 4, 'begin_shape_index': len(pts) - 1}])
 
 
 def replay_turns(r: Route, upto: float, own: bool) -> list:
