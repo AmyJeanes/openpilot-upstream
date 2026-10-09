@@ -318,8 +318,8 @@ class GTA5World(World):
     if state is None or not state.get("inVehicle"):
       return
     self._send_hud()
-    if self.expert.ww_driving:
-      return  # a wrong-way clip's controller sends the controls (gta5_wrongway.py)
+    if self.expert.controls_car:
+      return  # a wrong-way clip's controller or the map driver sends the controls (gta5_wrongway.py, gta5_mapdrive.py)
     if not self.simulator_state.is_engaged:
       self._send({"type": "control", "active": False})
       return
@@ -435,6 +435,8 @@ class GTA5World(World):
       self._set_cap(simulator_state, 0.0, "")
       self._set_blinkers(simulator_state)
       self._update_buttons(state)
+      if self.expert.md is not None:
+        self._lane_line(state, v)  # the map driver's path, for recordings and the overlay, whether drawn or not
       self._update_map(state, bearing, v)
       simulator_state.valid = True
       return
@@ -684,8 +686,14 @@ class GTA5World(World):
     })
 
   def _lane_line(self, state: dict, v: float) -> list:
-    """The route in the lanes nav aims for, for the map."""
+    """The route in the lanes nav aims for, for the map; while the map driver drives, the path it drives (its intent,
+    without the in-lane wander), so the ribbon is what's driven."""
     r, now = self.route, time.monotonic()
+    md = self.expert.md
+    if md is not None and md.path is not None and not self.expert.md_fallback:
+      if r is not self.lane_line[0] or now >= self.lane_line[1]:
+        self.lane_line = (r, now + LANE_LINE_EVERY, md.intent_line())
+      return self.lane_line[2]
     if r is None:
       return []
     if r is self.lane_line[0] and now < self.lane_line[1]:

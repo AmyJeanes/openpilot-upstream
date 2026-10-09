@@ -10,7 +10,8 @@ Each minute of driving becomes <folder>/data/<hex name>/ with:
   and modeld's outputs for that
   frame with the desire input it was given (rebuilt as modeld's DesireHelper builds it), plus its raw output vector
   when modeld runs with SEND_RAW_PRED=1. localizer and frame_info are made from it, so `finalize` can remake them;
-- routes.json: nav's routes and the lane line it aims for, when on a map route;
+- routes.json: nav's routes and the lane line it aims for, when on a map route (while the map driver drives, the path
+  it drives), and the map driver's planned paths (expert_paths: its intent, the labels' target, as each plan is made);
 - gta5.json: the segment's settings and counts, the camera's mount (from the plugin's state when it reports one, else
   GTA5_RECORD_MOUNT) and the scene at its start: the car, weather, time and traffic density.
 
@@ -67,6 +68,9 @@ INDICATORS = {None: 0, "left": 1, "right": 2}
 # the route's line), the car's distance from the planned path, the car's m right of the route's line, and the map's lane
 # (lane_match, NaN where none) with whether it's an oncoming one
 WW_COLUMNS = ("clip", "phase", "target_lane", "target_right", "path_dev", "route_right", "map_lane", "map_oncoming")
+# per road frame: who drove the route (expert_src: gta5_mapdrive.SOURCES' index, none / ai / map / ai_fallback), and in
+# segments the map driver drove, its state (mapx: gta5_mapdrive.MAPX_COLUMNS, NaN where it didn't; phase and speed_reason
+# index mapx_phase_values and mapx_reason_values); gta5.json's mapx has the trip's style, seed, plans, aborts, anomalies
 
 
 def state_mount(state: dict) -> tuple | None:
@@ -193,6 +197,11 @@ class Segment:
     self.expert_labels: list[str] = []
     self.ww_rows: list[list[float]] = []
     self.ww_clips: list[dict] = []
+    self.src_rows: list[int] = []
+    self.mapx_rows: list[list[float]] = []
+    self.expert_paths: list[dict] = []
+    self.md = None  # the map driver that drove in it
+    self.md_path = None  # the path last kept in expert_paths
     self.mount = None  # the plugin's report of it, which a change of ends the segment
     self.broken = ""
     self.done_at = 0.0  # when it stopped taking frames
@@ -292,8 +301,9 @@ class Recorder:
       route_idx = len(self.segment.routes) - 1
     # the game's AI driving (gta5_expert.py), and the desire its indicators stand for
     expert = getattr(w, "expert", None)
-    expert_on = bool(getattr(expert, "ai_drives", getattr(expert, "active", False)))
+    expert_on = bool(getattr(expert, "drives_route", getattr(expert, "ai_drives", getattr(expert, "active", False))))
     self.segment.ww_rows.append(self._ww_row(expert, route, state))
+    self._map_row(expert, index)
     label = str(getattr(expert, "label", "")) if expert_on else ""
     if label not in self.segment.expert_labels:
       self.segment.expert_labels.append(label)
@@ -309,6 +319,27 @@ class Recorder:
             getattr(w, "cap", 0), lane[0], lane[1], route_idx,
             *((route.at, route.off, route.right) if route is not None else (np.nan,) * 3),
             expert_on, self.segment.expert_labels.index(label)]
+
+  def _map_row(self, expert, index: int):
+    """The frame's expert_src and mapx rows, and the map driver's path in expert_paths when it's new."""
+    from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MAPX_COLUMNS, SOURCES
+    seg = self.segment
+    src = getattr(expert, "source", None)
+    if not isinstance(src, str):
+      src = "ai" if getattr(expert, "ai_drives", False) else "none"
+    seg.src_rows.append(SOURCES.index(src) if src in SOURCES else 0)
+    md = getattr(expert, "md", None)
+    if md is None or not getattr(expert, "active", False) or md.path is None:
+      seg.mapx_rows.append([np.nan] * len(MAPX_COLUMNS))
+      return
+    seg.md = md
+    seg.mapx_rows.append([float(v) for v in md.mapx_row()])
+    if md.path is not seg.md_path:
+      seg.md_path = md.path
+      plan = md.plan or {}
+      seg.expert_paths.append({"frame": index, "plan": md.plans, "at0": plan.get("at0"), "keys": plan.get("keys"),
+                               "bias": plan.get("bias"), "wander_knots": plan.get("wander_knots"), "wander_m": plan.get("wander_m"),
+                               "splices": len(md.splices), "path": md.intent[::2].round(2).tolist()})
 
   def _ww_row(self, expert, route, state: dict) -> list[float]:
     from openpilot.tools.sim.bridge.gta5.gta5_wrongway import PHASES
@@ -336,6 +367,11 @@ class Recorder:
       return
     seg.road.finish()
     seg.wide.finish()
+    if seg.md is not None:
+      try:
+        seg.info["mapx"] = json.loads(json.dumps(seg.md.summary(), default=json_default))
+      except (TypeError, ValueError) as e:
+        seg.info["mapx"] = {"error": str(e)}
     seg.done_at = time.monotonic()
     self.done.append(seg)
 
@@ -361,6 +397,12 @@ class Recorder:
       out.update({"wrongway": np.array(seg.ww_rows[:len(rows)], dtype=np.float64).reshape(-1, len(WW_COLUMNS)),
                   "wrongway_columns": np.array(WW_COLUMNS), "wrongway_phase_values": np.array(PHASES)})
       seg.info["wrongway"] = seg.ww_clips
+    from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MAPX_COLUMNS, PHASES as MAP_PHASES, REASONS, SOURCES
+    out.update({"expert_src": np.array(seg.src_rows[:len(rows)], dtype=np.int8), "expert_src_values": np.array(SOURCES)})
+    if seg.md is not None:
+      out.update({"mapx": np.array(seg.mapx_rows[:len(rows)], dtype=np.float64).reshape(-1, len(MAPX_COLUMNS)),
+                  "mapx_columns": np.array(MAPX_COLUMNS), "mapx_phase_values": np.array(MAP_PHASES),
+                  "mapx_reason_values": np.array(REASONS)})
     with self.lock:
       model = [self.model.pop(int(i), None) for i in rows[:, 0]]
       for i in [k for k in self.model if rows.size and k < rows[-1, 0]]:
@@ -372,7 +414,8 @@ class Recorder:
                      "model_frames": sum(m is not None for m in model)})
     np.savez(seg.path / "gta5.npz", **out)
     print(f"gta5: recorded {seg.path.name}: {len(rows)} frames" + (f", ended: {seg.broken}" if seg.broken else ""), flush=True)
-    (seg.path / "routes.json").write_text(json.dumps({"routes": seg.routes, "lane_lines": seg.lane_lines}, default=json_default))
+    routes = {"routes": seg.routes, "lane_lines": seg.lane_lines, **({"expert_paths": seg.expert_paths} if seg.expert_paths else {})}
+    (seg.path / "routes.json").write_text(json.dumps(routes, default=json_default))
     (seg.path / "gta5.json").write_text(json.dumps(seg.info, indent=1))
     # the frame index means reading the whole video back: done apart from the bridge's process
     with open(seg.path / "finalize.log", "w") as log:
