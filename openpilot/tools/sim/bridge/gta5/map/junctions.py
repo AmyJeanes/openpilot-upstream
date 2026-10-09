@@ -5,7 +5,8 @@ into it at its traffic signals, stop and give way signs. Only standard tags are 
 map as on our GTA V one.
 
 - Junction nodes are where three or more roads meet, and only where they share the node: roads crossing over each
-  other never make one. A node where a road's lanes part into ways side by side (fewer than three arms) isn't one, nor
+  other never make one, nor GTA's two-way links across a motorway's median or between its parallel chains (crossovers).
+  A node where a road's lanes part into ways side by side (fewer than three arms) isn't one, nor
   one where a one-way lane only leaves a two-way road or joins it on its own side, at a shallow angle (LANE_SPLIT), and
   stays beside it (BESIDE_REACH), as GTA lays a turn bay as a way of its own with lane changes to and from it.
 - Junction nodes joined by a road shorter than CLUSTER_LINK (and their widest road's width), or whose trimmed ends
@@ -75,6 +76,7 @@ CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
+CROSSOVER_M = 60.0  # m: a two-way link between motorway carriageways no longer than this is a crossover, not a road
 MERGE_FLOW = 45.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
 LANE_SPLIT = 50.0  # deg: a one-way lane leaving or joining a two-way road within this of its traffic, on its side ...
 BESIDE_REACH = 30.0  # m: ... and beside the road this far along (within its kerb and the lane's width), only parts or merges
@@ -313,6 +315,46 @@ def bezier(p0, c, p1, step: float = 0.75) -> np.ndarray:
   return (1 - t) ** 2 * p0 + 2 * (1 - t) * t * c + t ** 2 * p1
 
 
+def crossovers(osm: OsmLanes, ways: dict) -> set[int]:
+    """GTA's links across a motorway's median or between its parallel chains (emergency crossovers, shortcuts): chains
+    of two-way ways, no longer than CROSSOVER_M, whose ends meet only motorway carriageways (one-way motorway ways and
+    their links). They're no roads to draw, and make no junctions."""
+    at: dict[int, list[int]] = {}
+    for w, (_, refs) in ways.items():
+      at.setdefault(refs[0], []).append(w)
+      at.setdefault(refs[-1], []).append(w)
+
+    def carriageway(w):
+      tags = ways[w][0]
+      return tags.get('highway') in FREEWAY and oneway_of(tags) != 0
+
+    def candidate(w):
+      return oneway_of(ways[w][0]) == 0 and not carriageway(w)
+    out: set[int] = set()
+    seen: set[int] = set()
+    for w in ways:
+      if w in seen or not candidate(w):
+        continue
+      group, todo, ends = {w}, [w], []  # the candidates joined end to end at nodes only they meet at
+      while todo:
+        v = todo.pop()
+        for n in (ways[v][1][0], ways[v][1][-1]):
+          others = [x for x in at[n] if x not in group]
+          if not others and len(at[n]) > 1:
+            continue  # between two of the group
+          if others and all(candidate(x) for x in others) and not any(carriageway(x) for x in at[n]):
+            group.update(others)
+            todo += others
+          elif n not in ends:
+            ends.append(n)
+      seen |= group
+      length = sum(float(np.hypot(*np.diff(osm.way_points(v), axis=0).T).sum()) for v in group)
+      if len(ends) >= 2 and length <= CROSSOVER_M * len(ends) / 2 and \
+          all(any(carriageway(x) for x in at[n]) and all(carriageway(x) or x in group for x in at[n]) for n in ends):
+        out |= group
+    return out
+
+
 def _faces(tags: dict, m: 'Member', k: int) -> bool:
   """Whether a stop line node, the member's k-th, is for traffic towards its junction by its direction tag (none: either)."""
   facing = tags.get('traffic_signals:direction') or tags.get('direction')
@@ -402,6 +444,9 @@ class Junctions:
     self.osm = osm
     keep = roads or (lambda tags: True)
     self.ways = {w: v for w, v in osm.ways.items() if keep(v[0]) and len(v[1]) >= 2}
+    self.crossovers = crossovers(osm, self.ways)
+    for w in self.crossovers:
+      del self.ways[w]
     self.steps: dict[int, list[tuple[int, int, bool]]] = {}  # node -> [(way, next node, along the way)]
     for wid, (_, refs) in self.ways.items():
       for i, n in enumerate(refs):

@@ -179,6 +179,27 @@ def test_freeway_kerbs_by_a_gore_are_painted_edges():
     assert len(kept) == 1 and not lines, (wid, right)
 
 
+def test_two_way_road_beside_a_turn_bay_has_a_lane_line_not_a_kerb():
+  # a two-way road 14 m wide along y = 0, eastbound on the right (south); a one-way eastbound turn bay laid as its own
+  # way beside it, its middle 9.5 m south (edges at y = -7.25 .. -11.75): the road's south kerb (y = -7) lies on the
+  # bay's left edge, the solid line between them; its north kerb stays
+  road = {'highway': 'primary', 'lanes': '4', 'width': '14'}
+  bay = {'highway': 'residential', 'lanes': '1', 'oneway': 'yes', 'width': '4.5'}
+  nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (20.0, -9.5), 4: (80.0, -9.5)}
+  osm = make(nodes, {1: (road, [1, 2]), 2: (bay, [3, 4])})
+  side = SideBySide(osm, [1, 2], lambda w: 0)
+  lo, hi = osm.lanes(1).edges(FORWARD)
+  kept, lines = side.kerb(offset_line(osm.way_points(1), hi), None, 0, {1}, True)  # south, eastbound traffic's side
+  assert {st for _, st in lines} == {'solid'} and sum(_len(p) for p, _ in lines) > 55.0
+  assert all(p[:, 0].max() <= 21.0 or p[:, 0].min() >= 79.0 for p in kept), [p.round(1).tolist() for p in kept]
+  kept, lines = side.kerb(offset_line(osm.way_points(1), lo), None, 0, {1}, False)
+  assert len(kept) == 1 and not lines and _len(kept[0]) > 99.0
+
+
+def _len(p):
+  return float(np.hypot(*np.diff(p, axis=0).T).sum())
+
+
 def test_outer_lines_and_missing_lane_lines():
   # a one-way link's lanes from -6 to 6: a solid line at its left edge, dashed at its right, the next links' lines
   samples = [sample([mark(-6.1, kind='solid'), mark(5.9), mark(12.0)], s) for s in (2.0, 5.0, 8.0)]

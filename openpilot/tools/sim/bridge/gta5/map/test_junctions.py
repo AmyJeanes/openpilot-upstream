@@ -229,6 +229,19 @@ def test_driveway_off_a_main_road_is_minor():
     assert j.minor == minor and (set(j.carried) >= {1, 2}) == minor, (side, j.minor, j.carried)
 
 
+def test_median_crossover_is_no_junction():
+  # a motorway's two carriageways 20 m apart with GTA's two-way link across the median between them (and one across
+  # as two ways meeting in the median): crossovers, no junctions
+  fwy = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '11'}
+  link = {'highway': 'trunk', 'lanes': '2', 'width': '11'}
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0), 4: (100.0, 20.0), 5: (10.0, 20.0), 6: (-100.0, 20.0),
+           7: (50.0, 0.0), 8: (45.0, 10.0), 9: (40.0, 20.0)}
+  ways = {1: (fwy, [1, 2]), 2: (fwy, [2, 7]), 3: (fwy, [7, 3]), 4: (fwy, [4, 9]), 5: (fwy, [9, 5]), 6: (fwy, [5, 6]),
+          7: (link, [2, 5]), 8: (link, [7, 8]), 9: (link, [8, 9])}
+  js = Junctions(make(nodes, ways))
+  assert js.crossovers == {7, 8, 9} and not js.junctions, (js.crossovers, [j.nodes for j in js.junctions])
+
+
 def test_surveyed_stop_lines():
   # a stop line surveyed where it's painted (source:position=survey), 8 m from the crossroads' node, nearer than the
   # road would be trimmed: the road ends there and the line is drawn at it, not moved out behind the crossing
