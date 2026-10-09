@@ -50,6 +50,7 @@ MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map 
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
 MAP_EVERY = 0.1  # s
 LANE_LINE_EVERY = 0.5  # s
+ON_PATH = 15.0  # m: the overlay's turn markers go on nav's lane line where it passes this near their route points
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
 ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
 # s the car's last lane reading by the map's lanes stands while there's none: the plugin's own reading counts GTA's
@@ -126,6 +127,19 @@ def speed_limit(street: str) -> float:
     return 0.0
   mph = next((limit for words, limit in SPEED_LIMITS if any(w in street for w in words)), CITY_SPEED_LIMIT)
   return mph * 0.44704
+
+
+def on_path(p, line: np.ndarray, near: float = ON_PATH):
+  """The point of a polyline nearest p, where it passes within `near` m; else p."""
+  if p is None or len(line) < 2:
+    return p
+  p = np.asarray(p, float)
+  a, ab = line[:-1], np.diff(line, axis=0)
+  t = np.clip(np.einsum('ij,ij->i', p - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
+  foot = a + ab * t[:, None]
+  d = np.hypot(*(foot - p).T)
+  k = int(np.argmin(d))
+  return foot[k] if d[k] < near else p
 
 
 class GTA5World(World):
@@ -612,9 +626,15 @@ class GTA5World(World):
     return out + self.gps.update(state, self.route)
 
   def _turn_points(self, state: dict):
-    """The next turn navd signals and where its signal comes on, for the overlay."""
-    return self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"), state.get("junctions"),
-                                state.get("turns"))
+    """The next turn navd signals and where its signal comes on, for the overlay: on nav's lane line, as the route's
+    points are its road's line (a two-way road's middle, a junction's centre). Once signalled, where the car was."""
+    points = self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"),
+                                  state.get("junctions"), state.get("turns"))
+    if points is None:
+      return None
+    line = np.asarray(self._lane_line(state, state.get("vEgo", 0.0)), float).reshape(-1, 2)
+    turn, signal = points
+    return on_path(turn, line), signal if signal is None or self.nav.signaling else on_path(signal, line)
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
