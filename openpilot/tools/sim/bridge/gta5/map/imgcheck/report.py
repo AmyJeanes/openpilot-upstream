@@ -311,7 +311,7 @@ body{{background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,sans-serif;ma
 img{{max-width:100%;height:auto;display:block;border-radius:4px}} section{{background:var(--card);padding:8px 12px;margin:14px 0;border-radius:6px}}
 h2{{font-size:16px;margin:4px 0 8px}} .d{{color:var(--dim);font-weight:normal;font-size:13px}} ul{{margin:6px 0;padding-left:18px}}
 .t{{padding:1px 6px;border-radius:4px;color:#111}} .missing{{background:#f0f}} .stray{{background:#0ff}} .colour{{background:#f80}}
-.kerb{{background:#f44}} .stop{{background:#ff0}} .junction{{background:#8af}} .offset{{background:#fff}}
+.kerb{{background:#f44}} .stop{{background:#ff0}} .junction{{background:#8af}} .offset{{background:#fff}} .kind{{background:#a0ff78}}
 table{{border-collapse:collapse;font-size:13px}} td{{padding:2px 8px;border-bottom:1px solid #333}}
 </style></head><body><h1>Lane map vs the game's paint, from above</h1>
 <p>{stats['checked']} tiles checked ({stats['unloaded']} unloaded, {stats['covered']} looking down on something over the road,

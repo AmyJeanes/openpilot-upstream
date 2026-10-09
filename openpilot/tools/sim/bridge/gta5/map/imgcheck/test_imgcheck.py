@@ -44,10 +44,12 @@ def test_projection():
   assert along > across and abs(across - 2 * 45 * math.tan(math.radians(25))) < 1e-9
 
 
-def road_image(c: Camera, lines: list[tuple[np.ndarray, tuple, float]], dashed: set[int] = frozenset(), seed=0) -> np.ndarray:
-  """Grey asphalt with grain, pavement beyond y = +-8 m, and painted lines (world polylines, colour, width m)."""
+def road_image(c: Camera, lines: list[tuple[np.ndarray, tuple, float]], dashed: set[int] = frozenset(), seed=0,
+               road=(80.0, 80.0, 80.0)) -> np.ndarray:
+  """Grey asphalt (or the road's colour) with grain, pavement beyond y = +-8 m, and painted lines (world polylines,
+  colour, width m)."""
   rng = np.random.default_rng(seed)
-  img = np.full((H, W, 3), 80.0) + rng.normal(0, 6, (H, W, 1))
+  img = np.full((H, W, 3), road) + rng.normal(0, 6, (H, W, 1))
   xy = c.unproject(np.stack(np.meshgrid(np.arange(W), np.arange(H)), -1).reshape(-1, 2)).reshape(H, W, 2)
   img[np.abs(xy[..., 1]) > 8.0] = (170, 170, 165)
   im = Image.fromarray(img.clip(0, 255).astype(np.uint8))
@@ -66,21 +68,28 @@ def line(y, z=GROUND):
   return np.array([[-60.0, y, z], [60.0, y, z]])
 
 
-def tile_map(c: Camera, marks: list[tuple[str, np.ndarray]], shapes=()) -> TileMap:
+def dashes(y, dash, period, skip=(), x0=-60.0, x1=60.0):
+  """Dashes along y as separate polylines: `dash` m long every `period` m, the skip-th ones left out."""
+  return [np.array([[x, y, GROUND], [x + dash, y, GROUND]]) for k, x in enumerate(np.arange(x0, x1, period)) if k not in skip]
+
+
+def tile_map(c: Camera, marks: list[tuple[str, np.ndarray]], shapes=(), roads=None) -> TileMap:
   segs = np.concatenate([np.stack([p[:-1], p[1:]], axis=1) for _, p in marks]) if marks else np.zeros((0, 2, 3))
   kinds = np.concatenate([[k] * (len(p) - 1) for k, p in marks]) if marks else np.zeros(0, "<U1")
-  a = np.array([[-60.0, 0.0, GROUND]])
-  b = np.array([[60.0, 0.0, GROUND]])
-  return TileMap(c, segs.astype(np.float32), kinds, list(shapes), a, b, np.array([16.0]), np.array([0]), [])
+  roads = roads or [((-60.0, 0.0), (60.0, 0.0), 16.0, 2)]  # (from, to, width, class)
+  a = np.array([[*r[0], GROUND] for r in roads])
+  b = np.array([[*r[1], GROUND] for r in roads])
+  return TileMap(c, segs.astype(np.float32), kinds, list(shapes), a, b, np.array([r[2] for r in roads]), np.zeros(len(roads), int), [],
+                 np.array([r[3] for r in roads]))
 
 
 class FakeMap:
-  def __init__(self, marks, shapes=()):
-    self.marks, self.shapes = marks, shapes
+  def __init__(self, marks, shapes=(), roads=None):
+    self.marks, self.shapes, self.roads = marks, shapes, roads
     self.map_hash = "test"
 
   def tile(self, c):
-    return tile_map(c, self.marks, self.shapes)
+    return tile_map(c, self.marks, self.shapes, self.roads)
 
 
 YELLOW, WHITE = (230, 190, 40), (235, 235, 235)
@@ -101,9 +110,9 @@ def test_paint():
   assert rows and box_sum(np.ones((5, 5), bool), 3)[2, 2] == 9
 
 
-def run(img, c, marks, shapes=()):
+def run(img, c, marks, shapes=(), roads=None):
   tc = compare.TileCheck(img, Camera(c.x, c.y, c.ground, c.height, c.heading, c.fov, img.shape[1], img.shape[0], c.zmap),
-                         FakeMap(marks, shapes), scale=1)
+                         FakeMap(marks, shapes, roads), scale=1)
   tc.run()
   return tc
 
@@ -124,15 +133,20 @@ def test_clean():
 def test_missing_and_stray():
   c = cam()
   img = road_image(c, [(line(0.15), YELLOW, 0.12), (line(-0.15), YELLOW, 0.12), (line(4.0), WHITE, 0.15)])
-  # the map has the white line 1.5 m off the paint, and no other
-  marks = [("c", line(0.15)), ("c", line(-0.15)), ("w", line(5.5)), ("e", line(8.0)), ("e", line(-8.0))]
+  # the map has the white line 2.5 m off the paint, and no other: paint missing, a line with none
+  marks = [("c", line(0.15)), ("c", line(-0.15)), ("w", line(1.5)), ("e", line(8.0)), ("e", line(-8.0))]
   tc = run(img, c, marks)
   assert "missing" in kinds(tc) and "stray" in kinds(tc), [i.detail for i in tc.issues]
   miss = [i for i in tc.issues if i.kind == "missing"]
   assert all(abs(i.y - 4.0) < 0.5 and i.colour == "white" for i in miss)
   stray = [i for i in tc.issues if i.kind == "stray"]
-  assert all(abs(i.y - 5.5) < 0.5 for i in stray)
-  # spots: the two together are an offset
+  assert all(abs(i.y - 1.5) < 0.5 for i in stray)
+  # 1.5 m off: the paint is an offset of that line, measured
+  tc = run(img, c, [("c", line(0.15)), ("c", line(-0.15)), ("w", line(5.5)), ("e", line(8.0)), ("e", line(-8.0))])
+  off = [i for i in tc.issues if i.kind == "offset"]
+  assert off and "missing" not in kinds(tc) and all(abs(i.y - 4.0) < 0.5 for i in off), [i.detail for i in tc.issues]
+  assert abs(float(off[0].detail.split(" m off")[0].split()[-1]) - 1.5) < 0.2, off[0].detail
+  # spots: an offset with its stray line is an offset
   res = [{"name": "a", "camera": tc.cam.to_json(), "summary": {"unloaded": False}, "issues": [i.to_json() for i in tc.issues]}]
   sp = report.spots(res)
   assert sp[0]["type"] == "offset", sp[0]
@@ -162,6 +176,121 @@ def test_stop_line():
   off = run(img, c, [("e", line(8.0)), ("e", line(-8.0))], [("l", bar + [2.5, 0, 0])])
   stops = [i for i in off.issues if i.kind == "stop"]
   assert stops and abs(float(stops[0].detail.split(" m off")[0].split()[-1]) - 2.5) <= 0.2, [i.detail for i in off.issues]
+
+
+def test_dashed_windows():
+  c = cam()
+  # freeway dashes (4 m every 12.2 m) with one left out: a gap of 20 m is no stray; no paint at all along 120 m is
+  fwy = [(d, WHITE, 0.15) for d in dashes(4.0, 4.0, 12.2, skip={4})]
+  img = road_image(c, fwy)
+  tc = run(img, c, [("d", line(4.0)), ("d", line(-4.0)), ("e", line(8.0)), ("e", line(-8.0))])
+  stray = [i for i in tc.issues if i.kind == "stray"]
+  assert stray and all(abs(i.y + 4.0) < 0.5 for i in stray), [i.detail for i in tc.issues]
+  assert all(i.ends is not None and np.hypot(*np.subtract(*i.ends)) > 30 for i in stray), [i.ends for i in stray]
+  # a dashed line no longer than a window isn't judged: the frame or its ends may cut it between dashes
+  short = np.array([[-10.0, -4.0, GROUND], [10.0, -4.0, GROUND]])
+  tc = run(img, c, [("d", line(4.0)), ("d", short), ("e", line(8.0)), ("e", line(-8.0))])
+  assert "stray" not in kinds(tc), [i.detail for i in tc.issues]
+
+
+def test_faint_paint_on_concrete():
+  c = cam()
+  # worn lines on pale concrete stand out by a few tens of levels only, under the paint masks' share of the road's
+  # brightness, but they're there
+  pale = (185.0, 182.0, 175.0)
+  img = road_image(c, [(line(4.0), (218, 216, 212), 0.15)], road=pale)
+  tc = run(img, c, [("w", line(4.0)), ("e", line(8.0)), ("e", line(-8.0))])
+  assert "stray" not in kinds(tc), [i.detail for i in tc.issues]
+  tc = run(img, c, [("w", line(4.0)), ("w", line(-4.0)), ("e", line(8.0)), ("e", line(-8.0))])
+  assert [round(i.y) for i in tc.issues if i.kind == "stray"] == [-4], [i.detail for i in tc.issues]
+
+
+def test_faded_yellow_is_no_colour():
+  c = cam()
+  # faded yellow (red and green lifted well over blue, though the masks call it white or neither) under a yellow line
+  img = road_image(c, [(d, (205, 192, 150), 0.15) for d in dashes(0.0, 3.0, 9.0)], road=(150.0, 145.0, 130.0))
+  tc = run(img, c, [("y", line(0.0)), ("e", line(8.0)), ("e", line(-8.0))])
+  assert "colour" not in kinds(tc), [i.detail for i in tc.issues]
+
+
+def test_strokes_and_dashes():
+  c = cam()
+  stroke = np.array([[-20.0, 4.0, GROUND], [-17.5, 4.0, GROUND]])  # a 2.5 m stroke on its own: text, grit
+  bar = np.array([[10.0, -7.0, GROUND], [10.0, -3.0, GROUND]])  # paint across the road: a bar, a crossing's stripe
+  dash = [(d, WHITE, 0.15) for d in dashes(-4.0, 2.5, 6.0, x0=-30.0, x1=0.0)]  # a dashed line of 2.5 m dashes
+  img = road_image(c, [(stroke, WHITE, 0.15), (bar, WHITE, 0.3)] + dash)
+  tc = run(img, c, [("e", line(8.0)), ("e", line(-8.0))])
+  miss = [i for i in tc.issues if i.kind == "missing"]
+  assert miss and all(abs(i.y + 4.0) < 0.5 and i.x < 1.0 for i in miss), [(i.detail, round(i.x), round(i.y)) for i in tc.issues]
+
+
+def test_junction_paint():
+  c = cam()
+  area = np.array([[-8.0, -8.0, GROUND], [8.0, -8.0, GROUND], [8.0, 8.0, GROUND], [-8.0, 8.0, GROUND], [-8.0, -8.0, GROUND]])
+  guide = [np.array([[x, x - 6.0, GROUND], [x + 2.0, x - 4.0, GROUND]]) for x in (-4.0, 0.0)]  # a dashed turn guide
+  out = [("c", np.array([[-60.0, 0.0, GROUND], [-8.0, 0.0, GROUND]])), ("c", np.array([[8.0, 0.0, GROUND], [60.0, 0.0, GROUND]])),
+         ("e", line(8.0)), ("e", line(-8.0))]
+  # the centre line painted on through the junction where the map cuts it
+  img = road_image(c, [(line(0.0), YELLOW, 0.15)] + [(g, WHITE, 0.15) for g in guide])
+  tc = run(img, c, out, [("j", area)])
+  assert [i.kind for i in tc.issues] == ["junction"] and tc.issues[0].colour == "yellow", [i.detail for i in tc.issues]
+  # the guide alone is the game's own paint: no issue
+  img = road_image(c, [(out[0][1], YELLOW, 0.15), (out[1][1], YELLOW, 0.15)] + [(g, WHITE, 0.15) for g in guide])
+  tc = run(img, c, out, [("j", area)])
+  assert "junction" not in kinds(tc), [i.detail for i in tc.issues]
+
+
+def test_kerb_on_edge_line():
+  c = cam()
+  # a kerb drawn on a painted edge line with asphalt on beyond it (a paved shoulder): a kerb issue; kerbs at the
+  # pavement's edge are fine
+  img = road_image(c, [(line(5.5), WHITE, 0.15)])
+  tc = run(img, c, [("e", line(5.5)), ("e", line(8.0)), ("e", line(-8.0))])
+  bad = [i for i in tc.issues if i.kind == "kerb"]
+  assert bad and all(abs(i.y - 5.5) < 0.3 and "edge line" in i.detail for i in bad), [i.detail for i in tc.issues]
+
+
+def test_kerb_takes_its_road_class():
+  c = cam()
+  # a kerb 1.8 m out of a primary's edge, over a drive meeting it: the primary's kerb, not the drive's
+  roads = [((-60.0, 0.0), (60.0, 0.0), 10.0, 2), ((0.0, 0.0), (0.0, 20.0), 8.0, 7)]
+  img = road_image(c, [])
+  tc = run(img, c, [("e", line(6.8)), ("e", line(-8.0))], roads=roads)
+  bad = [i for i in tc.issues if i.kind == "kerb" and abs(i.y - 6.8) < 0.3]
+  assert bad and not any("service" in i.detail for i in bad), [i.detail for i in tc.issues]
+
+
+def test_stop_by_design():
+  c = cam()
+  img = road_image(c, [])
+  bar = np.array([[10.0, -7.5, GROUND], [10.0, 0.0, GROUND]])
+  edges = [("e", line(8.0)), ("e", line(-8.0))]
+  assert "stop" not in kinds(run(img, c, edges, [("s", bar)]))  # a stop sign with nothing painted
+  assert "stop" in kinds(run(img, c, edges, [("l", bar)]))  # lights with no bar
+  # a zebra crossing whose stripes run along the road: no bar, and a stop line at its edge needs none
+  zebra = [(np.array([[18.5, y, GROUND], [21.5, y, GROUND]]), WHITE, 0.5) for y in np.arange(-7.0, 7.5, 1.0)]
+  img = road_image(c, zebra)
+  crossing = np.array([[20.0, -8.0, GROUND], [20.0, 8.0, GROUND]])
+  tc = run(img, c, edges + [("x", crossing)], [("l", bar + [7.0, 0, 0])])
+  assert "stop" not in kinds(tc), [i.detail for i in tc.issues]
+
+
+def test_other_levels_dont_explain():
+  c = cam()
+  img = road_image(c, [(line(4.0), WHITE, 0.15)])
+  # a deck's line 10 m up drawn where it lies over the paint: it doesn't account for the paint of the road below
+  up = line(4.0 * 35.0 / 45.0, GROUND + 10.0)
+  tc = run(img, c, [("w", up), ("e", line(8.0)), ("e", line(-8.0))])
+  assert "missing" in kinds(tc), [i.detail for i in tc.issues]
+
+
+def test_solid_over_dashes():
+  c = cam()
+  img = road_image(c, [(d, WHITE, 0.15) for d in dashes(4.0, 3.6, 8.0)])
+  tc = run(img, c, [("w", line(4.0)), ("e", line(8.0)), ("e", line(-8.0))])
+  assert "kind" in kinds(tc) and "stray" not in kinds(tc), [i.detail for i in tc.issues]
+  tc = run(img, c, [("d", line(4.0)), ("e", line(8.0)), ("e", line(-8.0))])
+  assert not tc.issues, [i.detail for i in tc.issues]
 
 
 def test_plan_order():
