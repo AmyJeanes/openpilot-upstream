@@ -5,7 +5,9 @@ into it at its traffic signals, stop and give way signs. Only standard tags are 
 map as on our GTA V one.
 
 - Junction nodes are where three or more roads meet, and only where they share the node: roads crossing over each
-  other never make one. A node where a road's lanes part into ways side by side (fewer than three arms) isn't one.
+  other never make one. A node where a road's lanes part into ways side by side (fewer than three arms) isn't one, nor
+  one where a one-way lane only leaves a two-way road or joins it on its own side, at a shallow angle (LANE_SPLIT), and
+  stays beside it (BESIDE_REACH), as GTA lays a turn bay as a way of its own with lane changes to and from it.
 - Junction nodes joined by a road shorter than CLUSTER_LINK (and their widest road's width), or whose trimmed ends
   would overlap along a road shorter than MERGE_LINK, make one junction, as where a divided road crosses another
   (osm2streets merges such short roads into the junction); the roads between them are inside it. Junctions further
@@ -32,7 +34,8 @@ map as on our GTA V one.
   road has no stop or give way line or crossing into it, nothing of a higher class and wider meets it there, and its
   lines meet the same lines of the road on the far side at the junction's node (a turn lane's line, which doesn't, is
   left out). One road per junction, the highest class, then the widest; none where another as important crosses it (a
-  crossroads of equals). Where it's a priority road both sides (`priority_road=designated` / `yes_unposted`), its lines
+  crossroads of equals). Where it's a priority road both sides (`priority_road=designated` / `yes_unposted`), or only
+  minor roads meet it (service roads, tracks, one-lane slips, narrower than MINOR_SHARE of it), its lines
   are painted on across the junction (`Junction.carried`, with the ways after its first that the area still reaches
   into), as a main road's centre line runs on past a side road. The
   junction's area stays the whole of where its roads meet, the through road's lanes too: traffic turning out of a side
@@ -72,7 +75,9 @@ CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
-MERGE_FLOW = 30.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
+MERGE_FLOW = 45.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
+LANE_SPLIT = 50.0  # deg: a one-way lane leaving or joining a two-way road within this of its traffic, on its side ...
+BESIDE_REACH = 30.0  # m: ... and beside the road this far along (within its kerb and the lane's width), only parts or merges
 FREEWAY_FLOW = 60.0  # deg: ... or of this where one is a freeway's (GTA lays a diverge's lane changes as short links across it)
 U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
 LANE_CHANGE_M = 40.0  # m: GTA's lane changes between carriageways are 10-25 m long
@@ -81,6 +86,8 @@ SAME_WAY = 75.0  # deg between two ways' headings running the same way (GTA's la
 MEET = 0.6  # m: lines of a road either side of a junction this near each other at its node are one line carried across
 CLASSES = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street', 'service', 'track')
 PRIORITY = ('designated', 'yes_unposted')  # priority_road=*: a priority road, signed or not
+MINOR = ('service', 'track')  # roads whose junctions with a through road leave its lines painted on across
+MINOR_SHARE = 0.4  # of the through road's width a minor road meeting it is at most
 FLIPPED = {'dashed_solid': 'solid_dashed', 'solid_dashed': 'dashed_solid'}  # a line's halves seen from the other way
 STRAIGHT = 30.0  # deg: a move turning less than this goes through
 # the deg turned (left positive) along which each turn:lanes arrow points
@@ -375,6 +382,7 @@ class Junction:
   stops: list[Stop] = field(default_factory=list)
   through: dict[int, set[float]] = field(default_factory=dict)  # the road carried on through: way -> its lines (m right, to cm)
   carried: dict[int, set[float]] = field(default_factory=dict)  # those painted on across it (a priority road's)
+  minor: bool = False  # only minor roads meet its through road (_minor_sides): its lines go on across
 
   @property
   def ways(self) -> set[int]:
@@ -628,7 +636,8 @@ class Junctions:
     self._stops()
     for j in self.junctions:
       j.through = self._through(j)
-      if all(self.ways[w][0].get('priority_road') in PRIORITY for w in j.through):
+      j.minor = self._minor_sides(j)
+      if all(self.ways[w][0].get('priority_road') in PRIORITY for w in j.through) or j.minor:
         j.carried = self._carried_on(j)
     self.osm.carry_across([tuple(j.through) for j in self.junctions if j.carried and len(j.through) == 2])
 
@@ -651,7 +660,7 @@ class Junctions:
         if m is not None:
           members.append(m)
     if len(members) < 3 or all(self.freeway(self.ways[m.ways[0][0]][0]) for m in members) or \
-        self.merges(members, [w for ways, _ in links for w, _ in ways]):
+        self.merges(members, [w for ways, _ in links for w, _ in ways]) or (len(nodes) == 1 and self.lane_split(members)):
       return None  # freeways only merge and part, with no junction between
     centre = np.mean([self.osm.node_xy(n) for n in nodes], axis=0)
 
@@ -699,6 +708,32 @@ class Junctions:
   def freeway(tags: dict) -> bool:
     """A motorway's, or a one-way trunk road's: a divided highway's carriageway, or a lane change across one."""
     return tags.get('highway') in FREEWAY or (tags.get('highway', '').removesuffix('_link') == 'trunk' and oneway_of(tags) != 0)
+
+  def lane_split(self, members: list[Member]) -> bool:
+    """Whether the roads out of a node are a two-way road carried straight on through it and one-way ways only leaving
+    it or joining it, each on the side its traffic that way drives on and within LANE_SPLIT of that traffic's heading: a
+    lane parting from or merging into it, with no traffic crossing."""
+    two = [m for m in members if not oneway_of(self.ways[m.ways[0][0]][0])]
+    one = [m for m in members if oneway_of(self.ways[m.ways[0][0]][0])]
+    if len(two) != 2 or not one or math.cos(two[0].heading - two[1].heading) > -math.cos(math.radians(MERGE_FLOW)):
+      return False
+    for m in one:
+      w, along = m.ways[0]
+      flow = m.heading if (oneway_of(self.ways[w][0]) == 1) == along else m.heading + math.pi
+      road = max(two, key=lambda r: math.cos(r.heading - flow)).heading  # the traffic it leaves with or joins
+      if math.cos(flow - road) < math.cos(math.radians(LANE_SPLIT)):
+        return False
+      left_of = math.sin(m.heading - road) > 0  # its way out from the node lies left of that traffic's line
+      if left_of == self.osm.drive_on_right:
+        return False
+      # beside the road: not a slip road away to another one
+      side = max(two, key=lambda r: math.cos(r.heading - m.heading))
+      p, u = side.line.at(0.0), side.line.tangent(0.0)
+      q = m.line.at(min(BESIDE_REACH, m.line.length))
+      lo, hi = self.osm.lanes(w).edges(FORWARD)
+      if abs(_cross(u, q - p)) > max(abs(e) for e in side.edges) + (hi - lo) + 1.0:
+        return False
+    return True
 
   def merges(self, members: list[Member], inside: list[int]) -> bool:
     """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW (FREEWAY_FLOW where one is a
@@ -951,6 +986,24 @@ class Junctions:
     if not best[3] or any(f[0][0] == best[0][0] and not f[1] & best[1] for f in found[1:]):
       return {}
     return best[2]
+
+  def _minor_sides(self, j: Junction) -> bool:
+    """Whether every road meeting the through road at a junction is a minor one: a service road or track (a driveway,
+    a car park's way in), or a one-way lane (a slip into or out of it), each narrower than MINOR_SHARE of the through
+    road: its lines are painted on across, as the game paints a main road's lanes on past them."""
+    if not j.through:
+      return False
+    width = min(arm.width for arm in j.arms if any(m.ways[0][0] in j.through for m in arm.members))
+    for arm in j.arms:
+      for m in arm.members:
+        w = m.ways[0][0]
+        if w in j.through:
+          continue
+        tags = self.ways[w][0]
+        minor = tags.get('highway') in MINOR or (oneway_of(tags) and len(self.osm.lanes(w).lanes) == 1)
+        if not minor or arm.width > MINOR_SHARE * width:
+          return False
+    return True
 
   def _carried_on(self, j: Junction) -> dict[int, set[float]]:
     """The through road's lines painted on across the junction: its first way's either side, and the ways after them

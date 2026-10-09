@@ -584,7 +584,8 @@ def road_marks(paths, osm) -> dict:
       for piece in clip_areas(kerb, paint.near(kerb, paint.layer[n], kerbs_only=True, but=n)):
         add("e", np.column_stack([piece, z_near(piece, roads, z)]), (g, g))
     area = densify(simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), AREA_STEP)
-    shape("j", area, z_near(area, roads, z), g)
+    if not j.minor:  # a driveway's or slip's area across a main road would cut its approach in pieces
+      shape("j", area, z_near(area, roads, z), g)
     for s in j.stops:
       shape("l" if s.signal else "k" if s.kind == "give_way" else "s", s.line, z_near(s.line, roads, z), g)
     # each lane's arrows on the road into the junction, out from its stop line
