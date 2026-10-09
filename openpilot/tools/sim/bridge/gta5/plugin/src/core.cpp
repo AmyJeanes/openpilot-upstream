@@ -49,12 +49,12 @@ struct Config {
   float coastAccel = 3.1f;     // m/s^2
   float coastPerSpeed = 0.04f;  // m/s^2 per m/s
   float brakeGain = 8.0f;      // m/s^2 at full brake beyond coasting, roughly
-  int keyEngage = VK_F6;
+  int keyEngage = VK_INSERT;  // F5-F8 are GTA's character switch
   int keyLeft = VK_LEFT;
   int keyRight = VK_RIGHT;
   int keySpeedUp = VK_UP;
   int keySpeedDown = VK_DOWN;
-  int keyDebug = VK_F7;    // the map debug overlay on and off
+  int keyDebug = VK_DELETE;  // the map debug overlay on and off
   bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
@@ -1021,7 +1021,7 @@ struct DebugOverlay {
   float width = 1.0f;   // every kind's width scaled
   float layerWidth[128];  // and each layer's, by its letter
   float dist = 120.0f;  // m from the camera drawn
-  float grow = 40.0f;   // m from the camera strips widen beyond, to keep about as many pixels wide; 0: never
+  float grow = 0.0f;    // m from the camera strips widen beyond, to keep about as many pixels wide; 0: never
   int sides = 1;        // 1: each triangle wound to face up (seen from above); 2: both windings; flip: down only
   bool flip = false;
   int maxPolys = 16000;  // draw calls per frame
@@ -1080,8 +1080,8 @@ constexpr KindStyle STYLES[] = {
     {'T', 235, 235, 235, 240, 0.30f, 0, 0, 0.135f},     // through
     {'R', 255, 169, 64, 240, 0.30f, 0, 0, 0.135f},      // right
     {'t', 0, 220, 255, 110, 1.20f, 0, 0, 0.030f},       // the middle of a lane opening or closing along a taper
-    {'r', 255, 25, 25, 100, 1.75f, 0, 0, 0.0f},        // route ahead
-    {'b', 140, 15, 15, 100, 1.75f, 0, 0, 0.0f},        // route behind
+    {'r', 150, 90, 255, 110, 1.75f, 0, 0, 0.0f},       // route ahead, the purple-blue of the game's GPS route
+    {'b', 75, 45, 140, 100, 1.75f, 0, 0, 0.0f},        // route behind
     {'n', 255, 255, 255, 235, 0.25f, 2, 1.5f, 0.150f},  // nav's lane plan, over the route
     {'z', 255, 170, 0, 90, 0.20f, 0, 0, 0.165f},        // a blind-spot zone's outline, clear
     {'Z', 255, 40, 20, 110, 2.40f, 0, 0, 0.165f},       // an occupied blind-spot zone, filled down its middle
