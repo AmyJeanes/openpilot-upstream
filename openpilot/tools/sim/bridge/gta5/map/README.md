@@ -86,7 +86,9 @@ says so (`side_by_side.py`). Where every road at a node is one-way and all run a
 changing across a carriageway) there is no junction area. Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it (but the lines of a
-road carried straight on past side roads, as the main road's centre line runs on across them), stop lines across
+road carried straight on past side roads, as the main road's centre line runs on across them) nor where the roads
+start at a junction node (a road meeting it at a slant ends its lines square across itself at the node, reaching past
+the mouth of a road beside it trimmed back little; `osm_to_roads.node_ends`), stop lines across
 the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
 and `footway=crossing` crossings striped across the road. Roads are drawn a layer at a time (`layer`, `bridge`,
 `tunnel`): bridges over what they cross, with a dark casing, tunnels faded. A median between the directions is a
@@ -207,8 +209,9 @@ shown or a level changes.
     Hills' streets, car parks), and so are the links along such a road between unpainted ones too short to show it
     themselves (fewer sections, all bare; `unmarked_roads`), so its lines don't stop and start (Fenwell Pl). Major and
     unclassified roads keep their lines there, being more likely gaps in the files (the Great Ocean Hwy, some freeways,
-    Blaine roads), but for unclassified roads GTA's traffic doesn't use (switched off, back roads the minimap draws),
-    unpainted where their sections are bare even with no asphalt edges read (Baytree Canyon Rd).
+    Blaine roads), but for unclassified roads GTA's traffic doesn't use (switched off, back roads the minimap draws) or
+    marks off-road, unpainted where their sections are bare even with no asphalt edges read (Baytree Canyon Rd); so are
+    tracks and other off-road links (dirt, no asphalt to read edges of; the track off Senora Rd).
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for

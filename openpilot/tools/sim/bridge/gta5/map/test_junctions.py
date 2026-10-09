@@ -321,6 +321,27 @@ def test_bridge_from_a_junction():
   assert not any(a is j.polygon for _, a in paint.near(line, 0, {9}))
 
 
+def test_slanted_roads_lines_end_in_the_area():
+  # a divided road's carriageways meeting a wide road at a slant (Eclipse Blvd): the wide road is trimmed back little,
+  # and the carriageways' lines' ends at the node, square across their own line, reach out past its mouth; they're cut
+  # there (PaintAreas' node_ends), the wide road's own lines aren't
+  wide = {'highway': 'primary', 'lanes': '5', 'lanes:forward': '3', 'lanes:backward': '2', 'width': '21.4'}
+  half = {**ONE_WAY, 'width': '8.8'}
+  nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (-82.0, 57.0), 4: (-93.0, -36.0)}
+  ways = {1: (wide, [1, 2]), 2: (half, [1, 3]), 3: (half, [4, 1])}
+  osm = make(nodes, ways)
+  js = Junctions(osm)
+  only(js)
+  paint = PaintAreas(js)
+  for wid in (2, 3):
+    for line, geom in osm.line_geometry(wid):
+      for piece in clip_outside(geom, paint.near(geom, 0, {wid}, kerbs_only=line.kind == 'edge')):
+        assert piece[:, 0].max() < 0.3, (wid, line.kind, piece)
+  for line, geom in osm.line_geometry(1):
+    kept = clip_outside(geom, paint.near(geom, 0, {1}))
+    assert kept and min(piece[:, 0].min() for piece in kept) < 1.0  # from its mouth on
+
+
 SIDE = {'highway': 'service', 'lanes': '1', 'width': '5', 'lane_markings': 'no'}
 
 
