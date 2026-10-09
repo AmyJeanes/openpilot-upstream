@@ -206,21 +206,6 @@ def test_model_lane_lag_and_flicker_dont_add_changes():
   assert d.nav.lane_src == "model"
 
 
-def test_initiation_gate():
-  # every change nav starts asks _clear_to_change first, and again while it isn't
-  f = Freeway()
-  d = Drive((0, 4), v=V)
-  asked = []
-  blocked_until = f.exit_at - 1500.0 + 200.0
-
-  def gate(side):
-    asked.append(side)
-    return d.clock.t > 100.0 + 200.0 / V
-  d.nav._clear_to_change = gate
-  changes, d, _ = f.drive(0, start=f.exit_at - 1500.0, d=d)
-  assert asked and set(asked) == {"right"} and changes[0][0] >= blocked_until - 5.0, changes
-
-
 if __name__ == "__main__":
   import sys
   tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

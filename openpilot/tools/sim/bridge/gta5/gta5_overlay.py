@@ -35,7 +35,7 @@ Message formats (the plugin parses flat JSON only, so the geometry is one string
   s stop line (sign), k give way line, x crossing, j junction outline (closed), L T R a lane's arrow turning left (or
   back), through (or merging), right, t the middle of a lane opening or closing along a taper, q a lane count change
   with no taper (one point), r route ahead, b route behind, n nav's lane plan, m the next turn, g where its signal
-  comes on.
+  comes on, z a blind-spot zone's outline (gta5_blindspot.py), Z its middle while occupied.
 - gpsPoints: p, "x,y,z;x,y,z;..." in metres (empty clears)."""
 import argparse
 import contextlib
@@ -81,14 +81,14 @@ CELL = 50.0  # m: node index cells
 LIGHT = 15  # node special: a traffic light's stop line
 CAR_HEIGHT = 0.6  # paths.CAR_HEIGHT
 # drawn first when over budget
-PRIORITY = "mgnrbqlskLTRjtcywdepx"
+PRIORITY = "ZzmgnrbqlskLTRjtcywdepx"
 LAYER_OF = {"e": "e", "d": "d", "w": "d", "c": "d", "y": "d", "l": "s", "s": "s", "k": "s", "j": "j", "r": "r", "b": "r",
-            "n": "n", "m": "m", "g": "m", "p": "p", "x": "x", "L": "a", "T": "a", "R": "a", "t": "t", "q": "q"}
+            "n": "n", "m": "m", "g": "m", "p": "p", "x": "x", "L": "a", "T": "a", "R": "a", "t": "t", "q": "q", "z": "z", "Z": "z"}
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
 TAPER_STRIP = 0.2  # m a lane widens or narrows along a tapered way, at least, for its middle to be drawn there
 LAYERS = {"edges": "e", "dividers": "d", "stops": "s", "junctions": "j", "route": "r", "nav": "n", "points": "m", "fill": "f",
-          "arrows": "a", "crossings": "x", "parking": "p", "tapers": "t", "flags": "q"}
-DEFAULT_LAYERS = "edsjrnmaxptq"
+          "arrows": "a", "crossings": "x", "parking": "p", "tapers": "t", "flags": "q", "blindspot": "z"}
+DEFAULT_LAYERS = "edsjrnmaxptqz"
 # turn:lanes arrows: deg each turns (left positive), and m out from a lane's stop line (else its junction's mouth) to
 # the middle of each arrow painted on it
 ARROW_TURN = {"through": 0.0, "slight_left": 45.0, "left": 90.0, "sharp_left": 135.0, "reverse": 180.0, "slight_right": -45.0,
@@ -1081,7 +1081,7 @@ class Overlay:
     self.marks_for: tuple | None = None  # ((paths, osm), their road_marks' cache key, when first asked for)
     self.builder: subprocess.Popen | None | bool = None  # building them in the background; False: it failed
 
-  def update(self, state: dict, route, paths, lane_line, turn_points, recording: bool, osm=None) -> list[dict]:
+  def update(self, state: dict, route, paths, lane_line, turn_points, recording: bool, osm=None, zones=None) -> list[dict]:
     out = self._collect()
     debug = state.get("debug") or {}
     now = time.monotonic()
@@ -1089,7 +1089,8 @@ class Overlay:
       return out
     layers = str(debug.get("layers") or DEFAULT_LAYERS)
     full = now >= self.next
-    if not full and (route is None or "r" not in layers and "n" not in layers):
+    zoned = zones is not None and "z" in layers
+    if not full and not zoned and (route is None or "r" not in layers and "n" not in layers):
       return out
     self.next_route = now + ROUTE_EVERY
     if full:
@@ -1098,6 +1099,8 @@ class Overlay:
             "v": state.get("vEgo", 0.0), "full": full}
     if "r" in layers or "n" in layers:
       snap["lane_line"] = lane_line()
+    if zoned:
+      snap["zones"] = zones()
     if full and "m" in layers and state.get("route") and turn_points is not None:
       points = turn_points()
       if points is not None:
@@ -1162,7 +1165,7 @@ class Overlay:
         self.carriageway = (route, carriageway_line(route))
       snap["carriageway"] = self.carriageway[1]
     pos3 = np.asarray(snap["pos"], np.float64)
-    ribbon = self.ribbon.items(snap)
+    ribbon = self.ribbon.items(snap) + snap.get("zones", [])
     if full:
       origin = np.round(pos3)
       g, n = pack(ribbon, pos3[:2], origin, MAX_POINTS, MAX_CHARS)

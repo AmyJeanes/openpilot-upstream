@@ -335,6 +335,19 @@ class Route:
       return None
     return round(sec.frac(self.right), 2)
 
+  def beside(self) -> list[float | None] | None:
+    """m from the car's middle out to the far edge of the lane beside it our way, [left, right], None for a side with
+    no lane our way (the kerb, or the centre line); None where lane() is."""
+    sec = self._section_here()
+    if sec is None or self.misaligned > LANE_ALIGN:
+      return None
+    ours, i = sec.ours, sec.lane(self.right)
+    if not 0 <= i < len(ours):
+      return None
+    left = round(self.right - ours[i - 1].left, 2) if i > 0 else None
+    right = round(ours[i + 1].right - self.right, 2) if i + 1 < len(ours) else None
+    return [left, right]
+
   def two_way(self) -> bool | None:
     sec = self.section(self.seg)
     return None if sec is None else sec.two_way

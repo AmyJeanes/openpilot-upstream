@@ -42,6 +42,8 @@ class NavInputs:
   # the driving model's current-lane head (modelV2.laneHead): [lane from the left of ours, lanes, probability]; None
   # without a fresh one
   model_lane: list | None = None
+  left_blindspot: bool = False  # a vehicle in the blind spot that side (carState's blind-spot monitor)
+  right_blindspot: bool = False
   # truth
   pos: tuple | list = (0.0, 0.0)  # [x, y] m
   heading: float = 0.0  # deg
