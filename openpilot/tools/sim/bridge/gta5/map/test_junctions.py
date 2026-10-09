@@ -344,6 +344,15 @@ def test_carried_through_a_side_road():
   assert plain.through == {1: {0.0}, 2: {0.0}} and plain.carried == {}
 
 
+def test_carried_on_past_a_short_way():
+  # the road's first way out west is 3 m long and a side road meets at a skew, so the area reaches into the next way:
+  # its lines are carried across too
+  nodes = {1: (0.0, 0.0), 20: (-3.0, 0.0), 10: (-100.0, 0.0), 11: (100.0, 0.0), 12: (-60.0, 60.0)}
+  ways = {1: (PRIORITY, [1, 20]), 4: (PRIORITY, [20, 10]), 2: (PRIORITY, [1, 11]), 3: (SIDE, [1, 12])}
+  j = only(Junctions(make(nodes, ways)))
+  assert j.through == {1: {0.0}, 2: {0.0}} and j.carried == {1: {0.0}, 2: {0.0}, 4: {0.0}}
+
+
 def test_through_only_by_a_road_with_the_way():
   arms = {1: (PRIORITY, (-100.0, 0.0)), 2: (PRIORITY, (100.0, 0.0)), 3: (SIDE, (0.0, 100.0))}
   signals = cross(arms)

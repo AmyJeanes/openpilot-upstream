@@ -52,7 +52,7 @@ from multiprocessing.connection import Connection
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, DIVIDER, EDGE, FORWARD, OPENED, PARKING, Section, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, DIVIDER, EDGE, FORWARD, PARKING, Section, \
   offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
@@ -85,6 +85,7 @@ PRIORITY = "mgnrbqlskLTRjtcywdepx"
 LAYER_OF = {"e": "e", "d": "d", "w": "d", "c": "d", "y": "d", "l": "s", "s": "s", "k": "s", "j": "j", "r": "r", "b": "r",
             "n": "n", "m": "m", "g": "m", "p": "p", "x": "x", "L": "a", "T": "a", "R": "a", "t": "t", "q": "q"}
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
+TAPER_STRIP = 0.2  # m a lane widens or narrows along a tapered way, at least, for its middle to be drawn there
 LAYERS = {"edges": "e", "dividers": "d", "stops": "s", "junctions": "j", "route": "r", "nav": "n", "points": "m", "fill": "f",
           "arrows": "a", "crossings": "x", "parking": "p", "tapers": "t", "flags": "q"}
 DEFAULT_LAYERS = "edsjrnmaxptq"
@@ -466,7 +467,7 @@ def taper_middles(osm, wid: int, pts: np.ndarray, z: np.ndarray) -> list[np.ndar
   out = []
   for i in range(len(secs[0].spans)):
     widths = np.array([sec.spans[i].right - sec.spans[i].left for sec in secs])
-    if widths.min() >= OPENED or widths.max() - widths.min() < 1.0:
+    if widths.max() - widths.min() < TAPER_STRIP:  # (a taper split over several ways changes each one a little)
       continue
     changing = [k for k in range(len(ks) - 1) if abs(widths[k + 1] - widths[k]) > 0.05]
     lo, hi = ks[changing[0]], ks[changing[-1] + 1]

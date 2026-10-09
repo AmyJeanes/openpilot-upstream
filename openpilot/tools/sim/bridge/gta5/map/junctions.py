@@ -32,7 +32,8 @@ map as on our GTA V one.
   lines meet the same lines of the road on the far side at the junction's node (a turn lane's line, which doesn't, is
   left out). One road per junction, the highest class, then the widest; none where another as important crosses it (a
   crossroads of equals). Where it's a priority road both sides (`priority_road=designated` / `yes_unposted`), its lines
-  are painted on across the junction (`Junction.carried`), as a main road's centre line runs on past a side road. The
+  are painted on across the junction (`Junction.carried`, with the ways after its first that the area still reaches
+  into), as a main road's centre line runs on past a side road. The
   junction's area stays the whole of where its roads meet, the through road's lanes too: traffic turning out of a side
   road crosses them, and the moves, trims and stop lines are worked out over it.
 
@@ -581,7 +582,8 @@ class Junctions:
     for j in self.junctions:
       j.through = self._through(j)
       if all(self.ways[w][0].get('priority_road') in PRIORITY for w in j.through):
-        j.carried = j.through
+        j.carried = self._carried_on(j)
+    self.osm.carry_across([tuple(j.through) for j in self.junctions if j.carried and len(j.through) == 2])
 
   def junction(self, nodes: list[int], caps: dict[tuple[int, int], float] | None = None) -> Junction | None:
     """A junction of these nodes, or None where its roads make fewer than three arms (as where a road's lanes split).
@@ -892,6 +894,22 @@ class Junctions:
     if not best[3] or any(f[0][0] == best[0][0] and not f[1] & best[1] for f in found[1:]):
       return {}
     return best[2]
+
+  def _carried_on(self, j: Junction) -> dict[int, set[float]]:
+    """The through road's lines painted on across the junction: its first way's either side, and the ways after them
+    that still reach into its area (the area of a side road meeting at a skew reaches past a short way), all their
+    lines between lanes."""
+    out = dict(j.through)
+    for arm in j.arms:
+      for m in arm.members:
+        if m.ways[0][0] not in j.through:
+          continue
+        for k, (w, _) in enumerate(m.ways[1:], 1):
+          if self._along(m, k) >= m.trim:
+            break
+          if (road := self.osm.lanes(w)).markings:
+            out[w] = {round(ln.offset, 2) for ln in road.lines(FORWARD) if ln.kind in (CENTRE, DIVIDER, MEDIAN)}
+    return out
 
   def _crossed(self, m: Member) -> bool:
     """Whether a pedestrian crossing (`footway=crossing`) crosses the road near its junction: its lines stop there."""
