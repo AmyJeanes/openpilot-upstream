@@ -164,6 +164,10 @@ class Paths:
   def stop_line(self, i: int) -> bool:
     return (self.flags[i][1] >> 3) in STOP_LINES
 
+  def stop_kind(self, i: int) -> str:
+    """A stop line node's kind, as stop_lines.KINDS: "lights" or "stop" (a stop junction's)."""
+    return "lights" if (self.flags[i][1] >> 3) == 15 else "stop"
+
   def stop_for(self, i: int, nxt: int) -> bool:
     """Whether stop line i stops the way on to node nxt: towards the junction it stands before, not away from it."""
     if self._toward is None:

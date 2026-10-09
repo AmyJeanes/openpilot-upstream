@@ -50,8 +50,15 @@ the road it faces, with the destination on the kerb side. Either gives way to th
 30 s longer. A destination on its nearest road with no drive is routed as before.
 With ynddump's `paths.jsonl` in `GTA5_MAP` too, the bridge reads GTA's own roads (`paths.py`): a route starts from the
 road at the car's height and heading (from that road's next node, so not on a road passing over or under it), the car
-counts as off the route on another level or heading the other way, and nav gets the forks along the route, its stop
-lines and junctions.
+counts as off the route on another level or heading the other way, and nav gets the forks along the route and its
+junctions. Nav's stop lines along a route are the map's (`stop_lines.py`), as the map view and the overlay draw them:
+those the route crosses towards their junction, its own way only, each a stop sign's, lights' or give way's. A route
+crosses a line where it drives a link the line lies on or reaches across (GTA lays some approaches as a link per lane,
+the line on one of them; a lane with its own line keeps to it). They're worked out with the junction areas (about half
+a minute, in the background the first time, kept in `~/.cache/gta5_lanes` by the map file's contents; `python -m
+openpilot.tools.sim.bridge.gta5.map.lane_match gta5.osm.pbf` builds both), and the bridge routes on the map's lanes once
+they're read. On a map without lane tags they're GTA's stop line nodes, as before (`GTA5_STOP_DIRECTION=1`: only
+towards the junction each faces, by `paths.py`'s guess).
 The lanes along a route come from the map's lane tags, where `GTA5_MAP/gta5.osm.pbf` has them (`osm_lanes.py`,
 `RouteLanes`, read with `osm_pbf.py`, which needs no pyosmium): the route's ways (each shape point is a map node; a real
 map's would come from Valhalla's `trace_attributes`, `ways_from_trace`), each one's cross-section in the route's
@@ -249,8 +256,8 @@ shown or a level changes.
   lines. Junctions are GTA's junction nodes where links cross (it also flags the nodes where a road's lanes split). A
   stop line facing its junction gets `traffic_signals:direction` / `direction=forward`, with the two-way ways at it
   drawn towards the junction; one with no junction ahead, as on a one-way link leaving one, is left out. Valhalla 3.9
-  reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav's own
-  stop list follows it (`paths.py`, `GTA5_STOP_DIRECTION=1`).
+  reads the direction only at a node inside a way, so with a way per link it still counts them both ways; nav reads
+  the map's lines, each its own way only (`stop_lines.py`).
 - GTA's stop line nodes are 12-24 m before their junction's node, often metres off the painted line. With
   `--survey-lines` (and `--survey-features rp_all/features.jsonl` for the painted crossings) the map's stop lines go where the game files
   paint them (`stop_paint.py`): on each approach to a junction (junctions.py's), the thick white line across its
@@ -260,8 +267,7 @@ shown or a level changes.
   `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. A GTA stop line with no
   paint on its own approach but a new one from the paint on the road the other way within 15 m goes there instead
   (GTA's node faced the wrong junction). GTA's node stays the stop line where nothing is painted. The decals' measured
-  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15). Nav's stop list still comes from GTA's nodes, so it can
-  disagree with the map's (and the paint's) where GTA's node is off or faces the wrong way.
+  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15).
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /

@@ -28,6 +28,7 @@ class NavInputs:
   route_end: float | None = None  # m ahead to the route's end
   forks: list | None = None  # [[m ahead, side, lanes, lanes_in, keep, other, slip], ...]
   stops: list | None = None  # m ahead of stop lines
+  stop_kinds: list | None = None  # each stop line's: "stop" (a stop sign), "lights" or "give_way"
   junctions: list | None = None  # m ahead of junction nodes
   limits: list | None = None  # [[m ahead, m/s or 0 unknown], ...]
   lane_arrows: list | None = None  # [[m ahead, [each lane's arrows from the left, ";"-separated]], ...]

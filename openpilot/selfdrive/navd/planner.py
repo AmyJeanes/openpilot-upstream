@@ -140,7 +140,7 @@ KEEP_FOR = 30.0  # m driven at least
 KEEP_GAP = 0.5  # s off to repeat it: openpilot reads the desire every 0.2 s
 KEEP_AFTER_TURN = 60.0  # m: the model's expectation of the turn just taken fades only after it
 KEEP_MIN_SPEED = 3.0  # m/s: pulling away, its turn probabilities are noise
-# A turn's junction entry: GTA's stop line (11-22 m before the turn's node in the junction), else its junction nodes
+# A turn's junction entry: its stop line (the map's, at the junction's mouth or behind its crossing), else GTA's junction nodes
 ENTRY_STOP_BEFORE = 50.0  # m before the turn
 ENTRY_JUNCTION_BEFORE = 40.0  # m
 ENTRY_GAP = 15.0  # m between a junction's nodes

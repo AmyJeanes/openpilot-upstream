@@ -38,6 +38,7 @@ from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, Paths
 from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
+from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
 OP_WHEELBASE = 2.7
@@ -479,10 +480,11 @@ class GTA5World(World):
       self.matcher = MapMatcher(RoadGraph.from_osm(lanes))
       print("gta5: routing from navd's map match of the GNSS")
     if lanes is not None and lanes.tagged:
+      self.junction_areas = self._junction_areas(lanes)
+      StopLines.of(lanes, build=False)  # read before routes are made on the map, which take their stop lines from it
       self.navigator.router.osm = lanes
       print(f"gta5: lanes from the map's tags ({osm})")
       self.lane_matcher = LaneMatcher(lanes)
-      self.junction_areas = self._junction_areas(lanes)
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
 
@@ -544,11 +546,12 @@ class GTA5World(World):
 
   @staticmethod
   def _junction_areas(osm: OsmLanes) -> JunctionAreas | None:
-    """The map's junction areas from their cache, built by a separate process the first time (about half a minute)."""
+    """The map's junction areas from their cache, built with its stop lines (stop_lines.py) by a separate process the
+    first time (about half a minute)."""
     areas = JunctionAreas.cached(osm, build=False)
-    if areas is not None:
+    if areas is not None and StopLines.cached(osm, build=False) is not None:
       return areas
-    print("gta5: building the map's junction areas in the background", flush=True)
+    print("gta5: building the map's junction areas and stop lines in the background", flush=True)
     try:
       subprocess.run(["nice", "-n", "10", sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.map.lane_match", osm.path],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True, timeout=600)

@@ -22,7 +22,8 @@ RouteInputReader, gta5-train), which is why NEXT's lane fields stay although LAN
   (planner Turn.lanes / Fork.lanes): the centres of the first and last as a fraction of the road from the left,
   (lane + 0.5) / lanes; 170 lane data present (lanes before > 0).
 - [171:173] STOP: 171 present; 172 m to the next stop line on the route (Route.stops, from 2 m behind, within 300 m)
-  / 100. With router.STOP_DIRECTION off they include the far side of junctions: label with the bridge's setting.
+  / 100: the map's stop lines (map/stop_lines.py) on a map with lane tags, else GTA's stop line nodes (with
+  router.STOP_DIRECTION off, also those for the far side of junctions).
 - [173:223] LANES (route input v2): lane_slots.py's LANE_SLOTS_LEN floats, the road here and the road out of the next
   maneuver as lane slots counted from the kerb (oncoming, allowed, target), and from and by where to be in a target
   lane; zero where the route has no lanes.

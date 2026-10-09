@@ -13,6 +13,7 @@ from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, OsmLanes, RouteLanes, Section, Span, \
   ways_from_nodes
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, SLIP_LANE, Link, Paths, wrap
+from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
 
 SERVICE_PENALTY, SERVICE_FACTOR = 120, 4.0  # s onto a service road, and its cost over a road's
 HEADING_TOLERANCE = 45.0  # deg: start on a road heading the car's way, not the opposite carriageway
@@ -32,7 +33,8 @@ JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which t
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
 DEST_HEADING_TOLERANCE = 45.0  # deg
 SIDE_DETOUR = 30.0  # s: arriving with the destination on the kerb side may take this much longer than across the road
-# a stop line counts only on the way towards its junction, not for a route leaving the junction past it (off: both)
+# on a map without lane tags, where nav's stop lines are GTA's nodes: a stop line counts only on the way towards its
+# junction, not for a route leaving the junction past it (off: both)
 STOP_DIRECTION = os.getenv("GTA5_STOP_DIRECTION", "0") == "1"
 
 
@@ -82,9 +84,11 @@ class Fork:
 class Route:
   """A route's points (game metres), and where along it the car is. With GTA's road data, also the road's height and
   the roads that fork off it; with the map's speed limits, those. Its lanes come from the map's lane tags (osm_lanes.py),
-  or where the map has none, from GTA's own layout of each link (paths.Link)."""
+  or where the map has none, from GTA's own layout of each link (paths.Link); its stop lines from the map's
+  (stop_lines.py, as the map view and the overlay draw them: those it crosses into a junction, its own way), or on a map
+  without lane tags, GTA's stop line nodes."""
   def __init__(self, points: np.ndarray, maneuvers: list[dict], paths: Paths | None = None, limits: np.ndarray | None = None,
-               osm: OsmLanes | None = None):
+               osm: OsmLanes | None = None, stop_lines: StopLines | None = None):
     self.points = points
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.maneuvers = maneuvers
@@ -99,14 +103,20 @@ class Route:
     self.links: list[Link | None] = [None] * max(n - 1, 0)
     self.limits = limits if limits is not None else np.zeros(max(n - 1, 0))  # m/s per segment, 0 unknown
     self.forks: list[Fork] = []
-    self.stops: list[float] = []  # m along the route to stop lines (traffic lights' and stop junctions')
+    self.stops: list[float] = []  # m along the route to stop lines, in order
+    self.stop_kinds: list[str] = []  # each one's: stop_lines.KINDS, "stop" (a stop sign), "lights" or "give_way"
     self.junctions: list[float] = []  # and to junction nodes
+    self.osm_lanes = osm is not None and osm.tagged and n >= 2
     if paths is not None and n >= 2:
-      self._add_paths(paths)
+      self._add_paths(paths, stops=not self.osm_lanes)
+    if self.osm_lanes:
+      lines = stop_lines if stop_lines is not None else StopLines.of(osm)
+      for at, kind in lines.on_route(points, self.along, osm) if lines is not None else []:
+        self.stops.append(at)
+        self.stop_kinds.append(kind)
     self.limit_list = [round(float(v), 2) for v in self.limits]
     self._lanes: RouteLanes | None = None
     self._lanes_of: list | None = None  # the links a RouteLanes from GTA's layout was made from
-    self.osm_lanes = osm is not None and osm.tagged and n >= 2
     if self.osm_lanes:
       self._lanes = RouteLanes.from_osm(points, ways_from_nodes(points, osm), osm)
     self._maps: list | None = None  # lane_maps along the whole route
@@ -127,13 +137,14 @@ class Route:
     lanes = self.lanes
     return lanes.sections[k] if lanes is not None and 0 <= k < len(lanes.sections) else None
 
-  def _add_paths(self, paths: Paths):
+  def _add_paths(self, paths: Paths, stops: bool = True):
     pts = self.points
     nodes = paths.route_nodes(pts)
     for k, i in enumerate(nodes):
       if i is not None and 0 < k < len(pts) - 1:
-        if paths.stop_line(i) and (not STOP_DIRECTION or self._stops_here(paths, nodes, k)):
+        if stops and paths.stop_line(i) and (not STOP_DIRECTION or self._stops_here(paths, nodes, k)):
           self.stops.append(float(self.along[k]))
+          self.stop_kinds.append(paths.stop_kind(i))
         if paths.junction(i):
           self.junctions.append(float(self.along[k]))
     # the route starts and ends part way along a link: the node before its start and after its end
@@ -345,6 +356,7 @@ class Route:
       "limits": self.changes(self.limit_list, distance),
       "laneCounts": self.changes(self.lane_counts, distance),
       "stops": [round(a - self.at, 1) for a in self.stops if -JUNCTION_BEHIND < a - self.at < distance],
+      "stopKinds": [k for a, k in zip(self.stops, self.stop_kinds, strict=True) if -JUNCTION_BEHIND < a - self.at < distance],
       "junctions": [round(a - self.at, 1) for a in self.junctions if -JUNCTION_BEHIND < a - self.at < distance],
       "laneArrows": self.lane_arrows(distance),
       "laneDrops": self.lane_drops(distance),

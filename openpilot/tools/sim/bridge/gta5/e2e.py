@@ -365,8 +365,12 @@ class LaneMap:
       return None
     areas = JunctionAreas.cached(osm, build=False)
     if areas is None:
-      print("e2e: building the map's junction areas (once per map)...", flush=True)
-      areas = JunctionAreas.cached(osm)
+      from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
+      from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
+      print("e2e: building the map's junction areas and stop lines (once per map)...", flush=True)
+      junctions = Junctions(osm)
+      areas = JunctionAreas.cached(osm, junctions=junctions)
+      StopLines.cached(osm, junctions=junctions)  # the bridge's nav reads them
     return cls(osm, areas)
 
   def read(self, x: float, y: float, z: float, heading: float) -> list | None:
