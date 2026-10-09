@@ -532,7 +532,7 @@ def road_marks(paths, osm) -> dict:
     nodes.extend([ab] * (len(line3) - 1))
 
   for wid in osm.ways:
-    if wid in junctions.inside:
+    if wid in junctions.inside or wid in junctions.crossovers:
       continue
     pts = osm.way_points(wid)
     if len(pts) < 2 or np.hypot(*(pts[-1] - pts[0])) < 0.3:
@@ -608,7 +608,7 @@ def road_marks(paths, osm) -> dict:
     g = near_node(paths, c.mean(0))
     if g is not None:
       add("x", np.column_stack([c, np.full(len(c), paths.z[g])]), (g, g))
-  for node in lane_count_flags(osm, junctions.inside):
+  for node in lane_count_flags(osm, junctions.inside | junctions.crossovers):
     xy = osm.node_xy(node)
     found = gta_at(paths, xy)
     if found is not None:
