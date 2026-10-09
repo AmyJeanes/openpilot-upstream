@@ -62,11 +62,12 @@ def nav_split(nav: str) -> tuple[str, int]:
 
 
 def lane_turn_desire(CS, nav: str = "") -> int:
-  """The turn a blinker asks for at low speed, unless the blind spot that way is occupied; overrides any lane change."""
+  """The turn a blinker asks for at low speed; overrides any lane change. Unlike sunnypilot, the blind spot doesn't hold it:
+  at dual turn lanes a car turning beside us is normal, and dropping the desire would carry the car straight on."""
   if CS.vEgo < LANE_TURN_SPEED and nav_split(nav)[0] != NAV_LANE_CHANGE:
-    if CS.leftBlinker and not CS.rightBlinker and not CS.leftBlindspot:
+    if CS.leftBlinker and not CS.rightBlinker:
       return log.Desire.turnLeft
-    if CS.rightBlinker and not CS.leftBlinker and not CS.rightBlindspot:
+    if CS.rightBlinker and not CS.leftBlinker:
       return log.Desire.turnRight
   return log.Desire.none
 
