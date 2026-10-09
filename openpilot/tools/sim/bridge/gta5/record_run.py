@@ -763,9 +763,9 @@ class Run:
         outcome = ("infra", f"no segment recorded for {RECORD_STALL:.0f} s")
         break
     self.expert("off", quiet=True)
-    w.update()
-    ww_events += [row for row in w.take_rows() if row.get("event") == "wrongway"]
-    if ww_events:
+    if c.get("wrongway"):  # its last phase events (abort, end) may come after the loop stopped
+      w.update()
+      ww_events += [row for row in w.take_rows() if row.get("event") == "wrongway"]
       rec["wrongway_phases"] = ww_events
     act = [row for row in rows if row.get("active")]
     v = [row.get("vEgo") or 0.0 for row in act]
