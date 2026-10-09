@@ -241,6 +241,9 @@ shown or a level changes.
   at its height) are its lanes: GTA draws a freeway's lanes as links side by side, with lane changes between them. Ramps
   carry no name (named for their freeway they'd read as staying on it) and, where it's known, `destination`: the street
   an off-ramp reaches or the freeway a connector joins. Where two freeways split, both stay freeways (keep left/right).
+  GTA's freeway flag misses some lanes laid as links of their own (the Olympic Fwy's split, stretches of the Elysian
+  Fields Fwy): a run of one-way links whose only other links are the freeway's or its ramps' is `motorway` too, with
+  the freeway's limit (`freeway_lanes`).
 - Speed limits (`maxspeed`, mph) come from the road class and the speed class GTA gives each node (slow, normal, fast,
   faster), by the table in `ynd_to_osm.py`'s `LIMITS`. Nearly all the city is "normal", so the road class sets it there:
   30 with one lane each way, 40 with two or more (and on country roads), 20 in car parks and alleys, 15 where it's slow
