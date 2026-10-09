@@ -35,6 +35,7 @@ class NavInputs:
   # where our lanes change along the road: [[m ahead, the lane each lane before carries on as (None: it ends), how many
   # after], ...], the first at 0 m from the car's lanes as truth_lane numbers them where they differ from the road's
   lane_maps: list | None = None
+  turns: list | None = None  # the route's own turns, found once along it: [[m ahead, side, exit heading, deg turned], ...]
   two_way: bool | None = None  # the road here, None unknown
   # truth
   pos: tuple | list = (0.0, 0.0)  # [x, y] m

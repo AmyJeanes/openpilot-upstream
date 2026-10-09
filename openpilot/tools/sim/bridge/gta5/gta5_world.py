@@ -613,7 +613,8 @@ class GTA5World(World):
 
   def _turn_points(self, state: dict):
     """The next turn navd signals and where its signal comes on, for the overlay."""
-    return self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"), state.get("junctions"))
+    return self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"), state.get("junctions"),
+                                state.get("turns"))
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
@@ -642,7 +643,7 @@ class GTA5World(World):
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
     line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length)))
+                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

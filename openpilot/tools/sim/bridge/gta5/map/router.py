@@ -26,6 +26,7 @@ LANES_NEAR = 60.0  # m from a point to look for a link with its lanes
 ON_ROAD = 8.0  # m from the route's line: on its road, wherever its lanes are
 KERB_MARGIN = 1.0  # m outside the kerbs of the route's road still on it
 FORK_AT = 2.0  # m between a fork in GTA's roads and where the map's lanes change for it
+TURN_STEP = 20.0  # m: the route's turns are found on its own points, with more where they're further apart
 JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
 # the destination on the road it faces, rather than the router's nearest road, often a drive or car park (dest_snap.py)
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
@@ -109,6 +110,7 @@ class Route:
     if self.osm_lanes:
       self._lanes = RouteLanes.from_osm(points, ways_from_nodes(points, osm), osm)
     self._maps: list | None = None  # lane_maps along the whole route
+    self._turns: list | None = None  # turns along the whole route
     self.lane_counts = [sec.lanes if (sec := self.section(k)) is not None else 0 for k in range(max(n - 1, 0))]
 
   @property
@@ -346,6 +348,7 @@ class Route:
       "laneArrows": self.lane_arrows(distance),
       "laneDrops": self.lane_drops(distance),
       "laneMaps": self.lane_maps(distance),
+      "turns": self.turns(distance),
     }
 
   def lane_arrows(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
@@ -358,6 +361,24 @@ class Route:
     """Where lanes begin on the left of ours within `distance` m (RouteLanes.openings): [[m ahead, how many]]."""
     opens = self.lanes.openings if self.lanes is not None else []
     return [[float(s - self.at), n] for s, n in opens if -behind < s - self.at < distance]
+
+  def turns(self, distance: float) -> list:
+    """The route's turns within `distance` m (navd planner.find_turn along its own shape, once, so each holds still as
+    the car drives on): [[m ahead, side, exit heading (game deg), deg turned]]."""
+    if self._turns is None:
+      from openpilot.selfdrive.navd.planner import MIN_AHEAD_MAP, TURN_HOLDS, find_turn
+      self._turns = []
+      # its own points, a long segment split so that find_turn's window always holds the next
+      seg = np.diff(self.along)
+      s = np.concatenate([[0.0]] + [a + np.linspace(0.0, d, int(np.ceil(d / TURN_STEP)) + 1)[1:]
+                                    for a, d in zip(self.along[:-1], seg, strict=True) if d > 1e-6])
+      pts = np.stack([np.interp(s, self.along, self.points[:, 0]), np.interp(s, self.along, self.points[:, 1])], axis=1)
+      turn = find_turn(pts, MIN_AHEAD_MAP) if len(pts) >= 2 else None
+      while turn is not None:
+        self._turns.append(turn)
+        turn = find_turn(pts, turn.dist + TURN_HOLDS)
+    return [[round(t.dist - self.at, 1), t.side, round(float(t.exit_heading), 1), round(float(t.angle), 1)] for t in self._turns
+            if 0.0 < t.dist - self.at < distance]
 
   def lane_maps(self, distance: float, here: bool = True) -> list:
     """Where our lanes change within `distance` m (RouteLanes.lane_maps), the lane each before carries on as: [[m ahead,

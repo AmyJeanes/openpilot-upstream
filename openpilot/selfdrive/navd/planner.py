@@ -455,6 +455,18 @@ def find_turn(route: np.ndarray, after: float = 0.0) -> Turn | None:
   return None
 
 
+def next_turn(route: np.ndarray, after: float, turns: list | None = None) -> Turn | None:
+  """find_turn(route, after); with the route's own turns (Route.info's turns, found once along its shape: [[m ahead,
+  side, exit heading, deg turned], ...]), the first of them past `after`, which hold still as the car drives on, where
+  the turns found on the points from the car move about with them."""
+  if turns is None:
+    return find_turn(route, after)
+  for d, side, exit_heading, angle in turns:
+    if d > after:
+      return Turn(float(d), side, float(exit_heading), float(angle))
+  return None
+
+
 def curve_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> float:
   """The speed now that leaves room to slow for the bends ahead, 0 for none. A bend's curvature is its heading change
   over CURVE_WINDOW m, but no more than over twice or four times the window: GTA's lanes jog sideways through junctions
@@ -570,7 +582,7 @@ class LaneMaps:
 
 def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
               arrows: list | None = None, drops: list | None = None, opens: list | None = None,
-              maps: list | None = None) -> list[tuple[float, float]]:
+              maps: list | None = None, turns: list | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
   in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
@@ -578,14 +590,15 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   lane. Where our lanes change along the road (`maps`, Route.info's laneMaps: lanes beginning or ending on either side,
   at a node or across a junction) it keeps to its lane as its number changes, a lane that ends merging into the
   nearest. Without maps, only where lanes begin on the left of ours (`opens`: [m ahead, how many]) is it renumbered.
-  lanes_at(m, after) is the lanes the car's way just before (after: past) a point."""
+  lanes_at(m, after) is the lanes the car's way just before (after: past) a point. `turns`: the route's own turns
+  (next_turn), else found on `route`."""
   t = tune or TUNE
   arrows = parse_arrows(arrows)
   ahead: list[Turn | Fork | Through] = []
-  turn = find_turn(route, MIN_AHEAD_MAP)
+  turn = next_turn(route, MIN_AHEAD_MAP, turns)
   while turn is not None:
     ahead.append(turn)
-    turn = find_turn(route, turn.dist + TURN_HOLDS)
+    turn = next_turn(route, turn.dist + TURN_HOLDS, turns)
   ahead += [Fork(d, side, *rest) for d, side, *rest in forks if d > 0]
   for m in ahead:
     aim(m, arrows)
@@ -923,7 +936,7 @@ class Planner:
         self._turn_over(now)
         self._cancel(indicator)
 
-    turn = self._next_turn(route) if self.turn is None else None
+    turn = self._next_turn(route, inp.turns) if self.turn is None else None
     if turn is not None and self._behind(route, heading):
       turn = None  # GTA routes on once the car has passed somewhere to turn around
     if turn is None:
@@ -985,9 +998,9 @@ class Planner:
     caps = [(limit_cap(inp.limits or [], inp.v), "speedLimit")]
     if inp.route:
       route = np.array(inp.route, dtype=float)
-      turn = find_turn(route, MIN_AHEAD_MAP if inp.route_end is not None else MIN_AHEAD)
+      turn = next_turn(route, MIN_AHEAD_MAP if inp.route_end is not None else MIN_AHEAD, inp.turns)
       while turn is not None and not any(abs(d - turn.dist) < ENTRY_JUNCTION_BEFORE / 2 for d in inp.junctions or []):
-        turn = find_turn(route, turn.dist + TURN_HOLDS)  # a bend of the road, not a turn: slowed for
+        turn = next_turn(route, turn.dist + TURN_HOLDS, inp.turns)  # a bend of the road, not a turn: slowed for
       if turn is not None:
         along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
         route = np.vstack([route[along < turn.dist], self._point(route, turn.dist)])
@@ -1060,11 +1073,11 @@ class Planner:
       self.cue = None
     self.cue_staged = False
 
-  def _next_turn(self, route: np.ndarray) -> Turn | None:
-    """The first turn ahead not left to the route."""
-    turn = find_turn(route, max(self.min_ahead, self.skip_turns_to - self.driven))
+  def _next_turn(self, route: np.ndarray, turns: list | None = None) -> Turn | None:
+    """The first turn ahead not left to the route (of the route's own turns where given, next_turn)."""
+    turn = next_turn(route, max(self.min_ahead, self.skip_turns_to - self.driven), turns)
     while turn is not None and self._is_skipped(route, turn.dist):
-      turn = find_turn(route, turn.dist + TURN_HOLDS)
+      turn = next_turn(route, turn.dist + TURN_HOLDS, turns)
     return turn
 
   def _forks(self, forks: list | None, route: np.ndarray, turn: Turn | None) -> list[Fork]:
@@ -1163,18 +1176,20 @@ class Planner:
       at = max(at, min(entry - t.left_signal_max_entry, turn.dist - SIGNAL_LAST))
     return at
 
-  def turn_points(self, route: np.ndarray, forks: list | None, stops: list | None,
-                  junctions: list | None) -> tuple[np.ndarray, np.ndarray | None] | None:
-    """For the map overlay: where the turn nav signals next is and where its signal comes on by distance; once
-    signalled, where the car was when it did."""
+  def turn_points(self, route: np.ndarray, forks: list | None, stops: list | None, junctions: list | None,
+                  turns: list | None = None) -> tuple[np.ndarray, np.ndarray | None] | None:
+    """For the map overlay: where the turn nav signals next is (of the route's own turns where given), and where its
+    signal comes on by distance at the turn's own speed, which nav slows to for it and signals at, so the point holds
+    still while the car slows; once signalled, where the car was when it did."""
     if self.turn is not None and self.turn_point is not None:
       return self.turn_point, self.signaled_at
-    turn = self._next_turn(route)
+    turn = self._next_turn(route, turns)
     if turn is None:
       return None
     bay = self._bay(self._forks(forks, route, turn), turn)
     entry, _ = junction_entry(turn.dist, stops or [], junctions or [])
-    return self._point(route, turn.dist), self._point(route, max(self.signal_from(turn, entry, self.v, bay), 0.0))
+    at = self.signal_from(turn, entry, turn.speed(self.tune), bay)
+    return self._point(route, turn.dist), self._point(route, max(at, 0.0))
 
   def _signal_due(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, bay: float) -> bool:
     """Whether to signal the turn now, ending any lane change towards it, or leaving it to the route."""
