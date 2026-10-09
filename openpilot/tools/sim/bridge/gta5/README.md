@@ -114,6 +114,16 @@ entering the junction, rather than 5 s before it. How far the model turns depend
 turn's speed holds through the arc until the car heads its way out and is straight (`turn_release`, `turn_release_m`)
 and lifts at `release_accel`; nav logs the speeds into, through and out of each turn.
 
+On motorways and trunks (the map's road classes, so only on a map route), nav moves over for an exit or fork far
+ahead: `fwy_lane_time` s of travel per lane to cross (30 s; 0 times them as on any road) at the road's limit or the
+car's speed if higher, the changes done `fwy_clear` m before the gore, spread evenly over less room where there isn't
+that much, and none sooner than `fwy_settle` s past the maneuver before (a fork or keep it takes, a turn, an on-ramp's
+merge) or into lanes that leave the route before its exit; its lane line shows the same changes. The bridge's route
+reaches 3.5 km ahead for them. Nav plans from the car's lane by `lane_source`: `map` (the bridge's reading on the
+route), `model` (the driving model's `modelV2.laneHead`), or `fused` (the default; also `NAVD_LANE_SOURCE`), the model's
+once it has been sure of it (`model_lane_prob`) for `model_lane_hold` s and counts as many lanes as the map, else the
+map's. `NAVD_LANE_LOG=<file>` logs both each step as JSON lines, to score the model's lane against the map's.
+
 The model chooses where to turn and doesn't always: after a stop it can carry straight on, and with a turn asked for
 and no turning to take it stops, so a turn is signalled only within 50 m of one. `GTA5_DEBUG=1` prints nav's decisions.
 `gta5_cmd.py waypoint x= y=` sets a waypoint (`off=1` clears it).
@@ -144,6 +154,23 @@ actions (no turn signals or desires, lane changes, slowing for turns, arrival or
 caps the speed for the road's bends up to the next turn and for its speed limits, and holds keepRight out of the
 oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
 changes.
+
+### Blind-spot monitoring
+The car has a blind-spot monitor, as a Tesla's (`gta5_blindspot.py`): the plugin reports the vehicles around the car
+(`nearby`: each one's place, heading, velocity and model bounds), and the bridge flags a side while a vehicle going our
+way overlaps the lane beside us from 8 m behind our rear bumper to our front bumper, or is closing on it from up to 30 m
+behind fast enough to be there within 3 s; by the vehicles' bodies, out to the far edge of the lane beside by the map's
+lanes (4.5 m without them), never for oncoming, crossing or parked vehicles or a side with no lane our way, and held
+0.5 s once clear. The flags reach openpilot as the Model 3's own blind-spot signals (`DAS_status`, read into
+`carState.leftBlindspot`/`rightBlindspot`), so openpilot's lane change waits in preLaneChange with "Car Detected in
+Blindspot", and below 19 mph its lane turn desire waits too. A lane change nav asks for works like sunnypilot's
+nudgeless one: the blinker comes on when nav decides, stays on while the blind spot that way is occupied (the driver
+holds off the nudge, and openpilot would block it anyway), and the change starts as soon as it clears; nav's lane plan
+still shows it. Still held at the last place it may start (for a fork, its last start point; for a turn 30 m before it),
+nav gives it up and the blinker goes off, leaving the exit or turn to a reroute rather than changing into a car; and
+likewise once the lanes ahead no longer need it (a reroute, or the car's lane has moved).
+`GTA5_BLINDSPOT=0` turns it off; `GTA5_BLINDSPOT_TUNE` is a JSON file of its settings (the module's docstring says
+what each is and why), read again whenever it changes. Needs the plugin's `nearby` (no flags with an older plugin).
 
 ### navd and the GTA layer
 Navigation is being moved out of the bridge into a game-agnostic navd (`selfdrive/navd/`), which is to plan from only
@@ -183,6 +210,7 @@ on the game's ground, colours as the map view's where it has them:
 | tapers `t` | the middle of a lane opening or closing along a taper or bay, translucent cyan, 1.2 m |
 | flags `q` | a magenta post where a road's lane count changes at a node with no taper (suspect map data) |
 | route `r`, nav `n`, points `m` | the route a 1.75 m translucent red band (darker behind the car, where it was drawn as the car passed), nav's lane plan a dashed white line over it, the next turn a white cylinder and where its signal comes on an amber cone |
+| blind spot `z` | each side's blind-spot zone outlined faintly in amber, filled red down its middle while occupied (sent with the route, every 0.1 s) |
 
 Strips widen and lift with distance beyond `grow=` m (40; up to 4x) so a 0.2 m line stays a few pixels wide; they're
 drawn to `dist=` m (120; the bridge sends 150). `width=` scales them all, `widths=e:2,d:1.5` some layers; `ground=0`

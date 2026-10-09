@@ -24,12 +24,14 @@ from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5 import gta5_gnss
+from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
-from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, GpsRoute, Overlay, OverlayProcess
+from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
+  OverlayProcess
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
@@ -53,7 +55,9 @@ MAP_EVERY = 0.1  # s
 LANE_LINE_EVERY = 0.5  # s
 ON_PATH = 15.0  # m: the overlay's turn markers go on nav's lane line where it passes this near their route points
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
-ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
+# m: the route nav gets, in the form of the plugin's GTA route (500 m), as far as a freeway move's lane changes may start
+ROUTE_AHEAD, ROUTE_STEP = 3500.0, 5.0
+MODEL_STALE = 0.5  # s: the model's lane (modelV2.laneHead) for nav from a message no older
 # s the car's last lane reading by the map's lanes stands while there's none: the plugin's own reading counts GTA's
 # link, one of several side by side on a wide road (a 1-lane link reads [0, 1] in any lane), so it's used only on a
 # map without lane tags
@@ -176,6 +180,7 @@ class GTA5World(World):
     self.log = open(LOG, "a", buffering=1) if LOG else None
     self.params = Params()
     self._init_nav()
+    self.blindspot = BlindSpot()
     self.gnss = gta5_gnss.from_env()
     self.publishes_gps = self.gnss is not None
     self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
@@ -396,9 +401,6 @@ class GTA5World(World):
       self.q.put(control_cmd_gen("cruise_cancel"))
     self.steering = steering
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
-    # set once per step, held until the next: the car thread could read any value set in between
-    simulator_state.user_torque = self.driver.stalk(state.get("indicator"), state["heading"], state["yawRate"],
-                                                    self.sm['modelV2'].meta.laneChangeState, self.nav.signaling)
     desire = self.sm['modelV2'].meta.desireState
     turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
              "keepRight": desire[log.Desire.keepRight]} if len(desire) > log.Desire.keepRight else {}
@@ -410,6 +412,15 @@ class GTA5World(World):
       if known:
         simulator_state.speed_limit = limits[0][1]
       simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
+    # the car's blind-spot monitor (gta5_blindspot.py), for openpilot (the Model 3's own signals), nav and the driver
+    left, right = self.blindspot.update(state, time.monotonic())
+    simulator_state.left_blindspot, simulator_state.right_blindspot = left, right
+    state = {**state, "blindspot": [left, right]}
+    # set once per step, held until the next: the car thread could read any value set in between
+    indicator = state.get("indicator")
+    simulator_state.user_torque = self.driver.stalk(indicator, state["heading"], state["yawRate"],
+                                                    self.sm['modelV2'].meta.laneChangeState, self.nav.signaling,
+                                                    left if indicator == "left" else right if indicator == "right" else False)
     if self.nav_msgs is not None:
       # the game's pose stands in for the car's localizer (GPS and odometry)
       self.nav_msgs.update(self.route, v, self.navigator.router.osm if self.navigator is not None else None, self._lane_slots,
@@ -424,6 +435,7 @@ class GTA5World(World):
       self._update_map(state, bearing, v)
       simulator_state.valid = True
       return
+    state = {**state, "modelLane": self._model_lane()}
     drives = self._nav_drives()
     out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic(), drives))
     self.driver.act(out)
@@ -437,6 +449,14 @@ class GTA5World(World):
     self._update_buttons(state)
     self._update_map(state, bearing, v)
     simulator_state.valid = True
+
+  def _model_lane(self) -> list | None:
+    """The driving model's lane for nav (modelV2.laneHead): [index from the left of ours, count, probability], None
+    without a fresh one or from a model without the head."""
+    if self.sm.recv_frame['modelV2'] <= 0 or time.monotonic() - self.sm.recv_time['modelV2'] > MODEL_STALE:
+      return None
+    lh = self.sm['modelV2'].laneHead
+    return [int(lh.laneIdx), int(lh.laneCount), round(float(lh.prob), 3)] if 0 <= lh.laneIdx < lh.laneCount else None
 
   def _idle_gc(self):
     """The full garbage collection hold_full_collections leaves out, while nothing is driving."""
@@ -521,7 +541,8 @@ class GTA5World(World):
                                 state["laneMap"], time.monotonic())
     self._write_lane_slots(state, lane)
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
-            "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
+            "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None,
+            "beside": self.route.beside() if on else None}
 
   def _car_lane(self, lane: list[int] | None, frac: float | None, plugin: list[int] | None, map_lane: dict | None,
                 now: float) -> tuple[list[int] | None, float | None]:
@@ -627,7 +648,7 @@ class GTA5World(World):
     paths = self.navigator.router.paths if self.navigator is not None else None
     osm = self.navigator.router.osm if self.navigator is not None else None
     out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), lambda: self._turn_points(state),
-                              self.recorder is not None, osm)
+                              self.recorder is not None, osm, lambda: self.blindspot.overlay(state, OVERLAY_LEAD))
     return out + self.gps.update(state, self.route)
 
   def _turn_points(self, state: dict):
@@ -667,8 +688,11 @@ class GTA5World(World):
     if r is self.lane_line[0] and now < self.lane_line[1]:
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
-    line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length)))
+    lane = list(self.nav.lane) if self.nav.lane is not None else state.get("lane")  # the lane nav plans from
+    line = r.lane_line(lane_plan(r.rest(), forks, lane, r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
+                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length),
+                                 classes=r.changes(r.classes, r.length), limits=r.changes(r.limit_list, r.length),
+                                 fwy=self.nav.fwy_state()))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

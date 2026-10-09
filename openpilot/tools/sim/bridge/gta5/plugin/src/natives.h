@@ -21,6 +21,7 @@ inline BOOL DOES_ENTITY_EXIST(Entity e) { return Invoke<BOOL>(0x7239B21A38F536BA
 inline Vector3 GET_ENTITY_COORDS(Entity e, BOOL alive) { return Invoke<Vector3>(0x3FEF770D40960D5A, e, alive); }
 inline Vector3 GET_ENTITY_ROTATION(Entity e, int order) { return Invoke<Vector3>(0xAFBD61CC738D9EB9, e, order); }
 inline Vector3 GET_ENTITY_SPEED_VECTOR(Entity e, BOOL relative) { return Invoke<Vector3>(0x9A8D700A51CB7B0D, e, relative); }
+inline Vector3 GET_ENTITY_VELOCITY(Entity e) { return Invoke<Vector3>(0x4805D2B1D8CF94A9, e); }
 inline Vector3 GET_ENTITY_ROTATION_VELOCITY(Entity e) { return Invoke<Vector3>(0x213B91045D09B983, e); }
 inline float GET_ENTITY_HEADING(Entity e) { return Invoke<float>(0xE83D4F9BA2A38914, e); }
 inline Hash GET_ENTITY_MODEL(Entity e) { return Invoke<Hash>(0x9F47B058362C84B5, e); }
