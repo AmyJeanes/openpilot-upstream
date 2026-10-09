@@ -8,7 +8,8 @@ their heading), not their middles:
 - out from our side from `inner` m to the far edge of the lane beside (`outer` m where the lanes aren't known),
 - along from `behind` m behind our rear bumper to `front` m ahead of our front bumper;
 or is in that lane within `closing_behind` m behind our rear bumper, closing faster than `closing_speed` and due there
-within `closing_time` s. A side's flag comes on at once and goes off once it has been clear for `clear_after` s.
+within `closing_time` s. A side's flag comes on at once and goes off once it has been clear for `clear_after` s, also
+when its zone goes (the map's lanes beside flickering), so the flag never drops for a single reading.
 Oncoming and crossing vehicles (heading over `heading` deg off ours), parked ones (stopped, nobody in the driver's
 seat), and a side with no lane our way (the kerb, or across the centre line, where the car's lanes are known) never
 count.
@@ -73,6 +74,7 @@ class BlindSpot:
     self.seen = {"left": -math.inf, "right": -math.inf}  # when each side was last occupied
     self.left = self.right = False
     self.zones: dict[str, tuple[float, float, float, float] | None] = {"left": None, "right": None}  # our frame, as footprint
+    self.zone_lost = {"left": -math.inf, "right": -math.inf}  # when each side's zone last went
     self.reach = {"left": 0.0, "right": 0.0}  # m along (our frame) the rearmost vehicle that last set each side starts
     self.dims = OWN_DIMS
     self.last: dict | None = None  # the plugin's "nearby" last looked at
@@ -91,8 +93,8 @@ class BlindSpot:
       self.last = nearby
       self._look(state, nearby, now)
     t = self.tune
-    self.left = now - self.seen["left"] < t.clear_after and self.zones["left"] is not None
-    self.right = now - self.seen["right"] < t.clear_after and self.zones["right"] is not None
+    self.left, self.right = (now - self.seen[side] < t.clear_after and (self.zones[side] is not None or now - self.zone_lost[side] < t.clear_after)
+                             for side in ("left", "right"))
     return self.left, self.right
 
   def _look(self, state: dict, nearby: dict, now: float):
@@ -105,6 +107,8 @@ class BlindSpot:
     along = (mny - t.behind, mxy + t.front)
     for side, sign, edge in (("left", -1.0, mnx), ("right", 1.0, mxx)):
       if outer[side] is None:
+        if self.zones[side] is not None:
+          self.zone_lost[side] = now
         self.zones[side] = None
         continue
       lo, hi = sorted((edge + sign * t.inner, edge + sign * max(outer[side], t.inner + 1.0)))

@@ -12,6 +12,8 @@ LaneChangeDirection = log.LaneChangeDirection
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 LANE_CHANGE_START_TIME = 0.5
+# s the blind spot must stay clear before a lane change starts: a moment's gap between two vehicles isn't a gap
+BLINDSPOT_CLEAR_TIME = 0.5
 # below this a blinker asks the model to take the next turn instead, as sunnypilot's lane turn desire does
 LANE_TURN_SPEED = 19 * CV.MPH_TO_MS
 # a navigation source's request (the NavDesire param): "laneChange" makes the blinker ask for a lane change at any speed
@@ -78,6 +80,7 @@ class DesireHelper:
     self.lane_change_direction = LaneChangeDirection.none
     self.lane_change_timer = 0.0
     self.prev_one_blinker = False
+    self.blindspot_clear = {"left": BLINDSPOT_CLEAR_TIME, "right": BLINDSPOT_CLEAR_TIME}  # s each side has been clear
     self.desire = log.Desire.none
     self.stacked = log.Desire.none  # a second desire for the model, only when a navigation source stacks one
     self.nav = NavDesire()
@@ -138,6 +141,8 @@ class DesireHelper:
     # read afresh as a blinker comes on, which means a turn or a lane change by it
     nav, stacked = nav_split(self.nav.get(one_blinker and not self.prev_one_blinker))
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN and nav != NAV_LANE_CHANGE
+    for side, occupied in (("left", carstate.leftBlindspot), ("right", carstate.rightBlindspot)):
+      self.blindspot_clear[side] = 0.0 if occupied else self.blindspot_clear[side] + DT_MDL
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
@@ -158,8 +163,8 @@ class DesireHelper:
                          ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
                           (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right))
 
-        blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
-                              (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
+        side = "left" if self.lane_change_direction == LaneChangeDirection.left else "right"
+        blindspot_detected = self.blindspot_clear[side] < BLINDSPOT_CLEAR_TIME - 1e-6
 
         if not one_blinker or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off
