@@ -209,6 +209,12 @@ class Tune:
     "lane_change_early": LANE_CHANGE_EARLY,  # s
     "lane_change_fast_early": FAST_EARLY,  # s more above FAST m/s
     "lane_change_last": LANE_CHANGE_DIST,  # m before a turn
+    # the lane plan draws a city move's changes (a turn, fork or way straight on off a freeway) where nav starts them
+    # (city_lead before lane_change_last), each over LANE_LINE_CHANGE m, past the stop lines and junctions on the way;
+    # off, as late as allowed, which nav's changes run well ahead of
+    "plan_city_early": True,
+    # m before a city move its changes start at the latest, nav and the lane plan alike (0: no cap)
+    "turn_lead_max": 0.0,
     # m before a turn a lane change towards it still under way becomes the turn's signal (0: it's ended, though
     # openpilot's lane change carries on into the junction until the model is done with it)
     "lane_change_into_turn": 0.0,
@@ -652,6 +658,7 @@ class FwyState:
     return near[0] if near else None
 
 
+CROSSING_CLEAR = 5.0  # m past a stop line or junction node a lane change for a city move may start
 MAP_AT = 0.5  # m: a lane map this near a maneuver is its junction's or fork's own, past it (Route.info rounds to 0.1 m)
 
 
@@ -713,7 +720,8 @@ class LaneMaps:
 def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
               arrows: list | None = None, drops: list | None = None, opens: list | None = None,
               maps: list | None = None, turns: list | None = None, classes: list | None = None,
-              limits: list | None = None, fwy: FwyState | None = None) -> list[tuple[float, float]]:
+              limits: list | None = None, fwy: FwyState | None = None,
+              crossings: list | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
   in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
@@ -724,7 +732,8 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   lanes_at(m, after) is the lanes the car's way just before (after: past) a point. `turns`: the route's own turns
   (next_turn), else found on `route`. With the maps, freeway moves' changes are timed as the live planner times them
   (fwy_schedule), by the road classes and speed limits ahead (Route.info's roadClasses, limits) and what the planner
-  keeps for them (`fwy`, Planner.fwy_state)."""
+  keeps for them (`fwy`, Planner.fwy_state). City moves' changes start as nav starts them (city_lead), not across the
+  stop lines and junction nodes `crossings` (m ahead) on the way."""
   t = tune or TUNE
   arrows = parse_arrows(arrows)
   ahead: list[Turn | Fork | Through] = []
@@ -742,7 +751,8 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
     for m in ahead:
       aim_fork(m, maps.maps)
     ahead += lane_ends(maps.maps, ahead)
-    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), maps, lane, lanes_at, v, t, route, classes, limits, fwy)
+    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), maps, lane, lanes_at, v, t, route, classes, limits, fwy,
+                        sorted(crossings or []))
   ahead += [Opening(float(d), int(extra)) for d, extra in opens or [] if d > 0]
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
@@ -818,8 +828,18 @@ def bay_opens(maps: list, lane: int) -> float | None:
   return None
 
 
+def city_lead(changes: int, v: float, t: Tune) -> float:
+  """m before the last place a lane change for a city move may end (lane_change_last before it) that its changes may
+  start: lane_change_time a lane and lane_change_early s (more when fast) at the car's speed, up to turn_lead_max (less
+  lane_change_last) where that's set, but never less than the changes' own room on the lane line."""
+  early = t.lane_change_early + (t.lane_change_fast_early if v > FAST else 0.0)
+  lead = (changes * t.lane_change_time + early) * max(v, LANE_CHANGE_MIN_SPEED)
+  return min(lead, max(t.turn_lead_max - t.lane_change_last, changes * LANE_LINE_CHANGE)) if t.turn_lead_max > 0 else lead
+
+
 def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune, route: np.ndarray, classes: list | None = None,
-                 limits: list | None = None, fwy: FwyState | None = None) -> list[tuple[float, float]]:
+                 limits: list | None = None, fwy: FwyState | None = None,
+                 crossings: list | None = None) -> list[tuple[float, float]]:
   """lane_plan with the lane maps: the lane followed across each change of the road's lanes by a step in its number
   where it changes (as keys at one place, which lane_line puts either side of the node), also part way through a lane
   change."""
@@ -963,6 +983,18 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune,
           cur, pos = beside, opens
         start = max(pos, opens)
         end = max(min(start + LANE_LINE_CHANGE, end), start)
+      elif t.plan_city_early:
+        # as nav changes for it (Planner._change_for): from city_lead before the last place, past any stop line or
+        # junction on the way, each change over LANE_LINE_CHANGE m; as late as allowed where there's no room for that
+        late = end
+        span = abs(want - at) * LANE_LINE_CHANGE
+        start = max(late - city_lead(abs(want - at), v, t), free, pos)
+        for c in crossings:
+          if start - CROSSING_CLEAR < c < start + span and c < late:
+            start = c + CROSSING_CLEAR
+        if start + span > late:
+          start = max(min(max(late - span, free), late), pos)
+        end = max(min(start + span, late), start)
       else:
         start = max(min(max(end - abs(want - at) * LANE_LINE_CHANGE, free), end), pos)
       cur = hold(cur, start)
@@ -1079,6 +1111,7 @@ class Planner:
     self.keep_gap_until = 0.0  # repeating a keep desire: off until then
     self.keep_stopped = False
     self.classes: list | None = None  # the road classes ahead (NavInputs.road_classes)
+    self.crossings: list[float] = []  # m ahead to stop lines and junction nodes, which a lane change doesn't cross
     self.limits: list | None = None
     self.fwy_marks: list[float] = []  # self.driven at the barriers seen (fwy_free), behind the car too
     self.fwy_slots: list[tuple[float, float, float]] = []  # FwyState.slots
@@ -1116,6 +1149,7 @@ class Planner:
     self._read_lane(inp.truth_lane, now, inp.model_lane)
     self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
     self.classes, self.limits = inp.road_classes, inp.limits
+    self.crossings = sorted(d for d in (inp.stops or []) + (inp.junctions or []) if d > 0.0)
     if not engaged:
       self._cancel(indicator)
       self._end_change(indicator)
@@ -1640,8 +1674,9 @@ class Planner:
       end, each = fwy_schedule(m.dist, total, start, v, fwy_speed(v, self.limits, m.dist - 1.0), last, self.tune, slot)
       due = end - total * each <= 0.0
     else:
-      early = self.tune.lane_change_early + (self.tune.lane_change_fast_early if v > FAST else 0.0)
-      due, each = room < (need + early) * max(v, LANE_CHANGE_MIN_SPEED), None
+      # not across a stop line or junction on the way: from past it, unless there's no room after it
+      across = self.tune.plan_city_early and any(d < min(LANE_LINE_CHANGE, room) for d in self.crossings)
+      due, each = room < city_lead(changes, v, self.tune) and not across, None
     if (self.changing is None and room > 0 and due and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP
         and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)):
       if self.change_from == self.lane:
