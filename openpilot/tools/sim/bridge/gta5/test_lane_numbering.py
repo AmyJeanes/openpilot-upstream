@@ -191,6 +191,26 @@ def test_carriageway_joins_its_two_way_road():
     assert abs(at(100.0)) < 0.05 and abs(at(250.0) - 5.0) < 0.05, (turns, at(100.0), at(250.0))
 
 
+def test_jog_along_an_angled_link():
+  # a carriageway's last link angles 5 m across to the line of the road it joins, the road's lanes 5 m right of its
+  # line where the carriageway's were on it: the lanes run on straight along the kerb, and so does the lane line
+  # (eased over 10 m either side of the node, it swung 2-3 m left along the link and back)
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import _ease_jogs
+  points = np.array([(0.0, 0.0), (0.0, 100.0), (-5.0, 115.0), (-5.0, 300.0)])
+  along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))))
+  sj = float(along[2])
+  s = np.unique(np.concatenate((np.arange(0.0, along[-1], 2.0), along)))
+  offs = np.where(s < sj, 0.0, 5.0)
+  out = _ease_jogs(s, offs, [sj], points, along)
+  xy = np.stack([np.interp(s, along, points[:, 0]), np.interp(s, along, points[:, 1])], axis=1)
+  d = np.gradient(xy, axis=0)
+  n = np.stack([d[:, 1], -d[:, 0]], axis=1) / np.hypot(d[:, 0], d[:, 1])[:, None]
+  x = (xy + n * out[:, None])[:, 0]
+  near = (s > 80.0) & (s < 140.0)
+  assert np.abs(x[near]).max() < 0.6, x[near]
+  assert np.allclose(_ease_jogs(s, offs, [sj]), np.interp(s, [sj - 10.0, sj + 10.0], [0.0, 5.0]))  # without the route: as before
+
+
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
   from openpilot.tools.sim.bridge.gta5.gta5_world import on_path
@@ -337,6 +357,40 @@ def test_live_meteor_carriageway_into_its_road():
   assert r.lane() == [0, 1]
   assert [(round(s - r.at), list(m)) for s, m, _ in r.lane_maps_along()][:1] == [(18, [1])]
   assert not [c for c in ramps if c[0] < 70.0]
+
+
+def sideways(r: Route, keys, x: float, y: float, heading: float, ahead: list[float]) -> list[float]:
+  """The lane line's offset (m right) of a straight line from the car along its heading, at each distance ahead."""
+  import math
+  line = r.lane_line(keys)
+  fwd = np.array([-math.sin(math.radians(heading)), math.cos(math.radians(heading))])
+  a, side = (line - np.array([x, y])) @ fwd, (line - np.array([x, y])) @ np.array([fwd[1], -fwd[0]])
+  near = (a > 0.0) & (np.abs(side) < 25.0)
+  return [float(np.interp(d, a[near], side[near])) for d in ahead]
+
+
+def test_live_eclipse_carriageways_join():
+  # Eclipse Blvd where the grass median ends and the south carriageway joins the two-way road, a left-turn lane
+  # beginning past the nose. GTA's carriageway link before the node angles 5 m across to the road's line, which runs
+  # down the new left lane: the lane line moved across over 10 m either side of the node, following the link out and
+  # back (a lane's swing left and back right, at 20 m). It now moves across along the link, as the link does.
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  x, y, h = -459.7, 237.8, 261.8
+  r, keys, ramps = live_plan(router, x, y, 83.1, h, (-813.6, 179.5))
+  assert r.lane() == [1, 2] and not [c for c in ramps if c[0] < 60.0]
+  d = sideways(r, keys, x, y, h, [1.0, 10.0, 15.0, 20.0, 30.0, 40.0])
+  line = np.interp([10.0, 15.0, 20.0, 30.0], [1.0, 40.0], [d[0], d[-1]])  # the road runs straight, a little off the car's heading
+  assert max(abs(a - b) for a, b in zip(d[1:5], line, strict=True)) < 1.3, d
+  # further east, the same join (-133.6, 245.0), the route on east and turning left 170 m on: no move into the new
+  # left lane as it begins (it's no turn bay: a junction is between), only before the turn
+  x, y, h = -133.6, 245.0, 276.0
+  r, keys, ramps = live_plan(router, x, y, 95.2, h, (120.0, 240.0))
+  assert r.lane() == [1, 2] and not [c for c in ramps if c[0] < 50.0], ramps  # two changes, by 30 m before the turn
+  d = sideways(r, keys, x, y, h, [1.0, 20.0, 30.0, 40.0])
+  assert max(d) - min(d) < 3.0, d  # the road's own slight angle, no lane's swing
 
 
 def test_live_alta_bay_from_its_opening():

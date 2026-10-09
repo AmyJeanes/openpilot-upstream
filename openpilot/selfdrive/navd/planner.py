@@ -948,7 +948,7 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune,
         # the lane only begins once the changes would have ended: into it from there, by the move
         start = max(opens, pos)
         end = max(min(start + abs(want - at) * LANE_LINE_CHANGE, m.dist), start)
-      elif opens is not None and isinstance(m, Turn) and max(pos, free) <= opens:
+      elif opens is not None and isinstance(m, Turn) and max(pos, free) <= opens and m.dist - opens <= BAY_BEFORE:
         # into a turn bay as it opens, from the lane beside it (the changes to that one first, as late as they may)
         beside = want
         for _, mp, _ in reversed(todo[upto(opens):upto(m.dist)]):
