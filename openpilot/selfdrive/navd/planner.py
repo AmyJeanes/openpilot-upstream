@@ -92,6 +92,14 @@ FORK_MIN_SPEED = 10.0  # m/s, for a fork, as on a freeway
 LANE_CHANGE_TIMEOUT = 10.0  # s
 LANE_CHANGE_GAP = 2.0  # s between lane changes
 LANE_CHANGE_TRIES = 3  # for one turn or fork, without getting nearer its lane
+# Out of a lane that ends (Ends, not at a fork the route may leave by instead) the car has to merge, so a change held
+# by the blind spot isn't given up at its last place: it waits on until the lane's end, and the car slows to a crawl
+# short of it, letting the vehicle alongside go by to fall in behind it. Late, it may start at any speed until the end.
+# A crawl rather than a stop (lowest's floor), as the model won't pull away from a stop by itself.
+MERGE_DECEL = 1.0  # m/s^2
+MERGE_STOP_BEFORE = 10.0  # m before the lane's end
+MERGE_CRAWL = 0.5  # m/s from there
+MERGE_FORK_NEAR = 30.0  # m: lanes ending this near a fork end at the split, as the other branch's
 LANE_LINE_CHANGE = 40.0  # m a lane change takes on the map's lane line
 LANE_STEADY = 0.5  # s a lane reading must hold
 LANE_STALE = 3.0  # s without a steady reading
@@ -1082,6 +1090,8 @@ class Planner:
     self.change_by = math.inf  # self.driven by which the change under way must start
     self.change_went = False  # whether its side has been clear with the blinker on, so openpilot could start it
     self.change_planned = False  # whether it's for the turns and forks ahead (_change_for), rather than a bay or oncoming lane
+    self.change_end: float | None = None  # self.driven where the lane a change must leave ends (MERGE_), None if optional
+    self.change_held = False  # whether the blind spot has held the change under way
     self.change_need: str | None = None  # the side _change_for found a lane change needed to this step
     self.turn_point: np.ndarray | None = None  # where the signaled turn is
     self.signaled_at: np.ndarray | None = None  # where the car was on the route when it signaled it
@@ -1653,10 +1663,13 @@ class Planner:
         continue
       if (i > hi and i <= allowed[0]) or (i < lo and i >= allowed[1]):
         return 0.0  # not until past the one before, whose lanes the car is in
-      return self._change_for(m, lo, hi, route, v, now)
+      must = isinstance(m, Ends) and not any(isinstance(f, Fork) and abs(f.dist - m.dist) < MERGE_FORK_NEAR for f in ahead)
+      return self._change_for(m, lo, hi, route, v, now, must)
     return 0.0
 
-  def _change_for(self, m: Turn | Fork | Through, lo: int, hi: int, route: np.ndarray, v: float, now: float) -> float:
+  def _change_for(self, m: Turn | Fork | Through | Ends, lo: int, hi: int, route: np.ndarray, v: float, now: float,
+                  must: bool = False) -> float:
+    """must: the car's lane ends, so it has to leave it (MERGE_)."""
     i, n = self.lane
     self.change_need = "left" if i > hi else "right"
     changes = lo - i if i < lo else i - hi
@@ -1689,7 +1702,11 @@ class Planner:
       # not across a stop line on the way: from past it, unless there's no room after it
       across = self.tune.plan_city_early and any(d < min(LANE_LINE_CHANGE, room) for d in self.crossings)
       due, each = room < city_lead(changes, v, self.tune) and not across, None
-    if (self.changing is None and room > 0 and due and v > LANE_CHANGE_SPEED and now - self.change_t > LANE_CHANGE_GAP
+    unstarted = self.changing == side and not self.change_went
+    late = room <= 0 and (unstarted or self.changing is None and self._lane_settled(side, now))
+    if must and (late or unstarted and self.change_held):
+      cap = min(cap or math.inf, max(slow_for(0.0, m.dist - MERGE_STOP_BEFORE, v, MERGE_DECEL), MERGE_CRAWL))
+    if (self.changing is None and (room > 0 or must) and due and (v > LANE_CHANGE_SPEED or must) and now - self.change_t > LANE_CHANGE_GAP
         and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)):
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
@@ -1698,7 +1715,7 @@ class Planner:
         self.fwy_slots.append((float(where[0]), float(where[1]), each))
       what = "way straight on" if isinstance(m, Through) else "lane ending" if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
       self._start_change(side, f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
-                         turn=isinstance(m, Turn), by=room, planned=True)
+                         turn=isinstance(m, Turn), by=room, planned=True, end=m.dist if must else None)
     return cap
 
   def _lanes_to(self, m, changes: int) -> int:
@@ -1838,10 +1855,13 @@ class Planner:
       self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
     self.recover = "keepRight"
 
-  def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False):
-    """A lane change to `side`, which may start no later than `by` m on."""
+  def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False,
+                    end: float | None = None):
+    """A lane change to `side`, which may start no later than `by` m on; or, out of a lane that ends `end` m on,
+    until there."""
     self.changing, self.change_shown, self.change_t, self.change_turn = side, False, self.now, turn
     self.change_side, self.change_by, self.change_went, self.change_planned = side, self.driven + by, False, planned
+    self.change_end, self.change_held = None if end is None else self.driven + end, False
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
     self._set_desire(self.change_t)
@@ -1858,9 +1878,13 @@ class Planner:
       return
     if blocked and not self.change_went:
       # as an automatic lane change waits: the blinker stays on while openpilot holds the change for the blind spot, and
-      # it starts once that clears, timed out from then; still held at the last place it may start, it's given up
-      self.change_t = now
-      if self.driven > self.change_by:
+      # it starts once that clears, timed out from then; still held at the last place it may start (the end of a lane
+      # it must leave), it's given up
+      if DEBUG and not self.change_held and self.change_end is not None:
+        print(f"nav: lane change {self.changing} held by the blind spot, the lane ending in {self.change_end - self.driven:.0f} m: " +
+              "waiting on, slowing to fall in behind")
+      self.change_t, self.change_held = now, True
+      if self.driven > (self.change_by if self.change_end is None else self.change_end):
         self._give_up(indicator, "the blind spot still occupied at the last place to start it")
       return
     self.change_went |= self.change_shown
