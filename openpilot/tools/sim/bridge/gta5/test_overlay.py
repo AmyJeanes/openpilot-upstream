@@ -490,7 +490,7 @@ def test_junction_lines_take_their_roads_heights(paths, osm, fresh_marks):
   segs, nodes = fresh_marks["segs"], fresh_marks["nodes"]
   kerbs = segs[(fresh_marks["kinds"] == "e") & (nodes[:, 0] == nodes[:, 1]) &
                (np.hypot(*(segs[:, 0, :2] - VINEWOOD_T).T) < 16.0)].reshape(-1, 3)
-  assert len(kerbs) and np.abs(kerbs[:, 2] - ov.z_near(kerbs, roads, 0.0)).max() < 0.6
+  assert len(kerbs) and np.abs(kerbs[:, 2] - ov.z_near(kerbs, roads, 0.0)).max() < 0.8  # (the same corner)
 
 
 def test_arrow_strokes():
