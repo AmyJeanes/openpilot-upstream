@@ -26,6 +26,9 @@
                                                 drives our route to the destination set; off stops it
   gta5_cmd.py expert route L1 [speed=12 ...]    put the car at an e2e trip's start (a name in ~/gta5test/e2e/*.txt, or
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
+  gta5_cmd.py expert route L1 driver=map [mapdrive='{"seed":3,"preset":"calm"}']
+                                                ... driven by our map driver instead of the game's AI (gta5_mapdrive.py;
+                                                driver=map+ai: the AI takes over where it aborts)
   gta5_cmd.py expert status                     the control file
   gta5_cmd.py debug on [layers=edges,dividers,stops,junctions,arrows,crossings,parking,tapers,flags,route,nav,points,fill|all]
              [width=1] [widths=e:2,d:1.5] [dist=120] [grow=40] [ground=1] [lift=0.05] [casing=1] [thin=0] [sides=1] [force=1]
@@ -45,7 +48,8 @@
                                                 distance to it), printed from the state; gtadirs off stops asking
   gta5_cmd.py state [/tmp/gta5state.json]       save and print the plugin's next state
   expert options (gta5_expert.py): speed style ability aggr task ramp lead launch decel turn_speed arrive=gentle stop_before
-  targets=smooth ahead_min ahead_max past retarget_every limits=0 shortcuts=route|forks|off|always"""
+  targets=smooth ahead_min ahead_max past retarget_every limits=0 shortcuts=route|forks|off|always driver=ai|map|map+ai
+  mapdrive=<JSON: seed preset style bias_max wander on_abort speed plan_check stop_before hold_after>"""
 import glob
 import json
 import os

@@ -11,7 +11,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.dest_snap import DestinationSnapper, Snap
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, OsmLanes, RouteLanes, Section, Span, \
-  ways_from_nodes
+  oneway_of, ways_from_nodes
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, SLIP_LANE, Link, Paths, wrap
 from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
 
@@ -27,9 +27,21 @@ LANES_NEAR = 60.0  # m from a point to look for a link with its lanes
 ON_ROAD = 8.0  # m from the route's line: on its road, wherever its lanes are
 KERB_MARGIN = 1.0  # m outside the kerbs of the route's road still on it
 FORK_AT = 2.0  # m between a fork in GTA's roads and where the map's lanes change for it
+TURN_AT = 25.0  # m between a turn found on the route's shape and the junction or Valhalla's turn it's at
+# Valhalla's maneuvers that leave the road or choose at a junction: turns, U-turns, ramps, exits, keeps, roundabouts
+TURN_MANEUVERS = frozenset({9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 26, 27})
 TURN_STEP = 20.0  # m: the route's turns are found on its own points, with more where they're further apart
 JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
 # the destination on the road it faces, rather than the router's nearest road, often a drive or car park (dest_snap.py)
+# GTA's shortcut links across a painted separation (Router.crossings): rounds of routing again without them
+CROSSING_ROUNDS = 4
+CROSSING_RADIUS = 2  # m about a crossing's point Valhalla keeps the route off
+CROSSING_BACK = 20.0  # m behind the car the last of those starts
+CROSSING_DETOUR = 300.0  # m longer without the crossings: from the car's own road, not the node ahead, if that's shorter
+CLEAR_NEAR = 25.0  # m about a crossing's points to look for the map's other ways (clear_point)
+SEPARATION_GAP = 1.0  # m between two carriageways' lanes: more is hatching, a double line or a kerb between them
+LINK_ALIGN = 60.0  # deg: a carriageway at a shortcut link's end heads this near the link's way
+CARRIAGEWAY_ALIGN = 30.0  # deg: and the two carriageways this near each other's
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
 DEST_HEADING_TOLERANCE = 45.0  # deg
 SIDE_DETOUR = 30.0  # s: arriving with the destination on the kerb side may take this much longer than across the road
@@ -422,7 +434,8 @@ class Route:
 
   def turns(self, distance: float) -> list:
     """The route's turns within `distance` m (navd planner.find_turn along its own shape, once, so each holds still as
-    the car drives on): [[m ahead, side, exit heading (game deg), deg turned]]."""
+    the car drives on), those within TURN_AT m of a junction or a turn Valhalla calls: [[m ahead, side, exit heading
+    (game deg), deg turned]]. A bend of the road alone, however sharp (a hairpin), is no turn."""
     if self._turns is None:
       from openpilot.selfdrive.navd.planner import MIN_AHEAD_MAP, TURN_HOLDS, find_turn
       self._turns = []
@@ -432,8 +445,13 @@ class Route:
                                     for a, d in zip(self.along[:-1], seg, strict=True) if d > 1e-6])
       pts = np.stack([np.interp(s, self.along, self.points[:, 0]), np.interp(s, self.along, self.points[:, 1])], axis=1)
       turn = find_turn(pts, MIN_AHEAD_MAP) if len(pts) >= 2 else None
+      junctions = self.junctions + (list(self.lanes.junctions) if self.lanes is not None else [])
+      moves = [float(self.along[m['begin_shape_index']]) for m in self.maneuvers
+               if m.get('type') in TURN_MANEUVERS and 0 <= m.get('begin_shape_index', -1) < len(self.along)]
       while turn is not None:
-        self._turns.append(turn)
+        # a turn where roads meet or Valhalla calls one; a bend of the road alone is only slowed for (bend_cap)
+        if any(abs(j - turn.dist) <= TURN_AT for j in junctions + moves):
+          self._turns.append(turn)
         turn = find_turn(pts, turn.dist + TURN_HOLDS)
     return [[round(t.dist - self.at, 1), t.side, round(float(t.exit_heading), 1), round(float(t.angle), 1)] for t in self._turns
             if 0.0 < t.dist - self.at < distance]
@@ -479,6 +497,77 @@ class Route:
     return [[round(s - self.at, 1), lo, hi, n] for s, (lo, hi, n) in drops if -behind < s - self.at < distance]
 
 
+def carriageway(osm: OsmLanes, node: int, other: int, u: np.ndarray) -> tuple[np.ndarray, Section] | None:
+  """The carriageway through a map node heading u (a unit vector) within LINK_ALIGN, by its ways other than the
+  one to `other`: (its direction, its cross-section seen that way), None for none."""
+  best = None
+  here = osm.node_xy(node)
+  for m in osm.links.get(node, ()):
+    if m == other:
+      continue
+    w, fwd = osm.pairs[(node, m)]  # travelling node -> m, along the way's direction or not
+    one = oneway_of(osm.ways[w][0])
+    d = osm.node_xy(m) - here
+    length = float(np.hypot(*d))
+    if length < 1e-6:
+      continue
+    d = d / length
+    for sign in (1, -1):  # out of the node towards m, or into it from m
+      along = fwd if sign == 1 else not fwd
+      if one != 0 and (one == 1) != along:
+        continue
+      c = float(sign * d @ u)
+      if c > math.cos(math.radians(LINK_ALIGN)) and (best is None or c > best[0]):
+        best = (c, sign * d, Section.of(osm.lanes(w), FORWARD if along else BACKWARD))
+  return None if best is None else (best[1], best[2])
+
+
+def separated(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
+  """Whether a link from pa to pb (game metres, map nodes) joins two carriageways side by side, heading the same way,
+  with more than SEPARATION_GAP m between their lanes."""
+  na, nb = osm.nodes_at(np.asarray(pa, float), 1.0), osm.nodes_at(np.asarray(pb, float), 1.0)
+  if not na or not nb:
+    return False
+  u = osm.node_xy(nb[0]) - osm.node_xy(na[0])
+  if np.hypot(*u) < 1e-6:
+    return False
+  u = u / np.hypot(*u)
+  ca, cb = carriageway(osm, na[0], nb[0], u), carriageway(osm, nb[0], na[0], u)
+  if ca is None or cb is None or float(ca[0] @ cb[0]) < math.cos(math.radians(CARRIAGEWAY_ALIGN)):
+    return False
+  (da, sa), (_, sb) = ca, cb
+  across = float((osm.node_xy(nb[0]) - osm.node_xy(na[0])) @ np.array([da[1], -da[0]]))  # m right of a's line
+  gap = across + sb.edges[0] - sa.edges[1] if across > 0 else sa.edges[0] - (across + sb.edges[1])
+  return gap > SEPARATION_GAP
+
+
+def clear_point(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> np.ndarray:
+  """The point of a link from pa to pb furthest from the map's other ways near it, for Valhalla to keep a route off the
+  link alone (it takes the edges nearest a point to exclude, and a link's middle can be as near a way it meets)."""
+  pa, pb = np.asarray(pa, float), np.asarray(pb, float)
+  samples = [pa + (pb - pa) * t for t in np.linspace(0.2, 0.8, 7)]
+  na, nb = osm.nodes_at(pa, 1.0), osm.nodes_at(pb, 1.0)
+  own = {osm.pairs[(na[0], nb[0])][0]} if na and nb and (na[0], nb[0]) in osm.pairs else set()
+  segs = set()
+  lo, hi = np.minimum(pa, pb) - CLEAR_NEAR, np.maximum(pa, pb) + CLEAR_NEAR
+  for cx in range(int(lo[0] // osm.CELL), int(hi[0] // osm.CELL) + 1):
+    for cy in range(int(lo[1] // osm.CELL), int(hi[1] // osm.CELL) + 1):
+      for k in osm.cells.get((cx, cy), ()):
+        n = int(osm.ids[k])
+        for m in osm.links.get(n, ()):
+          if osm.pairs[(n, m)][0] not in own:
+            segs.add((min(n, m), max(n, m)))
+  if not segs:
+    return (pa + pb) / 2
+  a = np.array([osm.node_xy(n) for n, _ in segs])
+  ab = np.array([osm.node_xy(m) for _, m in segs]) - a
+
+  def clearance(q):
+    t = np.clip(np.einsum('ij,ij->i', q - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
+    return float(np.hypot(*(a + ab * t[:, None] - q).T).min())
+  return max(samples, key=clearance)
+
+
 class Router:
   def __init__(self, url: str, timeout: float = 2.0, paths: Paths | None = None, osm: OsmLanes | None = None,
                roads: OsmLanes | None = None):
@@ -513,7 +602,7 @@ class Router:
     def location(p, **kw):
       lat, lon = to_lat_lon(float(p[0]), float(p[1]))
       return {'lat': lat, 'lon': lon, **kw}
-    start = location(pos, heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)
+    start = at_car = location(pos, heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)
     snapped = self.paths.snap(pos, z, -bearing) if self.paths is not None and z is not None else None
     if snapped is not None:
       # from the next node of the road at the car's height, as the roads leaving a node are all at its height, where a
@@ -553,6 +642,34 @@ class Router:
       except urllib.error.HTTPError:
         pass
     points, maneuvers = self._shape(trip, snapped)
+    # off GTA's shortcut links across a painted separation between carriageways, which a driver can't take
+    excluded: list[np.ndarray] = []
+    first = trip.get('summary', {}).get('length', 0.0) * 1000.0
+    for _ in range(CROSSING_ROUNDS):
+      spots = [p for p in self.crossings(points) if all(np.hypot(*(p - q)) > 1.0 for q in excluded)]
+      if not spots:
+        break
+      excluded += spots
+      avoid = {**request, 'exclude_locations': [location(p, radius=CROSSING_RADIUS) for p in excluded]}
+      try:
+        trip = self._post('route', {**avoid, 'locations': [start, used]})['trip']
+      except (urllib.error.HTTPError, KeyError):
+        break  # none without them: as Valhalla has it
+      request = avoid
+      points, maneuvers = self._shape(trip, snapped)
+    if excluded and snapped is not None and trip.get('summary', {}).get('length', 0.0) * 1000.0 > first + CROSSING_DETOUR:
+      # a route starting at the node ahead may only set off within SNAP_TOLERANCE of the car's heading, where the
+      # way on without the crossing turns off sharper there: from the car itself instead, else from a little behind
+      # it on its road (the car is about at that node), which the car is then located past
+      back = np.asarray(pos, float)[:2] - CROSSING_BACK * np.array([math.sin(math.radians(bearing)), math.cos(math.radians(bearing))])
+      for begin in (at_car, location(back, heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)):
+        try:
+          other = self._post('route', {**request, 'locations': [begin, used]})['trip']
+        except (urllib.error.HTTPError, KeyError):
+          continue
+        if (other['summary']['length'] - trip['summary']['length']) * 1000.0 < -CROSSING_DETOUR and not self.crossings(self._shape(other, None)[0]):
+          trip, (points, maneuvers) = other, self._shape(other, None)
+          break
     uturns, avoided = sharp_turns(Route(points, maneuvers)), False
     if uturns:
       other = self._without_uturns({**request, 'locations': [start, used]}, snapped, points, uturns)
@@ -586,6 +703,22 @@ class Router:
       limits = np.concatenate((limits[:1], limits))
     return limits
 
+  def crossings(self, points) -> list[np.ndarray]:
+    """Where a route's points take one of GTA's shortcut links from one carriageway to another beside it with a painted
+    separation between them (hatching, a double line or a kerb: their lanes' edges more than SEPARATION_GAP m apart),
+    which GTA's AI may take but a driver can't: each such link's middle. GTA lays a wide road as parallel node chains
+    joined by shortcut links; those between lanes side by side (a dashed line) are a lane change, and stay."""
+    osm = self.osm if self.osm is not None else self.roads
+    if self.paths is None or osm is None or len(points) < 2:
+      return []
+    nodes = self.paths.route_nodes(np.asarray(points, float))
+    out = []
+    for a, b in zip(nodes, nodes[1:], strict=False):
+      link = self.paths.links.get((a, b)) if a is not None and b is not None and a != b else None
+      if link is not None and link.shortcut and separated(osm, self.paths.xy[a], self.paths.xy[b]):
+        out.append(clear_point(osm, self.paths.xy[a], self.paths.xy[b]))
+    return out
+
   def _without_uturns(self, request: dict, snapped, points: np.ndarray, uturns: list[float]) -> dict | None:
     """Another trip for request without U-turns: one of Valhalla's alternatives, else one kept off the U-turns' spots."""
     try:
@@ -599,7 +732,8 @@ class Router:
     spots = [to_lat_lon(float(np.interp(s + UTURN_INTO, along, points[:, 0])), float(np.interp(s + UTURN_INTO, along, points[:, 1])))
              for s in uturns]
     try:
-      trip = self._post('route', {**request, 'exclude_locations': [{'lat': lat, 'lon': lon} for lat, lon in spots]})['trip']
+      trip = self._post('route', {**request, 'exclude_locations': request.get('exclude_locations', []) +
+                                  [{'lat': lat, 'lon': lon} for lat, lon in spots]})['trip']
     except (urllib.error.HTTPError, KeyError):
       return None
     return trip if not sharp_turns(Route(*self._shape(trip, snapped))) else None

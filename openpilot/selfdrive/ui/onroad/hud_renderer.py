@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.onroad.nav_speed import NavSpeedSign
+from openpilot.selfdrive.ui.onroad.turn_signals import TurnSignals
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -78,6 +79,7 @@ class HudRenderer(Widget):
 
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
     self._nav_speed = NavSpeedSign()
+    self._turn_signals = TurnSignals()
     self.show_exp_button = True  # off while navigation's card has the button's spot
 
   def _update_state(self) -> None:
@@ -88,10 +90,12 @@ class HudRenderer(Widget):
       self.set_speed = SET_SPEED_NA
       self.speed = 0.0
       self._nav_speed.update(self.set_speed, False)
+      self._turn_signals.update(False)
       return
 
     controls_state = sm['controlsState']
     car_state = sm['carState']
+    self._turn_signals.update(True)
 
     v_cruise_cluster = car_state.vCruiseCluster
     self.set_speed = (
@@ -132,6 +136,7 @@ class HudRenderer(Widget):
       self._draw_nav_speed(rect)
 
     self._draw_current_speed(rect)
+    self._turn_signals.draw(rect)
 
     if self.show_exp_button:
       button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size

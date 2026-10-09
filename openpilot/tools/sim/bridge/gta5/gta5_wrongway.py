@@ -145,9 +145,11 @@ def suitable(route, lo: float, hi: float) -> str | None:
   return None
 
 
-def pursuit(path: np.ndarray, s_path: np.ndarray, s_car: float, pos, heading_deg: float, v: float) -> float:
-  """Pure pursuit's curvature (left-positive, as the plugin takes it) towards the path's point a lookahead on."""
-  ld = min(max(LOOKAHEAD[0], LOOKAHEAD[1] * v + 4.0), LOOKAHEAD[2])
+def pursuit(path: np.ndarray, s_path: np.ndarray, s_car: float, pos, heading_deg: float, v: float, ld: float | None = None) -> float:
+  """Pure pursuit's curvature (left-positive, as the plugin takes it) towards the path's point a lookahead (ld m, else
+  by speed) on."""
+  if ld is None:
+    ld = min(max(LOOKAHEAD[0], LOOKAHEAD[1] * v + 4.0), LOOKAHEAD[2])
   s = min(s_car + ld, s_path[-1])
   tx, ty = np.interp(s, s_path, path[:, 0]), np.interp(s, s_path, path[:, 1])
   h = math.radians(heading_deg)

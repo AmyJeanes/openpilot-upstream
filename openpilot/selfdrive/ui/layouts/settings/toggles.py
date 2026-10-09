@@ -38,6 +38,8 @@ DESCRIPTIONS = {
     "Show the road's lanes in the open navigation card whenever it has more than one lane your way, with the lane " +
     "openpilot thinks you are in, not only when the route needs a particular lane."
   ),
+  "ShowTurnSignals": tr_noop("When enabled, visual turn indicators are drawn on the HUD."),
+  "BlindSpot": tr_noop("Display warnings when a vehicle is detected in your blind spot, on cars with blind spot monitoring."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
 }
 
@@ -72,6 +74,18 @@ class TogglesLayout(Widget):
         lambda: tr("Always Show Lanes"),
         DESCRIPTIONS["NavShowLanesAlways"],
         "road.png",
+        False,
+      ),
+      "ShowTurnSignals": (
+        lambda: tr("Display Turn Signals"),
+        DESCRIPTIONS["ShowTurnSignals"],
+        "road.png",
+        False,
+      ),
+      "BlindSpot": (
+        lambda: tr("Show Blind Spot Warnings"),
+        DESCRIPTIONS["BlindSpot"],
+        "warning.png",
         False,
       ),
       "DisengageOnAccelerator": (

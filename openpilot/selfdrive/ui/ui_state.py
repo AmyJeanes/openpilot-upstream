@@ -93,6 +93,8 @@ class UIState:
     self.experimental_mode_confirmed: bool = self.params.get_bool("ExperimentalModeConfirmed")
     self.navigate_on_openpilot: bool = self.params.get_bool("NavigateOnOpenpilot")
     self.nav_show_lanes_always: bool = self.params.get_bool("NavShowLanesAlways")
+    self.show_turn_signals: bool = self.params.get("ShowTurnSignals", return_default=True)
+    self.show_blindspot: bool = self.params.get("BlindSpot", return_default=True)
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -255,6 +257,9 @@ class UIState:
     self.experimental_mode_confirmed = self.params.get_bool("ExperimentalModeConfirmed")
     self.navigate_on_openpilot = self.params.get_bool("NavigateOnOpenpilot")
     self.nav_show_lanes_always = self.params.get_bool("NavShowLanesAlways")
+    # on by default, before the manager next starts and writes the defaults
+    self.show_turn_signals = self.params.get("ShowTurnSignals", return_default=True)
+    self.show_blindspot = self.params.get("BlindSpot", return_default=True)
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     now = time.monotonic()

@@ -147,6 +147,17 @@ inline void SET_CLOCK_TIME(int h, int m, int s) { Invoke(0x47C3B5848C3E45D8, h, 
 inline void SET_WEATHER_TYPE_NOW_PERSIST(const char *w) { Invoke(0xED712CA327900C8A, w); }
 inline void SET_OVERRIDE_WEATHER(const char *w) { Invoke(0xA43D5C6FE51ADBEF, w); }
 inline void PAUSE_CLOCK(BOOL toggle) { Invoke(0x4055E40BD2DBEC1D, toggle); }
+inline void CASCADE_SHADOWS_INIT_SESSION() { Invoke(0x03FC694AE06C5A20); }
+inline void CASCADE_SHADOWS_SET_CASCADE_BOUNDS_SCALE(float s) { Invoke(0x5F0F3F56635809EF, s); }
+inline void CASCADE_SHADOWS_SET_SHADOW_SAMPLE_TYPE(const char *t) { Invoke(0xB11D94BC55F41932, t); }
+inline void CASCADE_SHADOWS_CLEAR_SHADOW_SAMPLE_TYPE() { Invoke(0x27CB772218215325); }
+inline void CASCADE_SHADOWS_SET_AIRCRAFT_MODE(BOOL on) { Invoke(0x6DDBF9DFFC4AC080, on); }
+inline void CASCADE_SHADOWS_SET_DYNAMIC_DEPTH_MODE(BOOL on) { Invoke(0xD39D13C9FEBF0511, on); }
+inline void CASCADE_SHADOWS_SET_DYNAMIC_DEPTH_VALUE(float v) { Invoke(0x02AC28F3A01FA04A, v); }
+inline void CASCADE_SHADOWS_ENABLE_ENTITY_TRACKER(BOOL on) { Invoke(0x80ECBC0C856D3B0B, on); }
+inline void SET_TIMECYCLE_MODIFIER(const char *name) { Invoke(0x2C933ABF17A1DF41, name); }
+inline void SET_TIMECYCLE_MODIFIER_STRENGTH(float s) { Invoke(0x82E7FFCD5B2326B3, s); }
+inline void CLEAR_TIMECYCLE_MODIFIER() { Invoke(0x0F07E7745A236711); }
 inline int GET_CLOCK_HOURS() { return Invoke<int>(0x25223CA6B4D20B7F); }
 inline int GET_CLOCK_MINUTES() { return Invoke<int>(0x13D2B8ADD79640F2); }
 inline void SET_WEATHER_TYPE_OVERTIME_PERSIST(const char *w, float secs) { Invoke(0xFB5045B7C42B75BF, w, secs); }
