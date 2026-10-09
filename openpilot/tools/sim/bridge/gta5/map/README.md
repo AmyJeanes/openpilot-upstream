@@ -66,7 +66,8 @@ direction, a lane widening from nothing over 30 m where a way's lane count rises
 joins, the turn arrows into each junction, from which nav takes the lanes for each turn, the junctions it goes straight
 on through onto fewer lanes, with the lanes that carry on (`continuing`: kerb to kerb where the road is as wide on both
 sides, else by its line), and the line through the lanes
-nav plans, on fillets from the lane in to the lane out through turns at junctions, moving across evenly over 10 m either
+nav plans, on fillets from the lane in to the lane out through turns at junctions (in what room there is near the route's
+start or end, as a route from the car with a turn just ahead; kept until the car is past the fillet), moving across evenly over 10 m either
 side of a node where the ways' lanes jog sideways (one carriageway of a divided road joining the middle of the road it
 becomes), and keeping to its lane where a turn bay opens on its left. A map without lane tags (only lane
 counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
@@ -82,7 +83,8 @@ edges, white dashed lines between lanes one way (solid where `change:lanes` forb
 the directions; and the plugin's debug overlay the same lines, from the map's tags. Kerbs are drawn only where the road
 surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
 cutting across between them, where the line between two such ways is a lane line, solid where either's `change:lanes`
-says so (`side_by_side.py`). Where every road at a node is one-way and all run about one way (lanes merging, parting or
+says so (`side_by_side.py`). GTA's lane changes across the painted gore where two such carriageways part or meet have
+no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. Where every road at a node is one-way and all run about one way (lanes merging, parting or
 changing across a carriageway) there is no junction area. Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it (but the lines of a

@@ -79,6 +79,34 @@ def test_no_kerbs_between_ways_side_by_side():
   assert len(kept) == 1 and np.array_equal(kept[0], line) and not between
 
 
+def test_lane_change_across_a_gore():
+  # eastbound carriageways 1 (y = 0) and 2 (y = -14), 6 m wide each with a painted gore 8 m wide between their kerbs,
+  # and GTA's lane changes across it in an X: 3 from 1's node at x = 50 to 2's at x = 70, 4 from 2's at x = 40 to 1's at
+  # x = 60 (Dutch London St). They draw no kerbs and cut none: the gore's edges are the carriageways' kerbs
+  nodes = {1: (0.0, 0.0), 2: (50.0, 0.0), 3: (60.0, 0.0), 4: (100.0, 0.0), 5: (0.0, -14.0), 6: (40.0, -14.0), 7: (70.0, -14.0),
+           8: (100.0, -14.0)}
+  ways = {11: (FREEWAY, [1, 2]), 12: (FREEWAY, [2, 3]), 13: (FREEWAY, [3, 4]), 21: (FREEWAY, [5, 6]), 22: (FREEWAY, [6, 7]),
+          23: (FREEWAY, [7, 8]), 3: (FREEWAY, [2, 7]), 4: (FREEWAY, [6, 3])}
+  osm = make(nodes, ways)
+  side = SideBySide(osm, list(ways), lambda w: 0)
+  assert side.across == {3, 4}
+
+  def kept(wid, right):
+    pts = osm.way_points(wid)
+    lo, hi = osm.lanes(wid).edges(FORWARD)
+    return side.kerb(offset_line(pts, hi if right else lo), None, 0, {wid}, right)
+
+  for wid in (3, 4):
+    assert kept(wid, False) == ([], []) and kept(wid, True) == ([], [])
+  for wid, right in ((11, True), (12, True), (13, True), (21, False), (22, False), (23, False)):
+    pieces = kept(wid, right)[0]
+    length = float(np.hypot(*(osm.way_points(wid)[-1] - osm.way_points(wid)[0])))
+    assert len(pieces) == 1 and abs(float(np.hypot(*np.diff(pieces[0], axis=0).T).sum()) - length) < 0.5, (wid, pieces)
+  # side by side, edge to edge, they're lane changes over the lanes as before (test_no_kerbs_between_ways_side_by_side)
+  near = {k: (x, y if y == 0.0 else -6.0) for k, (x, y) in nodes.items()}
+  assert not SideBySide(make(near, ways), list(ways), lambda w: 0).across
+
+
 def test_no_kerbs_across_a_diverge():
   # a carriageway of four 6 m lanes along y = 0 parts at x = 0 into two of two lanes, both starting from its middle (as
   # GTA lays them), one bearing left to (100, 20), one right to (100, -20); and they merge again from x = 200 to 300
