@@ -247,7 +247,7 @@ def test_one_edge_line_per_edge():
   assert Line(EDGE_LINE, 5.5, 'solid').white and not Line(EDGE_LINE, -5.5, 'solid', 'yellow').white
   # side_by_side's line at a kerb with an edge line on its side would be a second line: osm_to_roads leaves it out
   from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import lined_kerbs
-  assert lined_kerbs([(EDGE, -6.5), (EDGE_LINE, -5.5), (DIVIDER, 0.0), (EDGE, 6.5)]) == {-6.5}
+  assert lined_kerbs(iter([(EDGE, -6.5), (EDGE_LINE, -5.5), (DIVIDER, 0.0), (EDGE, 6.5)])) == {-6.5}  # (as a generator)
   assert lined_kerbs([(EDGE, -5.5), (EDGE_LINE, 5.5), (EDGE, 7.5)]) == {7.5}
   assert lined_kerbs([(EDGE, -5.5), (DIVIDER, 0.0), (EDGE, 5.5)]) == set()
 

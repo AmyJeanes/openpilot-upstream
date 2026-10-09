@@ -168,6 +168,7 @@ def marks(style: str | None, white: bool) -> list[tuple[int, float]]:
 def lined_kerbs(lines) -> set[float]:
   """The kerbs (EDGE offsets, of (kind, offset) pairs) with an edge line (EDGE_LINE) painted on their side of the road:
   side_by_side's line between ways at such a kerb would be a second line beside it, so it's left out."""
+  lines = list(lines)
   edges = [o for k, o in lines if k == EDGE]
   if not edges:
     return set()
