@@ -307,6 +307,44 @@ def lane_changes(nodes, es):
   return out
 
 
+FREEWAY_CLASSES = ('motorway', 'motorway_link')
+
+
+def freeway_lanes(rows):
+  """GTA's one-way links side by side with a freeway's that its freeway flag missed (the Olympic Fwy's split): runs of
+  one-way links of other classes joined end to end, every other link at their nodes a freeway's or its ramps' (the lane
+  changes between them), are its lanes. `rows` are [(a, b, two-way, class)]; returns {row: a freeway row at it}, for
+  its class and limit."""
+  at = defaultdict(list)
+  for r, (a, b, _, _) in enumerate(rows):
+    at[a].append(r)
+    at[b].append(r)
+
+  def candidate(r):
+    return not rows[r][2] and rows[r][3] not in (*FREEWAY_CLASSES, 'service', 'track')
+  out, seen = {}, set()
+  for r0 in range(len(rows)):
+    if r0 in seen or not candidate(r0):
+      continue
+    run, todo, others = set(), [r0], set()  # the run joined end to end, the other links at its nodes
+    while todo:
+      r = todo.pop()
+      if r in run:
+        continue
+      run.add(r)
+      for n in rows[r][:2]:
+        for s in at[n]:
+          if candidate(s):
+            todo.append(s)
+          else:
+            others.add(s)
+    seen |= run
+    freeway = [s for s in others if rows[s][3] in FREEWAY_CLASSES]
+    if freeway and len(freeway) == len(others):
+      out.update(dict.fromkeys(run, freeway[0]))
+  return out
+
+
 def highway(nodes, a, b, fwd, back):
   fa, fb = nodes[a]['f'], nodes[b]['f']
   if (fa[0] | fb[0]) & 8:
@@ -2034,6 +2072,10 @@ def main():
     info[i][5] = tag
     if dest:
       destination[info[i][0]] = dest
+  lanes_of = freeway_lanes([(a, b, bool(back), cls) for _, a, b, _, back, cls, *_ in info])
+  for i, j in lanes_of.items():
+    info[i][5], info[i][6] = 'motorway', info[j][6]
+  print(f"{len(lanes_of)} one-way links among a freeway's links only as its lanes")
   drawn = set()  # way ids
   if args.minimap:  # keeping their limits
     roads = minimap_classes(nodes, [(a, b, cls) for _, a, b, _, _, cls, *_ in info], minimap_roads(args.minimap))

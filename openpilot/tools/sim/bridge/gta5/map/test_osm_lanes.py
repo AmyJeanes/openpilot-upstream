@@ -323,6 +323,15 @@ def test_dead_end_lanes():
   assert dead_end_lanes(chain) == 3 and [r[4] for r in chain] == [1, 1, 0, 0, 0, 0]  # up to DEAD_END_LINKS back
 
 
+def test_freeway_lanes():
+  # a one-way run beside a freeway joined to it only by lane changes is its lanes; one reaching a street isn't
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import freeway_lanes
+  rows = [('A', 'B', False, 'motorway'), ('A', 'C', False, 'motorway_link'), ('C', 'D', False, 'residential'),
+          ('D', 'E', False, 'residential'), ('D', 'B', False, 'motorway_link')]
+  assert set(freeway_lanes(rows)) == {2, 3}
+  assert freeway_lanes(rows + [('E', 'F', True, 'residential')]) == {}
+
+
 def test_neighbours_paint():
   from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import neighbours_paint
 
