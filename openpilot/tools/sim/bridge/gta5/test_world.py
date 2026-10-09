@@ -40,7 +40,8 @@ def test_map_lane_for_nav():
   w = GTA5World.__new__(GTA5World)
   w.lane_matcher, w.junction_areas = matcher(), None
   state = {"pos": [-3.0, -150.0, 0.5], "heading": 0.0}  # northbound in the divided road's southbound lanes
-  assert w._map_lane(state) == {"lane": -1, "lanes": 2, "kind": "oncoming", "bay": False, "oncoming": True, "areas": False}
+  assert w._map_lane(state) == {"lane": -1, "lanes": 2, "kind": "oncoming", "bay": False, "oncoming": True,
+                                "beside": ["oncoming", "own"], "areas": False}
   w.junction_areas = SimpleNamespace(inside=lambda x, y, z: False)
   assert w._map_lane(state)["areas"] is True
   w.junction_areas = SimpleNamespace(inside=lambda x, y, z: True)
