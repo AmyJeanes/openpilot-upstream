@@ -5,6 +5,8 @@
 # (7200) of waiting each; it ends on the plan done, --until or --hours up, the stop file, or the driver taking over.
 #   .../junction_rec.sh /mnt/e/juncrec/plan_jr1.json jr1 --until 2026-10-09T08:00
 #   .../junction_rec.sh --dry-run /mnt/e/juncrec/plan_jr1.json jr1    the trips in order, checked on the live router
+#   .../junction_rec.sh /mnt/e/juncrec/plan_jr1w.json jr1 --wrongway --until ...   with the plan's wrong-way clips
+#                                       (junction_plan.py wrongway; without --wrongway they're left out)
 #   touch ~/gta5test/recruns/STOP      stop it after the trip being driven (the window stays open with the summary)
 #   cat ~/gta5test/recruns/status.json; ~/gta5test/recruns/<name>.manifest.json, <name>.log
 # Expert settings: ~/gta5test/record_settings.txt, read before each trip, as record.sh's. The bridge is restarted with
@@ -51,7 +53,7 @@ if [ "$1" = --inner ]; then
   exit 0
 fi
 
-[ $# -ge 2 ] || { sed -n '2,13p' "$0"; exit 1; }
+[ $# -ge 2 ] || { sed -n '2,15p' "$0"; exit 1; }
 tmux has-session -t gta5 2>/dev/null || tmux new-session -d -s gta5 -n shell
 if tmux list-windows -t gta5 -F '#W' | grep -qx jrec; then
   echo "a jrec window is open already (tmux attach -t gta5); close it first"; exit 1

@@ -293,6 +293,8 @@ class GTA5World(World):
     if state is None or not state.get("inVehicle"):
       return
     self._send_hud()
+    if self.expert.ww_driving:
+      return  # a wrong-way clip's controller sends the controls (gta5_wrongway.py)
     if not self.simulator_state.is_engaged:
       self._send({"type": "control", "active": False})
       return

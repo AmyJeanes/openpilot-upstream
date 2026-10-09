@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 from openpilot.selfdrive.navd.maneuvers import Maneuver, maneuvers, route_point
+from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay
 
 CONTROL = Path("/tmp/gta5_expert.json")
 POLL_EVERY = 0.5  # s
@@ -45,7 +46,7 @@ DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "ag
             "retarget_every": 0.0, "ramp": 0.0, "lead": 2.0, "launch": None, "decel": 0.0, "turn_speed": 6.0,
             "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0,
             "speed_by_class": None, "decel_fast": 0.0, "unstick": False, "unstick_after": 10.0,
-            "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0}
+            "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0, "wrongway": None}
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
 LIMIT_LOOKAHEAD = 600.0  # m, lower speed limits ahead slowed for
@@ -137,6 +138,10 @@ class Expert:
     self.collisions0 = 0  # the plugin counts frames in contact since the car was entered
     self.cmd, self.cmd_t = 0.0, 0.0  # the ramped speed, and when it was worked out
     self.target_t = 0.0
+    self.ww: WrongWay | None = None  # a wrong-way clip (gta5_wrongway.py), with the control file's wrongway
+    self.ww_driving = False  # its controller drives this frame, not the game's AI
+    self.ww_ai = False  # the game's AI was started for its recovery
+    self.ww_map_lane: dict | None = None  # the map's lane reading (lane_match) on the clip's last frame, for recordings
 
   # *** control file ***
 
@@ -159,10 +164,26 @@ class Expert:
     print(f"gta5: expert {'on' if self.on else 'off'} {json.dumps({k: v for k, v in cfg.items() if k != 'on'})}", flush=True)
     if self.on and not was:
       self._reset()
+      self.ww = self._wrongway(cfg.get("wrongway"))
       if self.log is None:
         self.log = open(log_path(), "a", buffering=1)
     elif self.active:
       self._send_settings()  # settings changed while driving
+
+  @staticmethod
+  def _wrongway(spec) -> WrongWay | None:
+    if not spec:
+      return None
+    try:
+      return WrongWay(json.loads(spec) if isinstance(spec, str) else dict(spec))
+    except (ValueError, TypeError, KeyError) as e:
+      print(f"gta5: expert: bad wrongway {spec!r}: {e}", flush=True)
+      return None
+
+  @property
+  def ai_drives(self) -> bool:
+    """The game's AI drives our route (what recordings mark as expert driving), not a wrong-way clip's controller."""
+    return self.active and not self.ww_driving
 
   def _settings(self, speed: float | None = None) -> dict:
     c = self.cfg
@@ -225,13 +246,18 @@ class Expert:
       self._write(state, ai)
       return True  # waiting for the route
     v = state.get("vEgo", 0.0)
-    if not self.active:
+    if not self.active and self.ww is not None:
+      self.active = True
+      self.clear_nav_desire()
+      self.collisions0 = state.get("collisions", 0)
+      self.send({"type": "ai", "on": 0, "indicator": "off"})  # the clip's controller drives first
+    elif not self.active:
       self.active = True
       self.clear_nav_desire()
       self.collisions0 = state.get("collisions", 0)
       self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings(self._start_speed(v))})
       self.next_request = now + REQUEST_EVERY
-    elif not ai.get("on") and now >= self.next_request:
+    elif not ai.get("on") and now >= self.next_request and (self.ww is None or self.ww_ai):
       # the plugin dropped it (reloaded, or the player out of the driver's seat): ask again
       self.next_request = now + REQUEST_EVERY
       self.sent_target = None
@@ -244,10 +270,45 @@ class Expert:
       self._stop("arrived")
       self._write_control({"on": False})
       return False
+    if self.ww is not None and self._wrongway_step(route, state, v, now):
+      self._write(state, ai)
+      return self.on
     if route is not None:
       self._follow(route, state, now)
     self._write(state, ai)
     return True
+
+  def _wrongway_step(self, route, state: dict, v: float, now: float) -> bool:
+    """A wrong-way clip's frame: whether the clip had it (its controller drives, or it ended the trip) rather than the
+    AI following the route."""
+    ww = self.ww
+    self.ww_map_lane = state.get("laneMap")
+    msg = ww.step(route, state, self.game_t, state.get("collisions", 0))
+    for e in ww.take_events():
+      if e.get("phase") != "end":
+        print(f"gta5: wrongway {ww.clip}: {e['phase']}" + (f" ({e['why']})" if e.get("why") else "") +
+              (f", back in our lanes in {e['recovered_s']} s" if "recovered_s" in e else ""), flush=True)
+      self._event("wrongway", **{k: val for k, val in e.items() if k != "event"})
+    if ww.phase == "abort" and self.ww_ai:
+      self.ww_ai = False
+      self.send({"type": "ai", "on": 0, "indicator": "off"})
+    self.ww_driving = msg is not None
+    if msg is not None:
+      self.send(msg)
+    if ww.ai_wanted and not self.ww_ai and ww.phase != "abort":
+      self.ww_ai = True
+      self.target, self.sent_target = None, None  # a fresh target for the AI from here
+      self.send({"type": "ai", "on": 1, "stop": STOP_RANGE, **self._settings(self._start_speed(v))})
+      self.next_request = now + REQUEST_EVERY
+    if ww.finished is not None and ww.finished.startswith("abort"):
+      self.on = False
+      self._stop(f"wrongway {ww.finished}")
+      self._write_control({"on": False})
+      return True
+    if ww.finished == "done" and ww.c["recover"] == "path" and not self.arrived:
+      self.arrived, self.arrived_t = True, self.game_t
+      print("gta5: expert arrived", flush=True)
+    return self.ww_driving or (ww.finished == "done" and ww.c["recover"] == "path")
 
   def _new_route(self, route):
     self.route, self.target, self.anchor, self.final, self.done = route, None, None, False, set()
@@ -515,6 +576,9 @@ class Expert:
       print(f"gta5: expert control file: {e}", flush=True)
 
   def _stop(self, why: str, plugin: bool = True):
+    if self.ww_driving:
+      self.send({"type": "control", "active": False})
+      self.ww_driving = False
     if plugin:
       self.send({"type": "ai", "on": 0, "indicator": "off"})
     else:
@@ -542,4 +606,5 @@ class Expert:
       "oncoming": any(bool(x) and x[0] < 0 for x in (lane, plugin)), "traffic": state.get("traffic"),
       "collisions": state.get("collisions", 0) - self.collisions0 if self.active else 0,
       "collisionsTotal": state.get("collisions"), "street": state.get("street"), "unstick": self.unstick_from is not None,
+      **({"ww": self.ww.info(), "wwDriving": self.ww_driving, "laneMap": state.get("laneMap")} if self.ww is not None else {}),
     }) + "\n")
