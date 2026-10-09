@@ -169,7 +169,7 @@ def test_map_split_takes_its_side():
   r.locate(np.array([0.0, 1.0]), heading=0.0)
   assert maps(r) == [(300, [None, 0], 1)]
   at = ribbon(r, 0, 2)
-  assert abs(at(100.0) - 1.75) < 0.05 and abs(at(275.0) - 5.25) < 0.05
+  assert abs(at(50.0) - 1.75) < 0.05 and abs(at(275.0) - 5.25) < 0.05  # as nav changes for it: 12 s at 15 m/s before 270 m
 
 
 def test_carriageway_joins_its_two_way_road():
@@ -189,6 +189,42 @@ def test_carriageway_joins_its_two_way_road():
     assert maps(r) == [(150, [1], 2)], turns
     at = ribbon(r, 0, 1)
     assert abs(at(100.0)) < 0.05 and abs(at(250.0) - 5.0) < 0.05, (turns, at(100.0), at(250.0))
+
+
+def test_jog_along_an_angled_link():
+  # a carriageway's last link angles 5 m across to the line of the road it joins, the road's lanes 5 m right of its
+  # line where the carriageway's were on it: the lanes run on straight along the kerb, and so does the lane line
+  # (eased over 10 m either side of the node, it swung 2-3 m left along the link and back)
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import _ease_jogs
+  points = np.array([(0.0, 0.0), (0.0, 100.0), (-5.0, 115.0), (-5.0, 300.0)])
+  along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))))
+  sj = float(along[2])
+  s = np.unique(np.concatenate((np.arange(0.0, along[-1], 2.0), along)))
+  offs = np.where(s < sj, 0.0, 5.0)
+  out = _ease_jogs(s, offs, [sj], points, along)
+  xy = np.stack([np.interp(s, along, points[:, 0]), np.interp(s, along, points[:, 1])], axis=1)
+  d = np.gradient(xy, axis=0)
+  n = np.stack([d[:, 1], -d[:, 0]], axis=1) / np.hypot(d[:, 0], d[:, 1])[:, None]
+  x = (xy + n * out[:, None])[:, 0]
+  near = (s > 80.0) & (s < 140.0)
+  assert np.abs(x[near]).max() < 0.6, x[near]
+  assert np.allclose(_ease_jogs(s, offs, [sj]), np.interp(s, [sj - 10.0, sj + 10.0], [0.0, 5.0]))  # without the route: as before
+
+
+def test_arrows_show_from_where_the_lanes_go_on_into_the_junction():
+  # the junction's arrows are tagged on the last way into it alone; the UI's lanes show them from 250 m back while the
+  # lanes carry on into it, also across a left-turn bay opening (before it opens, the two lanes it opens beside)
+  from openpilot.selfdrive.navd import lane_slots as ls
+  from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
+  r = road((150.0, one_way(2, 'right_of:2')), (100.0, one_way(3, 'right_of:3')),
+           (60.0, one_way(3, 'right_of:3', 'left|through|right')), (100.0, one_way(3, 'right_of:3')))
+  lanes = r.lanes
+  assert lanes.turns_at(200.0) == [frozenset({'left'}), frozenset({'through'}), frozenset({'right'})]
+  assert lanes.turns_at(100.0) == [frozenset({'through'}), frozenset({'right'})]
+  assert lanes.turns_at(350.0) == [frozenset()] * 3  # past the junction
+  slots = ls.LaneSlots(r)
+  assert [g['directions'] for g in nm.lane_guide(slots, 100.0, 10.0, None).lanes] == [['straight'], ['right']]
+  assert [g['directions'] for g in nm.lane_guide(slots, 200.0, 10.0, None).lanes] == [['left'], ['straight'], ['right']]
 
 
 def test_turn_markers_on_the_lane_line():
@@ -273,7 +309,7 @@ def test_live_vinewood_bridge_left_bay():
   m = {round(s - r.at): (list(mp), n) for s, mp, n in r.lane_maps_along()}
   assert m[25] == ([1, 2], 3) and m[88] == ([None, 0, 1], 2)
   at = ribbon(r, 1, 2)
-  assert abs(at(r.at + 10.0) - 10.5) < 0.3  # the right lane
+  assert abs(at(r.at) - 10.5) < 0.6  # the right lane, moving over for Elgin Ave from the car, as nav does
   assert abs(at(r.at + 70.0) - 5.0) < 0.3  # the through lane, for Elgin Ave
   assert abs(at(r.at + 110.0) - 5.0) < 0.3  # still it past the junction, now the left of two
 
@@ -296,7 +332,7 @@ def live_plan(router, x, y, z, heading, dest, lane=None):
   r = live_route(router, x, y, z, heading, dest)
   info = r.info(r.length)
   keys = lane_plan(r.rest(), info['forks'], lane or r.lane(), r.lanes_at, 20.0, None, info['laneArrows'], info['laneDrops'],
-                   maps=r.lane_maps(r.length), turns=r.turns(r.length))
+                   maps=r.lane_maps(r.length), turns=r.turns(r.length), crossings=[a - r.at for a in r.stops + r.junctions if a > r.at])
   ramps = [(a[0], b[0], a[1], b[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] + 0.01 and abs(b[1] - a[1]) > 0.01]
   return r, keys, ramps
 
@@ -326,9 +362,20 @@ def test_live_freeway_merge_exit_and_splits():
   assert ramps and ramps[0][1] <= split - r.at + 0.01 and ramps[0][3] == 1.0
 
 
+def bridge_line(r: Route, lane) -> np.ndarray:
+  """The lane line as the bridge draws it (GTA5World._lane_line), from the car's lane."""
+  from openpilot.selfdrive.navd.planner import Planner
+  from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
+  w = GTA5World.__new__(GTA5World)
+  w.nav, w.route, w.lane_line = Planner(), r, (None, 0.0, [])
+  return np.array(w._lane_line({"lane": lane}, 0.0))
+
+
 def test_live_meteor_carriageway_into_its_road():
-  # Meteor St (530.3, 149.1), heading 163, in the right of the divided road's carriageways as they become one road with
-  # a left-turn bay, the route turning right ahead: the carriageway's lane is the road's right lane, no change at all
+  # Meteor St, heading 158-163, in the right of the divided road's carriageways as they become one road with a left-turn
+  # bay, the route turning right ahead: the carriageway's lane is the road's right lane, no change at all; and the lane
+  # line, drawn as the bridge draws it, runs on into it without swinging towards the bay and back (GTA's carriageway
+  # links jog left then right into the road's first node, which lies on the bay's line)
   router = live_router()
   if router is None:
     print("skipped: no live map")
@@ -337,6 +384,50 @@ def test_live_meteor_carriageway_into_its_road():
   assert r.lane() == [0, 1]
   assert [(round(s - r.at), list(m)) for s, m, _ in r.lane_maps_along()][:1] == [(18, [1])]
   assert not [c for c in ramps if c[0] < 70.0]
+  import math
+  x, y, h = 531.3, 153.8, 158.0
+  r = live_route(router, x, y, 99.0, h, (-813.6, 179.5))
+  line = bridge_line(r, r.lane())
+  fwd = np.array([-math.sin(math.radians(h)), math.cos(math.radians(h))])
+  a, side = (line - np.array([x, y])) @ fwd, (line - np.array([x, y])) @ np.array([fwd[1], -fwd[0]])
+  near = (a > 0.0) & (np.abs(side) < 25.0)
+  d = [float(np.interp(v, a[near], side[near])) for v in (5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0)]
+  assert min(d[1:6]) > d[-1] - 1.0, d  # no swing left past where it settles (was 1.9 m)
+  assert max(d[1:6]) < d[0] + 1.0, d  # nor right
+
+
+def sideways(r: Route, keys, x: float, y: float, heading: float, ahead: list[float]) -> list[float]:
+  """The lane line's offset (m right) of a straight line from the car along its heading, at each distance ahead."""
+  import math
+  line = r.lane_line(keys)
+  fwd = np.array([-math.sin(math.radians(heading)), math.cos(math.radians(heading))])
+  a, side = (line - np.array([x, y])) @ fwd, (line - np.array([x, y])) @ np.array([fwd[1], -fwd[0]])
+  near = (a > 0.0) & (np.abs(side) < 25.0)
+  return [float(np.interp(d, a[near], side[near])) for d in ahead]
+
+
+def test_live_eclipse_carriageways_join():
+  # Eclipse Blvd where the grass median ends and the south carriageway joins the two-way road, a left-turn lane
+  # beginning past the nose. GTA's carriageway link before the node angles 5 m across to the road's line, which runs
+  # down the new left lane: the lane line moved across over 10 m either side of the node, following the link out and
+  # back (a lane's swing left and back right, at 20 m). It now moves across along the link, as the link does.
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  x, y, h = -459.7, 237.8, 261.8
+  r, keys, ramps = live_plan(router, x, y, 83.1, h, (-813.6, 179.5))
+  assert r.lane() == [1, 2] and not [c for c in ramps if c[0] < 60.0]
+  d = sideways(r, keys, x, y, h, [1.0, 10.0, 15.0, 20.0, 30.0, 40.0])
+  line = np.interp([10.0, 15.0, 20.0, 30.0], [1.0, 40.0], [d[0], d[-1]])  # the road runs straight, a little off the car's heading
+  assert max(abs(a - b) for a, b in zip(d[1:5], line, strict=True)) < 1.3, d
+  # further east, the same join (-133.6, 245.0), the route on east and turning left 170 m on: no move into the new
+  # left lane as it begins (it's no turn bay: a junction is between), only before the turn
+  x, y, h = -133.6, 245.0, 276.0
+  r, keys, ramps = live_plan(router, x, y, 95.2, h, (120.0, 240.0))
+  assert r.lane() == [1, 2] and not [c for c in ramps if c[0] < 50.0], ramps  # two changes, by 30 m before the turn
+  d = sideways(r, keys, x, y, h, [1.0, 20.0, 30.0, 40.0])
+  assert max(d) - min(d) < 3.0, d  # the road's own slight angle, no lane's swing
 
 
 def test_live_alta_bay_from_its_opening():
