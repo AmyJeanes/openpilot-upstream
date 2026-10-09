@@ -52,7 +52,7 @@ from multiprocessing.connection import Connection
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, DIVIDER, EDGE, FORWARD, PARKING, Section, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, DIVIDER, EDGE, EDGE_LINE, FORWARD, PARKING, Section, \
   offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
@@ -333,6 +333,8 @@ def marking_kinds(line) -> list[tuple[str, float]]:
     return [("e", 0.0)]
   if line.kind == PARKING:
     return [("p", 0.0)]
+  if line.kind == EDGE_LINE:
+    return [("c" if line.style == "yellow" else "w", 0.0)]
   dashed, solid = ("d", "w") if line.kind == DIVIDER else ("y", "c")
   return {"dashed": [(dashed, 0.0)], "solid": [(solid, 0.0)], "double_solid": [(solid, -DOUBLE), (solid, DOUBLE)],
           "dashed_solid": [(dashed, -DOUBLE), (solid, DOUBLE)], "solid_dashed": [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(line.style, [])
@@ -567,7 +569,7 @@ def road_marks(paths, osm) -> dict:
             add(kind, np.column_stack([piece, pz]), (a, b))
             continue
           kerbs, between = side.kerb(piece, pz, layer, {wid}, line.offset == right)  # none between ways side by side
-          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # nor round painted islands
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands, z=pz)):  # nor round painted islands
             add(kind, np.column_stack([p, z_along(p, piece, pz)]), (a, b))
           for p, style in between:
             add("d" if style == "dashed" else "w", np.column_stack([p, z_along(p, piece, pz)]), (a, b))
@@ -586,7 +588,7 @@ def road_marks(paths, osm) -> dict:
     roads = junction_roads(osm, paths, j)
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_areas(kerb, paint.near(kerb, paint.layer[n], kerbs_only=True, but=n)):
-        for p in off_islands(piece, junctions.islands):
+        for p in off_islands(piece, junctions.islands, z=z):
           add("e", np.column_stack([p, z_near(p, roads, z)]), (g, g))
     area = densify(simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), AREA_STEP)
     if not j.minor:  # a driveway's or slip's area across a main road would cut its approach in pieces

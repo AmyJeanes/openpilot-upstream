@@ -607,6 +607,69 @@ def unpainted(samples: list[dict], least: int = UNPAINTED_SAMPLES, edges_seen: b
   return (edges * 2 >= len(files) or not edges_seen) and bare >= UNPAINTED * len(files)
 
 
+EDGE_LINES = ('solid', 'double_solid', 'edge_line')  # the kinds of a painted edge line (a dashed one is a lane line)
+EDGE_SPREAD = 1.0  # m between the asphalt's edges read along a link, at most, to take them as its edge
+EDGE_BEYOND = 0.5  # m beyond the lanes' edge (or edge line) a painted line is something past it: other lanes, a bay
+
+
+def road_edges(samples: list[dict], edges: tuple[float, float], inner: tuple[float, float]):
+  """Where the game files paint a link's edge lines and where its asphalt ends, each side: [(edge line, its colour,
+  asphalt's edge, clear)] left and right, m right of its line seen a -> b (None where not seen in half the samples).
+  `edges`: where the map has its lanes' outer edges; `inner`: its outer lanes' inner edges. An edge line is the
+  outermost solid line within EDGE_REACH of the lanes' edge and LANE_MIN or more out from the outer lane's other edge
+  (so not a centre line). `clear`: nothing is painted between the edge line (else the lanes' edge) and the asphalt's
+  edge, but at the asphalt (MARKER_KERB: a gutter's line), in half the samples: road surface beyond, no other lanes."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < MIN_SAMPLES:
+    return [(None, None, None, False), (None, None, None, False)]
+  need = max(MIN_SAMPLES, (len(files) + 1) // 2)
+
+  def at(m):
+    return sum(m['pair']) / 2 if m.get('pair') else m['offset']
+  out = []
+  for i, (side, sign) in enumerate((('left', -1.0), ('right', 1.0))):
+    found, colour = [], {}
+    for k, d in enumerate(files):
+      near = [(v, m['colour']) for m in d['marks'] if m['conf'] >= CONF and m['type'] in EDGE_LINES
+              and abs((v := at(m)) - edges[i]) <= EDGE_REACH and (v - inner[i]) * sign >= LANE_MIN]
+      if near:
+        v, colour[k] = max(near, key=lambda vc: vc[0] * sign)
+        found.append((k, v))
+    best = max(clusters(found), key=lambda c: c[1], default=None)
+    line = best[0] if best and best[1] >= need else None
+    paint = Counter(colour[k] for k, v in found if line is not None and abs(v - line) <= AGREE).most_common(1)
+    asphalt = [d['kerbs'][side] for d in files if (d.get('kerbs') or {}).get(side) is not None]
+    edge = float(np.median(asphalt)) if len(asphalt) >= need and max(asphalt) - min(asphalt) <= EDGE_SPREAD else None
+    clear = False
+    if edge is not None:
+      start = line if line is not None else edges[i]
+      busy = sum(any(m['conf'] >= CONF and (at(m) - start) * sign > EDGE_BEYOND and (edge - at(m)) * sign > MARKER_KERB
+                     for m in d['marks']) for d in files)
+      clear = busy * 2 < len(files)
+    out.append((line, paint[0][0] if paint else None, edge, clear))
+  return out
+
+
+TRACK_CENTRE = 1.0  # m from a single track's line a painted centre line is looked for
+
+
+def painted_centre(samples: list[dict]) -> bool:
+  """Whether the game files paint a centre line on a link GTA lays as a single track (both directions on one lane on
+  its line): a yellow line, or a white solid or dashed one, within TRACK_CENTRE of its line in half the samples, on a
+  road at least two lanes wide where both its asphalt's edges are read."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < MIN_SAMPLES:
+    return False
+  seen = 0
+  for d in files:
+    kerbs = d.get('kerbs') or {}
+    if kerbs.get('left') is not None and kerbs.get('right') is not None and kerbs['right'] - kerbs['left'] < 2 * LANE_MIN:
+      continue
+    seen += any(m['conf'] >= CONF and abs(m['offset']) <= TRACK_CENTRE and (m['colour'] == 'yellow' or m['type'] in CROSSING)
+                for m in d['marks'])
+  return seen >= max(MIN_SAMPLES, (len(files) + 1) // 2)
+
+
 OUTER_REACH = 1.2  # m from a one-way link's outer lane edge that a white lane line is that edge's
 
 

@@ -428,6 +428,7 @@ def gaps(osm, tiles_dir, ways=None) -> list[Island]:
 # *** flush edges: a way's edge with road surface on beyond it ***
 
 FLUSH_OUT = (0.6, 1.4)  # m beyond an edge the tiles are read: road at both, and it's no kerb
+OPEN_OUT = (2.5, 4.0)  # m further beyond an edge facing no other carriageway the tiles also read road: open surface
 FLUSH_STEP = 0.5  # m between the points read along an edge
 FLUSH_RUN = 2.0  # m of edge flush at least
 FLUSH_STRIP = (0.4, 0.9)  # m inside and beyond the edge the strip marking it as road surface covers
@@ -435,9 +436,10 @@ FLUSH_STRIP = (0.4, 0.9)  # m inside and beyond the edge the strip marking it as
 
 def flush_strips(osm, tiles_dir, ways=None) -> list[tuple[np.ndarray, str, float]]:
   """Where a way's edge has road on beyond it (roadpaint's tiles) and faces another carriageway within GAP_BEYOND
-  (GTA's links side by side, slips and turn lanes parting, where the class layout's edges fall inside the asphalt):
-  strips [N, 2] along those runs, with the way's class, as road surface (area:highway) no kerb is drawn in. Only
-  there: an edge with no carriageway beyond is the road's own edge, kept wherever the layout puts it."""
+  (GTA's links side by side, slips and turn lanes parting, where the class layout's edges fall inside the asphalt), or
+  facing none has road on out to OPEN_OUT too (open hardstanding, as the port's yards and car parks: no kerb there):
+  strips [N, 2] along those runs, with the way's class, as road surface (area:highway) no kerb is drawn in. Elsewhere
+  an edge with road on just beyond it is the road's own edge, kept where the map puts it."""
   from openpilot.tools.sim.bridge.gta5.map.junctions import lane_changes
   from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD
   sys.path.insert(0, str(pathlib.Path(__file__).parent / 'roadpaint'))
@@ -476,16 +478,23 @@ def flush_strips(osm, tiles_dir, ways=None) -> list[tuple[np.ndarray, str, float
   dists = np.arange(GAP_BEYOND[0], GAP_BEYOND[1] + 0.1, 1.0)
   probes = at_edge[:, None] + out_dir[:, None] * dists[None, :, None]
   facing = quads.inside(probes.reshape(-1, 2), np.repeat(owner, len(dists))).reshape(len(at_edge), len(dists)).any(1)
-  cand = np.flatnonzero(facing & np.isfinite(z))
+  cand = np.flatnonzero(np.isfinite(z))
   flush = np.zeros(len(at_edge), bool)
+
+  def road(at, d):  # whether the tiles read road d m beyond the edge points `at`
+    q = at_edge[at] + out_dir[at] * d
+    order = np.lexsort((np.floor(q[:, 1] / rp.TILE), np.floor(q[:, 0] / rp.TILE)))  # tile by tile
+    code = np.zeros(len(at), np.uint8)
+    code[order] = tiles.sample(q[order, 0], q[order, 1], z[at][order])[0]
+    return (code & 7) == rp.ROAD
   if len(cand):
     ok = np.ones(len(cand), bool)
     for d in FLUSH_OUT:
-      q = at_edge[cand] + out_dir[cand] * d
-      order = np.lexsort((np.floor(q[:, 1] / rp.TILE), np.floor(q[:, 0] / rp.TILE)))  # tile by tile
-      code = np.zeros(len(cand), np.uint8)
-      code[order] = tiles.sample(q[order, 0], q[order, 1], z[cand][order])[0]
-      ok &= (code & 7) == rp.ROAD
+      ok &= road(cand, d)
+    for d in OPEN_OUT:
+      far = np.flatnonzero(ok & ~facing[cand])
+      if len(far):
+        ok[far] = road(cand[far], d)
     flush[cand] = ok
   strips, start = [], 0
   for w, e, _, _ in runs:  # runs of flush points along each way's side, FLUSH_RUN long at least

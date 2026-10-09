@@ -23,7 +23,8 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, apart, clip_outside, hull, off_islands
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, EDGE_LINE, FORWARD, MEDIAN, PARKING, OsmLanes, \
+  offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
@@ -158,7 +159,10 @@ def packed(z) -> int | list[int]:
 
 
 def marks(style: str | None, divider: bool) -> list[tuple[int, float]]:
-  """A line's style as lanes.json kinds and offsets from it: [(kind, m right)]."""
+  """A line's style as lanes.json kinds and offsets from it: [(kind, m right)]; `divider` for a white line (between
+  lanes one way, or an edge line)."""
+  if style == 'yellow':  # a one-way road's left edge line
+    return [(KINDS.index('centre'), 0.0)]
   dashed, solid = (1, 2) if divider else (4, 3)
   return {'dashed': [(dashed, 0.0)], 'solid': [(solid, 0.0)], 'double_solid': [(solid, -DOUBLE), (solid, DOUBLE)],
           'dashed_solid': [(dashed, -DOUBLE), (solid, DOUBLE)], 'solid_dashed': [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(style or '', [])
@@ -444,14 +448,14 @@ def main():
     right = max((offset for kind, offset, _ in sig if kind == EDGE), default=None)
     for kind, offset, style in sig:
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
-          marks(style, kind == DIVIDER):
+          marks(style, kind in (DIVIDER, EDGE_LINE)):
         geom = osm.offset_nodes(nodes, offset + off)
         for piece in clip_outside(geom, paint.near(geom, layer, ways, kind == EDGE, offset=offset if kind in PAINTED else None)):
           if kind != EDGE:
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, ways, offset == right)
-          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands, z=z_along(kerb, pts, z) if high else None)):
             add(k, p, layer, z_along(p, pts, z) if high else None)
           for p, s in between:
             add(KINDS.index(s), p, layer, z_along(p, pts, z) if high else None)
@@ -464,7 +468,7 @@ def main():
     for line, geom in geometry:
       if line.kind != EDGE and (not road.markings or line.kind == PARKING):
         continue
-      for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.kind == DIVIDER):
+      for k, off in [(0, 0.0)] if line.kind == EDGE else marks(line.style, line.kind in (DIVIDER, EDGE_LINE)):
         g = offset_line(geom, off) if off else geom
         # a blend's lines move only at its other end: at a junction they're where its lanes put them
         for piece in clip_outside(g, paint.near(g, layer, {wid}, line.kind == EDGE, offset=line.offset if line.kind in PAINTED else None)):
@@ -472,7 +476,7 @@ def main():
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, {wid}, line.offset == right)
-          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # as for the ways above
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands, z=z_along(kerb, pts, z) if high else None)):
             add(k, p, layer, z_along(p, pts, z) if high else None)
           for p, st in between:
             add(KINDS.index(st), p, layer, z_along(p, pts, z) if high else None)
@@ -484,7 +488,7 @@ def main():
     jz = junction_z[n] if high else None
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_outside(kerb, paint.near(kerb, area_layer[n], kerbs_only=True, but=n)):
-        for p in off_islands(piece, junctions.islands):
+        for p in off_islands(piece, junctions.islands, z=jz):
           add(KINDS.index('edge'), p, area_layer[n], jz)
     for s in j.stops:
       add(KINDS.index(s.kind), s.line, area_layer[n], jz)

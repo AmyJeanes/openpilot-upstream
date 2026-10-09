@@ -266,8 +266,22 @@ topcam poses) as tiles, so the check runs on them without the game.
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
     them and no measured road showed one, so our map has none; real maps do.
+  - Road edges from the game files (`ynd_to_osm.road_edges`, `paint_survey.road_edges`): GTA paints many roads' edges
+    as a solid line with road surface beyond it (the Great Ocean Hwy's 7 m lanes with 3-4.5 m shoulders, hill roads,
+    freeways), where the class layout's (or the survey's) kerbs fell on or inside the line. A way's outer lanes widen
+    (or narrow) to the edge lines its sections paint (the outermost solid line within 2.5 m of the lanes' edge, a lane
+    or more out from the lane's other edge, in half the sections), every other line staying put: each side to its own
+    where placement keeps the way's line on the lanes between, else both alike (the line the middle of the lanes) where
+    they're within 0.3 m of as far out, or to the one painted where the other side's asphalt has room. The asphalt
+    beyond, out to the files' edge of it with nothing else painted on it, is a shoulder (`shoulder=left|right|both`,
+    `shoulder:<side>:width`, part of `width`): `osm_lanes.py` puts the kerb at its outer edge and draws the edge line
+    where the lanes run to one (white, yellow on a one-way road's left, or `shoulder:<side>:markings` from the files'
+    colour; `=no` where the lanes don't reach the paint or none is painted, the kerb still out at the asphalt's
+    edge). Nav's lanes stay between the lines.
   - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
-    no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
+    no direction counts, `lane_markings=no`, as real single-track lanes are mapped. Not where the game files paint a
+    centre line on it (`paint_survey.painted_centre`: the port's yard roads, painted two lanes wide with a centre line
+    on open hardstanding): there it is a two-lane road as GTA's narrow links are.
   - A two-way link running on from a one-way link with nothing else at their node (45, mostly service roads and island
     side roads such as Route 68's Fort Zancudo turn) has a direction that goes nowhere there, a lane GTA's AI never
     drives: it is one-way as the one-way link (`dead_end_lanes`), rather than a lane ending at a point.
@@ -358,9 +372,11 @@ topcam poses) as tiles, so the check runs on them without the game.
   between GTA's links on Meteor St; GTA's lane changes across them don't count), each a closed way `area=yes` +
   `traffic_calming=painted_island` with the `colour` of the paint round it (435, 216 outlined). Flush edges: where a
   way's edge faces another carriageway within 8 m with road on beyond it (GTA's links side by side round paint, a
-  slip parting from Route 68, the class layout's edges inside the asphalt), a strip of `area:highway=<its class>`
-  (road surface) along it (264 km of edge). GTA lays its links round paint as round raised islands; no kerb is drawn
-  within 1 m of a painted island or inside road surface (`junctions.off_islands`, the map view and the overlay), the
+  slip parting from Route 68, the class layout's edges inside the asphalt), or facing none with road on out to 4 m
+  beyond it (open hardstanding: the port's yards, car parks), a strip of `area:highway=<its class>` (road surface)
+  along it. GTA lays its links round paint as round raised islands; no kerb is drawn
+  within 1 m of a painted island or inside road surface at its height (within 3 m: a ramp's kerbs over a motorway's
+  surface strips stay; `junctions.off_islands`, the map view and the overlay), the
   map view and the overlay draw an island's outline in its colour, and a junction's corner ends at a painted
   island's tip, square, rather than trimming back over a painted gore (Vinewood Blvd's hatched median beside the
   left-turn lane, hidden under a junction area trimmed 40 m back).

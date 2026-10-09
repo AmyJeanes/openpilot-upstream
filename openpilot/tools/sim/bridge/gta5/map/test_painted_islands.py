@@ -105,6 +105,48 @@ def test_added_areas_take_new_node_ids():
   assert data.ways[1][1] == [268501115, 268501116]
 
 
+def write_surface(d, code_at):
+  """Tile 0_0 at height 0 with the surface code_at(x, y) gives each pixel."""
+  n = 1280
+  xs = (np.arange(n) + 0.5) * 0.05
+  x, y = np.meshgrid(xs, 64.0 - xs)
+  body = struct.pack('<iiiifi', 0, 0, 0, n, 0.05, 1)
+  for arr in (code_at(x, y).astype(np.uint8)[None], np.zeros((1, n, n), np.float32)):
+    c = zlib.compress(arr.tobytes())
+    body += struct.pack('<i', len(c)) + c
+  with open(os.path.join(d, '0_0.bin'), 'wb') as f:
+    f.write(body)
+
+
+def test_no_kerb_on_open_surface():
+  # a 2 + 2 road along y = 20 (kerbs 5.5 m either side), pavement south of it; north, road out to `open_to`
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+  from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
+  ll = np.array([to_lat_lon(x, 20.0) for x in (10.0, 50.0)])
+  osm = OsmLanes(OsmData(np.array([1, 2]), ll[:, 0], ll[:, 1], {1: {'ele': '0'}, 2: {'ele': '0'}},
+                         {1: ({'highway': 'unclassified', 'lanes': '2', 'width': '11'}, [1, 2])}), to_game)
+  with tempfile.TemporaryDirectory() as d:
+    for open_to, strips in ((40.0, 1), (27.0, 0)):  # an open yard: no kerb; road on 1.5 m, a gutter: the kerb stays
+      write_surface(d, lambda x, y, open_to=open_to: np.where((y > 14.5) & (y < open_to), 1, 3))
+      found = painted_islands.flush_strips(osm, d)
+      assert len(found) == strips
+      if strips:
+        assert found[0][0][:, 1].min() > 25.0 and found[0][1] == 'unclassified'
+
+
+def test_islands_of_another_level():
+  # a motorway's road surface strip under a ramp 10 m above it: the ramp keeps its kerb, the motorway's is cut
+  from openpilot.tools.sim.bridge.gta5.map.junctions import Islands
+  strip = np.array([[0.0, -1.0], [50.0, -1.0], [50.0, 1.0], [0.0, 1.0]])
+  kerb = np.array([[10.0, 0.0], [40.0, 0.0]])
+  islands = Islands([strip], [0.0])
+  kept = off_islands(kerb, islands, z=10.0)
+  assert len(kept) == 1 and np.allclose(kept[0][[0, -1]], kerb)
+  assert off_islands(kerb, islands, z=np.array([1.0, 1.5])) == []
+  assert off_islands(kerb, islands) == [] and off_islands(kerb, Islands([strip]), z=10.0) == []  # a height unknown
+
+
 def test_no_kerbs_round_a_painted_island():
   tri = np.array([A, B, C])[:, :2]
   kerb = np.array([[20.0, 19.5], [32.0, 19.5], [40.0, 19.5], [50.0, 19.5]])  # 0.5 m off its base, on to 50 m
