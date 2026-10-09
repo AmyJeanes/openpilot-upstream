@@ -7,6 +7,7 @@ and the router's answers are cached, so a replay is repeatable without a router.
 inputs must write byte-identical logs (the nav layering split's gate: it must not change a decision).
 
   nav_replay.py extract RESULTS.jsonl [TRIP_ID ...] --out DIR   inputs from e2e results, their 2 Hz traces and bridge.jsonl
+  nav_replay.py extract-bsm RESULTS.jsonl --out DIR             inputs from bsm_trial results and bridge.jsonl
   nav_replay.py run DIR --logs OUT [--router URL] [--cache FILE] [--map DIR]
   nav_replay.py diff A B                                         first difference per trip between two `run` outputs
 
@@ -14,6 +15,8 @@ inputs must write byte-identical logs (the nav layering split's gate: it must no
 (the harness supports the bridge before and after the navd split). The inputs: the game's state at 20 Hz from the
 bridge's GTA5_LOG, engaged from the controls logged there, and the model's desire probabilities and lane change state
 from the e2e trace (2 Hz, held between points); the destination is the trip's, given as the e2e harness gives it.
+bsm_trial results have no trace: the lane change state comes from their changes' times, the desire probabilities are 0,
+and there's no model lane (laneHead), so nav's lane is the map's alone.
 """
 import argparse
 import contextlib
@@ -22,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time as real_time
@@ -187,6 +191,48 @@ def extract(results: str, ids: list[str], out: str, log: str):
     print(f"{r['id']}: {len(frames)} frames, refresh {head['refresh']}, tune {head['tune']} -> {path}")
 
 
+def extract_bsm(results: str, out: str, log: str):
+  """Inputs from bsm_trial results: each trip engaged from its mono_engaged, its changes' preLaneChange and
+  laneChangeStarting from their blinker, start and end times."""
+  os.makedirs(out, exist_ok=True)
+  name = os.path.splitext(os.path.basename(results))[0]
+  changes, k = [], 0
+  for line in open(results):
+    r = json.loads(line)
+    if r["kind"] == "change":
+      changes.append(r)
+      continue
+    ch, changes, k = changes, [], k + 1
+    if "mono_engaged" not in r:
+      continue  # not engaged: its setup failed
+    spans = []
+    for c in ch:
+      if c.get("mono_blinker"):
+        spans.append((c["mono_blinker"], c.get("mono_start") or c.get("mono_end") or c["mono_blinker"] + 10.0, "preLaneChange"))
+        if c.get("mono_start"):
+          spans.append((c["mono_start"], c.get("mono_end") or c["mono_start"] + 5.0, "laneChangeStarting"))
+    t0, t1 = r["mono_engaged"] - BEFORE, r["mono_engaged"] + r["secs"] + AFTER
+    states, controls = _window(log, t0 - 120.0, t1)
+    frames, c, engaged = [], 0, False
+    for m, st in states:
+      while c < len(controls) and controls[c][0] <= m:
+        engaged = controls[c][1]
+        c += 1
+      if t0 <= m <= t1:
+        lc = next((what for a, b, what in reversed(spans) if a <= m < b), "off")
+        frames.append({"mono": m, "en": engaged, "meta": {"lc": lc, "pL": 0.0, "pR": 0.0, "kL": 0.0, "kR": 0.0},
+                       "state": {key: v for key, v in st.items() if key not in DROP}})
+    trip = f"{k:02d}-" + re.sub(r"[^A-Za-z0-9-]+", "_", r["trip"][:12]).strip("_")
+    head = {"trip": trip, "results": results, "dest": [float(v) for v in r["spec"].split(">")[1].split(",")[:2]],
+            "tune": {}, "refresh": True, "frames": len(frames), "start": r["mono_engaged"]}
+    path = os.path.join(out, f"{name}-{trip}.jsonl.gz")
+    with gzip.open(path, "wt") as f:
+      f.write(json.dumps(head) + "\n")
+      for fr in frames:
+        f.write(json.dumps(fr) + "\n")
+    print(f"{trip}: {len(frames)} frames, {r['outcome']} -> {path}")
+
+
 # *** run ***
 
 class Clock:
@@ -269,6 +315,12 @@ class Model:
     self.meta.laneChangeState = getattr(self.log.LaneChangeState, meta["lc"], self.log.LaneChangeState.off)
 
 
+class SubMaster(dict):
+  """The world's SubMaster: its modelV2 never received, so no model lane (laneHead) is read."""
+  recv_frame = {"modelV2": 0}
+  recv_time = {"modelV2": 0.0}
+
+
 class Map:
   """The map stack, loaded once for every trip: the router's paths and lanes, and the world's lane matcher."""
   def __init__(self, map_dir: str, router: str | None, cache: str):
@@ -330,7 +382,7 @@ def _world(head: dict, mp: Map, rec: dict):
   w.lock = threading.Lock()
   w.state, w.last_frame_time = None, 0.0
   w.model = Model()
-  w.sm = {"modelV2": w.model}
+  w.sm = SubMaster({"modelV2": w.model})
   w.tesla, w.metric, w.VM, w.log, w.recorder = True, False, None, None, None
   w._send = lambda obj: rec["cmd"].append(obj)
   w.params = Params(head["refresh"], rec["nd"])
@@ -349,7 +401,9 @@ def _world(head: dict, mp: Map, rec: dict):
   tune_cls = type(w.nav.tune)
   w.nav.tune = tune_cls("")
   w.nav.tune.values.update(head["tune"])
-  w.expert = SimpleNamespace(update=lambda state, route, engaged: False)
+  w.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None)
+  if hasattr(gta5_world, "BlindSpot"):
+    w.blindspot = gta5_world.BlindSpot()  # the bridge's monitor, from the logged "nearby"
   w.map_view = MapView(head["dest"])
   w.navigator = Navigator(mp.router())
   _sync(w.navigator)
@@ -455,6 +509,10 @@ def main():
   e.add_argument("ids", nargs="*")
   e.add_argument("--out", required=True)
   e.add_argument("--log", default=BRIDGE_LOG)
+  b = sub.add_parser("extract-bsm")
+  b.add_argument("results")
+  b.add_argument("--out", required=True)
+  b.add_argument("--log", default=BRIDGE_LOG)
   r = sub.add_parser("run")
   r.add_argument("inputs")
   r.add_argument("--logs", required=True)
@@ -467,6 +525,8 @@ def main():
   args = ap.parse_args()
   if args.cmd == "extract":
     extract(args.results, args.ids, args.out, args.log)
+  elif args.cmd == "extract-bsm":
+    extract_bsm(args.results, args.out, args.log)
   elif args.cmd == "run":
     os.environ.setdefault("GTA5_DEBUG", "1")
     os.environ.setdefault("GTA5_NOO", "on")  # the drives were recorded with nav driving

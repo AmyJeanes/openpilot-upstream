@@ -23,18 +23,25 @@ Each change, from nav's "lane change <side>, <why>" line:
 - as the blinker came on: the blind-spot flag that way (flag_at_blinker) and a vehicle truly alongside (beside_at_blinker:
   its body overlapping ours along, within BESIDE_OUT m out from our side);
 - wait_s from the blinker to openpilot's laneChangeStarting, held_s of it with the flag set;
-- whether it started into an occupied side: the flag set at the start (started_flagged, the failure the monitor exists to
-  prevent), a vehicle truly alongside (started_beside), and the vehicle closing from behind in that lane (rear_at_start:
-  its gap, closing speed and time to us, also past the monitor's closing reach);
+- whether it started into an occupied side: the flag set at the start and the model step before it (started_flagged,
+  the failure the monitor exists to prevent; set only as it started, flag_came_on: openpilot's desire helper decided on a
+  carState a little older than the one read here, so the flag may have come on just after), a vehicle truly alongside
+  (started_beside), and the vehicle closing from behind in that lane (rear_at_start: its gap, closing speed and time to
+  us, also past the monitor's closing reach);
 - from the start to LAND s after laneChangeStarting ends: the least sideways clearance alongside (min_side_gap), the least
   gap and time to a vehicle closing from behind in the lane (min_rear_gap, min_ttc), the hardest a vehicle there braked
   (max_brake), and contacts (separate touches, CONTACT_GAP apart); squeezed if any passes SQUEEZE_*;
-- the outcome: done (the map's lanes have the car a lane over that way while the road keeps its lanes; landed: the
-  kind of lane it ends up in, own or oncoming: the map's lanes counted from that side), partial (MOVED_M over without reaching the next lane),
+- the outcome: done (the map's lanes have the car a lane over that way while the road keeps its lanes, or it moved
+  DONE_M over across the road, as where the lane count changes under it; landed: the kind of lane it ends up in, own or
+  oncoming: the map's lanes counted from that side), partial (MOVED_M over without reaching the next lane),
   not_taken (laneChangeStarting came and went without the car moving over: this fork's desire helper has no
   laneChangeFinishing, so it leaves laneChangeStarting the same way whether the model changed lanes or not, and the driver
   then cancels the blinker), given_up (nav's reason), ended (the blinker off unstarted), superseded, or open at the
   trip's end; nav's lowest speed cap while it waited (merge slowing).
+
+The summary splits not_taken and partial by cause: refused (laneChangeStarting over within REFUSED_S, the model's lane
+change probability having stayed low: the desire helper drops back to preLaneChange and the driver cancels the blinker)
+or moved (the model went on with it, but the car didn't get a lane over); and lists the changes never started apart.
 """
 import argparse
 import datetime
@@ -77,6 +84,9 @@ TRACK_JUMP = 5.0  # m/s change between two readings: not the same vehicle
 CONTACT_GAP = 1.0  # s between contact frames that count as separate touches
 MOVED_LANES = 1  # lanes over that way on the map
 MOVED_M = 2.5  # m over that way across the road (the map's offset from its line) without changing lanes: partial
+DONE_M = 4.0  # m over: done, most of GTA's 5.5 m lane, where the lane count changing hides the lane it's in
+REFUSED_S = 2.0  # s: laneChangeStarting ending sooner, the model didn't take the lane change
+ROUTE_WAIT = 20.0  # s for the bridge's route to a trip's destination
 CHANGE_LINE = re.compile(r"nav: lane change (left|right), (.*)")
 GIVEN_UP = re.compile(r"nav: lane change (left|right) given up, (.*)")
 HELD = re.compile(r"nav: lane change (left|right) held by the blind spot")
@@ -282,7 +292,7 @@ def assess(r: dict, states: list[tuple[float, dict]], lanes: Lanes | None):
   shift = max((sign * (x[3] - x0) for x in through if x[1] == n0), default=0.0)  # while the road's line stays put
   r["lane_before"], r["lane_after"], r["lanes_over"], r["shift_m"], r["landed"] = [l0, n0], [l1, n1], over, round(shift, 1), k1
   if r.get("outcome") in (None, "done", "partial", "not_taken", "unknown"):
-    r["outcome"] = "done" if over >= MOVED_LANES else "partial" if shift >= MOVED_M else "not_taken"
+    r["outcome"] = "done" if over >= MOVED_LANES or shift >= DONE_M else "partial" if shift >= MOVED_M else "not_taken"
 
 
 class Change:
@@ -295,7 +305,7 @@ class Change:
                 "pos": [round(v, 1) for v in state.get("pos", [0, 0])[:2]], "v_ask": round(state.get("vEgo", 0.0), 1),
                 "street": state.get("street"), "blinker_after": None, "mono_blinker": None, "flag_at_blinker": None,
                 "beside_at_blinker": None, "wait_s": None, "held_s": 0.0, "held_logged": False, "started": False,
-                "mono_start": None, "mono_end": None, "starting_s": None, "started_flagged": None, "flag_before_start": None,
+                "mono_start": None, "mono_end": None, "starting_s": None, "started_flagged": None, "flag_before_start": None, "flag_came_on": None,
                 "started_beside": None, "rear_at_start": None, "start_v": None, "min_side_gap": None, "min_rear_gap": None,
                 "min_ttc": None, "max_brake": 0.0, "contacts": 0, "contact_frames": 0, "squeezed": False,
                 "lane_before": None, "lane_after": None, "lanes_over": None, "shift_m": None, "landed": None, "outcome": None, "detail": None,
@@ -325,7 +335,8 @@ class Change:
       if lc == STARTING and self.prev_state == PRE:
         r["started"], r["mono_start"] = True, round(mono, 2)
         r["wait_s"] = round(mono - (r["mono_blinker"] or mono), 2)
-        r["started_flagged"], r["flag_before_start"] = flag, self.prev_flag
+        r["started_flagged"], r["flag_before_start"] = flag and self.prev_flag, self.prev_flag
+        r["flag_came_on"] = flag and not self.prev_flag
     elif r["mono_end"] is None and (lc != STARTING or mono - r["mono_start"] > CHANGE_MAX):
       r["mono_end"] = round(mono, 2)
       r["starting_s"] = round(mono - r["mono_start"], 2)
@@ -446,7 +457,7 @@ class Run:
         return (get_json(f"{MAP_VIEW}/state", 1.0).get("nav") or {}).get("routes", 0) > routes0
       except (OSError, ValueError):
         return False
-    if not self.wait(10, routed):
+    if not self.wait(ROUTE_WAIT, routed):
       return "the bridge made no route"
     if not self.set_engaged(True):
       ss = self.sm["selfdriveState"]
@@ -541,7 +552,7 @@ class Run:
 
 def trip_counts(rs: list[dict]) -> dict:
   return {"changes": len(rs), "changes_started": sum(r["started"] for r in rs), "done": sum(r["outcome"] == "done" for r in rs),
-          "not_taken": sum(r["outcome"] in ("not_taken", "partial") for r in rs), "started_flagged": sum(bool(r["started_flagged"]) for r in rs),
+          "not_taken": sum(r["outcome"] in ("not_taken", "partial") for r in rs), "started_flagged": sum(started_flagged(r) for r in rs),
           "started_beside": sum(bool(r["started_beside"]) for r in rs), "given_up": sum(r["outcome"] == "given_up" for r in rs),
           "squeezed": sum(bool(r["squeezed"]) for r in rs), "held": sum(r["held_s"] > 0 for r in rs)}
 
@@ -549,7 +560,7 @@ def trip_counts(rs: list[dict]) -> dict:
 def emit(out, rec: dict):
   r = {k: v for k, v in rec.items() if not k.startswith("_")}
   out.write(json.dumps(r) + "\n")
-  flag = " STARTED INTO A FLAGGED SIDE" if r["started_flagged"] else ""
+  flag = " STARTED INTO A FLAGGED SIDE" if r["started_flagged"] else " (the flag came on as it started)" if r.get("flag_came_on") else ""
   print(f"bsm: {r['trip']} {r['side']} {r['what']}: {r['outcome']} wait {r['wait_s']} held {r['held_s']} " +
         f"lanes {r['lane_before']}->{r['lane_after']} squeezed {r['squeezed']}{flag}", flush=True)
 
@@ -658,6 +669,18 @@ def recheck(paths: list[str], out_path: str):
       out.write(json.dumps(fixed) + "\n")
 
 
+def cause(r: dict) -> str | None:
+  """Why a change that started didn't get the car a lane over (module docstring); None for one that did, or never started."""
+  if not r.get("started") or r.get("outcome") not in ("not_taken", "partial"):
+    return None
+  return "refused" if r.get("starting_s") is not None and r["starting_s"] < REFUSED_S else "moved"
+
+
+def started_flagged(r: dict) -> bool:
+  """Results from before flag_came_on counted a flag that came on just as it started too: the flag set the step before."""
+  return bool(r["started_flagged"]) and r.get("flag_before_start", True) is not False
+
+
 def summary(paths: list[str]):
   rows = read_rows(paths)
   trips = [r for r in rows if r["kind"] == "trip"]
@@ -680,19 +703,28 @@ def summary(paths: list[str]):
           f"beside {sum(bool(r['beside_at_blinker']) for r in rs)}; held {sum(r['held_s'] > 0 for r in rs)} " +
           f"(max {max((r['held_s'] for r in rs), default=0):.1f} s); wait median {waits[len(waits) // 2] if waits else None} " +
           f"max {waits[-1] if waits else None} s")
-    print(f"    STARTED INTO A FLAGGED SIDE {sum(bool(r['started_flagged']) for r in rs)}, beside at start " +
+    print(f"    STARTED INTO A FLAGGED SIDE {sum(started_flagged(r) for r in rs)} (flag came on as it started " +
+          f"{sum(bool(r['started_flagged']) and not started_flagged(r) or bool(r.get('flag_came_on')) for r in rs)}), beside at start " +
           f"{sum(bool(r['started_beside']) for r in rs)}; squeezed {sum(bool(r['squeezed']) for r in rs)}, contacts " +
           f"{sum(r['contacts'] for r in rs)}; outcomes {dict(Counter(r['outcome'] for r in rs))}")
+    causes = Counter(c for r in rs if (c := cause(r)))
+    unstarted = Counter(r["outcome"] for r in rs if not r["started"])
+    if causes or unstarted:
+      print(f"    not taken or partial by cause {dict(causes)}; never started {dict(unstarted)}")
   for r in ch + warm:
     tag = "warmup " if r.get("warmup") else ""
     note = []
-    if r["outcome"] in ("given_up", "not_taken", "partial", "ended", "unknown") or r.get("landed") not in (None, "own"):
-      note.append(f"{r['outcome']} ({r.get('detail') or ''}) lanes {r.get('lane_before')}->{r.get('lane_after')} landed {r.get('landed')}")
+    if not r["started"]:
+      note.append(f"{r['outcome']} ({r.get('detail') or ''}), never started")
+    elif r["outcome"] in ("given_up", "not_taken", "partial", "ended", "unknown") or r.get("landed") not in (None, "own"):
+      why = f" {cause(r)} after {r.get('starting_s')} s" if cause(r) else ""
+      note.append(f"{r['outcome']}{why} ({r.get('detail') or ''}) lanes {r.get('lane_before')}->{r.get('lane_after')} " +
+                  f"shift {r.get('shift_m')} landed {r.get('landed')}")
     closer = r.get("rear_at_start")
     if closer and closer["ttc"] < CLOSER_TTC:
       note.append(f"closer behind at the start {closer}")
     if r["started_flagged"] or r["started_beside"] or r["squeezed"]:
-      note.append(f"flagged {r['started_flagged']} beside {r['started_beside']} side_gap {r['min_side_gap']} rear_gap {r['min_rear_gap']} " +
+      note.append(f"flagged {started_flagged(r)} beside {r['started_beside']} side_gap {r['min_side_gap']} rear_gap {r['min_rear_gap']} " +
                   f"ttc {r['min_ttc']} brake {r['max_brake']} contacts {r['contacts']}")
     if note:
       print(f"    {tag}{r['trip']} t={r['t']} {r['side']} {r['what']} at {r['pos']} v {r.get('start_v') or r['v_ask']}: " + "; ".join(note))

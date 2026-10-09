@@ -102,6 +102,8 @@ MERGE_DECEL = 1.0  # m/s^2
 MERGE_STOP_BEFORE = 10.0  # m before the lane's end
 MERGE_CRAWL = 0.5  # m/s from there
 MERGE_FORK_NEAR = 30.0  # m: lanes ending this near a fork end at the split, as the other branch's
+ANOMALY_NEAR = 20.0  # m: a map error found this near one already reported is the same
+CHANGE_CLEAR = 0.5  # s the blind spot stays clear before openpilot starts a change (desire_helper's BLINDSPOT_CLEAR_TIME)
 LANE_LINE_CHANGE = 40.0  # m a lane change takes on the map's lane line
 LANE_STEADY = 0.5  # s a lane reading must hold
 LANE_STALE = 3.0  # s without a steady reading
@@ -1094,6 +1096,8 @@ class Planner:
     self.change_planned = False  # whether it's for the turns and forks ahead (_change_for), rather than a bay or oncoming lane
     self.change_end: float | None = None  # self.driven where the lane a change must leave ends (MERGE_), None if optional
     self.change_held = False  # whether the blind spot has held the change under way
+    self.change_clear_t: float | None = None  # since when its side has been clear
+    self.change_bay: np.ndarray | None = None  # where the turn is whose bay the change under way is into
     self.change_map_lane: int | None = None  # the map's lane (map_read) the change started from
     self.map_read: dict | None = None  # the car's lane by the map's lanes alone (NavInputs.truth_lane_map)
     self.merge_waits = False  # a merge waiting on nav's and the map's lane readings to agree, as last logged
@@ -1143,12 +1147,16 @@ class Planner:
     self.lane_src = ""  # where self.lane is from: "map" or "model"
     self.lane_log = None  # NAVD_LANE_LOG's file, opened on the first step
     self.lane_disagree: bool | None = None
+    self.events: list[dict] = []  # this step's map errors found (NavOutputs.events)
+    self.reported: list[tuple[str, np.ndarray]] = []  # (kind, where) of the map errors reported
+    self.pos = np.zeros(2)
+    self.route_ahead = np.zeros((1, 2))
 
   def update(self, inp: NavInputs) -> NavOutputs:
     """The step's cruise cap, arrival, requests to the driver and NavDesire's changes."""
-    self.requests, self.desires = [], []
+    self.requests, self.desires, self.events = [], [], []
     (cap, reason), arrived = self._update(inp)
-    return NavOutputs(cap, arrived, self.requests, self.desires, reason)
+    return NavOutputs(cap, arrived, self.requests, self.desires, reason, self.events)
 
   def _update(self, inp: NavInputs) -> tuple[tuple[float, str], bool]:
     """The cruise cap (m/s, 0 for none) and its reason, and whether the car has arrived."""
@@ -1165,7 +1173,7 @@ class Planner:
     self.last_t = now
     self.driven += step
     route = inp.route
-    pos = np.array(inp.pos[:2], dtype=float)
+    pos = self.pos = np.array(inp.pos[:2], dtype=float)
     self._read_lane(inp.truth_lane, now, inp.model_lane)
     self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
     self.classes, self.limits = inp.road_classes, inp.limits
@@ -1203,7 +1211,7 @@ class Planner:
         return (stop, "arrival"), arrived
       self.route_end, self.dest = None, None
       return NO_CAP, False
-    route = np.array(route, dtype=float)
+    route = self.route_ahead = np.array(route, dtype=float)
     waypoint = np.array(inp.dest or (0.0, 0.0), dtype=float)
     self.dest = waypoint if waypoint.any() else route[-1]  # (0, 0) as GTA clears it
     self.route_end = None
@@ -1278,12 +1286,18 @@ class Planner:
     drops = inp.lane_drops if t.lane_drops and self.maps is None else None
     ahead = moves + [m for m in throughs(route, arrows, moves, drops) if turn is None or m.dist < turn.dist]
     if self.maps is not None:
-      ahead += [m for m in lane_ends(self.maps.maps, moves) if turn is None or m.dist < turn.dist]
+      left = [d for d, *_ in inp.forks or [] if d > 0.0 and self._is_skipped(route, d)]
+      ahead += [m for m in lane_ends(self.maps.maps, moves) if (turn is None or m.dist < turn.dist)
+                and not any(abs(d - m.dist) < MERGE_FORK_NEAR for d in left)]  # the branch the car now takes
     self._mark_barriers(ahead, pos, heading)
     self.change_need = None
     caps = [(self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now), "laneChange")]
-    if self.changing is not None and self.change_planned and not self.change_went and self.change_need != self.changing:
+    # a merge waiting on the blind spot isn't dropped while the lane reading is out (lanes merging read badly)
+    unread = self.lane is None and self.change_end is not None and self.driven < self.change_end
+    if self.changing is not None and self.change_planned and not self.change_went and self.change_need != self.changing and not unread:
       self._give_up(indicator, "the lanes ahead no longer need it")
+    if self.changing is not None and self.change_end is not None and self.change_held and not self.change_went:
+      caps.append((self._merge_cap(self.change_end - self.driven, v), "laneChange"))
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, inp.stops or [], inp.junctions or [])
     if turn is not None and turn.dist < t.slow_from:
@@ -1627,8 +1641,12 @@ class Planner:
       return
     if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED:
       return
+    where = self._point(self.route_ahead, turn.dist)
+    if self._into_oncoming(turn.side):
+      self._bay_oncoming(where, turn.side, turn.dist)
+      return
     self.bay_to = self.driven + turn.dist + TURN_HOLDS
-    self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m", by=turn.dist - BAY_LAST)
+    self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m", by=turn.dist - BAY_LAST, bay=where)
 
   def _lanes_for(self, m) -> tuple[int, int]:
     """The lanes of the car's road (self.lane's) to be in for a turn, fork or way straight on: its own lanes at its
@@ -1669,13 +1687,13 @@ class Planner:
         continue
       if (i > hi and i <= allowed[0]) or (i < lo and i >= allowed[1]):
         return 0.0  # not until past the one before, whose lanes the car is in
-      must = isinstance(m, Ends) and not any(isinstance(f, Fork) and abs(f.dist - m.dist) < MERGE_FORK_NEAR for f in ahead)
-      return self._change_for(m, lo, hi, route, v, now, must)
+      split = next((f for f in ahead if isinstance(f, Fork) and abs(f.dist - m.dist) < MERGE_FORK_NEAR), None) if isinstance(m, Ends) else None
+      return self._change_for(m, lo, hi, route, v, now, isinstance(m, Ends) and split is None, split)
     return 0.0
 
   def _change_for(self, m: Turn | Fork | Through | Ends, lo: int, hi: int, route: np.ndarray, v: float, now: float,
-                  must: bool = False) -> float:
-    """must: the car's lane ends, so it has to leave it (MERGE_)."""
+                  must: bool = False, split: Fork | None = None) -> float:
+    """must: the car's lane ends, so it has to leave it (MERGE_); split: the fork lanes ending there split off at."""
     i, n = self.lane
     self.change_need = "left" if i > hi else "right"
     changes = lo - i if i < lo else i - hi
@@ -1687,11 +1705,12 @@ class Planner:
       return 0.0  # the model won't: there's no lane there
     room = m.dist - last
     need = changes * self.tune.lane_change_time
-    if fork and room < 0 and self.changing is None:
+    if (fork or split is not None) and room < 0 and self.changing is None:
       if not self._sure_wrong(lo, hi):
         return 0.0
-      self._skip(route, m.dist, f"{m.side} fork")
-      self.skip_turns_to = self.driven + m.dist + FORK_TURN
+      f = m if fork else split
+      self._skip(route, f.dist, f"{f.side} fork")
+      self.skip_turns_to = self.driven + f.dist + FORK_TURN
       return 0.0
     cap = max(FORK_MIN_SPEED if fork else self.tune.lane_change_min_speed, room / need) if room < need * v else 0.0
     side = "left" if i > hi else "right"
@@ -1716,20 +1735,59 @@ class Planner:
               ("waits, nav's lane and the map's disagreeing" if self.merge_waits else "goes on, the lane readings agreeing"))
     unstarted = self.changing == side and not self.change_went
     late = room <= 0 and (unstarted or self.changing is None and self._lane_settled(side, now))
-    if must and agreed and (late or unstarted and self.change_held):
-      cap = min(cap or math.inf, max(slow_for(0.0, m.dist - MERGE_STOP_BEFORE, v, MERGE_DECEL), MERGE_CRAWL))
-    if (self.changing is None and (room > 0 or must and m.dist > MERGE_STOP_BEFORE) and due and (v > LANE_CHANGE_SPEED or must)
-        and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)
-        and agreed and not self._into_oncoming(side)):
+    if must and (agreed or unstarted) and (late or unstarted and self.change_held):
+      cap = min(cap or math.inf, self._merge_cap(m.dist, v))
+    ready = (self.changing is None and (room > 0 or must and m.dist > MERGE_STOP_BEFORE) and due and (v > LANE_CHANGE_SPEED or must)
+             and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING
+             and self._lane_settled(side, now) and agreed)
+    bay = self._point(route, max(m.dist, 0.0)) if isinstance(m, Turn) and self._turn_bay(m, side) else None
+    if ready and self._into_oncoming(side):
+      if bay is not None:
+        self._bay_oncoming(bay, side, m.dist)
+      ready = False
+    if ready:
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
       if each is not None and self._fwy_slot(where) is None:
         self.fwy_slots.append((float(where[0]), float(where[1]), each))
-      what = "way straight on" if isinstance(m, Through) else "lane ending" if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
+      # lanes ending at a fork are the other branch's: staying in them leaves the route rather than running out of road
+      ends = "lane ending" if must else "lane leaving at the fork"
+      what = "way straight on" if isinstance(m, Through) else ends if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
       self._start_change(side, f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
-                         turn=isinstance(m, Turn), by=room, planned=True, end=m.dist if must else None)
+                         turn=isinstance(m, Turn), by=room, planned=True, end=m.dist if must else None, bay=bay)
     return cap
+
+  @staticmethod
+  def _merge_cap(dist: float, v: float) -> float:
+    """The cruise cap out of a lane ending `dist` m on: slowing to a crawl MERGE_STOP_BEFORE m short of its end."""
+    return max(slow_for(0.0, dist - MERGE_STOP_BEFORE, v, MERGE_DECEL), MERGE_CRAWL)
+
+  def _turn_bay(self, turn: Turn, side: str) -> bool:
+    """Whether the lane a change `side` heads for, for the turn, is a turn bay: a lane opening on the way to it."""
+    if self.maps is None:
+      return False
+    on_way = self.maps.between(-1.0, turn.dist)
+    if not on_way:
+      return False
+    lo, hi = turn.lanes(on_way[-1][2])
+    return bay_opens(on_way, hi if side == "left" else lo) is not None
+
+  def _bay_oncoming(self, where: np.ndarray, side: str, dist: float | None):
+    """A lane change towards a turn bay (for the turn at `where`, `dist` m on) stopped as the map reads the lane that
+    way as oncoming: the bay's geometry is likely wrong, so it's reported, once per place, as a map error event and
+    nav's line."""
+    if any(k == "bay_reads_oncoming" and np.hypot(*(where - p)) < ANOMALY_NEAR for k, p in self.reported):
+      return
+    self.reported.append(("bay_reads_oncoming", where))
+    m = self.map_read or {}
+    self.events.append({"event": "anomaly", "kind": "bay_reads_oncoming", "pos": [round(float(c), 1) for c in self.pos],
+                        "turn_at": [round(float(c), 1) for c in where], "side": side, "turn_dist": None if dist is None else round(dist, 1),
+                        "lane": list(self.lane) if self.lane else None,
+                        "map": {k: m.get(k) for k in ("way", "lane", "lanes", "kind", "beside", "right")}})
+    if DEBUG:
+      print(f"nav: map error: the turn bay {side} for the turn at {where.round(1).tolist()} reads as an oncoming lane " +
+            f"(map lane {m.get('lane')} of {m.get('lanes')} on way {m.get('way')}, beside {m.get('beside')}); no change into it")
 
   def _lanes_to(self, m, changes: int) -> int:
     """The lane changes into a move's lanes from the car's, counting those into lanes still to open on the way (where
@@ -1889,10 +1947,11 @@ class Planner:
     self.recover = "keepRight"
 
   def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False,
-                    end: float | None = None):
+                    end: float | None = None, bay: np.ndarray | None = None):
     """A lane change to `side`, which may start no later than `by` m on; or, out of a lane that ends `end` m on,
-    until there."""
+    waiting on the blind spot as long as it takes; bay: into the bay of the turn there."""
     self.changing, self.change_shown, self.change_t, self.change_turn = side, False, self.now, turn
+    self.change_bay = bay
     self.change_side, self.change_by, self.change_went, self.change_planned = side, self.driven + by, False, planned
     self.change_end, self.change_held = None if end is None else self.driven + end, False
     self.change_map_lane = self.map_read.get("lane") if self.map_read else None
@@ -1911,21 +1970,26 @@ class Planner:
       self._end_change(indicator)
       return
     # never into a lane the map reads as oncoming, whatever nav's own lane says, until the car has moved over (a lane
-    # of its own way then has oncoming lanes beside it); not a turn bay, which can be a way of its own in the median
+    # of its own way then has oncoming lanes beside it); nor into a turn bay that reads so, which is reported
     now_lane = self.map_read.get("lane") if self.map_read else None
     moved = None not in (now_lane, self.change_map_lane) and now_lane != self.change_map_lane
-    if self._into_oncoming(self.changing) and not moved and self.driven >= self.bay_to:
+    if self._into_oncoming(self.changing) and not moved:
+      if self.change_bay is not None:
+        self._bay_oncoming(self.change_bay, self.changing, None)
       self._give_up(indicator, "the map reads the lane that way as oncoming")
       return
-    if blocked and not self.change_went:
+    self.change_clear_t = None if blocked else self.change_clear_t or now
+    if not self.change_went and (blocked or now - self.change_clear_t < CHANGE_CLEAR):
+      if not blocked:
+        return  # clear only a moment yet: openpilot hasn't started it
       # as an automatic lane change waits: the blinker stays on while openpilot holds the change for the blind spot, and
-      # it starts once that clears, timed out from then; still held at the last place it may start (the end of a lane
-      # it must leave), it's given up
+      # it starts once that clears, timed out from then; still held at the last place it may start (unless it's out of
+      # a lane that ends), it's given up
       if DEBUG and not self.change_held and self.change_end is not None:
         print(f"nav: lane change {self.changing} held by the blind spot, the lane ending in {self.change_end - self.driven:.0f} m: " +
               "waiting on, slowing to fall in behind")
       self.change_t, self.change_held = now, True
-      if self.driven > (self.change_by if self.change_end is None else self.change_end):
+      if self.change_end is None and self.driven > self.change_by:  # a merge waits as long as it takes
         self._give_up(indicator, "the blind spot still occupied at the last place to start it")
       return
     self.change_went |= self.change_shown
@@ -1945,7 +2009,7 @@ class Planner:
       return
     if indicator == self.changing:
       self.requests.append("cancelSignal")
-    self.changing, self.change_t, self.change_send_at = None, self.now, 0.0
+    self.changing, self.change_t, self.change_send_at, self.change_bay = None, self.now, 0.0, None
     self.change_hold_until = self.change_t + PARAM_HOLD
     self._set_desire(self.change_t)
 
