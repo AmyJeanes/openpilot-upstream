@@ -807,3 +807,26 @@ def test_city_turn_changes_drawn_where_nav_starts_them():
   late = nav_mod.Tune()
   late.values['plan_city_early'] = False
   assert abs(change(tune=late)[1] - (turn - 30.0)) < 1.0
+
+
+def test_turn_lane_changes_not_held_by_junction_nodes():
+  # a right turn 250 m on from the left of three lanes at 8 m/s, GTA's junction nodes every 20 m on the way (side
+  # streets) and a stop line 16 m before the turn: the changes start where nav's lead says (2 x 8 s + 4 s at 8 m/s
+  # before 30 m short of the turn), not only once no junction node is within 40 m; and the overlay's signal marker is
+  # where the first change's blinker comes on
+  route = route_to_turn(250.0)
+  turn = find_turn(route, nav_mod.MIN_AHEAD_MAP).dist
+  d = Drive((0, 3), v=8.0)
+  y, started, marker = 0.0, None, None
+  while y < 200.0 and started is None:
+    extra = {"stops": [turn - 16.0 - y], "junctions": [j - y for j in np.arange(20.0, turn, 20.0) if j > y]}
+    d.step(route, y, extra)
+    if d.nav.changing:
+      started = turn - y
+    if marker is None and d.nav.lane is not None:  # once nav has the car's lane
+      ahead = np.array([p for p in (route - [0.0, y]).tolist() if p[1] >= 0.0])
+      marker = d.nav.turn_points(ahead, [], extra["stops"], extra["junctions"])[1][1] + y
+    y += d.v * 0.05
+  lead = 30.0 + (2 * nav_mod.LANE_CHANGE_TIME + nav_mod.LANE_CHANGE_EARLY) * 8.0
+  assert started is not None and started >= lead - 20.0, started
+  assert marker is not None and abs(marker - (turn - lead)) < 5.0, marker

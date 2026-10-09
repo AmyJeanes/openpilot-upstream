@@ -345,7 +345,7 @@ def live_plan(router, x, y, z, heading, dest, lane=None):
   r = live_route(router, x, y, z, heading, dest)
   info = r.info(r.length)
   keys = lane_plan(r.rest(), info['forks'], lane or r.lane(), r.lanes_at, 20.0, None, info['laneArrows'], info['laneDrops'],
-                   maps=r.lane_maps(r.length), turns=r.turns(r.length), crossings=[a - r.at for a in r.stops + r.junctions if a > r.at])
+                   maps=r.lane_maps(r.length), turns=r.turns(r.length), crossings=[a - r.at for a in r.stops if a > r.at])
   ramps = [(a[0], b[0], a[1], b[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] + 0.01 and abs(b[1] - a[1]) > 0.01]
   return r, keys, ramps
 
@@ -436,13 +436,13 @@ def test_live_eclipse_carriageways_join():
   d = sideways(r, keys, x, y, h, [1.0, 10.0, 15.0, 20.0, 30.0, 40.0])
   line = np.interp([10.0, 15.0, 20.0, 30.0], [1.0, 40.0], [d[0], d[-1]])  # the road runs straight, a little off the car's heading
   assert max(abs(a - b) for a, b in zip(d[1:5], line, strict=True)) < 1.3, d
-  # further east, the same join (-133.6, 245.0), the route on east and turning left 170 m on: no move into the new
-  # left lane as it begins (it's no turn bay: a junction is between), only before the turn
+  # further east, the same join (-133.6, 245.0), the route on east and turning left 170 m on: the move into the left
+  # lane is nav's early one for the turn, from the car, not one starting as the new left lane begins at the nose (no
+  # turn bay: a junction is between)
   x, y, h = -133.6, 245.0, 276.0
   r, keys, ramps = live_plan(router, x, y, 95.2, h, (120.0, 240.0))
-  assert r.lane() == [1, 2] and not [c for c in ramps if c[0] < 50.0], ramps  # two changes, by 30 m before the turn
-  d = sideways(r, keys, x, y, h, [1.0, 20.0, 30.0, 40.0])
-  assert max(d) - min(d) < 3.0, d  # the road's own slight angle, no lane's swing
+  turn = r.turns(r.length)[0][0]
+  assert r.lane() == [1, 2] and ramps and ramps[0][0] < 1.0 and ramps[-1][1] <= turn - 30.0 + 0.1, ramps
 
 
 def test_live_fx2_right_carriageway_from_the_split():

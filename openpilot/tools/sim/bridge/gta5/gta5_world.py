@@ -695,7 +695,7 @@ class GTA5World(World):
     line = r.lane_line(lane_plan(r.rest(), forks, lane, r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
                                  r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length),
                                  classes=r.changes(r.classes, r.length), limits=r.changes(r.limit_list, r.length),
-                                 fwy=self.nav.fwy_state(), crossings=[a - r.at for a in r.stops + r.junctions if a > r.at]))
+                                 fwy=self.nav.fwy_state(), crossings=[a - r.at for a in r.stops if a > r.at]))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 
