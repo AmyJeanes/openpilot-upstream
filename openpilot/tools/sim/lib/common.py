@@ -55,6 +55,8 @@ class SimulatorState:
 
     self.left_blinker = False
     self.right_blinker = False
+    self.left_blindspot = False  # a vehicle in the blind spot that side, as the car's blind-spot monitor reports it
+    self.right_blindspot = False
 
     self.speed_limit: float = 0  # m/s, 0 if unknown
     self.speed_limit_follow = False  # whether the set speed follows the speed limit as it changes, as from a map

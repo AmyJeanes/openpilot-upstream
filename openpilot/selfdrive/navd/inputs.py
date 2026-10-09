@@ -38,6 +38,8 @@ class NavInputs:
   lane_maps: list | None = None
   turns: list | None = None  # the route's own turns, found once along it: [[m ahead, side, exit heading, deg turned], ...]
   two_way: bool | None = None  # the road here, None unknown
+  left_blindspot: bool = False  # a vehicle in the blind spot that side (carState's blind-spot monitor)
+  right_blindspot: bool = False
   # truth
   pos: tuple | list = (0.0, 0.0)  # [x, y] m
   heading: float = 0.0  # deg
