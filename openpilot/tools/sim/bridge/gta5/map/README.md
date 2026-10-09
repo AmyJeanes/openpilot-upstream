@@ -90,7 +90,7 @@ buffer between them). GTA's X of lane changes between two links lies over both
 links' lines, but they stay carriageways with that line between them. GTA's lane changes across the painted gore where
 two such carriageways part or meet have no kerbs and cut none (Dutch London St): the gore's edges are the carriageways'
 own kerbs. Where a carriageway parts or merges, a branch's edge off every way's lanes inside the carriageway carried
-on is the gore's painted edge, a solid line. A turn bay GTA starts from
+on is the gore's painted edge, a solid line (not a lane change's). A turn bay GTA starts from
 a two-way road's middle, where the road carries on narrower by the bay's lane, has the wider road's kerb carried on
 straight along its outside to the bay's end, where its outer edge meets it (Vinewood Blvd before Meteor St). Where every road at a node
 is one-way and all run about one way (lanes merging, parting or changing across a carriageway) there is no junction

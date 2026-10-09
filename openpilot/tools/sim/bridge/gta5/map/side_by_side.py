@@ -244,7 +244,8 @@ class SideBySide:
     begin, finish = {r[0] for r in refs} - {r[-1] for r in refs}, {r[-1] for r in refs} - {r[0] for r in refs}
     parted = {n for n in begin | finish if self.gores.get(n) and  # into carriageways, not only a lane change
               sum(w not in self.changes for w in (self.starts_at[n] if n in begin else self.ends_at[n])) >= 2}
-    if covered.any() and parted and not ways & self.changes and all(Junctions.freeway(self.osm.ways[w][0]) for w in ways):
+    if covered.any() and parted and not ways & self.changes and all(Junctions.freeway(self.osm.ways[w][0]) for w in ways) and \
+        not any(self.crosses(w) for w in ways):
       # a freeway's, inside the carriageway the ways part from or merge into but on no way's lanes: the painted gore's edge
       _, gore, _, _ = self._cover(line, z, layer, ways, False, quads=False, gore_nodes=parted)
       _, on_lanes, _, _ = self._cover(line, z, layer, ways, False, gores=False)
