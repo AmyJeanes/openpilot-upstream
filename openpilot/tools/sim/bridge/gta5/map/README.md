@@ -87,7 +87,8 @@ says so (`side_by_side.py`). GTA's lane changes across the painted gore where tw
 no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. Where every road at a node
 is one-way and all run about one way (lanes merging, parting or changing across a carriageway) there is no junction
 area; GTA's lane changes (`junctions.lane_changes`), cutting across at up to 60 degrees, don't count against that
-where two carriageways are left to say it (the hatched slip island by Vinewood Blvd's stop line). Zoomed in, junctions are drawn as
+where two carriageways are left to say it (the hatched slip island by Vinewood Blvd's stop line). Nor round painted
+islands (`traffic_calming=painted_island`), road surface. Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it (but the lines of a
 road carried straight on past side roads, as the main road's centre line runs on across them) nor where the roads
@@ -332,7 +333,22 @@ topcam poses) as tiles, so the check runs on them without the game.
   features.jsonl. Of the 9724 approaches, those with a stop line painted across their own lanes and none in the map
   went from 126 to 28 (the rest are crossings' edges); 48 more have a painted STOP word and no line (the port's grid).
   A stop line painted level with the road it meets, nearer the junction's node than the class layout's kerbs meet,
-  is drawn where it's painted, its road trimmed square where the kerbs meet (junctions.py).
+  is drawn where it's painted, along that road's edge (between where the kerbs meet it: square across GTA's link it
+  lay askew at a skewed T, Vinewood Park Dr), inside the junction's area, which is shaped as without it: cut back to
+  it, the road's kerbs ran out across the other road's lanes (junctions.py).
+- Painted islands and flush edges (`painted_islands.py`), from roadpaint's height-layered tiles beside its polylines
+  (road, kerb, pavement or gutter at each height; a raised island reads pavement or kerb). Painted islands, flat
+  painted areas with road all round them: areas outlined in white or yellow (the painted triangle where Mt Haan Dr's
+  side road parts), and road surface between carriageways that no way's lanes cover (the chevron-hatched gores
+  between GTA's links on Meteor St; GTA's lane changes across them don't count), each a closed way `area=yes` +
+  `traffic_calming=painted_island` with the `colour` of the paint round it (435, 216 outlined). Flush edges: where a
+  way's edge faces another carriageway within 8 m with road on beyond it (GTA's links side by side round paint, a
+  slip parting from Route 68, the class layout's edges inside the asphalt), a strip of `area:highway=<its class>`
+  (road surface) along it (264 km of edge). GTA lays its links round paint as round raised islands; no kerb is drawn
+  within 1 m of a painted island or inside road surface (`junctions.off_islands`, the map view and the overlay), the
+  map view and the overlay draw an island's outline in its colour, and a junction's corner ends at a painted
+  island's tip, square, rather than trimming back over a painted gore (Vinewood Blvd's hatched median beside the
+  left-turn lane, hidden under a junction area trimmed 40 m back).
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /

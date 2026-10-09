@@ -28,12 +28,17 @@ map as on our GTA V one.
   one (nearest past its mouth), and for one junction only: where the tag faces two (the node's ways drawn opposite ways
   out of it), the one whose mouth is nearer; no nearer the junction than its mouth, and behind a crossing
   (`footway=crossing`) near it. Signals on a
-  junction's own node stop every way into it at the mouth. A stop line surveyed where it's painted
-  (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that, unless its kerbs
-  meet the next road's further out (a line painted level with the road it meets): it's trimmed there, square.
+  junction's own node stop every way into it at the mouth (a directed one, those it faces), but for a directed one
+  already placed on another junction's approach (GTA's light where a slip parts, for the junction ahead). A stop line surveyed where it's painted
+  (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that; one nearer
+  than where its kerbs meet the next roads' (painted level with the road it meets) is inside the junction's area,
+  shaped as without it, and lies along that road's edge.
+- Kerbs aren't drawn within ISLAND_REACH of a painted island (`traffic_calming=painted_island`) or a road surface
+  area (`area:highway`) (off_islands).
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
   road has no stop or give way line or crossing into it, nothing of a higher class and wider meets it there, and its
-  lines meet the same lines of the road on the far side at the junction's node (a turn lane's line, which doesn't, is
+  lines meet the same lines of the road on the far side at the junction's node (or, between two of its nodes, of the
+  ways inside it it runs on along, as through a slip triangle) (a turn lane's line, which doesn't, is
   left out). One road per junction, the highest class, then the widest; none where another as important crosses it (a
   crossroads of equals). Where it's a priority road both sides (`priority_road=designated` / `yes_unposted`), or only
   minor roads meet it (service roads, tracks, one-lane slips, narrower than MINOR_SHARE of it), its lines
@@ -66,6 +71,7 @@ BUNDLE_GAP = 0.5  # m: ... and less than this apart (or overlapping) are one roa
 MEDIAN_REACH = 25.0  # m apart at most: a divided road's carriageways out of a junction, its median's nose squared across
 STOP_REACH = 40.0  # m beyond a junction's mouth its stop lines can be
 STOP_SETBACK = 0.5  # m: a stop line at the mouth is this far out from it
+STOP_SKEW = 40.0  # deg off square across its road a stop line along the road it meets may be
 MERGE_GAP = 2.0  # m: junctions whose trimmed ends come closer than this along the road between them ...
 MERGE_LINK = 20.0  # m: ... are one where that road is shorter than this; else both are trimmed less
 MAX_SPAN = 60.0  # m across a junction's nodes, at most, from merging
@@ -73,6 +79,7 @@ TRIANGLE_LINK = 40.0  # m: three junction nodes joined each to each by roads sho
 TRIANGLE_SPAN = 40.0  # m: ... and no further apart than this, are one junction
 CROSSING_WIDTH = 3.0  # m: a pedestrian crossing's painted width
 CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes between its stop lines and it
+ISLAND_REACH = 1.0  # m round a painted island (traffic_calming=painted_island) within which no kerb is drawn
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
@@ -137,6 +144,63 @@ def lane_changes(osm: OsmLanes, ways) -> set[int]:
     if all(ends):
       out.add(wid)
   return out
+
+
+class Islands:
+  """Outlines [K, 2] (closed) kerbs keep off, by CELL squares."""
+  def __init__(self, polys: list[np.ndarray]):
+    self.polys = polys
+    self.cells: dict[tuple[int, int], list[int]] = {}
+    for n, p in enumerate(polys):
+      lo, hi = p.min(0) // CELL, p.max(0) // CELL
+      for cx in range(int(lo[0]), int(hi[0]) + 1):
+        for cy in range(int(lo[1]), int(hi[1]) + 1):
+          self.cells.setdefault((cx, cy), []).append(n)
+
+  def __len__(self) -> int:
+    return len(self.polys)
+
+  def near(self, lo: np.ndarray, hi: np.ndarray) -> list[np.ndarray]:
+    found = {n for cx in range(int(lo[0] // CELL), int(hi[0] // CELL) + 1) for cy in range(int(lo[1] // CELL), int(hi[1] // CELL) + 1)
+             for n in self.cells.get((cx, cy), ())}
+    return [self.polys[n] for n in sorted(found) if (self.polys[n].max(0) >= lo).all() and (self.polys[n].min(0) <= hi).all()]
+
+
+def off_islands(line: np.ndarray, islands, reach: float = ISLAND_REACH, step: float = 0.25,
+                min_len: float = 0.3) -> list[np.ndarray]:
+  """The pieces of a line [N, 2] not inside, nor within reach of, any of the outlines (Islands, or a list of [K, 2])."""
+  if not len(islands):
+    return [line]
+  lo, hi = line.min(0) - reach, line.max(0) + reach
+  near = islands.near(lo, hi) if isinstance(islands, Islands) else \
+    [p for p in islands if (p.max(0) >= lo).all() and (p.min(0) <= hi).all()]
+  if not near:
+    return [line]
+  pts = densify(line, step)
+  out = np.zeros(len(pts), bool)
+  for p in near:
+    ring = np.vstack([p, p[:1]]) if np.hypot(*(p[-1] - p[0])) > 1e-6 else p
+    a, ab = ring[:-1], np.diff(ring, axis=0)
+    t = np.clip(np.einsum('qsk,sk->qs', pts[:, None] - a[None], ab) / np.maximum(np.einsum('sk,sk->s', ab, ab), 1e-12)[None], 0.0, 1.0)
+    dist = np.hypot(*(a[None] + ab[None] * t[..., None] - pts[:, None]).transpose(2, 0, 1)).min(axis=1)
+    x, y = pts[:, None, 0], pts[:, None, 1]  # inside: even-odd, as an outline needn't be convex
+    spans = (a[None, :, 1] > y) != (ring[None, 1:, 1] > y)
+    dy = np.where(ab[:, 1] == 0.0, 1e-12, ab[:, 1])[None]
+    cross = x < a[None, :, 0] + (y - a[None, :, 1]) * ab[None, :, 0] / dy
+    out |= (dist < reach) | ((spans & cross).sum(axis=1) % 2 == 1)
+  pieces, k = [], 0
+  while k < len(pts):
+    if out[k]:
+      k += 1
+      continue
+    e = k
+    while e < len(pts) and not out[e]:
+      e += 1
+    piece = pts[k:e]
+    if len(piece) >= 2 and float(np.hypot(*np.diff(piece, axis=0).T).sum()) >= min_len:
+      pieces.append(piece)
+    k = e
+  return pieces
 
 
 class Poly:
@@ -361,7 +425,7 @@ def _faces(tags: dict, m: 'Member', k: int) -> bool:
   if facing not in ('forward', 'backward'):
     return True
   wanted = facing == 'backward'  # the way runs out of the junction where traffic towards it goes backward
-  return any(m.ways[q][1] == wanted for q in (k - 1, k) if q < len(m.ways))
+  return any(m.ways[q][1] == wanted for q in (k - 1, k) if 0 <= q < len(m.ways))
 
 
 @dataclass
@@ -394,7 +458,8 @@ class Arm:
   width: float  # m, its widest member's
   trim: float = 0.0
   cap: float = MAX_TRIM  # m: trimmed no further than this, short of the next junction
-  stop: float = math.inf  # m: back to its surveyed stop line, unless its kerbs meet the next arms' further out
+  stop: float = math.inf  # m: back to its surveyed stop line, where that's out past where its kerbs meet the next arms'
+  meets: tuple = (None, None)  # where its right and left kerbs meet the next arms' (shape), else None
 
   def mouth(self) -> tuple[np.ndarray, np.ndarray]:
     """Its kerbs where it's trimmed: (right, left)."""
@@ -456,6 +521,13 @@ class Junctions:
           self.steps.setdefault(n, []).append((wid, refs[i + 1], True))
     self.junction_nodes = {n for n, s in self.steps.items() if len(s) >= 3}
     self.lane_changes = lane_changes(osm, self.ways)
+    # painted islands: road surface, the kerbs GTA's links round them suggest aren't there
+    painted = [(osm.xy[osm.data.index(refs)], tags.get('colour')) for tags, refs in osm.data.ways.values()
+               if tags.get('traffic_calming') == 'painted_island' and len(refs) >= 4]
+    surfaces = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values() if 'area:highway' in tags and len(refs) >= 4]
+    self.painted_islands = [xy for xy, _ in painted]  # their tips end junctions' corners (shape)
+    self.islands = Islands(self.painted_islands + surfaces)  # road surface: no kerb in it
+    self.island_outlines = [(xy, colour) for xy, colour in painted if colour in ('white', 'yellow')]  # drawn as painted
     self.crossings = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values()
                       if tags.get('footway') == 'crossing' and len(refs) >= 2]
     self._crossing_cells = self._cells(self.crossings)
@@ -719,7 +791,7 @@ class Junctions:
     for arm in arms:
       arm.cap = min([MAX_TRIM] + [caps[k] for m in arm.members if (k := (m.start, m.ways[0][0])) in (caps or {})])
       arm.stop = min([along - STOP_SETBACK for m in arm.members for along in self._surveyed_stops(m)], default=math.inf)
-    corners = self.shape(arms)
+    corners = self.shape(arms, self._islands_near(nodes))
     self.square(arms)
     polygon, kerbs = self.outline(arms, corners)
     for arm in arms:
@@ -854,7 +926,7 @@ class Junctions:
         p = b.line.at(b.trim)
         s = a.line.project(p)
         if np.hypot(*(a.line.at(s) - p)) <= MEDIAN_REACH:
-          a.trim = min(max(a.trim, s), a.cap, max(a.stop, a.trim))
+          a.trim = min(max(a.trim, s), a.cap, a.stop)
 
   @staticmethod
   def side_by_side(a: Member, b: Member) -> bool:
@@ -866,36 +938,76 @@ class Junctions:
     q = b.right.at(b.right.project(p))
     return float((q - p) @ _left(a.line.tangent(d))) < BUNDLE_GAP
 
+  def _islands_near(self, nodes: list[int]) -> list[np.ndarray]:
+    """The painted islands within MAX_TRIM of a junction's nodes."""
+    pts = self.osm.xy[self.osm.data.index(nodes)]
+    lo, hi = pts.min(0) - MAX_TRIM, pts.max(0) + MAX_TRIM
+    return [p for p in self.painted_islands if (p.max(0) >= lo).all() and (p.min(0) <= hi).all()]
+
   @staticmethod
-  def shape(arms: list[Arm]) -> list[tuple[float, float, np.ndarray] | None]:
+  def _tip(a: 'Arm', b: 'Arm', x: np.ndarray, islands: list[np.ndarray]) -> np.ndarray | None:
+    """Where a painted island lying in the corner between two arms (its points between their lines, nearer the
+    junction than where their kerbs meet, x) comes nearest the junction: its tip, the corner's point instead of x."""
+    best = None
+    sx = max(a.line.project(x), b.line.project(x))
+    for p in islands:
+      for q in p:
+        sa, sb = a.line.project(q), b.line.project(q)
+        if not (0.0 < sa < sx and 0.0 < sb < sx):
+          continue
+        # left of a's line looking out and right of b's: between them
+        if float((q - a.line.at(sa)) @ _left(a.line.tangent(sa))) <= 0.0 or float((q - b.line.at(sb)) @ _left(b.line.tangent(sb))) >= 0.0:
+          continue
+        if best is None or min(sa, sb) < best[0]:
+          best = (min(sa, sb), q)
+    return None if best is None else best[1]
+
+  @staticmethod
+  def shape(arms: list[Arm], islands: list[np.ndarray] = ()) -> list[tuple[float, float, np.ndarray] | None]:
     """Sets each arm's trim; returns each corner's kerb, between an arm and the next counterclockwise: (where it rounds
     from on this arm's left kerb, where to on the next's right kerb, the point the two kerbs meet at), or None where
     they don't meet ahead of the junction and the kerb between them is straight. A corner rounds no further out than a
-    surveyed stop line, and is square where the kerbs meet beyond it: the road is trimmed there, its stop line inside
-    the area (a stop line painted level with the road it meets, which the class layout draws a little wider)."""
+    surveyed stop line beyond where the kerbs meet; one nearer the junction than that (painted level with the road it
+    meets, which the class layout draws a little wider or off where GTA's links run) is inside its area, and the road
+    is trimmed as if it had none: cut back to it, its kerbs would run out across the other road's lanes. A painted
+    island in the corner (traffic_calming=painted_island: road surface, no kerb) ends it at the island's tip, square:
+    two roads parting at a narrow angle with a painted gore between would else trim back to MAX_TRIM over it."""
     n = len(arms)
     trims = [0.0] * n
-    meet = [0.0] * n  # m out along each arm to where its kerbs meet its neighbours'
-    corners: list[tuple[float, float, np.ndarray] | None] = []
+    hits = []
     for i in range(n):
       a, b = arms[i], arms[(i + 1) % n]
       gap = (b.heading - a.heading) % (2 * math.pi)
       # arms heading within BUNDLE_ANGLE of each other run side by side: their kerbs, carried back, cross only deep inside
       hit = crossing(a.left, b.right, MAX_TRIM, MAX_TRIM) if math.radians(BUNDLE_ANGLE) < gap < math.pi - 1e-3 else None
+      if hit is not None and islands and (tip := Junctions._tip(a, b, hit[2], islands)) is not None:
+        hit = (a.left.project(tip), b.right.project(tip), tip, True)
+      hits.append(hit)
+    meet = [0.0] * n  # m out along each arm to where its kerbs meet its neighbours'
+    for i, hit in enumerate(hits):
+      if hit is not None:
+        a, b = arms[i], arms[(i + 1) % n]
+        meet[i], meet[(i + 1) % n] = max(meet[i], a.line.project(hit[2])), max(meet[(i + 1) % n], b.line.project(hit[2]))
+        a.meets, b.meets = (a.meets[0], hit[2]), (hit[2], b.meets[1])
+    for arm, m in zip(arms, meet, strict=True):
+      if arm.stop < m:
+        arm.stop = math.inf
+    corners: list[tuple[float, float, np.ndarray] | None] = []
+    for i, hit in enumerate(hits):
       if hit is None:
         corners.append(None)
         continue
-      sa, sb, x = hit
+      a, b = arms[i], arms[(i + 1) % n]
+      gap = (b.heading - a.heading) % (2 * math.pi)
+      sa, sb, x = hit[:3]
       radius = min(max(min(a.width, b.width) / 2, MIN_RADIUS), CORNER_RADIUS)
-      pa, pb = a.line.project(x), b.line.project(x)
-      t = min(radius / math.tan(gap / 2), MAX_TANGENT, min(a.cap, a.stop) - pa, min(b.cap, b.stop) - pb)
-      ta, tb = sa + max(t, 0.0), sb + max(t, 0.0)
-      meet[i], meet[(i + 1) % n] = max(meet[i], pa), max(meet[(i + 1) % n], pb)
+      t = min(radius / math.tan(gap / 2), MAX_TANGENT, min(a.cap, a.stop) - a.line.project(x), min(b.cap, b.stop) - b.line.project(x))
+      ta, tb = (sa, sb) if len(hit) > 3 else (sa + max(t, 0.0), sb + max(t, 0.0))  # (square at an island's tip)
       trims[i] = max(trims[i], a.line.project(a.left.at(ta)))
       trims[(i + 1) % n] = max(trims[(i + 1) % n], b.line.project(b.right.at(tb)))
       corners.append((ta, tb, x))
-    for arm, t, m in zip(arms, trims, meet, strict=True):
-      arm.trim = min(max(t, 0.0), arm.cap, max(arm.stop, m))
+    for arm, t in zip(arms, trims, strict=True):
+      arm.trim = min(max(t, 0.0), arm.cap, arm.stop)
     return corners
 
   @staticmethod
@@ -929,6 +1041,7 @@ class Junctions:
           for k, node in enumerate(m.nodes):
             at.setdefault(node, []).append((j, m, k))
     tags_of = self.osm.data.node_tags
+    placed = set()  # stop line nodes placed on a junction's approach
     for node, tags in tags_of.items():
       kind = STOPS.get(tags.get('highway', ''))
       if kind is None:
@@ -951,13 +1064,17 @@ class Junctions:
       best = min(found, key=lambda f: f[0] - f[2].trim)
       for along, j, m in [best] if facing not in ('forward', 'backward') else [f for f in found if f[1] is best[1]]:
         self._add_stop(j, m, kind, along, tags['highway'] == 'traffic_signals', node)
+        placed.add(node)
     for j in self.junctions:
-      node = next((n for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', ''))), None)
+      # a directed one already placed on another junction's approach is that one's (GTA's light where a slip parts,
+      # for the junction ahead), not every way's into this one; one placed nowhere stops the ways in it faces
+      node = next((n for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', '')) and
+                   not (n in placed and (tags_of[n].get('traffic_signals:direction') or tags_of[n].get('direction')))), None)
       if node is not None:
         tags = tags_of[node]
         for arm in j.arms:
           for m in arm.members:
-            if not any(s.member is m for s in j.stops):
+            if not any(s.member is m for s in j.stops) and _faces(tags, m, 0):
               self._add_stop(j, m, STOPS[tags['highway']], 0.0, tags['highway'] == 'traffic_signals', node)
 
   def _surveyed_stops(self, m: Member) -> list[float]:
@@ -992,6 +1109,12 @@ class Junctions:
     right = _left(u)  # right of the direction of travel into the junction
     lo, hi = min(sp.left for sp in spans), max(sp.right for sp in spans)
     line = np.array([p + right * hi, p + right * lo])
+    arm = next((a for a in j.arms if any(x is m for x in a.members)), None)
+    if surveyed and s < m.trim and arm is not None and all(x is not None for x in arm.meets):
+      # inside the area, level with the road it meets: along that road's edge, between where this road's kerbs meet it
+      e = _unit(arm.meets[1] - arm.meets[0])
+      if (c := float(e @ right)) > math.cos(math.radians(STOP_SKEW)):
+        line = np.array([p + e * hi / c, p + e * lo / c])
     e_lo, e_hi = m.edges  # looking out: its right kerb is on the left arriving
     q = m.line.at(m.trim)
     uq = _left(m.line.tangent(m.trim))
@@ -1017,7 +1140,10 @@ class Junctions:
         if turn > STRAIGHT or len(a.members) != 1 or len(b.members) != 1:
           continue
         ma, mb = a.members[0], b.members[0]
-        if ma.start != mb.start or id(ma) in stopped or id(mb) in stopped or not (lines := self._meeting(ma, mb)):
+        if id(ma) in stopped or id(mb) in stopped:
+          continue
+        lines = self._meeting(ma, mb) if ma.start == mb.start else self._meeting_across(j, ma, mb)
+        if not lines:
           continue
         pair_rank, width = max(rank(ma), rank(mb)), min(a.width, b.width)
         ok = not any(self.osm.taper(m.ways[0][0]) is not None or self._crossed(m) for m in (ma, mb)) and \
@@ -1074,6 +1200,44 @@ class Junctions:
       if hit is not None and hit[1] >= 0.0:
         return True
     return False
+
+  def _meeting_across(self, j: Junction, ma: Member, mb: Member) -> dict[int, set[float]]:
+    """_meeting for two roads out of a junction of several nodes, from two of them: the road runs on between them along
+    ways inside it (as a through road between the corners of a slip triangle), its lines meeting at each node."""
+    from types import SimpleNamespace
+    inside = [w for w in j.inside if len(self.ways[w][1]) >= 2]
+    paths, frontier = [], [(ma.start, [])]
+    for _ in range(3):  # up to three ways inside
+      nxt = []
+      for node, path in frontier:
+        for w in inside:
+          refs = self.ways[w][1]
+          if w in [p for p, _ in path] or node not in (refs[0], refs[-1]):
+            continue
+          far = refs[-1] if refs[0] == node else refs[0]
+          (paths if far == mb.start else nxt).append((far, path + [(w, refs[0] == node)]))
+      frontier = nxt
+    def out_of(node, w, fwd):  # the inside way as a road out of node
+      refs = self.ways[w][1]
+      chain = refs if fwd else refs[::-1]
+      return SimpleNamespace(start=node, ways=[(w, fwd)], line=Poly(self.osm.xy[self.osm.data.index(chain)]))
+
+    def length(path):
+      return sum(float(np.hypot(*np.diff(self.osm.way_points(w), axis=0).T).sum()) for w, _ in path)
+    for _, path in sorted(paths, key=lambda p: length(p[1])):  # the shortest whose lines meet all along
+      out: dict[int, set[float]] = {}
+      node, prev = ma.start, ma
+      for w, fwd in [*path, (None, None)]:
+        lines = self._meeting(prev, out_of(node, w, fwd) if w is not None else mb)
+        if not lines:
+          break
+        for k, v in lines.items():
+          out.setdefault(k, set()).update(v)
+        if w is None:
+          return out
+        node = self.ways[w][1][-1] if fwd else self.ways[w][1][0]
+        prev = out_of(node, w, not fwd)
+    return {}
 
   def _meeting(self, ma: Member, mb: Member) -> dict[int, set[float]]:
     """The lines of two roads out of a node that meet each other there, same kind and style: {way: {m right}}."""

@@ -259,15 +259,65 @@ def test_surveyed_stop_lines():
 
 
 def test_surveyed_stop_line_level_with_the_road_it_meets():
-  # a T whose side road's stop line is painted 4 m from the node, inside the main road's 5.5 m to its kerb: the side
-  # road ends where its kerbs meet the main road's, the corners square there, and the line is drawn where it's painted
-  nodes = {1: (0.0, 0.0), 2: (-100.0, 0.0), 3: (100.0, 0.0), 4: (0.0, -100.0), 7: (0.0, -4.0)}
+  # a skewed T whose side road's stop line is painted 4 m from the node, inside the main road's 5.5 m to its kerb: the
+  # junction is shaped as without it (its corners round, no kerb runs out across the main road), and the line is drawn
+  # where it's painted, along the main road's edge rather than square across the skewed side road
+  side = (-math.sin(math.radians(20.0)), -math.cos(math.radians(20.0)))  # 20 degrees off square
+  nodes = {1: (0.0, 0.0), 2: (-100.0, 0.0), 3: (100.0, 0.0), 4: (100.0 * side[0], 100.0 * side[1]), 7: (4.0 * side[0], 4.0 * side[1])}
   ways = {1: (TWO_WAY, [2, 1]), 2: (TWO_WAY, [1, 3]), 3: (TWO_WAY, [4, 7]), 4: (TWO_WAY, [7, 1])}
+  plain = only(Junctions(make(nodes, ways)))
   j = only(Junctions(make(nodes, ways, {7: {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey'}})))
   stop = j.stops[0]
-  assert len(j.stops) == 1 and abs(stop.along - 4.0) < 1e-6 and abs(stop.member.trim - 5.5) < 0.05
-  for kerb in j.kerbs:  # none runs back out down the side road past its mouth
-    assert (kerb[:, 1] >= -5.5 - 0.05).all(), kerb
+  assert len(j.stops) == 1 and abs(stop.along - 4.0) < 1e-6
+  assert sorted(arm.trim for arm in j.arms) == sorted(arm.trim for arm in plain.arms) and stop.member.trim > 5.5
+  d = stop.line[1] - stop.line[0]
+  assert abs(d[1]) < 0.02 * abs(d[0]), stop.line  # along the main road
+  assert np.allclose(np.mean(stop.line, axis=0)[1], -4.0 * math.cos(math.radians(20.0)), atol=0.05)  # at the paint
+
+
+def test_directed_signal_on_a_junction_node_is_one_approach_s():
+  # GTA's light for the road from the south sits on the node where a slip parts from it, a junction of its own: that
+  # junction's ways in aren't all stopped there (an undirected one on a junction's node stops them all)
+  nodes = {1: (0.0, 0.0), 2: (0.0, -40.0), 3: (0.0, -100.0), 4: (-100.0, 0.0), 5: (100.0, 0.0), 6: (0.0, 100.0),
+           7: (30.0, -10.0)}
+  ways = {1: (TWO_WAY, [3, 2]), 2: (TWO_WAY, [2, 1]), 3: (TWO_WAY, [1, 4]), 4: (TWO_WAY, [1, 5]), 5: (TWO_WAY, [1, 6]),
+          6: (TWO_WAY, [2, 7]), 7: (TWO_WAY, [7, 5])}
+  signal = {'highway': 'traffic_signals', 'traffic_signals:direction': 'forward'}
+  js = Junctions(make(nodes, ways, {2: signal}))
+  at_2 = next(j for j in js.junctions if 2 in j.nodes)
+  main = next(j for j in js.junctions if 1 in j.nodes)
+  assert at_2.stops == [] and len(main.stops) == 1
+  js = Junctions(make(nodes, ways, {2: {'highway': 'traffic_signals'}}))
+  assert len(next(j for j in js.junctions if 2 in j.nodes).stops) == 3
+
+
+def test_through_road_carried_across_a_slip_triangle():
+  # a main road east-west through a slip triangle's two corners (one junction of three nodes), the side road from the
+  # north meeting it by two one-way slips: the main road is carried on through along its way inside, where it's a
+  # priority road
+  side = {'highway': 'residential', 'lanes': '1', 'oneway': 'yes', 'width': '4'}
+  nodes = {1: (-100.0, 0.0), 2: (-15.0, 0.0), 3: (15.0, 0.0), 4: (100.0, 0.0), 5: (0.0, 15.0), 6: (0.0, 100.0)}
+  main = {**TWO_WAY, 'divider': 'double_solid_line', 'priority_road': 'yes_unposted'}
+  ways = {1: (main, [1, 2]), 2: (main, [2, 3]), 3: (main, [3, 4]), 4: (TWO_WAY, [6, 5]), 5: (side, [5, 2]), 6: (side, [3, 5])}
+  j = only(Junctions(make(nodes, ways)))
+  assert 2 in j.inside and set(j.through) == {1, 2, 3} and set(j.carried) >= {1, 2, 3}
+
+
+def test_corner_ends_at_a_painted_island_tip():
+  # two roads parting at 20 degrees with a painted gore between them (traffic_calming=painted_island) from 6 m out:
+  # the corner between them ends at the gore's tip, not 40 m back where their kerbs meet
+  a = (-100.0 * math.cos(math.radians(80.0)), -100.0 * math.sin(math.radians(80.0)))
+  b = (100.0 * math.cos(math.radians(80.0)), -100.0 * math.sin(math.radians(80.0)))
+  nodes = {1: (0.0, 0.0), 2: (0.0, 100.0), 3: a, 4: b}
+  ways = {1: (TWO_WAY, [2, 1]), 2: (TWO_WAY, [1, 3]), 3: (TWO_WAY, [1, 4])}
+  plain = only(Junctions(make(nodes, ways)))
+  tip = (0.0, -20.0)
+  ring = {11: tip, 12: (-4.0, -40.0), 13: (4.0, -40.0)}
+  island = {**nodes, **ring}
+  with_island = {**ways, 9: ({'area': 'yes', 'traffic_calming': 'painted_island'}, [11, 12, 13, 11])}
+  j = only(Junctions(make(island, with_island)))
+  trims = sorted(arm.trim for arm in j.arms)
+  assert max(arm.trim for arm in plain.arms) > 30.0 and 15.0 < trims[-1] < 25.0, (trims, [arm.trim for arm in plain.arms])
 
 
 def test_crossing_lines_on_the_road():
@@ -399,7 +449,7 @@ def test_slanted_roads_lines_end_in_the_area():
     for line, geom in osm.line_geometry(wid):
       for piece in clip_outside(geom, paint.near(geom, 0, {wid}, kerbs_only=line.kind == 'edge')):
         assert piece[:, 0].max() < 0.3, (wid, line.kind, piece)
-  for line, geom in osm.line_geometry(1):
+  for _line, geom in osm.line_geometry(1):
     kept = clip_outside(geom, paint.near(geom, 0, {1}))
     assert kept and min(piece[:, 0].min() for piece in kept) < 1.0  # from its mouth on
 

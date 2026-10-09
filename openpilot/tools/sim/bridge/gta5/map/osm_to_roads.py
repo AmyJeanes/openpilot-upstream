@@ -22,7 +22,7 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
-from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, clip_outside, hull
+from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, clip_outside, hull, off_islands
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, FORWARD, MEDIAN, PARKING, OsmLanes, offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
@@ -327,6 +327,7 @@ def main():
   def heights(nodes) -> np.ndarray:
     return np.array([ele(n) for n in nodes])
   junctions = Junctions(osm, drawn)
+  carried_inside = {w: lines for j in junctions.junctions for w, lines in j.carried.items() if w in junctions.inside}
   levels = {wid: level(tags) for wid, (tags, _) in junctions.ways.items()}
   try:  # the nodes' heights, where the map has them all
     for _, refs in junctions.ways.values():
@@ -356,6 +357,11 @@ def main():
       lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD) if ln.kind == EDGE or (road.markings
                     and ln.kind != PARKING)) + tuple((PARKING_STRIP, round((a + b) / 2, 2), None) for a, b in road.parking_lanes(FORWARD))
       layouts.append(((levels[wid][0], lines), True, refs))  # lines are offsets along a way's direction: join only ways going on
+    elif carried_inside.get(wid) and road.markings:  # inside a junction, only the lines carried across it
+      lines = tuple((ln.kind, round(ln.offset, 2), ln.style) for ln in road.lines(FORWARD)
+                    if ln.kind in (CENTRE, DIVIDER, MEDIAN) and round(ln.offset, 2) in carried_inside[wid])
+      if lines:
+        layouts.append(((levels[wid][0], lines), True, refs))
 
   def trim(a, b):  # how far the road from node a on to b is trimmed back at a
     return round(junctions.trims.get((osm.pairs[(a, b)][0], a), 0.0), 1)
@@ -445,7 +451,7 @@ def main():
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, ways, offset == right)
-          for p in kerbs:
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):
             add(k, p, layer, z_along(p, pts, z) if high else None)
           for p, s in between:
             add(KINDS.index(s), p, layer, z_along(p, pts, z) if high else None)
@@ -466,7 +472,7 @@ def main():
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, {wid}, line.offset == right)
-          for p in kerbs:  # none between one-way ways side by side, as for the ways above
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # as for the ways above
             add(k, p, layer, z_along(p, pts, z) if high else None)
           for p, st in between:
             add(KINDS.index(st), p, layer, z_along(p, pts, z) if high else None)
@@ -478,11 +484,19 @@ def main():
     jz = junction_z[n] if high else None
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_outside(kerb, paint.near(kerb, area_layer[n], kerbs_only=True, but=n)):
-        add(KINDS.index('edge'), piece, area_layer[n], jz)
+        for p in off_islands(piece, junctions.islands):
+          add(KINDS.index('edge'), p, area_layer[n], jz)
     for s in j.stops:
       add(KINDS.index(s.kind), s.line, area_layer[n], jz)
     for mv in junctions.movements(j):
       add(KINDS.index(f'guide_{mv.kind}'), mv.path, area_layer[n], jz)
+  if junctions.island_outlines:  # painted islands' outlines, in their paint, at their nearest road node's height
+    road_nodes = sorted({n for _, refs in junctions.ways.values() for n in refs})
+    near_xy, near_z = points(road_nodes), heights(road_nodes) if high else None
+    for xy, colour in junctions.island_outlines:
+      ring = np.vstack([xy, xy[:1]]) if np.hypot(*(xy[-1] - xy[0])) > 1e-6 else xy
+      z = near_z[np.argmin(np.hypot(*(near_xy - ring.mean(0)).T))] if high else None
+      add(KINDS.index('centre' if colour == 'yellow' else 'solid'), ring, 0, None if z is None else np.full(len(ring), z))
   crossings = junctions.crossing_lines()
   if high:  # a crossing's height is its nearest road node's
     road_nodes = sorted({n for _, refs in junctions.ways.values() for n in refs})

@@ -77,6 +77,7 @@ RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
 RIBBON_TURN = 60.0  # deg: sharper corners in the route's line are cut where a side is shorter than RIBBON_JOG
 RIBBON_JOG = 5.0  # m
 RIBBON_LIFT = 0.25  # m above the map's road height: the map's heights can sit under the game's ground
+RIBBON_EASE = 10.0  # m over which the ribbon eases from under the car on to nav's lane plan line
 CELL = 50.0  # m: node index cells
 LIGHT = 15  # node special: a traffic light's stop line
 CAR_HEIGHT = 0.6  # paths.CAR_HEIGHT
@@ -511,7 +512,7 @@ def road_marks(paths, osm) -> dict:
   each stop line in to its junction, each area cutting its own layer's lines and its roads' (PaintAreas); and the
   junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
-  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas, densify
+  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas, densify, off_islands
   from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PAINTED, ROAD_CLASSES, PaintAreas, level, z_along
   from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
@@ -531,8 +532,9 @@ def road_marks(paths, osm) -> dict:
     kinds.extend([kind] * (len(line3) - 1))
     nodes.extend([ab] * (len(line3) - 1))
 
+  carried_inside = {w: lines for j in junctions.junctions for w, lines in j.carried.items() if w in junctions.inside}
   for wid in osm.ways:
-    if wid in junctions.inside or wid in junctions.crossovers:
+    if wid in junctions.crossovers or (wid in junctions.inside and not carried_inside.get(wid)):
       continue
     pts = osm.way_points(wid)
     if len(pts) < 2 or np.hypot(*(pts[-1] - pts[0])) < 0.3:
@@ -543,11 +545,13 @@ def road_marks(paths, osm) -> dict:
     (a, za), (b, zb) = gta
     layer = level(osm.ways[wid][0])[0]
     zpts = node_heights(osm, osm.ways[wid][1], za, zb, pts)
-    for middle in taper_middles(osm, wid, pts, zpts):
+    for middle in [] if wid in junctions.inside else taper_middles(osm, wid, pts, zpts):
       add("t", middle, (a, b))
     geometry = osm.line_geometry(wid)
     right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
     for line, base in geometry:
+      if wid in junctions.inside and (line.kind == EDGE or round(line.offset, 2) not in carried_inside[wid]):
+        continue  # inside a junction, only the lines carried across it
       if np.hypot(*(base[0] - pts[0])) > np.hypot(*(base[-1] - pts[0])):
         base = base[::-1]  # drawn the other way (OsmLanes.taper)
       z = zpts if len(base) == len(pts) else z_along(base, pts, zpts)
@@ -563,7 +567,7 @@ def road_marks(paths, osm) -> dict:
             add(kind, np.column_stack([piece, pz]), (a, b))
             continue
           kerbs, between = side.kerb(piece, pz, layer, {wid}, line.offset == right)  # none between ways side by side
-          for p in kerbs:
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # nor round painted islands
             add(kind, np.column_stack([p, z_along(p, piece, pz)]), (a, b))
           for p, style in between:
             add("d" if style == "dashed" else "w", np.column_stack([p, z_along(p, piece, pz)]), (a, b))
@@ -582,7 +586,8 @@ def road_marks(paths, osm) -> dict:
     roads = junction_roads(osm, paths, j)
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_areas(kerb, paint.near(kerb, paint.layer[n], kerbs_only=True, but=n)):
-        add("e", np.column_stack([piece, z_near(piece, roads, z)]), (g, g))
+        for p in off_islands(piece, junctions.islands):
+          add("e", np.column_stack([p, z_near(p, roads, z)]), (g, g))
     area = densify(simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), AREA_STEP)
     if not j.minor:  # a driveway's or slip's area across a main road would cut its approach in pieces
       shape("j", area, z_near(area, roads, z), g)
@@ -604,6 +609,11 @@ def road_marks(paths, osm) -> dict:
             for kind, xy in arrow_strokes(sp.lane.turns):
               q = p + right * sp.centre + xy[:, :1] * right + xy[:, 1:] * ahead
               add(kind, np.column_stack([q, z_near(q, roads, z)]), (g, g))
+  for xy, colour in junctions.island_outlines:  # painted islands' outlines, in their paint
+    ring = np.vstack([xy, xy[:1]]) if np.hypot(*(xy[-1] - xy[0])) > 1e-6 else xy
+    g = near_node(paths, ring.mean(0))
+    if g is not None:
+      add("c" if colour == "yellow" else "w", np.column_stack([ring, np.full(len(ring), paths.z[g])]), (g, g))
   for c in junctions.crossing_lines():
     g = near_node(paths, c.mean(0))
     if g is not None:
@@ -959,8 +969,10 @@ def trail_turn(trail: np.ndarray, line: np.ndarray, s: np.ndarray, at: float) ->
 
 class Ribbon:
   """The route's ribbon: from where the car will be while the plugin draws it on (r; n with the route layer off), along
-  nav's lane plan line, which can be up to gta5_world's LANE_LINE_EVERY old; and behind the car (b) the lines it was
-  drawn along as the car passed, kept as the car goes. Without a lane plan, both along the route's carriageway_line."""
+  nav's lane plan line, which can be up to gta5_world's LANE_LINE_EVERY old, easing on to it over RIBBON_EASE m from
+  under the car (the line runs down its lane's middle, and from where the car was when it was planned: a car off its
+  lane's middle, or placed, would see it start beside it and hook in); and behind the car (b) the lines it was drawn
+  along as the car passed, kept as the car goes. Without a lane plan, both along the route's carriageway_line."""
 
   def __init__(self):
     self.trail = np.zeros((0, 3))  # behind the car, from where it started to where the ribbon last started
@@ -995,6 +1007,14 @@ class Ribbon:
     # its heights by the route's, from the car's place on both
     z = route_heights(route, lane, route.at + s - car, road_z) if route is not None else np.full(len(s), road_z)
     line = np.column_stack([lane, z])
+    # from under the car (as far as it's off the line, square to it), easing on to the line ahead of where it starts
+    off = pos - np.array([np.interp(car, s, lane[:, 0]), np.interp(car, s, lane[:, 1])])
+    if not np.any(np.abs(s - start) < 1e-6):  # (a point where it starts, so it starts exactly there)
+      k = int(np.searchsorted(s, start))
+      line = np.insert(line, k, [np.interp(start, s, line[:, c]) for c in range(3)], axis=0)
+      s = np.insert(s, k, start)
+    t = np.clip((s - start) / RIBBON_EASE, 0.0, 1.0)
+    line[:, :2] += off * (1.0 - t * t * (3.0 - 2.0 * t))[:, None]
     self._extend_trail(line, s, start)
     if ("r" in layers or "n" in layers) and s[-1] - start > RIBBON_GAP:
       pts = ribbon_line(piece(line, s, start, float(s[-1])) + [0.0, 0.0, RIBBON_LIFT])
