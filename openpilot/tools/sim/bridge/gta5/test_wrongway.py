@@ -153,9 +153,30 @@ def test_expert():
   print("expert: ok")
 
 
+def test_record_rows():
+  """gta5_record's per-frame wrongway row: the clip and phase while one runs, nothing (-1, 0) otherwise."""
+  from types import SimpleNamespace
+  from openpilot.tools.sim.bridge.gta5.gta5_record import WW_COLUMNS, Recorder
+  from openpilot.tools.sim.bridge.gta5.gta5_wrongway import PHASES
+  rec = Recorder.__new__(Recorder)
+  rec.segment = SimpleNamespace(ww_clips=[])
+  e = Expert(lambda m: None, lambda: None, lambda: None)
+  route = road(1)
+  assert rec._ww_row(e, route, {})[:2] == [-1, 0] and not rec.segment.ww_clips
+  e.active, e.ww = True, WrongWay({"clip": "c1", "lane": -1})
+  car = Car(route)
+  s = car.state()
+  e.ww_driving = e.ww.step(route, s, 0.0, 0) is not None
+  row = rec._ww_row(e, route, s)
+  assert len(row) == len(WW_COLUMNS) and row[0] == 0 and PHASES[row[1]] == "approach" and row[2] == 0.0, row
+  assert rec.segment.ww_clips[0]["clip"] == "c1" and rec.segment.ww_clips[0]["path"]
+  print("record rows: ok")
+
+
 if __name__ == "__main__":
   test_suitable()
   test_path_clip()
   test_ai_clip()
   test_aborts()
   test_expert()
+  test_record_rows()
