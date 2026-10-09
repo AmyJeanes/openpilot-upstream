@@ -279,6 +279,9 @@ def test_expert_drives_with_map_driver():
   assert any(r.get("event") == "stopped" for r in rows)
   assert any(r.get("event") == "stop" and r.get("why") == "arrived" for r in rows)
   assert all(r.get("src") == "map" for r in rows if "map" in r)
+  from openpilot.tools.sim.bridge.gta5.mapdrive_trials import summary
+  got = summary(rows)
+  assert got["arrived"] and got["stops"] == 1 and got["dev_max"] < 1.0 and not got["aborts"], got
   seg = rec.segment
   assert set(seg.src_rows) == {SOURCES.index("map")} and len(seg.mapx_rows[0]) == len(MAPX_COLUMNS)
   assert seg.expert_paths and seg.expert_paths[0]["path"] and seg.expert_paths[0]["keys"]
