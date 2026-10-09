@@ -1757,12 +1757,13 @@ def _right_only(sec: Section) -> bool:
 
 
 def _opens_left(few: Section, many: Section) -> bool:
-  """Whether the lanes a road gains begin on the left of ours: by the turn arrows where they say (_turn_side), else
-  where our lanes before line up with the right of the lanes after better than with their left by SIDE_MARGIN a lane
-  (the two ways' lines in place), else not (the road widens on the outside)."""
+  """Whether the lanes a road gains begin on the left of ours: by the turn arrows where they say (_turn_side; where
+  they have a new turn lane on each side, where the lanes lie says which is new, as _match has it), else where our
+  lanes before line up with the right of the lanes after better than with their left by SIDE_MARGIN a lane (the two
+  ways' lines in place), else not (the road widens on the outside)."""
   side = _turn_side(few, many)
   if side is not None:
-    return side
+    return _side_by_place(few, many, side) if _both_sides(few, many) else side
   extra = many.lanes - few.lanes
   if extra <= 0 or not few.lanes:
     return False
