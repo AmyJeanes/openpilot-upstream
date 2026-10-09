@@ -48,6 +48,7 @@ GAP_M = 1.0  # m of a lane change on no carriageway (but other lane changes'): i
 CHANGE_M = 40.0  # m: a city lane change between carriageways is no longer than this
 JOIN_TURN = 20.0  # deg: a way leaving a run's start or joining its end at more than this crosses its kerb only there
 GORE_SHARED = 5.0  # m: a freeway's kerb this near another carriageway running its way is the edge of a gore or shoulder
+BUFFER = 0.6  # m between two measured ways' edges side by side: a painted buffer between them, not one line
 
 
 class SideBySide:
@@ -71,7 +72,7 @@ class SideBySide:
       self.first[wid], self.last[wid] = refs[0], refs[-1]
       self.ends_at[refs[-1]].append(wid)
       self.starts_at[refs[0]].append(wid)
-    changes = lane_changes(osm, list(self.first))
+    self.changes = changes = lane_changes(osm, list(self.first))
     for wid in self.first:
       if wid not in changes:
         self._add_quads(wid)
@@ -239,15 +240,46 @@ class SideBySide:
     edge &= ~covered
     kept = [pts[a:b + 1] for a, b in _runs(~covered & ~edge)]
     lines = [(pts[a:b + 1], 'solid') for a, b in _runs(edge)]
+    refs = [self.osm.ways[w][1] for w in ways]
+    begin, finish = {r[0] for r in refs} - {r[-1] for r in refs}, {r[-1] for r in refs} - {r[0] for r in refs}
+    parted = {n for n in begin | finish if self.gores.get(n) and  # into carriageways, not only a lane change
+              sum(w not in self.changes for w in (self.starts_at[n] if n in begin else self.ends_at[n])) >= 2}
+    if covered.any() and parted and not ways & self.changes and all(Junctions.freeway(self.osm.ways[w][0]) for w in ways):
+      # a freeway's, inside the carriageway the ways part from or merge into but on no way's lanes: the painted gore's edge
+      _, gore, _, _ = self._cover(line, z, layer, ways, False, quads=False, gore_nodes=parted)
+      _, on_lanes, _, _ = self._cover(line, z, layer, ways, False, gores=False)
+      lines += [(pts[a:b + 1], 'solid') for a, b in _runs(gore & ~on_lanes)]
     if right:
       mine = all(self.osm.lanes(w).lanes[-1].change_right for w in ways)
       for wid in sorted(set(beside[beside >= 0].tolist())):
         if self.crosses(wid):
           continue
         style = 'dashed' if mine and self.osm.lanes(wid).lanes[0].change_left else 'solid'
-        lines += [(pts[a:b + 1], style) for a, b in _runs(beside == wid)]
+        lines += [(p, style) for a, b in _runs(beside == wid) if (p := self._between(pts[a:b + 1], ways, wid)) is not None]
     keep = [p for p in kept if _length(p) >= MIN_PIECE]
     return keep, [(p, s) for p, s in lines if _length(p) >= MIN_PIECE]
+
+  def _between(self, piece: np.ndarray, ways: set, wid: int) -> np.ndarray | None:
+    """The one line between the ways' right kerb (`piece` of it) and the left edge of the way `wid` beside them: midway
+    between the two, or on the one whose lanes were measured (source:width=survey) where the other's weren't. None
+    where both were measured and are apart (a painted buffer between them, each edge its own line)."""
+    surveyed = [all(self.osm.ways[w][0].get('source:width') == 'survey' for w in ws) for ws in (ways, {wid})]
+    share = 0.5 if surveyed[0] == surveyed[1] else 1.0 if surveyed[1] else 0.0
+    left = min(((line, base) for line, base in self.osm.line_geometry(wid) if line.kind == EDGE and len(base) >= 2),
+               key=lambda lb: lb[0].offset, default=None)
+    if left is None or len(piece) < 2:
+      return piece
+    a, b = np.asarray(left[1], float)[:-1], np.asarray(left[1], float)[1:]
+    d = b - a
+    t = np.clip(np.einsum('pkj,kj->pk', piece[:, None] - a[None], d) / np.maximum((d * d).sum(1), 1e-9), 0.0, 1.0)
+    near = a[None] + d[None] * t[..., None]
+    q = near[np.arange(len(piece)), np.hypot(*(near - piece[:, None]).transpose(2, 0, 1)).argmin(1)]
+    tangent = np.gradient(piece, axis=0)
+    normal = np.stack([tangent[:, 1], -tangent[:, 0]], axis=1) / np.maximum(np.hypot(*tangent.T), 1e-9)[:, None]
+    across = np.einsum('pj,pj->p', q - piece, normal)  # moved across the line only
+    if all(surveyed) and float(np.median(np.abs(across))) > BUFFER:
+      return None
+    return piece + normal * (share * across)[:, None]
 
   def _two_way_kerb(self, line, z, layer: int, ways: set, right: bool) -> tuple[list[np.ndarray], list[tuple[np.ndarray, str]]]:
     """A two-way road's kerb (kerb's arguments): left out on a one-way way's carriageway running the way the traffic on
@@ -300,19 +332,21 @@ class SideBySide:
 
   def crosses(self, wid: int) -> bool:
     """Whether a one-way way's line lies mostly on other ways' carriageways running its way: a lane change across them,
-    as GTA lays them between its freeway links, rather than a way of lanes of its own."""
+    as GTA lays them between its freeway links, rather than a way of lanes of its own. Lane changes lying over a way don't
+    make it one: GTA's X of lane changes between two links side by side covers both links' lines."""
     if wid not in self._crosses:
       refs = self.osm.ways[wid][1]
       _, covered, _, _ = self._cover(self.osm.xy[self.osm.data.index(refs)], self._heights(refs), self.layer_of(wid), {wid}, False,
-                                     gores=False)
+                                     gores=False, skip=frozenset() if wid in self.changes else self.changes)
       self._crosses[wid] = bool(covered.mean() > 0.5) if len(covered) else False
     return self._crosses[wid]
 
-  def _cover(self, line, z, layer: int, ways: set, right: bool, gores: bool = True, oneway_only: bool = False, quads: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray,
-                                                                                            np.ndarray]:
+  def _cover(self, line, z, layer: int, ways: set, right: bool, gores: bool = True, oneway_only: bool = False, quads: bool = True,
+             skip=frozenset(), gore_nodes=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """The line densified (points [N, 2]), whether each of its segments is on the carriageway of a way beside `ways`,
     (`right`) the way whose left edge each meets, else -1, and (on a freeway) whether it's within GORE_SHARED of one. With `gores`, inside a carriageway the run parts from or
-    merges into counts too (not for a way's own line: that isn't a lane change across others)."""
+    merges into counts too (not for a way's own line: that isn't a lane change across others), at `gore_nodes` only where
+    given. The ways in `skip` count for nothing."""
     refs = [self.osm.ways[w][1] for w in ways]
     starts, ends = {r[0] for r in refs}, {r[-1] for r in refs}
     begin, finish = starts - ends, ends - starts  # the ends of the run of ways
@@ -338,7 +372,7 @@ class SideBySide:
     beside = np.full(len(mids), -1)  # the way whose left edge this right-hand kerb meets
     cos = np.cos(np.radians(SAME_WAY))
     # inside the carriageway this run parts from, or merges into, carried on past it
-    for node in begin | finish if gores else ():
+    for node in (begin | finish if gore_nodes is None else gore_nodes) if gores else ():
       for inner, heading, gore_layer, gore_z in self.gores.get(node, ()):
         if gore_layer != layer:
           continue
@@ -351,7 +385,7 @@ class SideBySide:
     for n, idx in tests.items() if quads else ():
       wid, centre, surface, strip, heading, quad_layer, quad_z, wide = self.quads[n]
       two_way = wid in self.two_way
-      if wid in ways or quad_layer != layer or (two_way and oneway_only):
+      if wid in ways or wid in skip or quad_layer != layer or (two_way and oneway_only):
         continue
       if not two_way and (self.last[wid] in begin or self.first[wid] in finish or
                           (oneway_only and (self.first[wid] in begin | finish or self.last[wid] in begin | finish))):

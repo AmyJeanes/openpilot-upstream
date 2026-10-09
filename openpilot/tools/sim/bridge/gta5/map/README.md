@@ -84,8 +84,13 @@ edges, white dashed lines between lanes one way (solid where `change:lanes` forb
 the directions; and the plugin's debug overlay the same lines, from the map's tags. Kerbs are drawn only where the road
 surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
 cutting across between them, where the line between two such ways is a lane line, solid where either's `change:lanes`
-says so (`side_by_side.py`). GTA's lane changes across the painted gore where two such carriageways part or meet have
-no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. A turn bay GTA starts from
+says so (`side_by_side.py`): one line, midway between the two ways' edges, or on the edge of the one whose lanes were
+measured (`source:width=survey`) where the other's weren't (none where both were and are over 0.6 m apart: a painted
+buffer between them). GTA's X of lane changes between two links lies over both
+links' lines, but they stay carriageways with that line between them. GTA's lane changes across the painted gore where
+two such carriageways part or meet have no kerbs and cut none (Dutch London St): the gore's edges are the carriageways'
+own kerbs. Where a carriageway parts or merges, a branch's edge off every way's lanes inside the carriageway carried
+on is the gore's painted edge, a solid line. A turn bay GTA starts from
 a two-way road's middle, where the road carries on narrower by the bay's lane, has the wider road's kerb carried on
 straight along its outside to the bay's end, where its outer edge meets it (Vinewood Blvd before Meteor St). Where every road at a node
 is one-way and all run about one way (lanes merging, parting or changing across a carriageway) there is no junction
@@ -238,9 +243,17 @@ topcam poses) as tiles, so the check runs on them without the game.
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
     lanes between their painted edges (GTA's lanes evenly between them where the files miss every lane line). GTA's lane
     counts stay on one-way links. A freeway GTA draws as parallel links is painted as one carriageway: each link takes
-    the painted lanes about its line (`paint_survey.correct_carriageway`), placed by `placement` on the nearest lane
-    edge or middle (the lines move up to 1 m to fit), and a one-way link's outer lanes take `change:lanes` from the
-    white line painted at their outer edge, the line between it and the next link (`paint_survey.outer_lines`). With
+    the painted lanes about its line (`paint_survey.correct_carriageway`), and a one-way link's outer lanes take
+    `change:lanes` from the white line painted at their outer edge, the line between it and the next link
+    (`paint_survey.outer_lines`). A white line crossing fewer than half a link's sections (freeway dashes are 4 m in 12)
+    still counts where a lane line is missing, dashed (`paint_survey.dashes`). A one-way link's line stays on GTA's nodes
+    and `placement` only says a lane's edge or middle, so the fewest painted lines move to put it there
+    (`paint_survey.place`): the lanes' outer edges centred on it (no tag), a lane's two edges (`middle_of`) or one line
+    onto it (`left_of` / `right_of`), whichever moves the lines least, each at most 1 m; the others stay where painted
+    (lane lines rather than the edges where the edges are only the asphalt's). Turn bays folded into a two-way road are
+    corrected too where their lane is painted open (with GTA's counts), and the links the turn lanes' tapers split or
+    give a lane, but for those it widens on, from their own sections. Links to a node `split_shared` made take their GTA
+    link's sections, moved onto them (`paint_survey.rebase`). With
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). A two-way link the files have no sections of (GTA's short links in and next to
@@ -248,7 +261,7 @@ topcam poses) as tiles, so the check runs on them without the game.
     same lane counts (`neighbours_paint`), so its lines run on at the paint's place and kind rather than GTA's class
     layout (a median where the game paints a double line; Mt Haan Rd). Build: `ynd_to_osm.py ... --survey
     rp_all/survey_gf.jsonl --survey-lines rp_all/polylines.jsonl`.
-  - Where a link's lanes stay the class layout (the survey didn't correct them, turn bays folded in included), its
+  - Where a link's lanes stay the class layout (the survey didn't correct them, turn bays where they open included), its
     lines still come from the game files' (`paint_survey.lane_lines`): each line between two lanes one way is the
     white line painted nearest it, less than halfway across the lanes beside it, in half the sections, and a solid one
     (or solid on one side) is `change:lanes` (the line beside a left-turn bay, approaches' solid lines). Where the files

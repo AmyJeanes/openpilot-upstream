@@ -27,14 +27,18 @@ CARRIAGEWAY = [mark(-12.9, 'yellow', 'solid'), mark(-8.2, kind='markers'), mark(
 
 def test_lanes_in_their_carriageway():
   samples = [sample(CARRIAGEWAY, s) for s in (2.0, 5.0, 8.0)]
-  assert correct_oneway(samples, 2, (-6.1, 6.1)) == (None, 'one-way, off the line')
   # the two lanes about the line, which goes on the line between them (0.6 m off): only that line moves
   got, why = correct_carriageway(samples, 2)
   assert why is None and got == {'lanes': [6.8, 5.4], 'placement': 'right_of:1', 'change': ['yes', 'not_right']}, got
+  assert correct_oneway(samples, 2, (-6.1, 6.1))[0] == {'lanes': [6.8, 5.4], 'placement': 'right_of:1'}
   # a link of one lane about the line: on its middle (0.2 m off), the lane moved with it
   shifted = [sample([{**m, 'offset': m['offset'] - 2.2} for m in CARRIAGEWAY], s) for s in (2.0, 5.0)]
   got, why = correct_carriageway(shifted, 1)
-  assert why is None and got['lanes'] == [6.0] and got['placement'] == 'middle_of:1', got
+  assert why is None and got['lanes'] == [6.0] and 'placement' not in got, got
+  # the lane line between two links' lanes missing from most sections (dashes 4 m in 12): a lane twice as wide split
+  dashed = [sample([m for m in CARRIAGEWAY if m['offset'] != -0.6 or s == 5.0], s) for s in (2.0, 5.0, 8.0, 11.0)]
+  got, why = correct_carriageway(dashed, 2)
+  assert why is None and got['lanes'] == [6.8, 5.4] and got['placement'] == 'right_of:1', (got, why)
   # nothing painted near enough the line to place it
   assert correct_carriageway([sample([mark(-12.3, 'yellow', 'solid'), mark(-6.2)], s) for s in (2.0, 5.0)], 2)[0] is None
   assert correct_carriageway(samples[:1], 2) == (None, 'carriageway, no game files')
@@ -77,6 +81,30 @@ def test_no_kerbs_between_ways_side_by_side():
   line = offset_line(osm.way_points(12), 3.0)
   kept, between = SideBySide(osm, [], lambda w: 0).kerb(line, None, 0, {12}, True)
   assert len(kept) == 1 and np.array_equal(kept[0], line) and not between
+
+
+def test_one_lane_line_between_ways_side_by_side():
+  # eastbound 1 along y = 0 and 2 along y = -6.8, 6 m wide each: 0.8 m apart, lane changes between them in an X
+  nodes = {1: (0.0, 0.0), 2: (40.0, 0.0), 3: (60.0, 0.0), 4: (100.0, 0.0), 5: (0.0, -6.8), 6: (40.0, -6.8), 7: (60.0, -6.8),
+           8: (100.0, -6.8)}
+  ways = {11: (FREEWAY, [1, 2]), 12: (FREEWAY, [2, 3]), 13: (FREEWAY, [3, 4]), 21: (FREEWAY, [5, 6]), 22: (FREEWAY, [6, 7]),
+          23: (FREEWAY, [7, 8]), 3: (FREEWAY, [2, 7]), 4: (FREEWAY, [6, 3])}
+
+  def between(ways, y=-6.8):
+    osm = make({k: (x, y if v else v) for k, (x, v) in nodes.items()}, ways)
+    side = SideBySide(osm, list(ways), lambda w: 0)
+    assert 3 not in ways or (side.crosses(3) and side.crosses(4) and not any(side.crosses(w) for w in (12, 22)))  # the X lies over both
+    _, lines = side.kerb(offset_line(osm.way_points(12), 3.0), None, 0, {12}, True)
+    if not lines:
+      return None
+    assert len(lines) == 1 and abs(float(np.hypot(*np.diff(lines[0][0], axis=0).T).sum()) - 20.0) < 1.0, lines
+    return lines[0][0][:, 1]
+  assert np.allclose(between(ways), -3.4)  # one line, midway between the two edges
+  surveyed = {**FREEWAY, 'width:lanes': '6', 'source:width': 'survey'}
+  assert np.allclose(between({**ways, 12: (surveyed, [2, 3])}), -3.0)  # on the edge of the way whose lanes were measured
+  assert np.allclose(between(ways, -5.6), -2.8)  # overlapping by 0.4 m: midway too
+  # both measured, 0.8 m apart: a painted buffer between them, each edge its own line, none between
+  assert between({**ways, 12: (surveyed, [2, 3]), 22: (surveyed, [6, 7])}) is None
 
 
 def test_lane_change_across_a_gore():
@@ -131,6 +159,10 @@ def test_no_kerbs_across_a_diverge():
   outer, inner = xs(kept(2, False)), xs(kept(2, True))
   assert len(outer) == 1 and 20 <= outer[0][0] <= 26 and outer[0][1] == 99, outer
   assert len(inner) == 1 and 40 <= inner[0][0] <= 50 and inner[0][1] == 101, inner
+  # before that, from where it leaves the other branch's lanes, the gore's painted edge: a solid line
+  pts, hi = osm.way_points(2), osm.lanes(2).edges(FORWARD)[1]
+  gore = sorted((round(float(p[0, 0])), round(float(p[-1, 0])), s) for p, s in side.kerb(offset_line(pts, hi), None, 0, {2}, True)[1])
+  assert {s for *_, s in gore} == {'solid'} and 30 <= gore[0][0] <= 40 and gore[-1][1] == inner[0][0], gore
   assert xs(kept(1, False)) == [(-100, 0)] and xs(kept(1, True)) == [(-100, 0)]  # the wide carriageway's own
   # merging: the mirror image, back from the wide carriageway's start
   outer = xs(kept(6, False))
