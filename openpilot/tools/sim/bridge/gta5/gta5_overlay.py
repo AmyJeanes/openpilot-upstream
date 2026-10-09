@@ -52,7 +52,7 @@ from multiprocessing.connection import Connection
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, EDGE, EDGE_LINE, FORWARD, PARKING, Section, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, EDGE, FORWARD, PARKING, Section, \
   offset_line as offset_polyline
 
 EVERY = 0.5  # s between overlay updates
@@ -513,7 +513,7 @@ def road_marks(paths, osm) -> dict:
   junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
   from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, apart, clip_outside as clip_areas, densify, off_islands
-  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PAINTED, ROAD_CLASSES, PaintAreas, level, z_along
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PAINTED, ROAD_CLASSES, PaintAreas, level, lined_kerbs, z_along
   from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
   junctions = Junctions(osm, lambda tags: tags.get("highway", "").removesuffix("_link") in ROAD_CLASSES)
@@ -549,7 +549,7 @@ def road_marks(paths, osm) -> dict:
       add("t", middle, (a, b))
     geometry = osm.line_geometry(wid)
     right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
-    painted_edges = {round(line.offset, 2) for line, _ in geometry if line.kind == EDGE_LINE}
+    lined = lined_kerbs((line.kind, line.offset) for line, _ in geometry)
     for line, base in geometry:
       if wid in junctions.inside and (line.kind == EDGE or round(line.offset, 2) not in carried_inside[wid]):
         continue  # inside a junction, only the lines carried across it
@@ -568,9 +568,9 @@ def road_marks(paths, osm) -> dict:
             add(kind, np.column_stack([piece, pz]), (a, b))
             continue
           kerbs, between = side.kerb(piece, pz, layer, {wid}, line.offset == right)  # none between ways side by side
-          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # nor round painted islands
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands, z=pz)):  # nor round painted islands
             add(kind, np.column_stack([p, z_along(p, piece, pz)]), (a, b))
-          for p, style in between if round(line.offset, 2) not in painted_edges else ():  # its own line is in its paint
+          for p, style in between if line.offset not in lined else ():  # the edge line on that side is the line
             add("d" if style == "dashed" else "w", np.column_stack([p, z_along(p, piece, pz)]), (a, b))
   shape_pts, shape_len, shape_kind, shape_node = [], [], [], []
 
@@ -587,7 +587,7 @@ def road_marks(paths, osm) -> dict:
     roads = junction_roads(osm, paths, j)
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_areas(kerb, paint.near(kerb, paint.layer[n], kerbs_only=True, but=n)):
-        for p in off_islands(piece, junctions.islands):
+        for p in off_islands(piece, junctions.islands, z=z):
           add("e", np.column_stack([p, z_near(p, roads, z)]), (g, g))
     area = densify(simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), AREA_STEP)
     if not j.minor:  # a driveway's or slip's area across a main road would cut its approach in pieces

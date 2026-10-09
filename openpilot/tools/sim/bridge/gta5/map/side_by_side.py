@@ -253,8 +253,8 @@ class SideBySide:
     if right:
       mine = all(self.osm.lanes(w).lanes[-1].change_right for w in ways)
       for wid in sorted(set(beside[beside >= 0].tolist())):
-        if self.crosses(wid):
-          continue
+        if self.crosses(wid) or self.osm.lanes(wid).edge_line_styles(FORWARD)[0]:
+          continue  # (a way with an edge line on its left draws the line itself)
         style = 'dashed' if mine and self.osm.lanes(wid).lanes[0].change_left else 'solid'
         lines += [(p, style) for a, b in _runs(beside == wid) if (p := self._between(pts[a:b + 1], ways, wid)) is not None]
     keep = [p for p in kept if _length(p) >= MIN_PIECE]

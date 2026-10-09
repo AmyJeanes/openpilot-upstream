@@ -165,6 +165,16 @@ def marks(style: str | None, white: bool) -> list[tuple[int, float]]:
           'dashed_solid': [(dashed, -DOUBLE), (solid, DOUBLE)], 'solid_dashed': [(solid, -DOUBLE), (dashed, DOUBLE)]}.get(style or '', [])
 
 
+def lined_kerbs(lines) -> set[float]:
+  """The kerbs (EDGE offsets, of (kind, offset) pairs) with an edge line (EDGE_LINE) painted on their side of the road:
+  side_by_side's line between ways at such a kerb would be a second line beside it, so it's left out."""
+  edges = [o for k, o in lines if k == EDGE]
+  if not edges:
+    return set()
+  lo, hi = min(edges), max(edges)
+  return {lo if abs(o - lo) <= abs(o - hi) else hi for k, o in lines if k == EDGE_LINE}
+
+
 def level(tags: dict) -> tuple[int, int]:
   """A way's layer (`layer`, else 1 on a bridge, -1 in a tunnel) and whether it's on the ground (0), a bridge (1) or in a
   tunnel (2)."""
@@ -443,7 +453,7 @@ def main():
     z = heights(nodes) if high else None
     ways = {osm.pairs[(a, b)][0] for a, b in zip(nodes[:-1], nodes[1:], strict=True)}
     right = max((offset for kind, offset, *_ in sig if kind == EDGE), default=None)
-    painted_edges = {offset for kind, offset, *_ in sig if kind == EDGE_LINE}
+    lined = lined_kerbs((kind, offset) for kind, offset, *_ in sig)
     for kind, offset, style, white in sig:
       for k, off in [(0, 0.0)] if kind == EDGE else [(KINDS.index('parking'), 0.0)] if kind == PARKING_STRIP else \
           marks(style, white):
@@ -453,9 +463,9 @@ def main():
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, ways, offset == right)
-          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands, z=z_along(kerb, pts, z) if high else None)):
             add(k, p, layer, z_along(p, pts, z) if high else None)
-          for p, s in between if offset not in painted_edges else ():  # its own line is in its paint
+          for p, s in between if offset not in lined else ():  # the edge line on that side is the line
             add(KINDS.index(s), p, layer, z_along(p, pts, z) if high else None)
   for wid in tapered:  # lanes opening or closing along it (osm_lanes.OsmLanes.taper)
     refs, road, layer = junctions.ways[wid][1], osm.lanes(wid), levels[wid][0]
@@ -463,7 +473,7 @@ def main():
     z = heights(refs) if high else None
     geometry = osm.line_geometry(wid)
     right = max((line.offset for line, _ in geometry if line.kind == EDGE), default=None)
-    painted_edges = {round(line.offset, 2) for line, _ in geometry if line.kind == EDGE_LINE}
+    lined = lined_kerbs((line.kind, line.offset) for line, _ in geometry)
     for line, geom in geometry:
       if line.kind != EDGE and (not road.markings or line.kind == PARKING):
         continue
@@ -475,9 +485,9 @@ def main():
             add(k, piece, layer, z_along(piece, pts, z) if high else None)
             continue
           kerbs, between = side.kerb(piece, z_along(piece, pts, z) if high else None, layer, {wid}, line.offset == right)
-          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands)):  # as for the ways above
+          for p in (q for kerb in kerbs for q in off_islands(kerb, junctions.islands, z=z_along(kerb, pts, z) if high else None)):
             add(k, p, layer, z_along(p, pts, z) if high else None)
-          for p, st in between if round(line.offset, 2) not in painted_edges else ():
+          for p, st in between if line.offset not in lined else ():
             add(KINDS.index(st), p, layer, z_along(p, pts, z) if high else None)
     for a, b in road.parking_lanes(FORWARD):
       g = offset_line(pts, (a + b) / 2)
@@ -487,7 +497,7 @@ def main():
     jz = junction_z[n] if high else None
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_outside(kerb, paint.near(kerb, area_layer[n], kerbs_only=True, but=n)):
-        for p in off_islands(piece, junctions.islands):
+        for p in off_islands(piece, junctions.islands, z=jz):
           add(KINDS.index('edge'), p, area_layer[n], jz)
     for s in j.stops:
       add(KINDS.index(s.kind), s.line, area_layer[n], jz)

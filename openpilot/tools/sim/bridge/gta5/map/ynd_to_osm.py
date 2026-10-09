@@ -1701,7 +1701,8 @@ def edge_line_tags(tags, samples, why):
   left, right = paint_survey.edge_lines(samples, (sec[0].left, sec[-1].right))
   for side, kind in (('left', left), ('right', right)):
     if kind:
-      tags = {**tags, f'divider:{side}': kind}
+      # one line per edge: it's the shoulder's edge line too (road_edges' markings for it go)
+      tags = {**{k: v for k, v in tags.items() if k != f'shoulder:{side}:markings'}, f'divider:{side}': kind}
       why[f'yellow {side} edge'] += 1
   return tags
 
@@ -1820,6 +1821,89 @@ def street_centres(nodes, ways, defaulted):
     sides = [v for v in (side(r, r[2], True), side(r, r[1], True)) if v]
     if sides:
       out[wid] = min(sides, key=lambda v: v[1])[0]
+  return out
+
+
+EDGE_LANE_MAX = 7.6  # m: an outer lane widened to the painted edge line is no wider (GTA paints lanes up to 7.5 m)
+EDGE_SYMMETRY = 0.6  # m the two edge lines' distances from the way's line may differ for the lanes to stay centred on it
+EDGE_ON = 0.3  # m between the lanes' edge and a painted edge line that is it
+ASPHALT_SLACK = 0.2  # m the lanes may reach past the asphalt's edge
+SHOULDER_MIN, SHOULDER_MAX = 0.3, 5.5  # m of road surface between the lanes' edge and the asphalt's: a shoulder
+
+
+def road_edges(tags, samples, why):
+  """A way's tags with its lanes running out to the edge lines the game files paint and its kerbs where their asphalt
+  ends (paint_survey.road_edges): GTA paints many roads' edges as a solid line with a shoulder of road beyond it (the
+  Great Ocean Hwy's 4 m), and the class layout's (or the survey's) kerbs fell inside the asphalt, on or short of the
+  line. The outer lanes widen (or narrow) to the edge lines, leaving every other line where it was: each to its own
+  where placement keeps the line on the lanes in between, else alike (the line the middle of the lanes) to both where
+  they're about as far either side of it, or to the one painted where the other side's asphalt has room. The road
+  surface between the lanes' edge and the asphalt's, with nothing else painted on it, is a shoulder
+  (`shoulder:<side>:width`), its edge line painted where the lanes run to one (else `shoulder:<side>:markings=no`), in
+  the files' colour (`shoulder:<side>:markings=white|yellow` where it isn't osm_lanes' default). Not on single tracks,
+  centre turn lanes, tapers, parking lanes or lanes with room between them and their kerbs."""
+  if any(k.endswith((':start', ':end')) or k.startswith(('parking', 'shoulder')) for k in tags):
+    return tags
+  road = WayLanes.from_tags(tags)
+  sec = road.section(FORWARD)
+  if not sec or road.margin > 0.01 or any(s.heading == 0 for s in sec):
+    return tags
+  one_way = all(s.heading == 1 for s in sec)
+  edges = [sec[0].left, sec[-1].right]
+  found = paint_survey.road_edges(samples, tuple(edges), (sec[0].right, sec[-1].left))
+  lines, colours, asphalt, clear = ([f[k] for f in found] for k in range(4))
+  sign = (-1.0, 1.0)
+  out = dict(tags)
+
+  def laid_out(to):  # the tags with the outer lanes out to `to` (left, right), if that leaves every other line in place
+    move = [(edges[0] - to[0]), (to[1] - edges[1])]
+    widths = [s.right - s.left for s in sec]
+    widths[0] += move[0]
+    widths[-1] += move[1]
+    if not all(paint_survey.LANE_MIN <= w <= EDGE_LANE_MAX for w in (widths[0], widths[-1])) or \
+        any(a is not None and (a - t) * s < -ASPHALT_SLACK for a, t, s in zip(asphalt, to, sign, strict=True)):
+      return None
+    new = dict(tags, width=metres(road.width + sum(move)))
+    if one_way:
+      new['width:lanes'] = '|'.join(metres(w) for w in widths)
+    else:
+      new.pop('width:lanes', None)
+      new['width:lanes:forward'] = '|'.join(metres(w) for w, s in zip(widths, sec, strict=True) if s.heading == 1)
+      new['width:lanes:backward'] = '|'.join([metres(w) for w, s in zip(widths, sec, strict=True) if s.heading == -1][::-1])
+    got = WayLanes.from_tags(new).section(FORWARD)
+    before = [v for s in sec for v in (s.left, s.right)][1:-1]
+    after = [v for s in got for v in (s.left, s.right)][1:-1]
+    moved = [abs(got[0].left - to[0]), abs(got[-1].right - to[1]), *(abs(a - b) for a, b in zip(before, after, strict=False))]
+    return new if len(got) == len(sec) and max(moved) <= 0.02 else None
+  tries = []
+  if any(v is not None for v in lines):
+    tries.append([v if v is not None else e for v, e in zip(lines, edges, strict=True)])  # each to its own
+    if None not in lines and abs(lines[0] + lines[1]) <= EDGE_SYMMETRY:
+      tries.append([(lines[0] - lines[1]) / 2, (lines[1] - lines[0]) / 2])
+    elif None in lines:
+      half = next(abs(v) for v in lines if v is not None)
+      tries.append([-half, half])
+  for to in tries:
+    if max(abs(t - e) for t, e in zip(to, edges, strict=True)) <= 0.05:
+      break
+    if (new := laid_out(to)) is not None:
+      out, edges = new, to
+      why['lanes out to the painted edge lines'] += 1
+      break
+  shoulders, base = [0.0, 0.0], WayLanes.from_tags(out).width
+  for i, side in enumerate(('left', 'right')):
+    if asphalt[i] is not None and clear[i] and SHOULDER_MIN <= (wide := (asphalt[i] - edges[i]) * sign[i]) <= SHOULDER_MAX:
+      shoulders[i] = wide
+      out[f'shoulder:{side}:width'] = metres(wide)
+      default = 'yellow' if one_way and i == 0 else 'white'
+      if lines[i] is None or abs(lines[i] - edges[i]) > EDGE_ON:
+        out[f'shoulder:{side}:markings'] = 'no'
+      elif colours[i] != default:
+        out[f'shoulder:{side}:markings'] = colours[i]
+      why['shoulders' + (' (no edge line)' if out.get(f'shoulder:{side}:markings') == 'no' else '')] += 1
+  if any(shoulders):
+    out['shoulder'] = 'both' if all(shoulders) else 'left' if shoulders[0] else 'right'
+    out['width'] = metres(base + sum(shoulders))
   return out
 
 
@@ -2258,6 +2342,15 @@ def main():
       medians.update(e for e in ((a, b), (b, a)) if e[1] not in bay_to[wid])
   lines = paint_survey.line_kinds(args.survey_lines) if args.survey_lines else None
   survey = paint_survey.load(args.survey, lines) if args.survey else {}
+  tracks = 0
+  for row in info:  # GTA's single tracks the game files paint a centre line on are two-lane roads (the port's grid)
+    lf = row[8]
+    steps_7 = lf[1] & 0xF0 == 0xF0  # offset -7: both directions on one lane on the line
+    if row[3] == row[4] == 1 and steps_7 and paint_survey.painted_centre(paint_survey.along(survey, row[1], row[2]) or []):
+      row[8] = [lf[0], lf[1] & 0x0F, *lf[2:]]
+      tracks += 1
+  if survey:
+    print(f"{tracks} single tracks with a painted centre line as two-lane roads")
   row_of = {row[0]: row for row in info}
   painted, why, left_out, centre_kinds, recounted, median_kinds = {}, Counter(), 0, {}, {}, {}
   # where the game files' paint covers the map, the camera's survey only checks it
@@ -2464,7 +2557,7 @@ def main():
       painted[wid] = got
       repainted.add(wid)
   print(f"{len(repainted)} ways the turn lanes split or changed painted as their own sections")
-  lines_why = Counter()
+  lines_why, edges_why = Counter(), Counter()
   unmarked = unmarked_roads(nodes, [(wid, a, b, bool(back), cls, bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF),
                                      bool((nodes[a]['f'][0] | nodes[b]['f'][0]) & OFFROAD))
                                     for wid, a, b, _, back, cls, *_ in info if wid not in crossings], link_samples) if survey else set()
@@ -2538,7 +2631,10 @@ def main():
       tags = painted_lines(tags, cls, bool(back), [] if wid in unmarked else samples, lines_why, wid in unmarked)
     if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
       tags = outer_changes(tags, samples, lines_why)
-      tags = edge_line_tags(tags, samples, lines_why)
+    if survey and (samples := link_samples(wid, a, b)):
+      tags = road_edges(tags, samples, edges_why)
+    if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
+      tags = edge_line_tags(tags, samples, lines_why)  # at the lanes' edges road_edges left them
     if survey and not back and sum(d.get('src') == paint_survey.GAMEFILES for d in link_samples(wid, a, b)) < paint_survey.MIN_SAMPLES:
       unread_edges.add(wid)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
@@ -2569,6 +2665,7 @@ def main():
     print(f"{len(edges_on)} one-way ways without sections with the yellow edges of the carriageway either side")
     print(f"{len(carried)} two-lane ways' centre lines as the road's either side, not the class default (" +
           ', '.join(f'{n} {k}' for k, n in Counter(' '.join(v.values()) for v in carried.values()).most_common()) + ")")
+    print("road edges from the game files: " + ', '.join(f'{n} {k}' for k, n in edges_why.most_common()))
   for i, (kind, wi, via, wo) in enumerate(restrictions):
     via = [(t, node_id(ref) if t == 'n' else ref, 'via') for t, ref in via]
     w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': kind},

@@ -34,7 +34,7 @@ map as on our GTA V one.
   than where its kerbs meet the next roads' (painted level with the road it meets) is inside the junction's area,
   shaped as without it, and lies along that road's edge.
 - Kerbs aren't drawn within ISLAND_REACH of a painted island (`traffic_calming=painted_island`) or a road surface
-  area (`area:highway`) (off_islands).
+  area (`area:highway`) at their height (off_islands): not of a road above or below (a ramp over a motorway).
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
   road has no stop or give way line or crossing into it, nothing of a higher class and wider meets it there, and its
   lines meet the same lines of the road on the far side at the junction's node (or, between two of its nodes, of the
@@ -80,6 +80,7 @@ TRIANGLE_SPAN = 40.0  # m: ... and no further apart than this, are one junction
 CROSSING_WIDTH = 3.0  # m: a pedestrian crossing's painted width
 CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes between its stop lines and it
 ISLAND_REACH = 1.0  # m round a painted island (traffic_calming=painted_island) within which no kerb is drawn
+ISLAND_LEVEL = 3.0  # m: an island or road surface further above or below a kerb is another level's
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
@@ -181,9 +182,10 @@ def apart(line: np.ndarray, segs: np.ndarray, dist: float = DRAWN_NEAR, step: fl
 
 
 class Islands:
-  """Outlines [K, 2] (closed) kerbs keep off, by CELL squares."""
-  def __init__(self, polys: list[np.ndarray]):
+  """Outlines [K, 2] (closed) kerbs keep off, by CELL squares, with their heights (nan unknown)."""
+  def __init__(self, polys: list[np.ndarray], heights: list[float] | None = None):
     self.polys = polys
+    self.z = np.array(heights if heights is not None else [np.nan] * len(polys), float)
     self.cells: dict[tuple[int, int], list[int]] = {}
     for n, p in enumerate(polys):
       lo, hi = p.min(0) // CELL, p.max(0) // CELL
@@ -194,19 +196,25 @@ class Islands:
   def __len__(self) -> int:
     return len(self.polys)
 
-  def near(self, lo: np.ndarray, hi: np.ndarray) -> list[np.ndarray]:
+  def near(self, lo: np.ndarray, hi: np.ndarray, z: float | None = None) -> list[np.ndarray]:
+    """The outlines in a box, those at height z (within ISLAND_LEVEL) where both are known."""
     found = {n for cx in range(int(lo[0] // CELL), int(hi[0] // CELL) + 1) for cy in range(int(lo[1] // CELL), int(hi[1] // CELL) + 1)
              for n in self.cells.get((cx, cy), ())}
-    return [self.polys[n] for n in sorted(found) if (self.polys[n].max(0) >= lo).all() and (self.polys[n].min(0) <= hi).all()]
+    level = z is None or not np.isfinite(z)
+    return [self.polys[n] for n in sorted(found) if (self.polys[n].max(0) >= lo).all() and (self.polys[n].min(0) <= hi).all()
+            and (level or not np.isfinite(self.z[n]) or abs(self.z[n] - z) <= ISLAND_LEVEL)]
 
 
 def off_islands(line: np.ndarray, islands, reach: float = ISLAND_REACH, step: float = 0.25,
-                min_len: float = 0.3) -> list[np.ndarray]:
-  """The pieces of a line [N, 2] not inside, nor within reach of, any of the outlines (Islands, or a list of [K, 2])."""
+                min_len: float = 0.3, z=None) -> list[np.ndarray]:
+  """The pieces of a line [N, 2] not inside, nor within reach of, any of the outlines (Islands, or a list of [K, 2]); of
+  Islands only those at the line's height `z` (m, or its points' heights), where given."""
   if not len(islands):
     return [line]
   lo, hi = line.min(0) - reach, line.max(0) + reach
-  near = islands.near(lo, hi) if isinstance(islands, Islands) else \
+  if z is not None and np.ndim(z):
+    z = float(np.nanmean(z)) if np.isfinite(z).any() else None
+  near = islands.near(lo, hi, z) if isinstance(islands, Islands) else \
     [p for p in islands if (p.max(0) >= lo).all() and (p.min(0) <= hi).all()]
   if not near:
     return [line]
@@ -558,9 +566,15 @@ class Junctions:
     # painted islands: road surface, the kerbs GTA's links round them suggest aren't there
     painted = [(osm.xy[osm.data.index(refs)], tags.get('colour')) for tags, refs in osm.data.ways.values()
                if tags.get('traffic_calming') == 'painted_island' and len(refs) >= 4]
-    surfaces = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values() if 'area:highway' in tags and len(refs) >= 4]
+    surfaces = [refs for tags, refs in osm.data.ways.values() if 'area:highway' in tags and len(refs) >= 4]
     self.painted_islands = [xy for xy, _ in painted]  # their tips end junctions' corners (shape)
-    self.islands = Islands(self.painted_islands + surfaces)  # road surface: no kerb in it
+
+    def height(refs):
+      ele = [float(t['ele']) for n in refs if 'ele' in (t := osm.data.node_tags.get(n, {}))]
+      return float(np.mean(ele)) if ele else np.nan
+    island_refs = [refs for tags, refs in osm.data.ways.values() if tags.get('traffic_calming') == 'painted_island' and len(refs) >= 4]
+    self.islands = Islands(self.painted_islands + [osm.xy[osm.data.index(refs)] for refs in surfaces],  # road surface: no kerb in it
+                           [height(refs) for refs in island_refs + surfaces])
     self.island_outlines = [(xy, colour) for xy, colour in painted if colour in ('white', 'yellow')]  # drawn as painted
     self.crossings = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values()
                       if tags.get('footway') == 'crossing' and len(refs) >= 2]

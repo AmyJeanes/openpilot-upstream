@@ -1089,8 +1089,10 @@ class MapDriver:
           continue
         gta_lo, gta_hi = link.inner - link.back * link.width, link.inner + link.lanes * link.width
         room = min(rr - gta_lo, gta_hi - rr) - HALF_WIDTH
-        # the map's road wider than GTA's on the near side (its lane placed out towards GTA's barrier or kerb)
-        wider = (lo < gta_lo - EDGE_WIDER) if rr - gta_lo < gta_hi - rr else (hi > gta_hi + EDGE_WIDER)
+        # the map's lanes wider than GTA's on the near side (a lane placed out towards GTA's barrier or kerb; a shoulder
+        # beyond them is no lane)
+        lanes_lo, lanes_hi = sec.spans[0].left, sec.spans[-1].right
+        wider = (lanes_lo < gta_lo - EDGE_WIDER) if rr - gta_lo < gta_hi - rr else (lanes_hi > gta_hi + EDGE_WIDER)
         if room < EDGE_CLEAR and wider:
           found.setdefault(("gta_edge", ""), []).append((i, {"room": round(float(room), 2), "right": round(float(rr), 2),
                                                             "gta_edges": [round(gta_lo, 2), round(gta_hi, 2)],
