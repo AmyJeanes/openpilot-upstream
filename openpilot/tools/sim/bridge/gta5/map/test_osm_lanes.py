@@ -339,6 +339,10 @@ def test_neighbours_paint():
   rows = [(1, 'A', 'B', 2, 1), (2, 'B', 'C', 1, 1), (4, 'C', 'E', 2, 1)]
   assert neighbours_paint(nodes, rows, {1: wide, 4: wide}, {2}) == {2: wide}
   assert neighbours_paint(nodes, rows, {1: wide}, {2}) == {}
+  # a link with sections the survey couldn't read: only where the road is painted alike at both ends
+  assert neighbours_paint(nodes, rows, {1: wide, 4: wide}, set(), {2}) == {2: wide}
+  same = [(1, 'A', 'B', 1, 1), (2, 'B', 'C', 1, 1), (4, 'C', 'E', 2, 1)]
+  assert neighbours_paint(nodes, same, painted, set(), {2}) == {}
 
 
 def test_unmarked_roads():

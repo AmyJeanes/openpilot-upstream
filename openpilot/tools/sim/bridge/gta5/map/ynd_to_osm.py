@@ -1554,13 +1554,15 @@ def painted_lines(tags, cls, two_way, samples, why, unmarked=False):
   return out
 
 
-def neighbours_paint(nodes, rows, painted, unsurveyed):
+def neighbours_paint(nodes, rows, painted, unsurveyed, unread=None):
   """The painted cross-sections (paint_survey.correct's) for two-way ways the game files have no sections of (`unsurveyed`
   way ids: as GTA's short links in and next to junctions, whose sections the survey leaves out), from the way the road
   runs on to at either end (within STRAIGHT) with the same lane counts each way and a painted cross-section, the longer
-  one where both have; or other counts where the road is painted with them at both ends (a link between two whose
-  counts the paint has): so a road's lines run on at the paint's place and kind rather than GTA's class layout (a
-  median where the game paints a double line). `rows` are [(way id, a, b, fwd, back)]; returns {way id: cross-section}."""
+  one where both have; and for those and the ways whose few sections the survey couldn't read (`unread`), where the
+  road is painted alike at both ends, with its counts (a link between two the paint recounts): so a road's lines run on
+  at the paint's place and kind rather than GTA's class layout (a median where the game paints a double line). `rows`
+  are [(way id, a, b, fwd, back)]; returns {way id: cross-section}."""
+  unread = unsurveyed | (unread or set())
   at = defaultdict(list)
   for r in rows:
     if r[4]:
@@ -1575,7 +1577,7 @@ def neighbours_paint(nodes, rows, painted, unsurveyed):
   out = {}
   for r in rows:
     wid, a, b, fwd, back = r
-    if wid not in unsurveyed or not back:
+    if wid not in unread or not back:
       continue
     found = []
     for n, far in ((a, b), (b, a)):
@@ -1595,8 +1597,9 @@ def neighbours_paint(nodes, rows, painted, unsurveyed):
           if 'parking' in got:
             got['parking'] = got['parking'][::-1]
         found.append((length(o), n, got))
-    counts = [f for f in found if (len(f[2]['forward']), len(f[2]['backward'])) == (fwd, back)]
-    # or other counts, painted on the road both sides (a link between two the paint recounts)
+    counts = [f for f in found if (len(f[2]['forward']), len(f[2]['backward'])) == (fwd, back)] if wid in unsurveyed else []
+    # or the road painted alike at both ends (a link between two the paint recounts, or whose own few sections the
+    # survey couldn't read)
     other = {n: (len(got['forward']), len(got['backward'])) for _, n, got in found}
     if not counts and len(other) == 2 and len(set(other.values())) == 1:
       counts = found
@@ -2130,10 +2133,11 @@ def main():
     if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
       centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
   print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
-  unsurveyed = {wid for wid, a, b, _, back, *_ in info if back and not bay_to[wid] and wid not in painted and
+  unread = {wid for wid, _, _, _, back, *_ in info if back and not bay_to[wid] and not painted.get(wid)}
+  unsurveyed = {wid for wid, a, b, *_ in info if wid in unread and
                 not any(d.get('src') == paint_survey.GAMEFILES for d in paint_survey.along(survey, a, b) or [])}
-  inherited = neighbours_paint(nodes, [(wid, a, b, fwd, back) for wid, a, b, fwd, back, *_ in info], painted, unsurveyed) \
-    if from_files else {}
+  inherited = neighbours_paint(nodes, [(wid, a, b, fwd, back) for wid, a, b, fwd, back, *_ in info], painted, unsurveyed,
+                               unread) if from_files else {}
   for wid, got in inherited.items():
     painted[wid] = got
     row = row_of[wid]
