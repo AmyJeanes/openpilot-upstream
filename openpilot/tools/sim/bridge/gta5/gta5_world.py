@@ -50,9 +50,13 @@ MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map 
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
 MAP_EVERY = 0.1  # s
 LANE_LINE_EVERY = 0.5  # s
+ON_PATH = 15.0  # m: the overlay's turn markers go on nav's lane line where it passes this near their route points
 ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
 ROUTE_AHEAD, ROUTE_STEP = 1000.0, 5.0  # m: the route nav gets, in the form of the plugin's GTA route (500 m)
-ON_ROUTE = 8.0  # m: the car's lane from the route's road, rather than the plugin's guess at the road it's on
+# s the car's last lane reading by the map's lanes stands while there's none: the plugin's own reading counts GTA's
+# link, one of several side by side on a wide road (a 1-lane link reads [0, 1] in any lane), so it's used only on a
+# map without lane tags
+LANE_HOLD = 3.0
 # the route input of a route-conditioned driving model (navd/route_input.py); modeld reads it only if its model has one
 ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the model, to A/B one model with and without
 OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
@@ -123,6 +127,19 @@ def speed_limit(street: str) -> float:
     return 0.0
   mph = next((limit for words, limit in SPEED_LIMITS if any(w in street for w in words)), CITY_SPEED_LIMIT)
   return mph * 0.44704
+
+
+def on_path(p, line: np.ndarray, near: float = ON_PATH):
+  """The point of a polyline nearest p, where it passes within `near` m; else p."""
+  if p is None or len(line) < 2:
+    return p
+  p = np.asarray(p, float)
+  a, ab = line[:-1], np.diff(line, axis=0)
+  t = np.clip(np.einsum('ij,ij->i', p - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
+  foot = a + ab * t[:, None]
+  d = np.hypot(*(foot - p).T)
+  k = int(np.argmin(d))
+  return foot[k] if d[k] < near else p
 
 
 class GTA5World(World):
@@ -220,6 +237,7 @@ class GTA5World(World):
     self.noo, self.noo_t = NOO != "off", 0.0
     self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
     self.match_t: float | None = None
+    self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
 
   def _nav_drives(self) -> bool:
     """Navigate on openpilot: nav drives, rather than only guiding."""
@@ -491,19 +509,38 @@ class GTA5World(World):
     self.route = route
     self._write_route_input(state)
     state = {**state, "waypoint": dest.tolist() if dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
+    plugin = state.get("lane")
     if self.route is None:
-      self._write_lane_slots(state, state.get("lane"))
-      return state
-    on = self.route.off < ON_ROUTE
-    lane, plugin = self.route.lane() if on else None, state.get("lane")
-    frac = self.route.lane_frac() if lane else None
-    if lane and plugin and lane[0] != plugin[0]:
-      lane, frac = None, None  # they disagree: no lane changes on either
-    elif not lane:
-      lane = plugin
+      lane, _ = self._car_lane(None, None, plugin, state["laneMap"], time.monotonic())
+      self._write_lane_slots(state, lane)
+      return {**state, "lane": lane, "lanePlugin": plugin}
+    on = self.route.on_road()
+    lane, frac = self._car_lane(self.route.lane() if on else None, self.route.lane_frac() if on else None, plugin,
+                                state["laneMap"], time.monotonic())
     self._write_lane_slots(state, lane)
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None}
+
+  def _car_lane(self, lane: list[int] | None, frac: float | None, plugin: list[int] | None, map_lane: dict | None,
+                now: float) -> tuple[list[int] | None, float | None]:
+    """The car's lane [i from the left, of n] and where it is between lanes, for nav, its lane line and recordings: the
+    route's (`lane`, on its road), else the map's lane match on our side of the road, else the last of those for
+    LANE_HOLD s. The plugin's own reading stands only on a map without lane tags; where it reads as many lanes as the
+    route's but another one, and the map's match doesn't side with the route's, there's no lane."""
+    matched = [map_lane["lane"], map_lane["lanes"]] if map_lane and map_lane.get("kind") == "own" and map_lane.get("lanes") else None
+    tagged = self.navigator is not None and self.navigator.router.osm is not None
+    if lane and plugin and plugin[1] == lane[1] and plugin[0] != lane[0] and matched != lane:
+      return None, None  # they disagree: no lane changes on either
+    if lane:
+      self.good_lane = (lane, now)
+      return lane, frac
+    if matched:
+      self.good_lane = (matched, now)
+      return matched, None
+    if not tagged and plugin:
+      return plugin, None
+    held, t = self.good_lane
+    return (held, None) if held is not None and now - t < LANE_HOLD else (None, None)
 
   @staticmethod
   def _junction_areas(osm: OsmLanes) -> JunctionAreas | None:
@@ -591,8 +628,15 @@ class GTA5World(World):
     return out + self.gps.update(state, self.route)
 
   def _turn_points(self, state: dict):
-    """The next turn navd signals and where its signal comes on, for the overlay."""
-    return self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"), state.get("junctions"))
+    """The next turn navd signals and where its signal comes on, for the overlay: on nav's lane line, as the route's
+    points are its road's line (a two-way road's middle, a junction's centre). Once signalled, where the car was."""
+    points = self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"),
+                                  state.get("junctions"), state.get("turns"))
+    if points is None:
+      return None
+    line = np.asarray(self._lane_line(state, state.get("vEgo", 0.0)), float).reshape(-1, 2)
+    turn, signal = points
+    return on_path(turn, line), signal if signal is None or self.nav.signaling else on_path(signal, line)
 
   def _update_map(self, state: dict, bearing: float, v: float):
     now = time.monotonic()
@@ -621,7 +665,7 @@ class GTA5World(World):
       return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
     forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
     line = r.lane_line(lane_plan(r.rest(), forks, state.get("lane"), r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0), r.lane_opens(r.length, 0.0)))
+                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length)))
     self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
     return self.lane_line[2]
 

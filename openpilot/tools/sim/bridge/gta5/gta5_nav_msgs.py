@@ -31,7 +31,7 @@ MAX_ROAD_POINTS = 8000  # in one navRoute
 DEFAULT_ROAD_WIDTH = 7.0  # m
 MINOR = frozenset({"service", "track", "living_street"})  # left off the map: car parks and drives clutter it
 DEFAULT_SPEED = 13.4  # m/s, for the time left where the route has no times
-ON_ROUTE = 15.0  # m: off the route by more, the car's lane isn't one of the route's road
+ON_ROUTE = 15.0  # m: off the route by more, and outside its road's kerbs, the car's lane isn't one of its road's
 TARGET_DIRECTION = {"left": "left", "right": "right", "through": "straight"}
 FORK_DIRECTION = {"left": "slightLeft", "right": "slightRight"}
 
@@ -365,7 +365,7 @@ class NavMessages:
       except Exception as e:  # lanes on a map they can't read: the rest of the guidance carries on
         print(f"nav msgs: lane slots: {e!r}")
     try:
-      guide = lane_guide(slots, route.at, v, route.lane() if route.off < ON_ROUTE else None)
+      guide = lane_guide(slots, route.at, v, route.lane() if route.on_road(ON_ROUTE) else None)
     except Exception as e:
       print(f"nav msgs: lanes: {e!r}")
       guide = NO_LANES
