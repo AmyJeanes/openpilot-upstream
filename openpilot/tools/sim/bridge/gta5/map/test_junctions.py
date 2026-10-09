@@ -180,6 +180,18 @@ def test_stop_line_between_two_junctions():
   assert np.allclose(sorted(stops[0][1].line[:, 0]), [0.0, 5.5])  # the northbound lanes
 
 
+def test_lane_change_cutting_across_is_no_junction():
+  # two one-way carriageways side by side, and GTA's lane change from one to the other cutting across at 55 degrees:
+  # the traffic all runs one way, so no junction where it leaves or joins (its own heading would spread the flows
+  # past MERGE_FLOW)
+  lane = {'highway': 'primary', 'lanes': '1', 'oneway': 'yes', 'width': '4'}
+  q = (18.0 * math.cos(math.radians(55.0)), 18.0 * math.sin(math.radians(55.0)))
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0), 4: (-100.0, q[1]), 5: q, 6: (100.0, q[1])}
+  ways = {1: (lane, [1, 2]), 2: (lane, [2, 3]), 3: (lane, [4, 5]), 4: (lane, [5, 6]), 5: (lane, [2, 5])}
+  js = Junctions(make(nodes, ways))
+  assert js.lane_changes == {5} and js.junctions == [], [j.nodes for j in js.junctions]
+
+
 def test_slip_triangle_is_one_junction():
   # a side road from the east (node 3) meets a main road running north-west to south-east through nodes 1 and 2, 25 m
   # apart, by a one-way slip into it at 1 and one out of it at 2, as GTA lays a triangle where a side road joins: one

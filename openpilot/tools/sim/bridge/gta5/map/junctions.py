@@ -75,6 +75,9 @@ FREEWAY = frozenset({'motorway', 'motorway_link'})
 MERGE_FLOW = 30.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
 FREEWAY_FLOW = 60.0  # deg: ... or of this where one is a freeway's (GTA lays a diverge's lane changes as short links across it)
 U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
+LANE_CHANGE_M = 40.0  # m: GTA's lane changes between carriageways are 10-25 m long
+BRANCH = 10.0  # deg more a lane change turns off a carriageway than the carriageway turns going on
+SAME_WAY = 75.0  # deg between two ways' headings running the same way (GTA's lane changes cut across at up to ~60)
 MEET = 0.6  # m: lines of a road either side of a junction this near each other at its node are one line carried across
 CLASSES = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street', 'service', 'track')
 PRIORITY = ('designated', 'yes_unposted')  # priority_road=*: a priority road, signed or not
@@ -84,6 +87,47 @@ STRAIGHT = 30.0  # deg: a move turning less than this goes through
 ARROWS = {'through': (-STRAIGHT, STRAIGHT), 'slight_left': (10.0, 60.0), 'left': (STRAIGHT, 150.0), 'sharp_left': (110.0, U_TURN),
           'slight_right': (-60.0, -10.0), 'right': (-150.0, -STRAIGHT), 'sharp_right': (-U_TURN, -110.0),
           'merge_to_left': (-STRAIGHT, STRAIGHT), 'merge_to_right': (-STRAIGHT, STRAIGHT)}
+
+
+def lane_changes(osm: OsmLanes, ways) -> set[int]:
+  """The one-way ways among `ways` up to LANE_CHANGE_M long that leave a carriageway going on through their first node
+  and join one going on through their last (GTA's lane changes between links side by side): at each, another one-way
+  way in and another out run on straighter (by BRANCH) than this one turns off them, and within SAME_WAY of it. Where
+  carriageways braid, both are such ways' neighbours."""
+  first, last, ends_at, starts_at = {}, {}, {}, {}
+  for wid in ways:
+    tags, refs = osm.ways[wid]
+    if oneway_of(tags) != 1 or len(refs) < 2:
+      continue
+    first[wid], last[wid] = refs[0], refs[-1]
+    ends_at.setdefault(refs[-1], []).append(wid)
+    starts_at.setdefault(refs[0], []).append(wid)
+
+  def heading(wid, at_end):
+    pts = osm.xy[osm.data.index(osm.ways[wid][1])]
+    return _unit(pts[-1] - pts[-2] if at_end else pts[1] - pts[0])
+
+  def angle(u, v):
+    return float(np.degrees(np.arccos(np.clip(u @ v, -1.0, 1.0))))
+
+  out = set()
+  for wid in first:
+    pts = osm.xy[osm.data.index(osm.ways[wid][1])]
+    if float(np.hypot(*np.diff(pts, axis=0).T).sum()) > LANE_CHANGE_M:
+      continue
+    ends = []
+    for node, u, leaving in ((first[wid], heading(wid, False), True), (last[wid], heading(wid, True), False)):
+      ins = [heading(w, True) for w in ends_at.get(node, ()) if w != wid]
+      outs = [heading(w, False) for w in starts_at.get(node, ()) if w != wid]
+      if not ins or not outs:
+        ends.append(False)
+        continue
+      on = min(angle(a, b) for a in ins for b in outs)  # the carriageway going on through the node
+      off = min(angle(a, u) for a in ins) if leaving else min(angle(u, b) for b in outs)
+      ends.append(off > on + BRANCH and off < SAME_WAY)
+    if all(ends):
+      out.add(wid)
+  return out
 
 
 class Poly:
@@ -358,6 +402,7 @@ class Junctions:
         if i + 1 < len(refs):
           self.steps.setdefault(n, []).append((wid, refs[i + 1], True))
     self.junction_nodes = {n for n, s in self.steps.items() if len(s) >= 3}
+    self.lane_changes = lane_changes(osm, self.ways)
     self.crossings = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values()
                       if tags.get('footway') == 'crossing' and len(refs) >= 2]
     self._crossing_cells = self._cells(self.crossings)
@@ -658,7 +703,9 @@ class Junctions:
   def merges(self, members: list[Member], inside: list[int]) -> bool:
     """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW (FREEWAY_FLOW where one is a
     motorway's or its link's) of one heading, and the roads between its nodes (`inside`) are one-way: lanes merging,
-    parting or changing across one carriageway (as lane changes laid as links of their own), with no traffic crossing."""
+    parting or changing across one carriageway (as lane changes laid as links of their own), with no traffic crossing.
+    GTA's lane changes between the carriageways (`lane_changes`) cut across at a steeper angle: the carriageways'
+    flows alone say it, where two or more are left."""
     if any(not oneway_of(self.ways[w][0]) for w in inside):
       return False
     flows = []
@@ -667,7 +714,10 @@ class Junctions:
       way = oneway_of(self.ways[w][0])
       if not way:
         return False
-      flows.append(m.heading if (way == 1) == along else m.heading + math.pi)
+      flows.append((m.heading if (way == 1) == along else m.heading + math.pi, w in self.lane_changes))
+    if sum(not change for _, change in flows) >= 2:
+      flows = [f for f in flows if not f[1]]
+    flows = [f for f, _ in flows]
     mean = math.atan2(sum(math.sin(f) for f in flows), sum(math.cos(f) for f in flows))
     spread = FREEWAY_FLOW if any(self.ways[m.ways[0][0]][0].get('highway') in FREEWAY for m in members) else MERGE_FLOW
     return all(math.cos(f - mean) > math.cos(math.radians(spread)) for f in flows)

@@ -11,8 +11,8 @@ not from its own lanes there), the branches' kerbs are left out where they lie i
 straight past its end (by GORE m, and SHARED in from its edges, so a branch running on along its edge keeps its kerb):
 they cross its lanes until the branches part, at the gore. Likewise where several merge into one, back from its start.
 
-GTA also lays lane changes (a one-way way up to LANE_CHANGE_M long turning off a carriageway that goes on, into another
-that came from elsewhere, all running about one way) across the painted gore where two carriageways part or meet, and
+GTA also lays lane changes (junctions.lane_changes: a one-way way up to LANE_CHANGE_M long turning off a carriageway
+that goes on, into another that came from elsewhere, all running about one way) across the painted gore where two carriageways part or meet, and
 their kerbs crossed it. One with a stretch over GAP_M on no other carriageway (`across`) is part of the surface: it has
 no kerbs, covers no other way's kerb and parts no carriageway, so the gore's edges are the carriageways' own kerbs.
 """
@@ -20,22 +20,19 @@ from collections import defaultdict
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.junctions import densify, in_fan
+from openpilot.tools.sim.bridge.gta5.map.junctions import SAME_WAY, densify, in_fan, lane_changes
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, oneway_of
 
 # m: a kerb this near another way's carriageway, or on it, is inside the road surface (lanes at their class
 # width often fall short of the paint between GTA's links)
 SHARED = 1.5
 MEETS = 1.5  # m a kerb may be on the carriageway beside it (lanes placed to a lane's edge or middle) and still be its edge
-SAME_WAY = 75.0  # deg between two ways' headings running the same way (GTA's lane changes cut across at up to ~60)
 PARALLEL = 10.0  # deg: a way meeting another this near parallel shares a lane line with it, rather than crossing to it
 LEVEL = 2.5  # m of height between ways on one level
 STEP = 0.5  # m: kerbs are cut to this
 MIN_PIECE = 0.3  # m
 CELL = 25.0  # m
 GORE = 40.0  # m a carriageway that parts or merges is carried on past its end, or back from its start
-LANE_CHANGE_M = 40.0  # m: GTA's lane changes between carriageways are 10-25 m long
-BRANCH = 10.0  # deg more a lane change turns off a carriageway than the carriageway turns going on
 GAP_M = 1.0  # m of a lane change on no carriageway (but other lane changes'): it crosses a gore
 
 
@@ -59,7 +56,7 @@ class SideBySide:
       self.first[wid], self.last[wid] = refs[0], refs[-1]
       self.ends_at[refs[-1]].append(wid)
       self.starts_at[refs[0]].append(wid)
-    changes = self._lane_changes()
+    changes = lane_changes(osm, list(self.first))
     for wid in self.first:
       if wid not in changes:
         self._add_quads(wid)
@@ -114,37 +111,6 @@ class SideBySide:
                                   gores=False)
     seg = np.hypot(*np.diff(pts, axis=0).T)
     return max((float(seg[a:b].sum()) for a, b in _runs(~covered)), default=0.0)
-
-  def _lane_changes(self) -> set[int]:
-    """The one-way ways up to LANE_CHANGE_M long that leave a carriageway going on through their first node and join
-    one going on through their last: at each, another way in and another out run on straighter (by BRANCH) than this
-    one turns off them, and within SAME_WAY of it. Where carriageways braid, both are such ways' neighbours."""
-    def heading(wid, at_end):
-      pts = self.osm.xy[self.osm.data.index(self.osm.ways[wid][1])]
-      d = pts[-1] - pts[-2] if at_end else pts[1] - pts[0]
-      return d / max(float(np.hypot(*d)), 1e-9)
-
-    def angle(u, v):
-      return float(np.degrees(np.arccos(np.clip(u @ v, -1.0, 1.0))))
-
-    out = set()
-    for wid in self.first:
-      pts = self.osm.xy[self.osm.data.index(self.osm.ways[wid][1])]
-      if float(np.hypot(*np.diff(pts, axis=0).T).sum()) > LANE_CHANGE_M:
-        continue
-      ends = []
-      for node, u, leaving in ((self.first[wid], heading(wid, False), True), (self.last[wid], heading(wid, True), False)):
-        ins = [heading(w, True) for w in self.ends_at[node] if w != wid]
-        outs = [heading(w, False) for w in self.starts_at[node] if w != wid]
-        if not ins or not outs:
-          ends.append(False)
-          continue
-        on = min(angle(a, b) for a in ins for b in outs)  # the carriageway going on through the node
-        off = min(angle(a, u) for a in ins) if leaving else min(angle(u, b) for b in outs)
-        ends.append(off > on + BRANCH and off < SAME_WAY)
-      if all(ends):
-        out.add(wid)
-    return out
 
   def _heights(self, refs) -> np.ndarray | None:
     try:

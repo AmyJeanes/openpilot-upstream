@@ -84,8 +84,10 @@ the directions; and the plugin's debug overlay the same lines, from the map's ta
 surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
 cutting across between them, where the line between two such ways is a lane line, solid where either's `change:lanes`
 says so (`side_by_side.py`). GTA's lane changes across the painted gore where two such carriageways part or meet have
-no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. Where every road at a node is one-way and all run about one way (lanes merging, parting or
-changing across a carriageway) there is no junction area. Zoomed in, junctions are drawn as
+no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. Where every road at a node
+is one-way and all run about one way (lanes merging, parting or changing across a carriageway) there is no junction
+area; GTA's lane changes (`junctions.lane_changes`), cutting across at up to 60 degrees, don't count against that
+where two carriageways are left to say it (the hatched slip island by Vinewood Blvd's stop line). Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it (but the lines of a
 road carried straight on past side roads, as the main road's centre line runs on across them) nor where the roads
