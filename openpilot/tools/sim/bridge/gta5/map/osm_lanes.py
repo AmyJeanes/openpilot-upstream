@@ -888,28 +888,30 @@ def junction_move(osm: OsmLanes, nodes: list[int | None], points, along, k: int)
 MERGE_SPREAD = 40.0  # deg: a road joining the route's this near its heading on merges into it
 
 
-def merge_side(osm: OsmLanes, nodes: list[int | None], k: int) -> bool | None:
+def merge_side(osm: OsmLanes, nodes: list[int | None], k: int, split: bool = False) -> bool | None:
   """Whether another road joins the route's at its shape point k from behind (driven into the node, heading within
-  MERGE_SPREAD of the route's way on) on the left of the route's road in (True) or the right (False); None where none
-  does, or roads join on both sides (nodes: route_nodes)."""
+  MERGE_SPREAD of the route's way on) on the left of the route's road in (True) or the right (False); with `split`,
+  leaves it ahead (driven away from the node, within MERGE_SPREAD of the route's way in) on the left of the route's
+  road out. None where none does, or on both sides (nodes: route_nodes)."""
   if not 0 < k < len(nodes) - 1 or None in (nodes[k - 1], nodes[k], nodes[k + 1]):
     return None
   prev, j, nxt = nodes[k - 1], nodes[k], nodes[k + 1]
   here = osm.node_xy(j)
-  out = heading_of(osm.node_xy(nxt) - here)
-  back = osm.node_xy(prev) - here
+  ours = osm.node_xy(nxt if split else prev) - here  # the route's road on the side the other road is
+  along = heading_of(here - osm.node_xy(prev)) if split else heading_of(osm.node_xy(nxt) - here)
   sides = set()
   for m in osm.links.get(j, ()):
     if m in (prev, nxt):
       continue
-    w, fwd = osm.pairs[(m, j)]
+    w, fwd = osm.pairs[(j, m) if split else (m, j)]
     one = oneway_of(osm.ways[w][0])
     if one != 0 and (one == 1) != fwd:
       continue
     v = osm.node_xy(m) - here
-    if abs(math.degrees((heading_of(-v) - out + math.pi) % (2 * math.pi) - math.pi)) > MERGE_SPREAD:
+    if abs(math.degrees((heading_of(v if split else -v) - along + math.pi) % (2 * math.pi) - math.pi)) > MERGE_SPREAD:
       continue
-    sides.add(bool(back[0] * v[1] - back[1] * v[0] < 0))
+    cross = ours[0] * v[1] - ours[1] * v[0]
+    sides.add(bool(cross > 0) if split else bool(cross < 0))
   return sides.pop() if len(sides) == 1 else None
 
 
@@ -1030,7 +1032,7 @@ class RouteLanes:
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
                junctions=None, explicit: dict | None = None, moves: list | None = None, blended: dict | None = None,
-               merges: dict | None = None):
+               merges: dict | None = None, splits: dict | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
@@ -1047,6 +1049,8 @@ class RouteLanes:
     # shape points where another road joins the route's from behind, as onto a freeway from its on-ramp: whether it
     # joins on the left of ours (merge_side)
     self.merges: dict[int, bool] = merges or {}
+    # and where another road leaves it ahead, as an exit from a freeway: whether it leaves on the left of ours
+    self.splits: dict[int, bool] = splits or {}
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     self._corners: list[tuple[float, float]] | None = None
@@ -1096,7 +1100,8 @@ class RouteLanes:
     nodes = route_nodes(pts, osm) if ends or any(d >= 3 for d in degree) else []
     moves = [junction_move(osm, nodes, pts, along, k) for k in ends]
     merges = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k)) is not None}
-    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges)
+    splits = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k, True)) is not None}
+    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits)
 
   @staticmethod
   def _blended(pts: np.ndarray, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes, n: int) -> dict:
@@ -1231,6 +1236,8 @@ class RouteLanes:
     side = _turn_side(a, b)
     if side is None and sb - sa <= EPS and b.lanes > a.lanes and q[0] in self.merges:
       side = self.merges[q[0]]  # another road's lanes join ours on its side: two ways' lines meet at the node anyhow
+    if side is None and sb - sa <= EPS and b.lanes < a.lanes and q[0] in self.splits:
+      side = self.splits[q[0]]  # and leave on its side
     if side is not None:  # the turn lane's own side, wherever the lanes lie
       shift = (b.lanes - a.lanes) if side else 0
       return [i + shift if 0 <= i + shift < b.lanes else None for i in range(a.lanes)]
@@ -1520,14 +1527,16 @@ SIDE_MARGIN = 0.5  # m a lane
 
 def _turn_side(a: Section, b: Section) -> bool | None:
   """Where the road's lanes change from a to b in number, the side the lanes begin or end on by their turn arrows:
-  True on the left (a lane that only turns left is new in b, or a's ends), False on the right; None where the arrows
-  don't say, or say both. A bay opens where its road widens the other side as often as on its own (the lanes moving
-  across over its taper), so where the lanes lie can't tell."""
+  True on the left (a lane that only turns left is new in b, or a's ends), False on the right (one that only turns
+  right), the left where both are (a left bay opening as the kerb lane becomes a right-turn lane); None where the
+  arrows don't say. A bay opens where its road widens the other side as often as on its own (the lanes moving across
+  over its taper), so where the lanes lie can't tell."""
   few, many = (a, b) if a.lanes < b.lanes else (b, a)
   if few.lanes == many.lanes or not few.lanes:
     return None
-  left, right = _left_only(many) and not _left_only(few), _right_only(many) and not _right_only(few)
-  return None if left == right else left
+  if _left_only(many) and not _left_only(few):
+    return True
+  return False if _right_only(many) and not _right_only(few) else None
 
 
 LANE_GAP = 0.5  # of a lane's width: the cost of a lane carrying on as none, matching lanes across a change by place

@@ -283,8 +283,9 @@ class Route:
     """The lanes the car's way just before (after: just past) a point `ahead` m on, from the nearest link with them."""
     k = int(np.searchsorted(self.along, self.at + ahead + (1.0 if after else -1.0), side='right')) - 1
     ks = range(max(k, 0), len(self.links)) if after else range(min(k, len(self.links) - 1), -1, -1)
+    s = self.at + ahead
     for j in ks:
-      if abs(self.along[j] - self.at - ahead) > LANES_NEAR:
+      if max(self.along[j] - s, s - self.along[j + 1], 0.0) > LANES_NEAR:  # the segment, however long, from the point
         break
       sec = self.section(j)
       if sec is not None and sec.lanes:

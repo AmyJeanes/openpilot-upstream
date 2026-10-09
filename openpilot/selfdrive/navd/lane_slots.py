@@ -192,7 +192,7 @@ class LaneSlots:
     self.lanes = route.lanes
     self.drive_on_right = drive_on_right
     along = getattr(route, "lane_maps_along", None)
-    self.maps = along() if along is not None and self.lanes is not None else []  # where our lanes change (Route)
+    self.maps = along() if along is not None and self.lanes is not None else None  # where our lanes change (Route)
     self.points = np.asarray(route.points, float)
     self.moves: list[Move] = []
     self.along = np.zeros(0)
@@ -218,6 +218,7 @@ class LaneSlots:
         else:  # a map's route alone: by the branch's lane count
           nav = planner.Fork(m.along, side, self._lanes(m.along, True), n_in, True)
       planner.aim(nav, arrows)
+      planner.aim_fork(nav, self.maps)
       navs.append(nav)
     navs += planner.throughs(self.points, arrows, navs)
     navs.sort(key=lambda nav: nav.dist)
@@ -263,7 +264,7 @@ class LaneSlots:
     opening = self.lanes.opening(self.lanes.segment(s))
     shut = opening[1] if opening is not None and s < opening[0] else 0  # lanes still opening, not yet sec's
     shift = shut if shut and opening[2] else 0
-    maps = [m for m in self.maps if s < m[0] < move.along - planner.MAP_AT]
+    maps = [m for m in self.maps or [] if s < m[0] < move.along - planner.MAP_AT]
     if (len(maps[0][1]) if maps else move.n) != sec.lanes + shut:
       return want, centre  # the lanes here aren't those the maps start from
     ends = []

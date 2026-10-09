@@ -354,10 +354,13 @@ class Fork:
     self.slip = slip  # the other branch opens a slip lane or turn bay
     self.junction = False  # the route's move through a junction rather than a fork in the road: aimed as the arrows call it
     self.targets: tuple[int, int, int] | None = None  # lanes lo-hi of n the map's arrows allow it from
+    self.every = False  # every lane carries on along the route's branch, by the map's lanes (aim_fork)
 
   def lanes(self, n: int) -> tuple[int, int]:
     if self.targets is not None:
       return remap(self.targets, n, self.side == "left")
+    if self.every:
+      return 0, n - 1
     ours = min(self.ours, self.lanes_in - self.other) if 0 < self.other < self.lanes_in else self.ours
     if self.other and ours >= 3:
       ours -= 1  # and not the lane beside the other branch on a wide road, which drifts into it
@@ -376,6 +379,27 @@ class Through:
 
   def lanes(self, n: int) -> tuple[int, int]:
     return remap(self.targets, n, self.targets[0] == 0)
+
+
+class Ends:
+  """Where some of our lanes end along the road (a lane drop, or a split the route takes the other branch of, its gore
+  beginning there): the lanes that carry on (Route.info's laneMaps), to be in by then rather than cross over at it."""
+  def __init__(self, dist: float, mapping):
+    self.dist = dist
+    self.side = "through"
+    kept = [i for i, j in enumerate(mapping) if j is not None]
+    self.targets = (min(kept), max(kept), len(mapping))
+
+  def lanes(self, n: int) -> tuple[int, int]:
+    return remap(self.targets, n, self.targets[0] == 0)
+
+
+def lane_ends(maps: list, moves: list) -> list[Ends]:
+  """Ends for the lane maps ([(m ahead, map, how many after)]) where some of our lanes end, but none at a turn's
+  junction, where nav picks the lane out."""
+  turns = [m.dist for m in moves if isinstance(m, Turn)]
+  return [Ends(d, mp) for d, mp, _ in maps if d > 0.0 and None in mp and any(j is not None for j in mp)
+          and not any(t - MAP_AT <= d <= t + TURN_HOLDS for t in turns)]
 
 
 class Opening:
@@ -602,9 +626,14 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   ahead += [Fork(d, side, *rest) for d, side, *rest in forks if d > 0]
   for m in ahead:
     aim(m, arrows)
-  ahead += throughs(route, arrows, ahead, drops if t.lane_drops else None)
+  # with the maps, lanes that end are theirs (lane_ends), at junctions too
+  ahead += throughs(route, arrows, ahead, drops if t.lane_drops and maps is None else None)
   if maps is not None:
-    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), LaneMaps(maps), lane, lanes_at, v, t)
+    maps = LaneMaps(maps)
+    for m in ahead:
+      aim_fork(m, maps.maps)
+    ahead += lane_ends(maps.maps, ahead)
+    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), maps, lane, lanes_at, v, t)
   ahead += [Opening(float(d), int(extra)) for d, extra in opens or [] if d > 0]
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
@@ -648,6 +677,36 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
     keys += [(m.dist, float(cur)), (m.dist, float(new))]
     cur = new
   return keys
+
+
+FORK_MAP_NEAR = 15.0  # m past a fork in GTA's roads that the map's lanes may change for it
+
+
+def aim_fork(m, maps: list | None):
+  """A fork's lanes where the map's arrows don't give them, from where the map's lanes change for it (lane maps
+  [(m along, map, how many after)] from it to FORK_MAP_NEAR m on): the lanes before that carry on, all of them where
+  none end there, but the one beside the other branch on a road of three or more. GTA's own counts at a fork don't
+  always add up (a link into the gore counted on top of the road's lanes); without maps, they're all there is."""
+  if not isinstance(m, Fork) or m.targets is not None or m.junction or maps is None:
+    return
+  near = [mp for d, mp, _ in maps if m.dist - MAP_AT <= d <= m.dist + FORK_MAP_NEAR]
+  kept = [i for i, j in enumerate(near[0]) if j is not None] if near else []
+  if not near or not kept or len(kept) == len(near[0]):
+    m.every = True
+    return
+  if m.other and len(kept) >= 3:
+    kept = kept[:-1] if m.side == "left" else kept[1:]
+  m.targets = (min(kept), max(kept), len(near[0]))
+
+
+def bay_opens(maps: list, lane: int) -> float | None:
+  """Where lane `lane` (numbered as past the maps) begins on the way, as a turn bay opens: the last of the maps (laneMaps'
+  [(m ahead, map, how many after)]) no lane before carries on into; None where it's there all along."""
+  for d, m, _ in reversed(maps):
+    if lane not in m:
+      return d
+    lane = carry_back(m, lane)
+  return None
 
 
 def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune) -> list[tuple[float, float]]:
@@ -709,11 +768,34 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune)
       at = carry(mp, at)
     at = min(at, n - 1)
     lo, hi = m.lanes(n)
+    if isinstance(m, Fork) and (lo, hi) == (0, n - 1):
+      continue  # any lane will do: nothing to keep changes for the next move from starting before it
     if not lo <= at <= hi:
       want = lo if at < lo else hi
       last = max(FORK_LAST_DIST, FORK_LAST * v) if isinstance(m, Fork) else t.lane_change_last
       end = max(min(max(m.dist - last, free), m.dist), pos)
-      start = max(min(max(end - abs(want - at) * LANE_LINE_CHANGE, free), end), pos)
+      opens = bay_opens(todo[:upto(m.dist)], want)
+      if opens is not None and opens >= end:
+        # the lane only begins once the changes would have ended: into it from there, by the move
+        start = max(opens, pos)
+        end = max(min(start + abs(want - at) * LANE_LINE_CHANGE, m.dist), start)
+      elif opens is not None and isinstance(m, Turn) and max(pos, free) <= opens:
+        # into a turn bay as it opens, from the lane beside it (the changes to that one first, as late as they may)
+        beside = want
+        for _, mp, _ in reversed(todo[upto(opens):upto(m.dist)]):
+          beside = carry_back(mp, beside)
+        here = cur
+        for _, mp, _ in todo[:upto(opens)]:
+          here = carry(mp, here)
+        if beside != here:
+          start = max(min(max(opens - abs(beside - here) * LANE_LINE_CHANGE, free), opens), pos)
+          cur = hold(cur, start)
+          ramp(cur, start, beside, opens)
+          cur, pos = beside, opens
+        start = max(pos, opens)
+        end = max(min(start + LANE_LINE_CHANGE, end), start)
+      else:
+        start = max(min(max(end - abs(want - at) * LANE_LINE_CHANGE, free), end), pos)
       cur = hold(cur, start)
       to = want
       for _, mp, _ in reversed(todo[upto(end):upto(m.dist)]):
@@ -950,8 +1032,11 @@ class Planner:
     moves: list = forks + ([turn] if turn is not None else [])
     for m in moves:
       aim(m, arrows)
-    drops = inp.lane_drops if t.lane_drops else None
+      aim_fork(m, self.maps.maps if self.maps is not None else None)
+    drops = inp.lane_drops if t.lane_drops and self.maps is None else None
     ahead = moves + [m for m in throughs(route, arrows, moves, drops) if turn is None or m.dist < turn.dist]
+    if self.maps is not None:
+      ahead += [m for m in lane_ends(self.maps.maps, moves) if turn is None or m.dist < turn.dist]
     caps = [(self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now), "laneChange")]
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, inp.stops or [], inp.junctions or [])
@@ -1307,7 +1392,7 @@ class Planner:
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
-      what = "way straight on" if isinstance(m, Through) else f"{m.side} {'fork' if fork else 'turn'}"
+      what = "way straight on" if isinstance(m, Through) else "lane ending" if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
       self._start_change("left" if i > hi else "right", f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
                          turn=isinstance(m, Turn))
     return cap

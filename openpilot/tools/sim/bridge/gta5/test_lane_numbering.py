@@ -124,6 +124,7 @@ def test_lane_drops():
   r = road((150.0, one_way(3, 'left_of:1')), (250.0, one_way(2, 'left_of:1')))
   assert maps(r) == [(150, [0, 1, None], 2)]
   assert abs(ribbon(r, 2, 3)(300.0) - 5.25) < 0.05 and abs(ribbon(r, 0, 3)(300.0) - 1.75) < 0.05
+  assert abs(ribbon(r, 2, 3)(120.0) - 5.25) < 0.05  # out of it before it ends, not across where it does
   # the left lane ends (the right kerb kept): the lanes right of it carry on, numbered one further left
   r = road((150.0, one_way(3, 'right_of:3')), (250.0, one_way(2, 'right_of:2')))
   assert maps(r) == [(150, [None, 0, 1], 2)]
@@ -156,6 +157,30 @@ def test_map_count_blip():
     assert abs(at(100.0) - x) < 0.05 and abs(at(250.0) - x) < 0.05, (lane, at(100.0), at(250.0))
 
 
+def test_map_split_takes_its_side():
+  # a one-way road of two lanes splits, a one-lane link off to the right the route takes, the road going on left: the
+  # link takes the right lane (where the two ways' lines lie at the node can't say), and the car in the left lane is
+  # in it before the split
+  nodes = {1: (0.0, 0.0), 2: (0.0, 300.0), 3: (0.0, 500.0), 4: (30.0, 480.0)}
+  ways = {1: (one_way(2, 'left_of:1'), [1, 2]), 2: (one_way(2, 'left_of:1'), [2, 3]),
+          3: ({'highway': 'primary_link', 'oneway': 'yes', 'lanes': '1', 'width': '4'}, [2, 4])}
+  r = Route(np.array([nodes[1], nodes[2], nodes[4]]), [{'type': START, 'begin_shape_index': 0},
+                                                      {'type': DEST, 'begin_shape_index': 2}], osm=osm_map(nodes, ways))
+  r.locate(np.array([0.0, 1.0]), heading=0.0)
+  assert maps(r) == [(300, [None, 0], 1)]
+  at = ribbon(r, 0, 2)
+  assert abs(at(100.0) - 1.75) < 0.05 and abs(at(275.0) - 5.25) < 0.05
+
+
+def test_turn_markers_on_the_lane_line():
+  # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
+  from openpilot.tools.sim.bridge.gta5.gta5_world import on_path
+  line = np.array([[4.0, 0.0], [4.0, 50.0], [20.0, 66.0]])
+  assert np.allclose(on_path(np.array([0.0, 30.0]), line), [4.0, 30.0])
+  assert np.allclose(on_path(np.array([0.0, 30.0]), line[:0]), [0.0, 30.0])
+  assert np.allclose(on_path(np.array([-30.0, 30.0]), line), [-30.0, 30.0])  # too far from it: as it was
+
+
 def test_live_lanes_follow_the_maps():
   # nav's live targets at a junction, followed back to the car's lanes across where they change on the way
   from openpilot.selfdrive.navd.planner import LaneMaps, Planner, Through, Turn
@@ -176,15 +201,19 @@ def test_live_lanes_follow_the_maps():
 
 
 def test_lane_slots_follow_the_maps():
-  # straight on at a junction with left | through | right, its right-turn bay opening 100 m before: before it opens,
-  # the target is the right of our two lanes, which carries on as the through lane (counted from the right, the left)
+  # straight on at a junction with left | through | right, its right-turn bay opening 100 m before beside a left-turn
+  # lane already there: before the bay opens, the target is the right of our two lanes, which carries on as the
+  # through lane (counted from the right, it would be the left-turn lane)
   from openpilot.selfdrive.navd import lane_slots as ls
-  r = road((150.0, one_way(2, 'left_of:1')), (100.0, one_way(3, 'left_of:1', 'left|through|right')),
+  r = road((150.0, one_way(2, 'left_of:1', 'left|through')), (100.0, one_way(3, 'left_of:1', 'left|through|right')),
            (100.0, one_way(2, 'left_of:1')))
+  assert maps(r) == [(150, [0, 1], 3), (250, [None, 0, 1], 2)]
   slots = ls.LaneSlots(r)
-  here, target = slots.target(100.0, 10.0)
-  assert here.lanes == 2 and target is not None and target.want == {1}
-  assert slots.target(200.0, 10.0)[1].want == {1}
+  move = next(m for m in slots.moves if abs(m.along - 250.0) < 1.0)
+  here = slots.section_here(100.0)
+  assert here.lanes == 2 and move.targets == {1} and slots.wanted(move, 100.0, here) == ({1}, False)
+  slots.maps = []
+  assert slots.wanted(move, 100.0, here) == ({0}, False)  # without the maps
 
 
 LIVE_MAP = os.path.expanduser("~/gta5map_lanes")
@@ -225,7 +254,7 @@ def test_live_vinewood_bridge_left_bay():
   m = {round(s - r.at): (list(mp), n) for s, mp, n in r.lane_maps_along()}
   assert m[25] == ([1, 2], 3) and m[88] == ([None, 0, 1], 2)
   at = ribbon(r, 1, 2)
-  assert abs(at(r.at + 20.0) - 10.5) < 0.3  # the right lane
+  assert abs(at(r.at + 10.0) - 10.5) < 0.3  # the right lane
   assert abs(at(r.at + 70.0) - 5.0) < 0.3  # the through lane, for Elgin Ave
   assert abs(at(r.at + 110.0) - 5.0) < 0.3  # still it past the junction, now the left of two
 
@@ -239,6 +268,59 @@ def test_live_vinewood_stop_reads_its_lane():
     return
   r = live_route(router, 556.99, 78.40, 95.37, 67.5, (-813.6, 179.5))
   assert r.on_road() and r.lane() == [2, 3]
+
+
+def live_plan(router, x, y, z, heading, dest, lane=None):
+  """A route on the live map from the car and nav's plan along it from its lane (else the route's reading): (route,
+  keys, the plan's lane changes [(m from, m to, lane from, lane to)])."""
+  from openpilot.selfdrive.navd.planner import lane_plan
+  r = live_route(router, x, y, z, heading, dest)
+  info = r.info(r.length)
+  keys = lane_plan(r.rest(), info['forks'], lane or r.lane(), r.lanes_at, 20.0, None, info['laneArrows'], info['laneDrops'],
+                   maps=r.lane_maps(r.length), turns=r.turns(r.length))
+  ramps = [(a[0], b[0], a[1], b[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] + 0.01 and abs(b[1] - a[1]) > 0.01]
+  return r, keys, ramps
+
+
+def test_live_freeway_merge_exit_and_splits():
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  dest = (1727.2, 1403.26)
+  # LS Freeway on-ramp (1252.9, 521.0): it joins the freeway on the right, into its right lane, not across to the left
+  r, keys, ramps = live_plan(router, 1252.89, 520.99, 80.66, 332.0, dest)
+  assert r.lane() == [0, 1] and [(round(s), list(m)) for s, m, _ in r.lane_maps_along()][:1] == [(39, [1])]
+  assert not [c for c in ramps if c[0] < 150.0]  # no change straight after joining
+  # LS Freeway (1666.3, 1243.2) in the right of two lanes, the route off at the exit just ahead: no change at all
+  r, keys, ramps = live_plan(router, 1666.32, 1243.17, 84.92, 344.5, dest)
+  assert r.lane() == [1, 2] and not ramps
+  # Olympic Fwy split (-193.6, -1196.2) in the second lane of four: GTA's forks and the map's lanes agree on the left
+  # branch's lanes, the right of its two being the one on; no change through the interchange
+  dest = (-680.13, -2021.56)
+  r, keys, ramps = live_plan(router, -193.62, -1196.23, 36.84, 96.3, dest)
+  assert r.lane() == [1, 4] and not [c for c in ramps if c[0] < 440.0]
+  # Dutch London St ramp split (-741.9, -1838.4): the route's branch is the right one, which a road joining on the
+  # right begins just before: into it before the split, not across the gore after
+  r, keys, ramps = live_plan(router, -741.90, -1838.37, 26.97, 196.2, dest, lane=[0, 1])
+  split = next(s for s, m, _ in r.lane_maps_along() if None in m)
+  assert ramps and ramps[0][1] <= split - r.at + 0.01 and ramps[0][3] == 1.0
+
+
+def test_live_alta_bay_from_its_opening():
+  # Alta St (227.2, 276.2), left at the junction 85 m on, its left-turn bay opening 34 m on: into the bay from where it
+  # opens, the change to the lane beside it first, not as late as the turn allows
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  r, keys, ramps = live_plan(router, 227.24, 276.22, 105.19, 159.0, (1727.2, 1403.26), lane=[1, 2])
+  opens = next(s for s, m, n in r.lane_maps_along() if n > len(m)) - r.at
+  assert round(opens) == 34
+  before = [c for c in ramps if c[1] <= opens + 0.1]
+  into = [c for c in ramps if opens - 0.1 <= c[0] < 85.0]
+  assert before == [(0.0, opens, 1.0, 0.0)] or before[-1][1:] == (opens, 1.0, 0.0)  # beside the bay as it opens
+  assert len(into) == 1 and abs(into[0][0] - opens) < 0.1 and into[0][3] == 0.0  # and into it from there
 
 
 if __name__ == "__main__":
