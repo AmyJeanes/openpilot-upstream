@@ -512,7 +512,7 @@ def road_marks(paths, osm) -> dict:
   each stop line in to its junction, each area cutting its own layer's lines and its roads' (PaintAreas); and the
   junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
-  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas, densify, off_islands
+  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, apart, clip_outside as clip_areas, densify, off_islands
   from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PAINTED, ROAD_CLASSES, PaintAreas, level, z_along
   from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
@@ -609,11 +609,15 @@ def road_marks(paths, osm) -> dict:
             for kind, xy in arrow_strokes(sp.lane.turns):
               q = p + right * sp.centre + xy[:, :1] * right + xy[:, 1:] * ahead
               add(kind, np.column_stack([q, z_near(q, roads, z)]), (g, g))
-  for xy, colour in junctions.island_outlines:  # painted islands' outlines, in their paint
+  # painted islands' outlines, in their paint, but where the road's own lines draw them already
+  all_segs, all_kinds = (np.concatenate(ends), np.array(kinds)) if ends else (np.zeros((0, 2, 3)), np.array([], "<U1"))
+  drawn_segs = {"yellow": all_segs[np.isin(all_kinds, ["c", "y"])][:, :, :2], "white": all_segs[np.isin(all_kinds, ["d", "w", "e"])][:, :, :2]}
+  for xy, colour in junctions.island_outlines:
     ring = np.vstack([xy, xy[:1]]) if np.hypot(*(xy[-1] - xy[0])) > 1e-6 else xy
     g = near_node(paths, ring.mean(0))
     if g is not None:
-      add("c" if colour == "yellow" else "w", np.column_stack([ring, np.full(len(ring), paths.z[g])]), (g, g))
+      for piece in apart(ring, drawn_segs[colour]):
+        add("c" if colour == "yellow" else "w", np.column_stack([piece, np.full(len(piece), paths.z[g])]), (g, g))
   for c in junctions.crossing_lines():
     g = near_node(paths, c.mean(0))
     if g is not None:

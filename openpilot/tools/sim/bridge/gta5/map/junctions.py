@@ -144,6 +144,40 @@ def lane_changes(osm: OsmLanes, ways) -> set[int]:
   return out
 
 
+DRAWN_NEAR = 0.6  # m: a painted island's outline this near a line the road already draws there is that line
+
+
+def apart(line: np.ndarray, segs: np.ndarray, dist: float = DRAWN_NEAR, step: float = 0.25, min_len: float = 1.0) -> list[np.ndarray]:
+  """The pieces of a line [N, 2] further than dist from every segment [S, 2, 2]: a painted island's outline but where
+  the road's own lines draw it (a hatched median's edges are its centre lines)."""
+  pts = densify(line, step)
+  if len(segs):
+    lo, hi = pts.min(0) - dist, pts.max(0) + dist
+    s = segs[((segs.max(1) >= lo) & (segs.min(1) <= hi)).all(1)]
+  else:
+    s = segs
+  if not len(s):
+    return [line]
+  a, ab = s[:, 0], s[:, 1] - s[:, 0]
+  near = np.zeros(len(pts), bool)
+  for b in range(0, len(pts), 256):
+    q = pts[b:b + 256]
+    t = np.clip(np.einsum('qsk,sk->qs', q[:, None] - a[None], ab) / np.maximum(np.einsum('sk,sk->s', ab, ab), 1e-12)[None], 0.0, 1.0)
+    near[b:b + 256] = np.hypot(*(a[None] + ab[None] * t[..., None] - q[:, None]).transpose(2, 0, 1)).min(1) < dist
+  out, k = [], 0
+  while k < len(pts):
+    if near[k]:
+      k += 1
+      continue
+    e = k
+    while e < len(pts) and not near[e]:
+      e += 1
+    if e - k >= 2 and float(np.hypot(*np.diff(pts[k:e], axis=0).T).sum()) >= min_len:
+      out.append(pts[k:e])
+    k = e
+  return out
+
+
 class Islands:
   """Outlines [K, 2] (closed) kerbs keep off, by CELL squares."""
   def __init__(self, polys: list[np.ndarray]):

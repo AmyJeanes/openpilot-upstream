@@ -994,7 +994,7 @@ CARRIAGEWAY_TURN = 40.0  # deg: a carriageway joining a two-way road bends up to
 CARRIAGEWAY_APART = (3.0, 25.0)  # m between the two carriageways of a road GTA lays as one-way links side by side
 
 
-def lane_tapers(nodes, info, lane_links, junction, survey, lines=None, why=None, recounted=None):
+def lane_tapers(nodes, info, lane_links, junction, survey, lines=None, why=None, recounted=None, ends=frozenset()):
   """Where the turn lanes folded into roads (detached_bays) or painted in medians (lane_turns) open, from the game
   files' paint: the median's right edge swings across over the taper, read off their yellow polylines (,
   paint_survey.swing_taper) where given, else off their sections (paint_survey.opening_taper). `lane_links` are the
@@ -1009,7 +1009,7 @@ def lane_tapers(nodes, info, lane_links, junction, survey, lines=None, why=None,
   long, ending 5 m before GTA's lane begins), on the road before where it has a median to open in, else from where they
   begin; where the paint counts the lane on the links before its own (`recounted`: {way id: GTA's lanes forward and
   backward} of the links whose counts are the paint's), to full width where that begins. `why` counts each lane's
-  case."""
+  case. `ends`: links a lane ends on that aren't into a junction (painted_median_lanes')."""
   import numpy as np
   why = why if why is not None else Counter()
   recounted = recounted or {}
@@ -1073,7 +1073,7 @@ def lane_tapers(nodes, info, lane_links, junction, survey, lines=None, why=None,
 
   found = []
   for p, j in sorted(lane_links):
-    if not junction(j):
+    if not junction(j) and (p, j) not in ends:
       continue
     chain = [(p, j)]
     while (prev := [q for q in into[chain[0][0]] if (q, chain[0][0]) in lane_links and q != chain[0][1] and (q, chain[0][0]) not in chain]):
@@ -1911,6 +1911,37 @@ def lane_turns(nodes, ways, lanes_to, junction, toward, left_only, restrictions,
   return tags, approaches, bent, opened
 
 
+def painted_median_lanes(nodes, ways, lanes_to, medians, painted, spans, junction):
+  """Medians the game paints a left-turn arrow in: a lane GTA has no link for, as where a hatched median ends and the
+  lane opens in its room (Vinewood Blvd before Meteor St), or a median the class layout puts where the paint has the
+  lane next to the centre line. `medians` are links (node, next node) with room for a lane in their median (BAY_MIN),
+  `spans` each link's lanes (left, right) m right of it, `painted` PaintedArrows. A link with a painted arrow turning
+  left wholly inside its median (between the two directions' inner lane edges) and the links on from it towards the
+  road's next junction, while the road runs on alone with its median and lanes: [chains of links, along the road]."""
+  _, out, into = graph(ways)
+  chains, used = [], set()
+  for e in sorted(medians):
+    p, q = e
+    ours, theirs = spans.get(e), spans.get((q, p))
+    if e in used or not ours or not theirs:
+      continue
+    lo, hi = -theirs[0][0], ours[0][0]  # the median, m right of the link
+    if hi - lo < BAY_MIN or not any('left' in kind for _, _, kind in
+                                    painted.on(nodes[p], nodes[q], [(lo + ARROW_SPILL, hi - ARROW_SPILL)])):
+      continue
+    chain = [e]
+    while not junction(chain[-1][1]):
+      p, q = chain[-1]
+      nxt = [r for r in out[q] if r != p]
+      if len(nxt) != 1 or len([r for r in into[q] if r != nxt[0]]) != 1 or (q, nxt[0]) not in medians or \
+         lanes_to.get((q, nxt[0])) != lanes_to[e] or (q, nxt[0]) in chain:
+        break
+      chain.append((q, nxt[0]))
+    used.update(chain)
+    chains.append(chain)
+  return chains
+
+
 def node_id(k):
   return k[0] * 65536 + k[1] + 1
 
@@ -2176,11 +2207,39 @@ def main():
   arrows_at, approaches, bent, opened = lane_turns(nodes, ways, lanes_to, junction, toward, left_lanes, restrictions,
                                                    left_bays, medians, painted_arrows, spans)
   way_of = graph(ways)[0]
+  painted_medians = painted_median_lanes(nodes, ways, lanes_to, medians - opened, painted_arrows, spans, junction) \
+    if painted_arrows is not None else []
+  drawn_from = {wid: a for wid, a, _, _ in ways}
+
+  def turn_key(e):
+    wid = way_of[e]
+    return wid, 'turn:lanes:forward' if e[0] == drawn_from[wid] else 'turn:lanes:backward'
+
+  def left_lane_already(e):  # GTA's left lane, its arrow painted beside the median: that lane's
+    wid, key = turn_key(e)
+    have = arrows_at.get(wid, {}).get(key) or arrows_at.get(wid, {}).get('turn:lanes')
+    return bool(have) and have.split('|')[0] == 'left' and lanes_to[e] > 1
+  painted_medians = [c for c in painted_medians if not any(left_lane_already(e) for e in c)]
+  for chain in painted_medians:
+    for e in chain:
+      wid = way_of[e]
+      a, two_way = next((a, t) for w, a, _, t in ways if w == wid)
+      key = 'turn:lanes' if not two_way else 'turn:lanes:forward' if e[0] == a else 'turn:lanes:backward'
+      if not (have := arrows_at.get(wid, {}).get(key)):
+        continue  # no arrows into where the way ends (the left turn is further on): the lane alone
+      lanes = have.split('|')
+      if any('left' in k.split(';') for k in lanes):  # the left turn is the new lane's now
+        lanes = [';'.join(t for t in k.split(';') if t != 'left') or 'none' for k in lanes]
+        arrows_at[wid][key] = '|'.join(['left', *lanes])
+      else:  # no left turn where the way ends: its arrow is for one further on
+        arrows_at[wid][key] = '|'.join(['none', *lanes])
+    opened.update(chain)
   for p, q in opened:
     row = row_of[way_of[(p, q)]]
     row[3 if row[2] == q else 4] += 1
     bay_to[row[0]].add(q)
-  print(f"{len(opened)} links into junctions with their median painted as a left-turn lane")
+  print(f"{len(opened)} links into junctions with their median painted as a left-turn lane (" +
+        f"{sum(len(c) for c in painted_medians)} on {len(painted_medians)} roads from a left arrow painted in it)")
   if survey:
     print(f"paint survey of {len(painted) + left_out} links: " +
           ', '.join(f'{n} {k}' for k, n in why.most_common()))
@@ -2190,7 +2249,8 @@ def main():
 
   yellow = paint_survey.yellow_lines(args.survey_lines) if args.survey_lines else None
   taper_why = Counter()
-  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow, taper_why, recounted) if survey else []
+  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow, taper_why, recounted,
+                       {c[-1] for c in painted_medians}) if survey else []
   link_ends = {r[0]: (r[1], r[2]) for r in info}  # GTA's links, before any are split
   info, parent, widen, piece_bays, applied = split_tapers(nodes, info, tapers, set(left_bays) | opened, arrows_at, bay_to,
                                                                recounted)
@@ -2329,17 +2389,12 @@ def main():
     tiles = os.path.join(os.path.dirname(args.survey_lines), 'tiles')  # roadpaint's, beside its polylines
     if os.path.isdir(tiles):
       from openpilot.tools.sim.bridge.gta5.map import painted_islands
-      synthetic = [max((k[1] for k in nodes if k[0] == TAPER_NODE_AREA), default=0)]
-
-      def new_node_id():
-        synthetic[0] += 1
-        return node_id((TAPER_NODE_AREA, synthetic[0]))
       from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
       from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
       osm = OsmLanes.load(args.out, to_game)
       found = painted_islands.islands(args.survey_lines, tiles, osm)
       strips = painted_islands.flush_strips(osm, tiles)
-      painted_islands.add(args.out, found, new_node_id, to_lat_lon, strips)
+      painted_islands.add(args.out, found, to_lat_lon, strips)
       print(f"{len(found)} painted islands (traffic_calming=painted_island), {len(strips)} flush edges' road surface (area:highway)")
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +

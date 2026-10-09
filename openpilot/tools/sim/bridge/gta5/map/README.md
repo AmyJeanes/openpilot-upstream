@@ -174,6 +174,10 @@ shown or a level changes.
     the median over the last 30 m (15 m at least) get that lane, `turn:lanes` `left|...`, filling the median. Not
     where the game files paint the median's edge on our side on into the junction with no arrow of ours in it
     (`paint_survey.median_runs_in`): there the median stays a median, often with the other way's bay opening in it.
+    Wherever else the game files paint a left arrow wholly inside a median (between the two directions' lanes), the
+    median is a lane GTA has no link for (`painted_median_lanes`): from that link on towards the next junction, while
+    the road runs on alone, one more lane `left`, opening as above (Vinewood Blvd before Meteor St, where a hatched
+    median ends and the left-turn lane opens in its room; 44 roads).
   - Where GTA runs both carriageways of a divided road through one node in its median (a side road meeting it at a gap
     in the median; 84 junctions, each carriageway bent about 7 m across the median into it), each carriageway gets a
     node of its own on its line between its neighbours, joined by a two-way link across the median of the road's class
@@ -310,7 +314,8 @@ shown or a level changes.
 - Painted islands and flush edges (`painted_islands.py`), from roadpaint's height-layered tiles beside its polylines
   (road, kerb, pavement or gutter at each height; a raised island reads pavement or kerb). Painted islands, flat
   painted areas with road all round them: areas outlined in white or yellow (the painted triangle where Mt Haan Dr's
-  side road parts), and road surface between carriageways that no way's lanes cover (the chevron-hatched gores
+  side road parts; a hatched area between the edge lines its strokes run between, its tips, Vinewood Blvd's hatched
+  medians), and road surface between carriageways that no way's lanes cover (the chevron-hatched gores
   between GTA's links on Meteor St; GTA's lane changes across them don't count), each a closed way `area=yes` +
   `traffic_calming=painted_island` with the `colour` of the paint round it (435, 216 outlined). Flush edges: where a
   way's edge faces another carriageway within 8 m with road on beyond it (GTA's links side by side round paint, a
