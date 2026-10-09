@@ -21,6 +21,7 @@ MAX_OUT = 3.0  # m outside a way's kerbs: off it
 BAY_SCORE = 3.0  # how much worse a two-way way's match may be than a one-way's for the car to be in its median
 CELL, PAD = 20.0, 15.0  # m: a grid of the ways, each cell with the segments within PAD of it
 OWN, ONCOMING, WRONG_WAY, MEDIAN, CENTRE = 'own', 'oncoming', 'wrong-way', 'median', 'centre'
+SPAN_KINDS = {1: OWN, -1: ONCOMING, 0: CENTRE}  # by a lane's Span.heading
 JUNCTION_DZ = 6.0  # m between the car and a junction's height: a road passing over or under it
 JUNCTION_CANDIDATES = 6
 CACHE_DIR = os.path.expanduser(os.getenv("GTA5_LANE_CACHE", "~/.cache/gta5_lanes"))  # junction areas, by map
@@ -36,6 +37,7 @@ class LaneReading(NamedTuple):
   bay: bool  # a one-way driven against inside a two-way road's median: the other direction's turn bay
   right: float  # m right of the way's line
   out: float  # m outside its kerbs
+  beside: tuple[str | None, str | None] = (None, None)  # the lanes left and right of the car's: OWN, ONCOMING or CENTRE, None for none
 
   @property
   def oncoming(self) -> bool:
@@ -145,7 +147,8 @@ class LaneMatcher:
     else:
       kind = OWN
     bay = kind == WRONG_WAY and any(c[3].two_way and not c[6] and c[5] == 0 and c[0] - score < BAY_SCORE for c in cands[1:])
-    return LaneReading(way, direction, lane, sec.lanes, kind, bay, round(right, 2), round(out, 2))
+    beside = tuple(SPAN_KINDS[spans[j].heading] if 0 <= j < len(spans) else None for j in (i - 1, i + 1))
+    return LaneReading(way, direction, lane, sec.lanes, kind, bay, round(right, 2), round(out, 2), beside)
 
   def lane_centre(self, x: float, y: float, heading: float, lane: int, z: float | None = None) -> tuple[float, float, float] | None:
     """The middle of lane `lane` (from the left, clamped to the lanes there) of the road at (x, y) running the way

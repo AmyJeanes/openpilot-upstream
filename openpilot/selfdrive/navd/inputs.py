@@ -50,7 +50,9 @@ class NavInputs:
   truth_lane: list | None = None  # [lane from the left (< 0: oncoming), lanes]
   truth_lane_frac: float | None = None  # the lane, between lanes as it changes
   truth_lane_plugin: list | None = None  # the simulator's own lane reading, as truth_lane
-  truth_lane_map: dict | None = None  # the lane by the map's lanes at the true pose: lane, lanes, kind, bay, oncoming, areas
+  # the lane by the map's lanes at the true pose: lane, lanes, kind, bay, oncoming, beside (the lanes left and right of
+  # it: "own", "oncoming", "centre" or None for none), areas
+  truth_lane_map: dict | None = None
 
 
 @dataclass

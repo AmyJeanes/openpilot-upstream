@@ -597,7 +597,7 @@ class GTA5World(World):
       return None
     r = m.match(x, y, math.radians(state["heading"] + 90.0), z)
     return None if r is None else {"lane": r.lane, "lanes": r.lanes, "kind": r.kind, "bay": r.bay, "oncoming": r.oncoming,
-                                   "areas": areas is not None}
+                                   "beside": list(r.beside), "areas": areas is not None}
 
   def _write_route_input(self, state: dict):
     """The driving model's route input for the route and the car's place on it; zero off it."""

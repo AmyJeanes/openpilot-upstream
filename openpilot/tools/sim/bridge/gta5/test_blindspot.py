@@ -356,3 +356,64 @@ def test_nav_merge_doesnt_start_fresh_in_the_crawl():
   for _ in range(60):
     d.step(route, 200.0, {"blindspot": [False, False], "routeEnd": 900.0, "laneMaps": [[nav_mod.MERGE_STOP_BEFORE - 2.0, [0, None], 1]]})
   assert d.nav.changing is None and d.indicator is None
+
+
+def map_read(lane, lanes, beside, kind="own"):
+  return {"lane": lane, "lanes": lanes, "kind": kind, "bay": False, "oncoming": kind == "oncoming", "beside": beside, "areas": True}
+
+
+def test_nav_never_changes_into_a_lane_the_map_reads_as_oncoming():
+  # nav reads the car in the right lane of two, with its lane ending (or a left turn ahead), but the map has it in the
+  # left lane, the oncoming lanes beside it: no change, mandatory or not, and no slowing to merge
+  route = np.array([(0.0, y) for y in np.arange(0.0, 800.0, 5.0)])
+  for extra in ({"laneMaps": [[120.0, [0, None], 1]]}, {"forks": [[120.0, "left", 1, 2, True, 1, False]]}):
+    d = Drive((1, 2), v=10.0)
+    y = 0.0
+    while y < 115.0:
+      d.step(route - [0.0, 0.0], y, {"blindspot": [False, False], "routeEnd": 790.0 - y,
+                                    "laneMap": map_read(0, 2, ["oncoming", "own"]),
+                                    **{k: [[v[0][0] - y, *v[0][1:]]] for k, v in extra.items()}})
+      assert d.nav.changing is None and d.indicator is None
+      y += d.v * 0.05
+
+
+def test_nav_gives_up_a_change_once_the_map_reads_oncoming_that_way():
+  d = Drive((1, 2), v=10.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 800.0, 5.0)])
+  y, sent = 0.0, None
+  while y < 200.0:
+    beside = ["oncoming", "own"] if d.indicator == "left" else ["own", "own"]  # the map turns once the blinker is on
+    d.step(route, y, {"blindspot": [False, False], "routeEnd": 790.0 - y, "laneMaps": [[300.0 - y, [0, None], 1]],
+                      "laneMap": map_read(1, 2, beside)})
+    if sent is None and d.indicator == "left":
+      sent = y
+    if sent is not None and d.nav.changing is None:
+      break
+    y += d.v * 0.05
+  assert sent is not None and d.nav.changing is None
+  assert [m["type"] for m in d.sent][:2] == ["setIndicator", "indicatorOff"]
+
+
+def test_nav_still_changes_back_out_of_the_oncoming_lanes():
+  d = Drive((-1, 2), v=10.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 800.0, 5.0)])
+  for k in range(80):
+    d.step(route, k * 0.5, {"blindspot": [False, False], "routeEnd": 700.0,
+                            "laneMap": map_read(-1, 2, ["oncoming", "own"], kind="oncoming")})
+  assert d.nav.changing == "right" and d.indicator == "right"
+
+
+def test_nav_merge_waits_for_its_lane_and_the_maps_to_agree():
+  # nav reads the car in the right lane of three, which ends; the map has it a lane further left, which carries on:
+  # nothing until they agree, then the merge goes
+  d = Drive((2, 3), v=10.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 800.0, 5.0)])
+  y, agree_from = 0.0, 120.0
+  while y < 250.0 and d.nav.changing is None:
+    agree = y >= agree_from
+    cap, _ = d.step(route, y, {"blindspot": [False, False], "routeEnd": 790.0 - y, "laneMaps": [[260.0 - y, [0, 1, None], 2]],
+                               "laneMap": map_read(2 if agree else 1, 3, ["own", None if agree else "own"])})
+    if not agree:
+      assert d.nav.changing is None and not (d.reason == "laneChange" and cap < 10.0)
+    y += d.v * 0.05
+  assert d.nav.changing == "left" and y >= agree_from

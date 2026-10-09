@@ -1094,6 +1094,9 @@ class Planner:
     self.change_planned = False  # whether it's for the turns and forks ahead (_change_for), rather than a bay or oncoming lane
     self.change_end: float | None = None  # self.driven where the lane a change must leave ends (MERGE_), None if optional
     self.change_held = False  # whether the blind spot has held the change under way
+    self.change_map_lane: int | None = None  # the map's lane (map_read) the change started from
+    self.map_read: dict | None = None  # the car's lane by the map's lanes alone (NavInputs.truth_lane_map)
+    self.merge_waits = False  # a merge waiting on nav's and the map's lane readings to agree, as last logged
     self.change_need: str | None = None  # the side _change_for found a lane change needed to this step
     self.turn_point: np.ndarray | None = None  # where the signaled turn is
     self.signaled_at: np.ndarray | None = None  # where the car was on the route when it signaled it
@@ -1167,6 +1170,7 @@ class Planner:
     self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
     self.classes, self.limits = inp.road_classes, inp.limits
     self.crossings = sorted(d for d in inp.stops or [] if d > 0.0)
+    self.map_read = inp.truth_lane_map
     if not engaged:
       self._cancel(indicator)
       self._end_change(indicator)
@@ -1704,12 +1708,19 @@ class Planner:
       # not across a stop line on the way: from past it, unless there's no room after it
       across = self.tune.plan_city_early and any(d < min(LANE_LINE_CHANGE, room) for d in self.crossings)
       due, each = room < city_lead(changes, v, self.tune) and not across, None
+    agreed = not must or self._lanes_agree(side)
+    if must and agreed == self.merge_waits:
+      self.merge_waits = not agreed
+      if DEBUG:
+        print(f"nav: the merge for the lane ending in {m.dist:.0f} m " +
+              ("waits, nav's lane and the map's disagreeing" if self.merge_waits else "goes on, the lane readings agreeing"))
     unstarted = self.changing == side and not self.change_went
     late = room <= 0 and (unstarted or self.changing is None and self._lane_settled(side, now))
-    if must and (late or unstarted and self.change_held):
+    if must and agreed and (late or unstarted and self.change_held):
       cap = min(cap or math.inf, max(slow_for(0.0, m.dist - MERGE_STOP_BEFORE, v, MERGE_DECEL), MERGE_CRAWL))
     if (self.changing is None and (room > 0 or must and m.dist > MERGE_STOP_BEFORE) and due and (v > LANE_CHANGE_SPEED or must)
-        and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)):
+        and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)
+        and agreed and not self._into_oncoming(side)):
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane
@@ -1754,6 +1765,26 @@ class Planner:
   def fwy_state(self) -> FwyState:
     """What the live planner keeps for freeway moves, for lane_plan."""
     return FwyState([mk - self.driven for mk in self.fwy_marks], list(self.fwy_slots))
+
+  def _into_oncoming(self, side: str) -> bool:
+    """Whether the map's lanes read the lane beside the car that way as oncoming, the car in a lane of its own way (out
+    of the oncoming lanes, a change back towards ours is never blocked). No reading (no map, or in a junction's area)
+    blocks nothing."""
+    m = self.map_read
+    if not m or m.get("oncoming") or not m.get("beside"):
+      return False
+    return m["beside"][0 if side == "left" else 1] == "oncoming"
+
+  def _lanes_agree(self, side: str) -> bool:
+    """Whether nav's lane and the map's agree on where the car is, counted from the side whose lanes end (the other
+    side from the merge), as it's there that a lane count can differ; true without a map reading."""
+    m = self.map_read
+    if not m or m.get("lane") is None or not m.get("lanes") or self.lane is None:
+      return True
+    i, n = self.lane
+    if side == "left":
+      return n - 1 - i == m["lanes"] - 1 - m["lane"]
+    return i == m["lane"]
 
   def _lane_settled(self, side: str, now: float) -> bool:
     """Whether a lane change for a turn or fork may go by the model's lane: not while it may still be reading the lane
@@ -1830,7 +1861,7 @@ class Planner:
       return
     self.wrong_side_t = self.wrong_side_t or now
     if (self.changing is None and self.turn is None and now - self.wrong_side_t > WRONG_SIDE_FOR and v > LANE_CHANGE_SPEED
-        and now - self.change_t > LANE_CHANGE_GAP):
+        and now - self.change_t > LANE_CHANGE_GAP and not self._into_oncoming("right")):
       self._start_change("right", f"out of oncoming lane {-lane[0]}")
 
   def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float, map_lane: dict | None = None):
@@ -1864,6 +1895,7 @@ class Planner:
     self.changing, self.change_shown, self.change_t, self.change_turn = side, False, self.now, turn
     self.change_side, self.change_by, self.change_went, self.change_planned = side, self.driven + by, False, planned
     self.change_end, self.change_held = None if end is None else self.driven + end, False
+    self.change_map_lane = self.map_read.get("lane") if self.map_read else None
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
     self._set_desire(self.change_t)
@@ -1877,6 +1909,13 @@ class Planner:
     # the bridge cancels the indicator once the lane change is done, as does the driver to stop it
     if self.change_shown and indicator != self.changing:
       self._end_change(indicator)
+      return
+    # never into a lane the map reads as oncoming, whatever nav's own lane says, until the car has moved over (a lane
+    # of its own way then has oncoming lanes beside it); not a turn bay, which can be a way of its own in the median
+    now_lane = self.map_read.get("lane") if self.map_read else None
+    moved = None not in (now_lane, self.change_map_lane) and now_lane != self.change_map_lane
+    if self._into_oncoming(self.changing) and not moved and self.driven >= self.bay_to:
+      self._give_up(indicator, "the map reads the lane that way as oncoming")
       return
     if blocked and not self.change_went:
       # as an automatic lane change waits: the blinker stays on while openpilot holds the change for the blind spot, and

@@ -44,6 +44,14 @@ def test_lanes_of_a_divided_road():
   assert m.match(6.0, -150.0, EAST, 0.5) is None  # across them
 
 
+def test_lanes_beside():
+  m = matcher()
+  assert m.match(6.0, -150.0, NORTH, 0.5).beside == (OWN, None)  # the kerb to the right
+  assert m.match(2.5, -150.0, NORTH, 0.5).beside == (ONCOMING, OWN)  # across the median
+  assert m.match(-3.0, -150.0, NORTH, 0.5).beside == (ONCOMING, OWN)  # in the oncoming lanes: ours to the right
+  assert m.match(98.25, -100.0, NORTH, 0.5).beside == (None, OWN)  # a one-way road: its left lane
+
+
 def test_one_way_driven_against():
   r = matcher().match(101.0, -100.0, SOUTH, 0.5)
   assert (r.way, r.lane, r.kind, r.oncoming, r.bay) == (3, -1, WRONG_WAY, True, False)

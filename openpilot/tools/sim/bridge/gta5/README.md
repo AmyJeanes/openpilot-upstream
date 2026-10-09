@@ -171,7 +171,10 @@ nav gives it up and the blinker goes off, leaving the exit or turn to a reroute 
 likewise once the lanes ahead no longer need it (a reroute, or the car's lane has moved). Out of a lane that ends
 (a lane drop rather than a split the route leaves by), where a reroute won't help, it isn't given up: the blinker stays
 on to the lane's end, and nav caps the speed down to a crawl 10 m before it, so the vehicle alongside goes by and the car
-falls in behind it. `bsm_trial.py` drives trips in traffic and measures each lane change nav asks for against the blind
+falls in behind it; such a merge waits while nav's lane and the map's lane match disagree on where the car is. Whatever
+nav's own lane says, no lane change starts into a lane the map's lanes read as oncoming beside the car, and one asked
+for is given up if the map reads it so before the car moves over (out of the oncoming lanes, and into a turn bay, which
+can be a way of its own in the median, aren't blocked). `bsm_trial.py` drives trips in traffic and measures each lane change nav asks for against the blind
 spot: occupied as the blinker came on, the wait, whether it started into an occupied side, squeezes and give-ups.
 `GTA5_BLINDSPOT=0` turns it off; `GTA5_BLINDSPOT_TUNE` is a JSON file of its settings (the module's docstring says
 what each is and why), read again whenever it changes. Needs the plugin's `nearby` (no flags with an older plugin).
