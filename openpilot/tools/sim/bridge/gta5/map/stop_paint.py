@@ -4,7 +4,12 @@ added on approaches with a painted stop line and none in the map.
 
 - A painted stop line is a thick (MIN_WIDTH), straight white line, solid or tiled, across an approach's lanes towards
   its junction (junctions.py's members): within ANGLE of square to the road, at its height (DZ), covering most of
-  those lanes (COVER), from the junction's node out to STOP_REACH past its mouth. Lines covering only the other
+  those lanes (COVER), from the junction's node out to STOP_REACH past its mouth. The game files' polylines join some
+  stop lines on to the edge line they meet (an L round a slip's corner): a polyline that isn't straight gives its
+  straight end pieces that turn a corner into the rest (`straight_ends`), but none from an outline (CLOSED: a box, a
+  hatched area). roadpaint misses an atlas decal's band where the decal's UVs are shifted whole tiles across it (as
+  on many STOP decals' stop lines), so those bands are read here from its decals (decals.jsonl, with each texture's
+  bands from textures.tsv; `wrapped_lines`). Lines covering only the other
   direction's lanes are that approach's, not this one's, and a line across the whole road with another junction's area
   behind it about as near as this junction's mouth ahead (OTHER_BEHIND, MOUTH_TIE) is that junction's: traffic
   leaving a junction doesn't stop as it leaves.
@@ -15,9 +20,10 @@ added on approaches with a painted stop line and none in the map.
 - A stop line node the map has is moved there when it's within MAX_MOVE (its signal or sign kept, with its direction
   now said by the way it's on). One with no paint across its own approach but within MAX_MOVE of a new stop line on
   the road the other way, towards the junction behind it, is that one's: GTA's stop nodes sit on the road's middle,
-  and their direction, taken from the junction they're nearer, can be the wrong one. An approach without one gets one where the line covers only its own lanes (a line
-  across the whole road is a crossing's edge) with no painted crossing just ahead of it: `traffic_signals` at a
-  junction with signals, else `stop`. Elsewhere the map's own stop lines stay as they are.
+  and their direction, taken from the junction they're nearer, can be the wrong one. An approach without one gets one
+  where the line covers only its own lanes (a line reaching on across the other direction's is a crossing's edge; one
+  reaching past the kerb only is the class layout's lanes narrower than the paint) with no painted crossing just ahead
+  of it: `traffic_signals` at a junction with signals, else `stop`. Elsewhere the map's own stop lines stay as they are.
 - The node goes on the approach's way where the line crosses its line: a new node splitting the way (ids from
   `node_ids`, as for tapers) unless one of its nodes is within SNAP. The pieces keep the way's tags, a widening
   lane's start and end widths taken at the cut, and turning back at the new node on a two-way way is forbidden, as
@@ -25,6 +31,7 @@ added on approaches with a painted stop line and none in the map.
 """
 import json
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -36,6 +43,9 @@ from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Osm
 MIN_WIDTH = 0.15  # m: stop lines are painted this thick at least (the decals' measured widths run 0.16-0.3)
 MIN_LENGTH, MAX_LENGTH = 2.0, 40.0  # m
 STRAIGHT = 0.9  # of a line's length between its ends at least
+CLOSED = 1.0  # m between a polyline's ends at most: it goes round an outline
+CORNER_TOL = 0.15  # m a bent polyline's straight end piece's points are off the line between its ends at most
+CORNER_TURN, CORNER_REACH = 40.0, 2.0  # deg the polyline turns at least within this many m past the piece
 ANGLE = 30.0  # deg off square across the road at most
 DZ = 2.0  # m between the paint's height and the road's
 COVER = 0.6  # of the approach's lanes' width a stop line covers at least
@@ -71,17 +81,136 @@ class Placed:
   z: float
 
 
+def straight_ends(pts: np.ndarray, tol: float = CORNER_TOL) -> list[np.ndarray]:
+  """The straight pieces [K, 2+] at the two ends of a polyline [N, 2+] that turn a corner into the rest of it (CORNER_TURN
+  within CORNER_REACH m on): from each end, as far on as its points stay within tol of the line between the piece's
+  ends (the whole polyline where it's straight). A curve bending away gradually (an island's outline) has none."""
+  def piece(p):
+    k = 1
+    while k + 1 < len(p):
+      a, d = p[0, :2], p[k + 1, :2] - p[0, :2]
+      off = np.abs((p[1:k + 1, 0] - a[0]) * d[1] - (p[1:k + 1, 1] - a[1]) * d[0]) / max(float(np.hypot(*d)), 1e-9)
+      if off.max() > tol:
+        break
+      k += 1
+    if k + 1 == len(p):
+      return p
+    rest = p[k:, :2]
+    along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(rest, axis=0).T))))
+    on = np.array([np.interp(min(CORNER_REACH, along[-1]), along, rest[:, c]) for c in (0, 1)]) - rest[0]
+    u, v = p[k, :2] - p[0, :2], on
+    cos = float(u @ v) / max(float(np.hypot(*u) * np.hypot(*v)), 1e-9)
+    return p[:k + 1] if cos < math.cos(math.radians(CORNER_TURN)) else None
+  first = piece(pts)
+  if first is not None and len(first) == len(pts):
+    return [pts]
+  last = piece(pts[::-1])
+  return [e for e in (first, None if last is None else last[::-1]) if e is not None]
+
+
 def painted_lines(path) -> list[Line]:
   out = []
   with open(path) as f:
     for row in f:
       p = json.loads(row)
-      if p['colour'] != 'white' or p['width'] < MIN_WIDTH or not MIN_LENGTH <= p['len'] <= MAX_LENGTH:
+      if p['colour'] != 'white' or p['width'] < MIN_WIDTH or p['len'] < MIN_LENGTH:
         continue
       pts = np.array(p['pts'], float)
-      if np.hypot(*(pts[-1, :2] - pts[0, :2])) < STRAIGHT * p['len']:
+      gap = np.hypot(*(pts[-1, :2] - pts[0, :2]))
+      if gap < CLOSED:
+        continue  # an outline (a box, a hatched area's edge): its sides aren't stop lines
+      for part in straight_ends(pts) if gap < STRAIGHT * p['len'] else [pts]:
+        length = float(np.hypot(*np.diff(part[:, :2], axis=0).T).sum())
+        if MIN_LENGTH <= length <= MAX_LENGTH and np.hypot(*(part[-1, :2] - part[0, :2])) >= STRAIGHT * length:
+          out.append(Line(p['id'], part[:, :2], float(part[:, 2].mean())))
+  return out
+
+
+WRAPPED_ID = 10_000_000  # ids of the lines read from the decals, past the polylines'
+MIN_PAINTED = 0.9  # of a band's length painted at least: a solid line, as a stop line is
+
+
+def texture_bands(path) -> dict[str, list[tuple[str, float, float, str, float]]]:
+  """roadpaint's textures.tsv: each texture's line bands, (the axis it runs along, its position across and width in
+  texture units, colour w / y, the fraction of it painted)."""
+  out = {}
+  with open(path) as f:
+    next(f)
+    for row in f:
+      cols = row.rstrip('\n').split('\t')
+      if len(cols) < 7 or not cols[6]:
         continue
-      out.append(Line(p['id'], pts[:, :2], float(pts[:, 2].mean())))
+      bands = []
+      for b in cols[6].split():
+        pos, width, colour, painted = b[1:].split('/')
+        bands.append((b[0], float(pos), float(width), colour, float(painted)))
+      out[cols[1]] = bands
+  return out
+
+
+def _joined(pieces) -> list[list[int]]:
+  """Pieces [(end, end, ...)] sharing an end (to the cm), as adjacent triangles' do, in groups of their indices."""
+  parent = list(range(len(pieces)))
+
+  def root(n):
+    while parent[n] != n:
+      parent[n] = parent[parent[n]]
+      n = parent[n]
+    return n
+  seen = {}
+  for n, (p, q, *_) in enumerate(pieces):
+    for e in (p, q):
+      key = (round(float(e[0]), 2), round(float(e[1]), 2))
+      if key in seen:
+        parent[root(n)] = root(seen[key])
+      else:
+        seen[key] = n
+  groups = defaultdict(list)
+  for n in range(len(pieces)):
+    groups[root(n)].append(n)
+  return list(groups.values())
+
+
+def wrapped_lines(decals_path, textures_path) -> list[Line]:
+  """The solid white bands of the atlas decals (decals.jsonl: each vertex's world xyz and uv, the triangles) where a
+  decal's UVs are shifted a whole tile or more across the band (at its position + k, k != 0): roadpaint reads each
+  band at its own position only. Each run of triangles the band crosses is one straight line between its furthest
+  points."""
+  bands = texture_bands(textures_path)
+  out = []
+  with open(decals_path) as f:
+    for row in f:
+      d = json.loads(row)
+      solid = [b for b in bands.get(d['tex'], ()) if b[3] == 'w' and b[4] >= MIN_PAINTED]
+      if not solid or 'crossing' in d['tex'] or 'rail' in d['tex']:
+        continue
+      v = np.array(d['v'], float)
+      tris = np.array(d['i'], int).reshape(-1, 3)
+      for axis, pos, width, _, _ in solid:
+        col = 3 if axis == 'v' else 4  # across a band running along v is u
+        runs = defaultdict(list)  # k -> [(end, end, m across per texture unit)]
+        for t in tris:
+          a = v[t, col]
+          for k in range(math.ceil(a.min() - pos), math.floor(a.max() - pos) + 1):
+            level = pos + k
+            ends = [v[t[i], :3] + (level - a[i]) / (a[j] - a[i]) * (v[t[j], :3] - v[t[i], :3])
+                    for i, j in ((0, 1), (1, 2), (2, 0)) if min(a[i], a[j]) <= level < max(a[i], a[j])]
+            if k == 0 or len(ends) < 2:
+              continue
+            try:
+              m = np.linalg.solve(np.c_[v[t, 3:5], np.ones(3)], v[t, :3])  # world xyz = [u v 1] @ m
+            except np.linalg.LinAlgError:
+              continue
+            runs[k].append((ends[0], ends[1], float(np.hypot(*m[col - 3, :2]))))
+        for pieces in runs.values():
+          for members in _joined(pieces):
+            pts = np.array([e for n in members for e in pieces[n][:2]])
+            c = pts[:, :2].mean(0)
+            along = (pts[:, :2] - c) @ np.linalg.svd(pts[:, :2] - c)[2][0]
+            ends = pts[[int(np.argmin(along)), int(np.argmax(along))]]
+            length = float(along.max() - along.min())
+            if MIN_LENGTH <= length <= MAX_LENGTH and np.median([pieces[n][2] for n in members]) * width >= MIN_WIDTH:
+              out.append(Line(WRAPPED_ID + len(out), ends[:, :2], float(ends[:, 2].mean())))
   return out
 
 
@@ -291,7 +420,7 @@ class StopPaint:
           else:
             z = self._z(m, s)
             z = line.z if z is None else z
-            if past_left > OWN_SIDE or past_right > OWN_SIDE:
+            if past_left > OWN_SIDE:
               counts['new: line across the whole road'] += 1
               continue
             if self._crossing_between(m, s - CROSSING_AHEAD, s, z):
@@ -455,8 +584,15 @@ def rewrite(path: str, placed: list[Placed], new_node_id, to_lat_lon, remap_rest
 
 
 def stop_lines(path: str, lines_path: str, features_path: str | None, project) -> tuple[list[Placed], dict]:
-  """The stop lines of the map at `path` placed by the game files' paint (StopPaint.place)."""
+  """The stop lines of the map at `path` placed by the game files' paint (StopPaint.place): its polylines, and the
+  bands roadpaint missed, from the decals and textures beside features.jsonl where they're there."""
   osm = OsmLanes.load(path, project)
   junctions = Junctions(osm)
   crossings = painted_crossings(features_path) if features_path else []
-  return StopPaint(junctions, painted_lines(lines_path), crossings).place()
+  lines = painted_lines(lines_path)
+  if features_path:
+    here = os.path.dirname(features_path)
+    decals, textures = os.path.join(here, 'decals.jsonl'), os.path.join(here, 'textures.tsv')
+    if os.path.exists(decals) and os.path.exists(textures):
+      lines += wrapped_lines(decals, textures)
+  return StopPaint(junctions, lines, crossings).place()

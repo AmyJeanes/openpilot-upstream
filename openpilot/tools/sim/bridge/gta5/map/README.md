@@ -66,7 +66,8 @@ direction, a lane widening from nothing over 30 m where a way's lane count rises
 joins, the turn arrows into each junction, from which nav takes the lanes for each turn, the junctions it goes straight
 on through onto fewer lanes, with the lanes that carry on (`continuing`: kerb to kerb where the road is as wide on both
 sides, else by its line), and the line through the lanes
-nav plans, on fillets from the lane in to the lane out through turns at junctions, moving across evenly over 10 m either
+nav plans, on fillets from the lane in to the lane out through turns at junctions (in what room there is near the route's
+start or end, as a route from the car with a turn just ahead; kept until the car is past the fillet), moving across evenly over 10 m either
 side of a node where the ways' lanes jog sideways (one carriageway of a divided road joining the middle of the road it
 becomes), and keeping to its lane where a turn bay opens on its left. A map without lane tags (only lane
 counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
@@ -82,11 +83,16 @@ edges, white dashed lines between lanes one way (solid where `change:lanes` forb
 the directions; and the plugin's debug overlay the same lines, from the map's tags. Kerbs are drawn only where the road
 surface ends: not between one-way ways side by side running the same way, as GTA's freeway links and the lane changes
 cutting across between them, where the line between two such ways is a lane line, solid where either's `change:lanes`
-says so (`side_by_side.py`). Where every road at a node is one-way and all run about one way (lanes merging, parting or
-changing across a carriageway) there is no junction area. Zoomed in, junctions are drawn as
+says so (`side_by_side.py`). GTA's lane changes across the painted gore where two such carriageways part or meet have
+no kerbs and cut none (Dutch London St): the gore's edges are the carriageways' own kerbs. Where every road at a node
+is one-way and all run about one way (lanes merging, parting or changing across a carriageway) there is no junction
+area; GTA's lane changes (`junctions.lane_changes`), cutting across at up to 60 degrees, don't count against that
+where two carriageways are left to say it (the hatched slip island by Vinewood Blvd's stop line). Zoomed in, junctions are drawn as
 real maps draw them (`junctions.py`, after osm2streets): each road trimmed back flat where its kerbs meet its
 neighbours', the junction's area between, kerbs carried round its corners, no lane lines inside it (but the lines of a
-road carried straight on past side roads, as the main road's centre line runs on across them), stop lines across
+road carried straight on past side roads, as the main road's centre line runs on across them) nor where the roads
+start at a junction node (a road meeting it at a slant ends its lines square across itself at the node, reaching past
+the mouth of a road beside it trimmed back little; `osm_to_roads.node_ends`), stop lines across
 the lanes into it at its signals and stop signs (and behind its crossings), the lines on its approaches ending there,
 and `footway=crossing` crossings striped across the road. Roads are drawn a layer at a time (`layer`, `bridge`,
 `tunnel`): bridges over what they cross, with a dark casing, tunnels faded. A median between the directions is a
@@ -145,7 +151,9 @@ shown or a level changes.
     before has a median to open in; on the 58 surveyed bays the painted opening is a median 9 m long and ends 5 m before
     GTA's split, so a lane widening from the split on (osm_lanes' default) opened about 35 m late. The lane is open
     from where the road begins at its carriageways joining (a grass median ending; Eclipse Blvd), from a junction less
-    than 15 m before GTA's split, and from where the paint's lane counts already have it on the links before. Elsewhere
+    than 15 m before GTA's split, and from where the paint's lane counts already have it on the links before (full
+    width at that node, not widening over the first link: Eclipse Blvd's left lane runs on through its junctions from
+    the median's end). Elsewhere
     osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
   - Where a road carries on from one way to the next (two ways meeting end to end, no junction) with the same lanes
     sitting elsewhere (other widths or line, as where the survey measured one link and not the next), osm_lanes moves
@@ -207,8 +215,9 @@ shown or a level changes.
     Hills' streets, car parks), and so are the links along such a road between unpainted ones too short to show it
     themselves (fewer sections, all bare; `unmarked_roads`), so its lines don't stop and start (Fenwell Pl). Major and
     unclassified roads keep their lines there, being more likely gaps in the files (the Great Ocean Hwy, some freeways,
-    Blaine roads), but for unclassified roads GTA's traffic doesn't use (switched off, back roads the minimap draws),
-    unpainted where their sections are bare even with no asphalt edges read (Baytree Canyon Rd).
+    Blaine roads), but for unclassified roads GTA's traffic doesn't use (switched off, back roads the minimap draws) or
+    marks off-road, unpainted where their sections are bare even with no asphalt edges read (Baytree Canyon Rd); so are
+    tracks and other off-road links (dirt, no asphalt to read edges of; the track off Senora Rd).
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
@@ -283,10 +292,18 @@ shown or a level changes.
   lanes towards the junction (the far edge of a crossing painted there, which GTA paints as the stop line), as a node
   splitting the way there (ids as for tapers) that takes the signal or sign and its direction from GTA's node. An
   approach with a painted stop line and none in the map gets one (`traffic_signals` at a junction with signals, else
-  `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. A GTA stop line with no
+  `stop`) where the line doesn't reach on across the other direction's lanes (a crossing's edge; past the kerb is the
+  class layout's lanes narrower than the road) and no crossing is painted just ahead of it. A GTA stop line with no
   paint on its own approach but a new one from the paint on the road the other way within 15 m goes there instead
   (GTA's node faced the wrong junction). GTA's node stays the stop line where nothing is painted. The decals' measured
-  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15).
+  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15). The polylines run some stop lines on round the corner into
+  the edge line they meet (an L): a bent polyline gives its straight end pieces. roadpaint reads an atlas decal's bands
+  only at their own place in the texture, so a decal laid with its UVs a whole tile over misses them (many STOP
+  decals' stop lines, as on Mt Haan Dr's T): those are read from `decals.jsonl` and `textures.tsv` beside
+  features.jsonl. Of the 9724 approaches, those with a stop line painted across their own lanes and none in the map
+  went from 126 to 28 (the rest are crossings' edges); 48 more have a painted STOP word and no line (the port's grid).
+  A stop line painted level with the road it meets, nearer the junction's node than the class layout's kerbs meet,
+  is drawn where it's painted, its road trimmed square where the kerbs meet (junctions.py).
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /

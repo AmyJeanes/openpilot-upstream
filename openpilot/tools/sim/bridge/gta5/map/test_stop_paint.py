@@ -1,12 +1,14 @@
 """stop_paint.py's stop lines from painted lines, on small maps made here. No pytest needed: `python test_stop_paint.py`
 runs them all (the rewrite test needs pyosmium, as ynd_to_osm does)."""
+import json
 import os
 import tempfile
 
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
-from openpilot.tools.sim.bridge.gta5.map.stop_paint import Line, StopPaint, _interpolate
+from openpilot.tools.sim.bridge.gta5.map.stop_paint import WRAPPED_ID, Line, StopPaint, _interpolate, painted_lines, \
+  straight_ends, wrapped_lines
 from openpilot.tools.sim.bridge.gta5.map.test_junctions import TWO_WAY, make
 
 # a crossroads at node 1, (0, 0); the south road is two ways, from node 3 to node 2 (20 m south) and on to the junction,
@@ -95,6 +97,55 @@ def test_new_stop_lines():
   zebra = (np.array([[0.0, -14.0], [5.5, -14.0], [5.5, -11.0], [0.0, -11.0]]), 0.0)
   _, counts = place([line(7, 0.3, 5.2, -15.0)], crossings=[zebra])
   assert counts.get('new: a crossing ahead') == 1
+
+
+def test_new_stop_line_wider_than_the_lanes():
+  # paint reaching past the kerb only (the class layout's lanes narrower than the road painted) is still this
+  # approach's own; reaching on across the other direction's lanes, a crossing's edge
+  placed, counts = place([line(7, -0.3, 8.0, -15.0)])
+  assert counts.get('new (stop)') == 1 and len(placed) == 1
+
+
+def test_stop_line_joined_to_an_edge_line():
+  # the game files' polyline runs the stop line on round the corner into the slip's edge line (an L): its straight
+  # end piece is the stop line
+  pts = np.array([[5.2, -15.0, 0.0], [2.6, -15.0, 0.0], [0.3, -15.0, 0.0], [0.0, -15.5, 0.0], [-0.5, -20.0, 0.0], [-1.0, -26.0, 0.0]])
+  ends = straight_ends(pts)
+  assert len(ends) == 2 and np.allclose(ends[0][:, :2], [[5.2, -15.0], [2.6, -15.0], [0.3, -15.0]])
+  assert np.allclose(ends[1][[0, -1], :2], [[0.0, -15.5], [-1.0, -26.0]])
+  straight = np.array([[0.3, -15.0, 0.0], [2.0, -15.01, 0.0], [5.2, -15.0, 0.0]])
+  assert len(straight_ends(straight)) == 1
+  with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, 'polylines.jsonl')
+    with open(path, 'w') as f:
+      length = float(np.hypot(*np.diff(pts[:, :2], axis=0).T).sum())
+      f.write(json.dumps({'id': 7, 'colour': 'white', 'width': 0.3, 'len': length, 'pts': pts.tolist()}) + '\n')
+    lines = painted_lines(path)
+  placed, counts = place(lines)
+  assert counts.get('new (stop)') == 1 and np.allclose(placed[0].xy, [0.0, -15.0])
+
+
+def test_wrapped_decal_band():
+  # an atlas decal whose UVs are shifted a tile across its band (v from -0.2 to 0, the band at v 0.9): the band is
+  # read at v -0.1, a line across the lanes in; at its own position it's roadpaint's (polylines.jsonl)
+  def quad(v0, v1):
+    return {'tex': 'atlas_a', 'ent': 'e', 'decal': True, 'i': [0, 1, 2, 2, 3, 0],
+            'v': [[0.0, -15.15, 0.0, 0.0, v0, 255], [6.0, -15.15, 0.0, 1.0, v0, 255], [6.0, -14.85, 0.0, 1.0, v1, 255],
+                  [0.0, -14.85, 0.0, 0.0, v1, 255]]}
+  with tempfile.TemporaryDirectory() as d:
+    decals, textures = os.path.join(d, 'decals.jsonl'), os.path.join(d, 'textures.tsv')
+    with open(textures, 'w') as f:
+      f.write('id\tname\tdecal\tcls\tw\th\tbands\n1\tatlas_a\t1\t1\t512\t128\tu0.900/0.150/w/1.00\n')
+    with open(decals, 'w') as f:
+      f.write(json.dumps(quad(-0.2, 0.0)) + '\n')
+    lines = wrapped_lines(decals, textures)
+    assert len(lines) == 1 and lines[0].id == WRAPPED_ID
+    assert np.allclose(sorted(lines[0].pts[:, 0]), [0.0, 6.0], atol=1e-6) and np.allclose(lines[0].pts[:, 1], -15.0, atol=1e-6)
+    with open(decals, 'w') as f:
+      f.write(json.dumps(quad(0.8, 1.0)) + '\n')
+    assert wrapped_lines(decals, textures) == []
+  placed, counts = place(lines)
+  assert counts.get('new (stop)') == 1 and abs(placed[0].xy[1] + 15.0) < 1e-6
 
 
 def test_stop_line_for_the_other_way():

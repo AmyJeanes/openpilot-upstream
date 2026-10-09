@@ -114,6 +114,23 @@ def test_ribbon_behind_is_where_it_was_drawn():
   assert not [line for k, line in items if k == "b"]
 
 
+def test_ribbon_behind_only_where_the_car_went():
+  # the car placed on a road, stopped: nav's first plan, before the car's lane is known, ramps in from another lane
+  # past the car; the next is from the car's lane. Neither leaves a route behind the car, which hasn't moved
+  route = straight_route()
+  route.at = 100.0
+  ramp = np.column_stack([np.interp(np.arange(100.0, 300.0, 2.0), [100.0, 106.0], [-6.0, 0.5]), np.arange(100.0, 300.0, 2.0)])
+  ribbon = ov.Ribbon()
+  for lane in (ramp, ramp, lane_from(route, 100.0, 0.5), lane_from(route, 100.0, 0.5)):
+    items = ribbon.items(ribbon_snap(route, lane, v=0.0))
+    assert not [line for k, line in items if k == "b"]
+  for y in np.arange(100.0, 121.0, 2.0):  # then it drives on: the route behind is where it went
+    route.at = y
+    items = ribbon.items(ribbon_snap(route, lane_from(route, 100.0, 0.5), v=0.0))
+  b = [line for k, line in items if k == "b"]
+  assert len(b) == 1 and np.all(np.abs(b[0][:, 0] - 0.5) < 0.05) and b[0][0, 1] >= 99.0
+
+
 def test_ribbon_behind_starts_again_for_a_route_the_other_way():
   # the car turning round in a junction: the route behind it was north along x = 1.75; the new route from where it
   # stands heads back south. The old line isn't kept behind the car, crossing the new one
@@ -463,16 +480,17 @@ def test_junction_lines_take_their_roads_heights(paths, osm, fresh_marks):
   outline = [s for s, k in zip(shapes, fresh_marks["shape_kind"], strict=True)
              if k == "j" and np.all(s[:, :2].min(0) < VINEWOOD_T) and np.all(s[:, :2].max(0) > VINEWOOD_T)]
   assert len(outline) == 1
-  east = outline[0][outline[0][:, 0] > 921.0]  # across the east mouth, where GTA's road is at 118.0-118.5 m
-  assert len(east) >= 3 and np.all(np.abs(east[:, 2] - 118.2) < 0.6), east
-  # every point of the outline within 0.6 m of GTA's road nearest it in plan (links of the T's roads)
   near = [(i, j) for (i, j) in paths.links if np.hypot(*(paths.xy[i] - VINEWOOD_T)) < 40.0]
   roads = np.array([[[*paths.xy[i], paths.z[i]], [*paths.xy[j], paths.z[j]]] for i, j in near])
-  np.testing.assert_allclose(outline[0][:, 2], ov.z_near(outline[0], roads, 0.0), atol=0.6)
+  east = outline[0][outline[0][:, 0] > outline[0][:, 0].max() - 1.0]  # across the east mouth, below the node's height
+  assert len(east) >= 3 and np.all(np.abs(east[:, 2] - ov.z_near(east, roads, 0.0)) < 0.6), east
+  # every point of the outline within 0.8 m of GTA's road nearest it in plan (links of the T's roads; the side road's
+  # corner on the main road's kerb lies between the two roads' heights, its own road's 0.7 m below the main road's)
+  np.testing.assert_allclose(outline[0][:, 2], ov.z_near(outline[0], roads, 0.0), atol=0.8)
   segs, nodes = fresh_marks["segs"], fresh_marks["nodes"]
   kerbs = segs[(fresh_marks["kinds"] == "e") & (nodes[:, 0] == nodes[:, 1]) &
                (np.hypot(*(segs[:, 0, :2] - VINEWOOD_T).T) < 16.0)].reshape(-1, 3)
-  assert len(kerbs) and np.abs(kerbs[:, 2] - ov.z_near(kerbs, roads, 0.0)).max() < 0.6
+  assert len(kerbs) and np.abs(kerbs[:, 2] - ov.z_near(kerbs, roads, 0.0)).max() < 0.8  # (the same corner)
 
 
 def test_arrow_strokes():

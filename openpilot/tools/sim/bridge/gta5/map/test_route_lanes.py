@@ -109,6 +109,28 @@ def test_route_lanes():
   assert np.hypot(*(mid[0] - line[np.argmin(np.abs(np.hypot(*(line - mid[0]).T)))])) < 0.6
 
 
+def test_fillets_near_the_route_ends():
+  # routed from the car 12 m before the junction (Dutch London St), and ending 15 m past it: the corner has its fillet,
+  # in what room there is, not the ways' sharp corner
+  osm = junction_map()
+
+  def smooth(line):
+    d = np.diff(line, axis=0)
+    d = d[np.hypot(*d.T) > 0.05]
+    return float(np.degrees(np.abs(np.diff(np.unwrap(np.arctan2(d[:, 1], d[:, 0]))))).max())
+  for pts in (np.array([(0.0, -12.0), NODES[3], NODES[4]]), np.array([NODES[1], NODES[2], NODES[3], (-15.0, 0.0)])):
+    lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+    assert len(lanes.corners) == 1
+    line = lanes.lane_line(0.0, [(0.0, 0.0)])
+    assert smooth(line) < 25.0 and np.hypot(*line.T).min() > 2.5, smooth(line)
+  # the car past the corner's apex keeps the rest of its fillet
+  pts = left_turn_route()
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  line = lanes.lane_line(0.0, [(0.0, 0.0)])
+  past = lanes.lane_line(108.0, [(0.0, 0.0)])
+  assert np.hypot(*(line - past[0]).T).min() < 0.3
+
+
 def test_taper_lines():
   # the bay's way: its lines move with the lanes over TAPER_M from where it opens; the white line beside the opening
   # lane starts once it has opened (on the next way, here none)
