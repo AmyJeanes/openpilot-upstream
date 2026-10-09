@@ -4,6 +4,8 @@ so training has the same approach with different routes and the real path each o
 
   junction_plan.py plan --out plan.json [--hours 8] [--map ~/gta5map_lanes] [--router URL | --valhalla valhalla.json]
   junction_plan.py show plan.json [--hours 6] [--fig plan.png]
+  junction_plan.py wrongway --plan plan.json --out plan_w.json [--every 6] [--recover ai|path|mix]
+                                                                 the plan with wrong-way clips between its trips
 
 Junctions are GTA's junction nodes, clustered (CLUSTER_LINK, CLUSTER_NEAR). An approach is a road into one: the car
 starts at a road node about BEFORE m up it (SHORT_BEFORE where the router would leave that road for another street from
@@ -1090,6 +1092,152 @@ def cmd_fxpick(args):
     print(f"wrote {args.out}")
 
 
+# *** wrong-way clips ***
+
+WW_EVERY = 6  # junction trips between wrong-way trips
+WW_APART = 250.0  # m between the clips' starts
+WW_SPEEDS = (6.0, 8.0, 10.0, 12.0, 14.0)  # m/s
+WW_EST_OVERHEAD = 30.0  # s a trip: randomise, setup, placing, the arrival hold
+
+
+def ww_clip(rng: random.Random, lanes: int, recover: str) -> dict:
+  """A clip's drift, hold and recovery (gta5_wrongway.py), varied: speed, a gradual drift or a swerve, how deep, how long."""
+  v = rng.choice(WW_SPEEDS)
+  sharp = rng.random() < 0.35
+  drift_m = round(v * (rng.uniform(1.5, 2.5) if sharp else rng.uniform(4.0, 8.0)), 1)
+  from_lane = 0 if lanes == 1 else rng.choice((0, 1))
+  r = rng.random()
+  if lanes == 1:
+    lane = -0.5 if r < 0.3 else -1.0
+  else:
+    lane = -0.5 if r < 0.25 else -1.0 if r < 0.75 else -2.0
+  mode = recover if recover != "mix" else rng.choice(("ai", "path"))
+  return {"lane": lane, "from_lane": from_lane, "approach_m": round(rng.uniform(50.0, 90.0)), "drift_m": drift_m,
+          "hold_s": round(rng.uniform(2.0, 5.0), 1), "speed": v, "recover": mode, "recover_m": round(v * rng.uniform(4.0, 6.0), 1),
+          "after_m": 40.0, "sharp": sharp}
+
+
+def ww_span(c: dict) -> tuple[float, float, float]:
+  """m along the route from the start: the drift's start, the recovery's end, and the route needed."""
+  from openpilot.tools.sim.bridge.gta5.gta5_wrongway import keys
+  k = keys(c, c["from_lane"])
+  return k[1][0], k[4][0], k[-1][0] + 40.0
+
+
+def held_points(plan: dict) -> np.ndarray:
+  """junction_plan's held-out eval and scenario junctions: the plan's, its eval approaches', and every eval trips file's
+  noted turns."""
+  pts = [tuple(p) for p in plan.get("held_out_junctions", [])]
+  pts += [tuple(a["junction"]) for a in plan["approaches"] if a.get("split") == "eval" and a.get("junction")]
+  for path in (plan.get("settings", {}).get("eval_trips") or "").split(","):
+    if path and os.path.exists(os.path.expanduser(path)):
+      pts += [tuple(ep["turn"]) for ep in eval_points(path)]
+  return np.array(pts, dtype=float).reshape(-1, 2)
+
+
+def make_wrongway(args) -> dict:
+  """plan with wrong-way trips (one after every --every junction trips) on undivided 1+1 and 2+2 roads away from the
+  held-out junctions, each checked on the router as the bridge routes it (gta5_wrongway.suitable)."""
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  from openpilot.tools.sim.bridge.gta5.gta5_wrongway import suitable
+  plan = json.loads(Path(args.plan).read_text())
+  map_dir = args.map or plan["map"]
+  e2e.MAP_DIR = map_dir
+  m = e2e.Map()
+  router = make_router(map_dir, args.router, args.valhalla)
+  if router.roads is not None and router.roads.tagged:
+    router.osm = router.roads  # the map's lanes, as the bridge has them
+  held = held_points(plan)
+  rng = random.Random(args.seed)
+  n_junction = len(plan["trips"])
+  want = args.n or max(1, n_junction // args.every)
+  starts = list(m.starts)
+  rng.shuffle(starts)
+  starts.sort(key=lambda s: 0 if e2e.in_city(s[0], s[1]) else rng.random() * 2)  # the city first, some of the rest
+  picked, why_not = [], Counter()
+  t0 = time.monotonic()
+  for x, y, z, h in starts:
+    if len(picked) >= want or time.monotonic() - t0 > args.max_route_s:
+      break
+    if len(held) and np.hypot(*(held - [x, y]).T).min() < EVAL_BUFFER:
+      why_not["near a held-out junction"] += 1
+      continue
+    if any(math.hypot(x - p["start"][0], y - p["start"][1]) < WW_APART for p in picked):
+      why_not["near another clip"] += 1
+      continue
+    c = ww_clip(rng, 1, args.recover)
+    lo, hi, need = ww_span(c)
+    fwd = np.array([-math.sin(math.radians(h)), math.cos(math.radians(h))])
+    dest = np.array([x, y]) + fwd * need
+    try:
+      r = router.route(np.array([x, y]), (-h) % 360, dest, z)
+    except Exception:
+      why_not["no route"] += 1
+      continue
+    if r.length < need - 5.0 or r.length > need * 1.3:
+      why_not["not straight on"] += 1
+      continue
+    sec = r.section(int(np.searchsorted(r.along, lo)) - 1 if lo < r.length else 0)
+    if sec is None or sec.lanes not in (1, 2):
+      why_not["lanes"] += 1
+      continue
+    if sec.lanes == 2:
+      c = ww_clip(rng, 2, args.recover)
+      c.update(approach_m=c["approach_m"])
+      lo, hi, need2 = ww_span(c)
+      if need2 > r.length - 5.0:
+        why_not["too short for 2+2"] += 1
+        continue
+    why = suitable(r, lo, hi)
+    if why is not None:
+      why_not[why.split(" at ")[0].split(" (")[0]] += 1
+      continue
+    if len(held) and min(np.hypot(*(held - p).T).min() for p in r.points) < EVAL_BUFFER:
+      why_not["passes near a held-out junction"] += 1
+      continue
+    geom = [[round(float(np.interp(s, r.along, r.points[:, 0])), 1), round(float(np.interp(s, r.along, r.points[:, 1])), 1)]
+            for s in np.append(np.arange(0.0, r.length, GEOM_STEP), r.length)]
+    end = r.points[-1]
+    picked.append({"start": [round(x, 1), round(y, 1), round(z, 1), round(h)], "dest": [round(float(end[0]), 1), round(float(end[1]), 1)],
+                   "length": round(r.length), "lanes": f"{sec.lanes}+{sec.back}", "clip": c, "geom": geom,
+                   "street": None})
+    if len(picked) % 10 == 0:
+      print(f"{len(picked)} wrong-way clips in {time.monotonic() - t0:.0f} s", flush=True)
+  print(f"{len(picked)} wrong-way clips of {want} wanted in {time.monotonic() - t0:.0f} s; not: {dict(why_not.most_common())}", flush=True)
+
+  ww_trips = []
+  for i, p in enumerate(picked):
+    c = p.pop("clip")
+    lane = int(c.pop("from_lane"))
+    sharp = c.pop("sharp")
+    p["traffic"] = {"on": 1, "vehicles": 0.1, "peds": 0.2} if rng.random() < args.traffic_share else {"on": 1, "vehicles": 0.0, "peds": 0.0}
+    p["clip"] = {**c, "from_lane": lane}
+    p["style"] = "swerve" if sharp else "drift"
+    sx, sy, sz, sh = p["start"]
+    world = {"hour": HOURS[(i * 7 + 2) % len(HOURS)], "minute": 0, "weather": WEATHERS[(i * 11 + 5) % len(WEATHERS)]}
+    est = WW_EST_OVERHEAD + p["length"] / (0.75 * c["speed"])
+    ww_trips.append({"id": f"W{i:03d}p0", "approach": f"W{i:03d}", "exit": f"W{i:03d}x0", "pass": 0, "split": "wrongway",
+                     "extra": False, "lane": lane, "world": world, "wrongway": p,
+                     "spec": f"{sx:.1f},{sy:.1f},{sz:.1f},{sh:.0f},{lane}>{p['dest'][0]:.1f},{p['dest'][1]:.1f}",
+                     "est_s": round(est)})
+  trips, k = [], 0
+  for j, t in enumerate(plan["trips"]):
+    trips.append(t)
+    if (j + 1) % args.every == 0 and k < len(ww_trips):
+      trips.append(ww_trips[k])
+      k += 1
+  trips += ww_trips[k:]
+  out = {**plan, "trips": trips, "wrongway": {"made": time.strftime("%Y-%m-%dT%H:%M:%S"), "from": os.path.abspath(args.plan),
+                                              "every": args.every, "clips": len(ww_trips), "recover": args.recover,
+                                              "seed": args.seed, "not_picked": dict(why_not)}}
+  junc_s = sum(t["est_s"] for t in plan["trips"])
+  ww_s = sum(t["est_s"] for t in ww_trips)
+  print(f"{len(ww_trips)} wrong-way trips, ~{ww_s / 60:.0f} min ({100 * ww_s / (junc_s + ww_s):.1f}% of the plan's " +
+        f"{(junc_s + ww_s) / 3600:.1f} h); 1+1 {sum(t['wrongway']['lanes'] == '1+1' for t in ww_trips)}, " +
+        f"2+2 {sum(t['wrongway']['lanes'] == '2+2' for t in ww_trips)}; recover {Counter(t['wrongway']['clip']['recover'] for t in ww_trips)}")
+  return out
+
+
 def main():
   p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   sub = p.add_subparsers(dest="command", required=True)
@@ -1137,7 +1285,25 @@ def main():
   fx.add_argument("--map", default=DEFAULT_MAP)
   fx.add_argument("--router")
   fx.add_argument("--valhalla")
+  ww = sub.add_parser("wrongway", help="a plan with wrong-way clips (gta5_wrongway.py) between its trips, as a new file")
+  ww.add_argument("--plan", required=True, help="the junction plan, left as it is")
+  ww.add_argument("--out", required=True)
+  ww.add_argument("--every", type=int, default=WW_EVERY, help="junction trips between wrong-way trips")
+  ww.add_argument("--n", type=int, default=0, help="clips (default one per --every of the plan's trips)")
+  ww.add_argument("--recover", choices=["ai", "path", "mix"], default="ai",
+                  help="who brings the car back: the game's AI driving on to the destination, the map path, or both")
+  ww.add_argument("--traffic-share", type=float, default=0.25, help="of clips with light traffic, the rest none")
+  ww.add_argument("--map", help="the map folder (default the plan's)")
+  ww.add_argument("--router")
+  ww.add_argument("--valhalla")
+  ww.add_argument("--max-route-s", type=float, default=900.0)
+  ww.add_argument("--seed", type=int, default=1)
   a = p.parse_args()
+  if a.command == "wrongway":
+    plan = make_wrongway(a)
+    Path(a.out).write_text(json.dumps(plan, indent=1))
+    print(f"wrote {a.out}")
+    return 0
   if a.command == "abcheck":
     return cmd_abcheck(a)
   if a.command == "fxpick":
