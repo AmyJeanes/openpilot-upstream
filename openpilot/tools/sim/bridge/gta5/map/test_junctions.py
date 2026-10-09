@@ -189,7 +189,7 @@ def test_slip_triangle_is_one_junction():
   ways = {1: (TWO_WAY, [4, 1]), 2: (TWO_WAY, [1, 2]), 3: (TWO_WAY, [2, 5]), 4: (one, [3, 1]), 5: (one, [2, 3]),
           6: (TWO_WAY, [3, 6])}
   j = only(Junctions(make(nodes, ways)))
-  assert sorted(j.nodes) == [1, 2, 3] and len(j.arms) == 3 and j.inside >= {2, 4}, (j.nodes, j.inside)
+  assert sorted(j.nodes) == [1, 2, 3] and len(j.arms) == 3 and j.inside == {2, 4, 5}, (j.nodes, j.inside)
 
 
 def test_surveyed_stop_lines():

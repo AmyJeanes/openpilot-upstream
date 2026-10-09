@@ -361,6 +361,7 @@ class Junctions:
     self.junctions: list[Junction] = []
     self.trims: dict[tuple[int, int], float] = {}
     self.inside: set[int] = set()
+    self.triangle_sides: set[frozenset[int]] = set()  # the node pairs of the slip triangles merged into junctions
     self._rules: tuple[dict, list] | None = None  # read from the map's relations when first needed
     self._build()
 
@@ -532,6 +533,7 @@ class Junctions:
               (one := self.junction(sorted({a, b, c}))) is not None and len(one.arms) == 3:  # a side road joining
             parent[find(b)] = find(a)
             parent[find(c)] = find(a)
+            self.triangle_sides |= sides
     # junctions whose trimmed ends overlap are one where the road between them is short; else both are trimmed less
     caps: dict[tuple[int, int], float] = {}  # (node, way) -> how far at most the road out of the node is trimmed
     for _ in range(4):
@@ -631,7 +633,8 @@ class Junctions:
     for ways, chain in links:
       pts = self.osm.xy[self.osm.data.index(chain)]
       mids = np.vstack([pts[:-1] + (pts[1:] - pts[:-1]) * t for t in (0.25, 0.5, 0.75)])
-      if in_fan(mids, centre, polygon).mean() >= 0.5 or any(self.straight_on(ways, chain, c) for c in across):
+      if in_fan(mids, centre, polygon).mean() >= 0.5 or any(self.straight_on(ways, chain, c) for c in across) or \
+          frozenset((chain[0], chain[-1])) in self.triangle_sides:  # a slip triangle's are its own, not roads round it
         inside |= {w for w, _ in ways}
     if inside:  # the kerbs go round the roads inside where they reach out past the corners
       samples = []
