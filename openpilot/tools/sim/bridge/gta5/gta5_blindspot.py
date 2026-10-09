@@ -73,6 +73,7 @@ class BlindSpot:
     self.seen = {"left": -math.inf, "right": -math.inf}  # when each side was last occupied
     self.left = self.right = False
     self.zones: dict[str, tuple[float, float, float, float] | None] = {"left": None, "right": None}  # our frame, as footprint
+    self.reach = {"left": 0.0, "right": 0.0}  # m along (our frame) the rearmost vehicle that last set each side starts
     self.dims = OWN_DIMS
     self.last: dict | None = None  # the plugin's "nearby" last looked at
 
@@ -108,8 +109,11 @@ class BlindSpot:
         continue
       lo, hi = sorted((edge + sign * t.inner, edge + sign * max(outer[side], t.inner + 1.0)))
       self.zones[side] = (lo, hi, *along)
-      if any(self._occupies(v, lo, hi, along, mny, v_ego) for v in nearby.get("v") or []):
+      hits = [v for v in nearby.get("v") or [] if self._occupies(v, lo, hi, along, mny, v_ego)]
+      if hits:
         self.seen[side] = now
+        # how far back the vehicles that set it reach, for the overlay: a closing one is behind the zone
+        self.reach[side] = min(footprint(v)[2] for v in hits)
 
   def _outer(self, state: dict, half_width: float) -> dict[str, float | None]:
     """m out from our side each zone reaches, None for a side with no lane our way: by the map's lanes along our route,
@@ -161,5 +165,6 @@ class BlindSpot:
 
       out.append(("z", world([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)])))
       if on:
-        out.append(("Z", world([((x0 + x1) / 2, y0), ((x0 + x1) / 2, y1)])))
+        # back to the vehicle that set it, so a car closing from behind the zone shows where it is
+        out.append(("Z", world([((x0 + x1) / 2, min(y0, self.reach[side])), ((x0 + x1) / 2, y1)])))
     return out
