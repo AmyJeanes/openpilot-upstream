@@ -261,6 +261,24 @@ def test_split_tapers():
   assert got == [('no_u_turn', 4, [('n', 'S')], 4), ('no_left_turn', 4, [('w', 2), ('w', 5)], 3)]
 
 
+def test_bay_full_width_from_its_start():
+  # a lane open full width from where its chain begins (start == end: a junction just before, the painted lanes before
+  # it, carriageways joining) is full width at that node, not widening from nothing over the first way (Eclipse Blvd,
+  # where it drew a bay opening just past each junction the painted lane carries on through)
+  from collections import defaultdict
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import split_tapers
+
+  def node(x, y):
+    return {'x': x, 'y': y, 'z': 0.0, 'f': [0, 0, 0, 0, 0], 'st': 0}
+  nodes = {'S': node(0, -60), 'Q': node(0, -30), 'J': node(0, 0)}
+  road = flags(2, 2, 6, False)
+  info = [[2, 'S', 'Q', 3, 2, 'primary', 40, None, road], [3, 'Q', 'J', 3, 2, 'primary', 40, None, road]]
+  chain = [('S', 'Q'), ('Q', 'J')]
+  rows, parent, widen, bays, _ = split_tapers(nodes, info, [(chain, [0.0, 30.0, 60.0], 0.0, 0.0)], set(chain), {},
+                                              defaultdict(set, {2: {'Q'}, 3: {'J'}}))
+  assert widen == {} and parent == {} and [r[3] for r in rows] == [3, 3]
+
+
 def test_back_to_back_bays():
   # a median shared by both ways' bays (a diamond): the forward one opens 45-55 m along towards D, the backward one 60-70 m
   # from D towards A, each from its own end

@@ -1267,7 +1267,8 @@ def split_tapers(nodes, info, tapers, lane_links, arrows_at, bay_to, recounted=N
           tags.pop(f'turn:lanes:{key}', None)
         fb[0 if forward else 1] = carries
         if carries:
-          share = [min(max((p - start) / max(end - start, 1e-6), 0.0), 1.0) for p in (p0, p1)]
+          # (a lane full width from where it opens, start == end: full width at its first node too)
+          share = [1.0 if end - start < 1e-6 else min(max((p - start) / (end - start), 0.0), 1.0) for p in (p0, p1)]
           if min(share) < 1.0 - 1e-3:
             widen.setdefault(pid, {})[key] = tuple(share)
       if len(ts) > 2 or pid in widen or piece[3:5] != row[3:5]:

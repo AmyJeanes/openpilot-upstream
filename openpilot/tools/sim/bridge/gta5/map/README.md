@@ -149,7 +149,9 @@ shown or a level changes.
     before has a median to open in; on the 58 surveyed bays the painted opening is a median 9 m long and ends 5 m before
     GTA's split, so a lane widening from the split on (osm_lanes' default) opened about 35 m late. The lane is open
     from where the road begins at its carriageways joining (a grass median ending; Eclipse Blvd), from a junction less
-    than 15 m before GTA's split, and from where the paint's lane counts already have it on the links before. Elsewhere
+    than 15 m before GTA's split, and from where the paint's lane counts already have it on the links before (full
+    width at that node, not widening over the first link: Eclipse Blvd's left lane runs on through its junctions from
+    the median's end). Elsewhere
     osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
   - Where a road carries on from one way to the next (two ways meeting end to end, no junction) with the same lanes
     sitting elsewhere (other widths or line, as where the survey measured one link and not the next), osm_lanes moves
