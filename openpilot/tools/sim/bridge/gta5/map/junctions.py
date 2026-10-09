@@ -19,7 +19,9 @@ map as on our GTA V one.
   nodes (fill the triangles, in_fan). Its kerbs go round the outside of the roads inside it.
 - A stop line is at its node (`highway=traffic_signals` / `stop` / `give_way`), across the lanes towards the junction
   the node's direction tag (`traffic_signals:direction`, `direction`) faces, or towards the nearest junction without
-  one; no nearer the junction than its mouth, and behind a crossing (`footway=crossing`) near it. Signals on a
+  one (nearest past its mouth), and for one junction only: where the tag faces two (the node's ways drawn opposite ways
+  out of it), the one whose mouth is nearer; no nearer the junction than its mouth, and behind a crossing
+  (`footway=crossing`) near it. Signals on a
   junction's own node stop every way into it at the mouth. A stop line surveyed where it's painted
   (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that.
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
@@ -774,7 +776,12 @@ class Junctions:
         if not _faces(tags, m, k):
           continue
         found.append((along, j, m))
-      for along, j, m in sorted(found, key=lambda f: f[0])[:1 if facing not in ('forward', 'backward') else None]:
+      if not found:
+        continue
+      # one junction's: a node between two junctions, its ways drawn opposite ways out of it, faces both by its tag
+      # (forward along one is backward along the other); the line is the one nearest its own junction's mouth
+      best = min(found, key=lambda f: f[0] - f[2].trim)
+      for along, j, m in [best] if facing not in ('forward', 'backward') else [f for f in found if f[1] is best[1]]:
         self._add_stop(j, m, kind, along, tags['highway'] == 'traffic_signals', node)
     for j in self.junctions:
       node = next((n for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', ''))), None)

@@ -13,7 +13,9 @@ added on approaches with a painted stop line and none in the map.
   road (a crossing's edges painted without stripes), go with it, and the outermost is the stop line. Pieces of one
   line laid end to end count as one.
 - A stop line node the map has is moved there when it's within MAX_MOVE (its signal or sign kept, with its direction
-  now said by the way it's on). An approach without one gets one where the line covers only its own lanes (a line
+  now said by the way it's on). One with no paint across its own approach but within MAX_MOVE of a new stop line on
+  the road the other way, towards the junction behind it, is that one's: GTA's stop nodes sit on the road's middle,
+  and their direction, taken from the junction they're nearer, can be the wrong one. An approach without one gets one where the line covers only its own lanes (a line
   across the whole road is a crossing's edge) with no painted crossing just ahead of it: `traffic_signals` at a
   junction with signals, else `stop`. Elsewhere the map's own stop lines stay as they are.
 - The node goes on the approach's way where the line crosses its line: a new node splitting the way (ids from
@@ -31,7 +33,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.junctions import FREEWAY, STOP_REACH, Junctions, _left, in_fan
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, oneway_of
 
-MIN_WIDTH = 0.25  # m: stop lines are painted this thick at least (lane lines 0.1-0.2)
+MIN_WIDTH = 0.15  # m: stop lines are painted this thick at least (the decals' measured widths run 0.16-0.3)
 MIN_LENGTH, MAX_LENGTH = 2.0, 40.0  # m
 STRAIGHT = 0.9  # of a line's length between its ends at least
 ANGLE = 30.0  # deg off square across the road at most
@@ -245,6 +247,8 @@ class StopPaint:
     tags_of = self.osm.data.node_tags
     out, counts = [], defaultdict(int)
     replaced = defaultdict(int)  # node -> its stop lines moved
+    unpainted = []  # (node, its xy) of GTA's stop lines with no paint across their approach
+    new_on = {}  # id(new Placed) -> the nodes of its approach
     stops_from = defaultdict(int)  # node -> its stop lines
     for j in self.j.junctions:
       for st in j.stops:
@@ -271,6 +275,7 @@ class StopPaint:
             found = [c for c in found if c not in mouths]
           if not found:
             counts['no paint' if at_node else 'no stop line, no paint'] += 1
+            unpainted += [(st.node, self.osm.node_xy(st.node)) for st in at_node]
             continue
           k = 0
           while k + 1 < len(found) and self._one_crossing(m, found[k], found[k + 1]):
@@ -280,6 +285,7 @@ class StopPaint:
             st = min(at_node, key=lambda st: abs(s - self.j._along(m, m.nodes.index(st.node))))
             if abs(s - self.j._along(m, m.nodes.index(st.node))) > MAX_MOVE:
               counts['paint too far from the stop line'] += 1
+              unpainted += [(st.node, self.osm.node_xy(st.node)) for st in at_node]
               continue
             highway = tags_of[st.node]['highway']
           else:
@@ -315,6 +321,22 @@ class StopPaint:
           z = self._z(m, s)
           out.append(Placed(w, t, node, tags, moved, line.id, m.line.at(s), line.z if z is None else z))
           counts['moved to the paint' if at_node else f'new ({highway})'] += 1
+          if not at_node:
+            new_on[id(out[-1])] = set(m.nodes)
+    # GTA's stop line with no paint on its approach, on the approach the other way with a new line from the paint near
+    for node, xy in unpainted:
+      near = [p for p in out if id(p) in new_on and node in new_on[id(p)] and np.hypot(*(p.xy - xy)) <= MAX_MOVE]
+      if not near or replaced[node] >= stops_from[node]:
+        continue
+      p = min(near, key=lambda p: float(np.hypot(*(p.xy - xy))))
+      highway = tags_of[node]['highway']
+      direction = p.tags.pop('traffic_signals:direction', None) or p.tags.pop('direction')
+      p.tags.pop('highway')
+      p.tags = {'highway': highway, 'traffic_signals:direction' if highway == 'traffic_signals' else 'direction': direction,
+                **p.tags}
+      p.moved_from.append(node)
+      replaced[node] += 1
+      counts['moved to the paint the other way'] += 1
     # a node's tag goes only once all its stop lines have moved
     keep = {n for n in replaced if replaced[n] < stops_from[n]}
     for p in out:
