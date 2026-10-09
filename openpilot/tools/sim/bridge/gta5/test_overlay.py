@@ -114,6 +114,23 @@ def test_ribbon_behind_is_where_it_was_drawn():
   assert not [line for k, line in items if k == "b"]
 
 
+def test_ribbon_behind_only_where_the_car_went():
+  # the car placed on a road, stopped: nav's first plan, before the car's lane is known, ramps in from another lane
+  # past the car; the next is from the car's lane. Neither leaves a route behind the car, which hasn't moved
+  route = straight_route()
+  route.at = 100.0
+  ramp = np.column_stack([np.interp(np.arange(100.0, 300.0, 2.0), [100.0, 106.0], [-6.0, 0.5]), np.arange(100.0, 300.0, 2.0)])
+  ribbon = ov.Ribbon()
+  for lane in (ramp, ramp, lane_from(route, 100.0, 0.5), lane_from(route, 100.0, 0.5)):
+    items = ribbon.items(ribbon_snap(route, lane, v=0.0))
+    assert not [line for k, line in items if k == "b"]
+  for y in np.arange(100.0, 121.0, 2.0):  # then it drives on: the route behind is where it went
+    route.at = y
+    items = ribbon.items(ribbon_snap(route, lane_from(route, 100.0, 0.5), v=0.0))
+  b = [line for k, line in items if k == "b"]
+  assert len(b) == 1 and np.all(np.abs(b[0][:, 0] - 0.5) < 0.05) and b[0][0, 1] >= 99.0
+
+
 def test_ribbon_behind_starts_again_for_a_route_the_other_way():
   # the car turning round in a junction: the route behind it was north along x = 1.75; the new route from where it
   # stands heads back south. The old line isn't kept behind the car, crossing the new one
