@@ -12,7 +12,8 @@ TOPHAT_MIN = 40.0  # brightness levels above the opening
 TOPHAT_REL = 0.35  # and this share of the opening's brightness, so bright concrete's texture isn't paint
 BRIGHT_MIN = 120.0  # a white line's brightness at least (shadows included)
 YELLOW_LIFT = 15.0
-YELLOW_WARM = 0.13
+YELLOW_WARM = 0.16
+YELLOW_RB = 28.0  # levels of red over blue, less the road's
 WHITE_WARM = 0.07
 SPECK_M = 0.5  # m: paint fills 8% of a square this wide about it at least, more than grit does
 LOCAL_M = 2.0  # m: the square paint must stand out of for paint the map is said to miss
@@ -77,7 +78,8 @@ class Paint:
     grey = (sat < 0.2) & (v > 22) & (v < 215)
     bias = float(np.median((r - b)[grey])) if grey.any() else 0.0
     warm = (r - b - bias) / np.maximum(r, 1.0)
-    self.yellow = lifted_y & (warm > YELLOW_WARM) & (r - b - bias > 15) & (g > 0.6 * r) & (r > 90)
+    # sunlit concrete pavements are warm too, but not this much
+    self.yellow = lifted_y & (warm > YELLOW_WARM) & (r - b - bias > YELLOW_RB) & (g > 0.6 * r) & (r > 90)
     self.white = lifted & ~self.yellow & (warm < WHITE_WARM) & (v - mn < 0.22 * v + 12) & (v > BRIGHT_MIN)
     # paint of neither colour for sure (worn yellow, tinted white): it counts as paint, not as either colour
     self.unsure = lifted_y & ~self.yellow & ~self.white & (warm >= WHITE_WARM) & (g > 0.6 * r) & (v > 90)
