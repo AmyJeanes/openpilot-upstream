@@ -412,6 +412,9 @@ def test_expert_drives_with_map_driver():
   assert got["arrived"] and got["stops"] == 1 and got["dev_max"] < 1.0 and not got["aborts"], got
   seg = rec.segment
   assert set(seg.src_rows) == {SOURCES.index("map")} and len(seg.mapx_rows[0]) == len(MAPX_COLUMNS)
+  mx = np.array(seg.mapx_rows)  # the change into the left lane: its side recorded wherever its progress is
+  tau, side = mx[:, MAPX_COLUMNS.index("lc_tau")], mx[:, MAPX_COLUMNS.index("lc_dir")]
+  assert np.isfinite(tau).any() and (np.isfinite(tau) == np.isfinite(side)).all() and set(side[np.isfinite(side)]) == {-1.0}
   assert seg.expert_paths and seg.expert_paths[0]["path"] and seg.expert_paths[0]["keys"]
   json.dumps(seg.md.summary())  # gta5.json's mapx
   print("expert drives with the map driver: ok")

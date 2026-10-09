@@ -46,8 +46,9 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold")
+# lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
-                "lc_tau", "lead_gap")
+                "lc_tau", "lead_gap", "lc_dir")
 SOURCES = ("none", "ai", "map", "ai_fallback")  # gta5.npz expert_src codes
 
 STEP = 1.0  # m between the path's points
@@ -474,6 +475,7 @@ class MapDriver:
     self.dev = 0.0
     self.v_prof = math.nan
     self.lc_tau = math.nan
+    self.lc_dir = math.nan
     self.target_lane = math.nan
     self.target_right = math.nan
     self.timers: dict[str, float | None] = {}
@@ -497,7 +499,7 @@ class MapDriver:
 
   def mapx_row(self) -> list[float]:
     return [PHASES.index(self.phase) if self.phase in PHASES else 0, self.s, self.dev, self.target_lane, self.target_right, self.v_prof,
-            self.a, self.kappa, REASONS.index(self.reason) if self.reason in REASONS else 0, self.lc_tau, math.nan]
+            self.a, self.kappa, REASONS.index(self.reason) if self.reason in REASONS else 0, self.lc_tau, math.nan, self.lc_dir]
 
   def summary(self) -> dict:
     """gta5.json's mapx: the trip's style and seed, its plans' keys, splices, aborts, anomalies and lights passed."""
@@ -1474,13 +1476,14 @@ class MapDriver:
     self.target_lane = lane_at(self.keys, rs)
     sec = route.section(segment_of(route, rs))
     self.target_right = round(sec.offset(self.target_lane), 2) if sec is not None and sec.lanes else math.nan
-    self.lc_tau = math.nan
+    self.lc_tau = self.lc_dir = math.nan
     side = label = None
     for s0, s1, d, _ in self.changes:
       if s0 - self.style["signal_lead"] * max(v, 3.0) <= s < s0 + LC_DONE * (s1 - s0):
         side, label = d, "laneChange" + d.capitalize()
       if s0 <= s <= s1:
         self.lc_tau = (s - s0) / max(s1 - s0, EPS)
+        self.lc_dir = -1.0 if d == "left" else 1.0
     at, heading = route.at, float(state.get("heading") or 0.0)
     for i, m in enumerate(self.mans):
       if i in self.done_mans:
