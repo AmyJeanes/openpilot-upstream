@@ -24,7 +24,7 @@ OWN, ONCOMING, WRONG_WAY, MEDIAN, CENTRE = 'own', 'oncoming', 'wrong-way', 'medi
 JUNCTION_DZ = 6.0  # m between the car and a junction's height: a road passing over or under it
 JUNCTION_CANDIDATES = 6
 CACHE_DIR = os.path.expanduser(os.getenv("GTA5_LANE_CACHE", "~/.cache/gta5_lanes"))  # junction areas, by map
-AREAS_VERSION = 1  # of junction areas' cache: bump when what goes into them changes
+AREAS_VERSION = 2  # of junction areas' cache: bump when what goes into them changes
 
 
 class LaneReading(NamedTuple):
@@ -187,7 +187,7 @@ class JunctionAreas:
   def from_junctions(cls, junctions, heights: dict[int, float] | None = None) -> 'JunctionAreas':
     """From a Junctions; heights (default: the nodes' `ele` tags) give each junction its nodes' mean height."""
     heights = node_heights(junctions.osm) if heights is None else heights
-    js = junctions.junctions
+    js = [j for j in junctions.junctions if not j.minor]  # a driveway's across a main road: still on its lanes
     zs = [float(np.mean(h)) if (h := [heights[n] for n in j.nodes if n in heights]) else np.nan for j in js]
     return cls(np.array([j.centre for j in js]).reshape(-1, 2), [j.polygon for j in js], np.array(zs))
 

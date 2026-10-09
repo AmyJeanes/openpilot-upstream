@@ -6,6 +6,9 @@ so training has the same approach with different routes and the real path each o
   junction_plan.py show plan.json [--hours 6] [--fig plan.png]
   junction_plan.py wrongway --plan plan.json --out plan_w.json [--every 6] [--recover ai|path|mix]
                                                                  the plan with wrong-way clips between its trips
+  junction_plan.py recheck --plan plan.json --out plan2.json   the plan with the ways out that no longer pass the route
+                                                                 checks' U-turn rules dropped, spares for approaches left
+                                                                 with fewer than two (trip ids kept, for a run's resume)
 
 Junctions are GTA's junction nodes, clustered (CLUSTER_LINK, CLUSTER_NEAR). An approach is a road into one: the car
 starts at a road node about BEFORE m up it (SHORT_BEFORE where the router would leave that road for another street from
@@ -13,8 +16,8 @@ further back; e2e.Map's walk and spawnable rules, as e2e's short trips), so the 
 junction, and each way out ends AFTER m down its road. Every approach and way out is routed as the bridge would route it
 (router.Router with the map's paths and roads; --valhalla runs Valhalla in process on a copy of the map, else
 --router's service) and kept only where the route runs in along the approach's link, out along that way's link, with no
-turn, ramp or roundabout before the junction, no U-turn and no detour: so the ways out are the legal ones. An approach
-needs two.
+turn, ramp or roundabout before the junction, no U-turn (nor a turn sharper than router.SHARP_TURN, which the expert's
+AI won't drive) and no detour: so the ways out are the legal ones. An approach needs two.
 
 Held out for eval, whole junctions: those of --eval-trips (the in-game A/B set, driven from each trip's own start, freeway
 exits included; then the set it replaced and the scenario suites, by their noted points), so they stay tests: no
@@ -153,6 +156,7 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
   """Routes start -> dest and whether it goes in along via_in (the approach's link into the junction) and out along
   via_out (the way out's link from it): {"ok", "why", and the route's length, time, kind of way out, ...}."""
   from openpilot.tools.sim.bridge.gta5 import e2e
+  from openpilot.tools.sim.bridge.gta5.map.router import SHARP_TURN, sharp_turns
   from openpilot.tools.sim.bridge.gta5.record_run import maneuver_class
   bearing = (-start["heading"]) % 360
   try:
@@ -178,6 +182,12 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
     mans.append({"type": m["type"], "s": s, "angle": angle, "real": m["type"] in e2e.REAL})
   if any(m["type"] in (12, 13) for m in mans):
     return {"ok": False, "why": "U-turn"}
+  # the expert's AI won't drive a U-turn, nor a turn this sharp; nor the bridge's router, which routes round them
+  if r.uturns_avoided:
+    return {"ok": False, "why": "U-turn (routed round it)"}
+  sharp = sharp_turns(r)
+  if sharp:
+    return {"ok": False, "why": f"U-turn (a turn over {SHARP_TURN:.0f} deg after {sharp[0]:.0f} m)"}
   if any(m["type"] in NOT_BEFORE and m["s"] < s_in - NO_TURN_BEFORE for m in mans):
     return {"ok": False, "why": "a turn on the way in"}
   def point(s):
@@ -204,7 +214,8 @@ def route_check(router, start: dict, dest: list, via_in: list, via_out: list, be
           "kind": kind, "angle": round(change), "change": round(change), "bend": round(bend),
           "maneuvers": [e2e.TYPES.get(m["type"], str(m["type"])) for m in mans],
           "exit_point": [round(float(v), 1) for v in point(s_out + 30)], "way_out": way_out, "geom": geom,
-          "turns": [[round(m["s"]), m["type"]] for m in mans if m["real"]]}
+          "turns": [[round(m["s"]), m["type"]] for m in mans if m["real"]],
+          "shortcuts": sum(1 for link in r.links if link is not None and link.shortcut)}
 
 
 # *** junctions on GTA's links ***
@@ -505,7 +516,7 @@ def nav_lane_changes(router, spec: str, v: float = 20.0) -> tuple[list[tuple[flo
   cur = min(lane if lane is not None and lane < 9 else n - 1, n - 1)
   keys = lane_plan(r.rest(), forks, [cur, n], r.lanes_at, v, None, r.lane_arrows(r.length, 0.0), r.lane_drops(r.length, 0.0),
                    maps=r.lane_maps(r.length, here=False), turns=r.turns(r.length), classes=r.changes(r.classes, r.length),
-                   limits=r.changes(r.limit_list, r.length))
+                   limits=r.changes(r.limit_list, r.length), crossings=[a - r.at for a in r.stops + r.junctions if a > r.at])
   return [(round(a[0]), round(b[0]), b[1] - a[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] and b[1] != a[1]], n
 
 
@@ -1093,6 +1104,119 @@ def cmd_fxpick(args):
     print(f"wrote {args.out}")
 
 
+# *** a plan checked again ***
+
+def pass_trips(plan: dict, a: dict, p: int, way0: int) -> list[dict]:
+  """An approach's trips in pass p, as make_plan lays them out (way0: the index its first way out's world cycles from)."""
+  out, n = [], len(a["exits"])
+  for j in range(n):
+    k = (j + p) % n
+    e = a["exits"][k]
+    if a.get("freeway"):
+      lane = 0 if (p + k) % 2 == 0 else 1
+    else:
+      lane = (0 if (p + k) % 2 == 0 else 9) if a["lanes_start"] >= 2 else 9
+    s, w = a["start"], way0 + k
+    world = {"hour": HOURS[(w * 7 + p * 3) % len(HOURS)], "minute": 0, "weather": WEATHERS[(w * 11 + p * 7 + 3) % len(WEATHERS)]}
+    out.append({"id": f"{e['id']}p{p}", "approach": a["id"], "exit": e["id"], "pass": p, "split": a["split"],
+                "extra": p >= plan["settings"]["train_reps"] if a["split"] == "train" else False, "lane": lane, "world": world,
+                "spec": f"{s['x']:.1f},{s['y']:.1f},{s['z']:.1f},{s['heading']:.0f},{lane}>{e['dest'][0]:.1f},{e['dest'][1]:.1f}",
+                "est_s": round(est_seconds(e["length"], a.get("freeway", False)))})
+  return out
+
+
+def recheck(plan: dict, router) -> tuple[dict, dict]:
+  """The plan with every way out routed again and those now failing the U-turn checks dropped: a training approach left
+  with under two ways is swapped for a spare that passes every check (as far from the others' starts as the plan's
+  picks), an eval approach is kept while it has one. Every other trip keeps its id and place, so a run resumes on it."""
+  report = {"checked": 0, "dropped_ways": {}, "dropped_approaches": [], "replaced": {}, "other_failures": {}, "shortcut_ways": []}
+  keep_a, gone_exits = [], set()
+  for a in plan["approaches"]:
+    kept = []
+    for e in a["exits"]:
+      r = route_check(router, a["start"], e["dest"], a["via_in"], e["via_out"], max(a["before"], BEFORE), e["after"])
+      report["checked"] += 1
+      if not r["ok"] and r["why"].startswith("U-turn"):
+        report["dropped_ways"][e["id"]] = r["why"]
+        gone_exits.add(e["id"])
+        continue
+      if not r["ok"]:
+        report["other_failures"][e["id"]] = r["why"]  # junction_run's check skips these live (plan_mismatch)
+      elif r.get("shortcuts"):
+        report["shortcut_ways"].append(e["id"])
+      kept.append(e)
+    need = 1 if a["split"] == "eval" else 2
+    if len(kept) >= need:
+      keep_a.append({**a, "exits": kept})
+    else:
+      report["dropped_approaches"].append(a["id"])
+      gone_exits |= {e["id"] for e in a["exits"]}
+  # spares for the training approaches dropped
+  spares, used = list(plan.get("spares", [])), {}
+  starts = [(a["start"]["x"], a["start"]["y"]) for a in keep_a]
+  for aid in [x for x in report["dropped_approaches"] if not x.startswith("E")]:
+    while spares:
+      s = spares.pop(0)
+      if any(math.hypot(s["start"]["x"] - p[0], s["start"]["y"] - p[1]) < TOO_CLOSE for p in starts):
+        continue
+      v = verify(router, {**s, "exits": [dict(e) for e in s["exits"]]})
+      if v is None:
+        continue
+      v.update(split="train", reps=plan["settings"]["train_reps"])
+      v["score"], v["tags"] = kind_score(v)
+      used[aid] = v
+      starts.append((v["start"]["x"], v["start"]["y"]))
+      break
+  report["replaced"] = {aid: v["id"] for aid, v in used.items()}
+  # the trips: the dropped ones out, each spare's in its approach's first place in each pass
+  ways_before = sum(len(a["exits"]) for a in plan["approaches"])
+  firsts: dict[tuple[str, int], int] = {}
+  trips = []
+  for t in plan["trips"]:
+    if t.get("exit") in gone_exits:
+      if t["approach"] in used and (t["approach"], t["pass"]) not in firsts:
+        firsts[(t["approach"], t["pass"])] = len(trips)
+        trips.append({"placeholder": t["approach"], "pass": t["pass"]})
+      continue
+    trips.append(t)
+  out_trips, way0 = [], ways_before
+  offsets = {}
+  for aid, v in used.items():
+    offsets[aid] = way0
+    way0 += len(v["exits"])
+  for t in trips:
+    if "placeholder" in t:
+      out_trips += pass_trips(plan, used[t["placeholder"]], t["pass"], offsets[t["placeholder"]])
+    else:
+      out_trips.append(t)
+  used_ids = {v["id"] for v in used.values()}
+  new = {**plan, "approaches": keep_a + list(used.values()), "spares": [s for s in plan.get("spares", []) if s["id"] not in used_ids],
+         "trips": out_trips}
+  report["trips_before"], report["trips_after"] = len(plan["trips"]), len(out_trips)
+  report["trips_dropped"] = sum(1 for t in plan["trips"] if t.get("exit") in gone_exits)
+  report["trips_added"] = sum(1 for t in out_trips if t.get("approach") in used_ids)
+  return new, report
+
+
+def cmd_recheck(args):
+  from openpilot.tools.sim.bridge.gta5 import e2e
+  plan = json.loads(Path(args.plan).read_text())
+  map_dir = args.map or plan["map"]
+  e2e.MAP_DIR = map_dir
+  router = make_router(map_dir, args.router, args.valhalla)
+  t0 = time.monotonic()
+  new, report = recheck(plan, router)
+  new["recheck"] = {"made": time.strftime("%Y-%m-%dT%H:%M:%S"), "from": os.path.abspath(args.plan), "map": map_dir, **report}
+  print(f"routed {report['checked']} ways out in {time.monotonic() - t0:.0f} s")
+  for k in ("dropped_ways", "dropped_approaches", "replaced", "other_failures"):
+    print(f"{k}: {report[k]}")
+  print(f"ways through GTA's shortcut links: {len(report['shortcut_ways'])} {report['shortcut_ways']}")
+  print(f"trips: {report['trips_before']} -> {report['trips_after']} ({report['trips_dropped']} dropped, {report['trips_added']} added)")
+  Path(args.out).write_text(json.dumps(new, indent=1))
+  print(f"wrote {args.out}")
+  return 0
+
+
 # *** wrong-way clips ***
 
 WW_EVERY = 6  # junction trips between wrong-way trips
@@ -1303,7 +1427,15 @@ def main():
   ww.add_argument("--max-route-s", type=float, default=900.0)
   ww.add_argument("--passes", type=int, default=2, help="clips on each road found, each with its own settings")
   ww.add_argument("--seed", type=int, default=1)
+  rc = sub.add_parser("recheck", help="the plan with ways out failing the U-turn checks dropped, as a new file")
+  rc.add_argument("--plan", required=True, help="the plan, left as it is")
+  rc.add_argument("--out", required=True)
+  rc.add_argument("--map", help="the map folder (default the plan's)")
+  rc.add_argument("--router")
+  rc.add_argument("--valhalla")
   a = p.parse_args()
+  if a.command == "recheck":
+    return cmd_recheck(a)
   if a.command == "wrongway":
     plan = make_wrongway(a)
     Path(a.out).write_text(json.dumps(plan, indent=1))

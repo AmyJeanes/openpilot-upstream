@@ -204,6 +204,31 @@ def test_slip_triangle_is_one_junction():
   assert sorted(j.nodes) == [1, 2, 3] and len(j.arms) == 3 and j.inside == {2, 4, 5}, (j.nodes, j.inside)
 
 
+def test_turn_bay_beside_a_two_way_road_is_no_junction():
+  # an eastbound turn bay laid as its own one-way way: it leaves the two-way road's middle at node 2 at 30 degrees to
+  # its right, runs beside it 7 m out, and a lane change from it rejoins the road at node 5 (as GTA lays them): lanes
+  # parting and merging on the eastbound side, no traffic crossing, so no junctions along the approach
+  one = {'highway': 'residential', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}
+  road = {'highway': 'primary', 'lanes': '4', 'width': '18'}
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (12.0, -7.0), 4: (40.0, -7.0), 5: (50.0, 0.0), 6: (150.0, 0.0), 7: (90.0, -7.0)}
+  ways = {1: (road, [1, 2]), 2: (road, [2, 5]), 3: (road, [5, 6]), 4: (one, [2, 3]), 5: (one, [3, 4]), 6: (one, [4, 5]),
+          7: (one, [4, 7])}
+  assert not Junctions(make(nodes, ways)).junctions
+  # the bay leaving to the left instead, across the westbound lanes: a turn, a junction
+  mirrored = {n: (x, -y) for n, (x, y) in nodes.items()}
+  assert 2 in {n for j in Junctions(make(mirrored, ways)).junctions for n in j.nodes}
+
+
+def test_driveway_off_a_main_road_is_minor():
+  # a driveway (service road, 5.5 m) off a 20 m main road: its junction is minor, the main road's lines carried on
+  # across it; a residential side road as wide is not
+  road = {'highway': 'primary', 'lanes': '4', 'width': '20'}
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0), 4: (0.0, -60.0)}
+  for side, minor in (({'highway': 'service', 'lanes': '1', 'width': '5.5'}, True), (TWO_WAY, False)):
+    j = only(Junctions(make(nodes, {1: (road, [1, 2]), 2: (road, [2, 3]), 3: (side, [2, 4])})))
+    assert j.minor == minor and (set(j.carried) >= {1, 2}) == minor, (side, j.minor, j.carried)
+
+
 def test_surveyed_stop_lines():
   # a stop line surveyed where it's painted (source:position=survey), 8 m from the crossroads' node, nearer than the
   # road would be trimmed: the road ends there and the line is drawn at it, not moved out behind the crossing
