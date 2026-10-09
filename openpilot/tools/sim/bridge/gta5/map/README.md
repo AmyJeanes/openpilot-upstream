@@ -68,8 +68,9 @@ on through onto fewer lanes, with the lanes that carry on (`continuing`: kerb to
 sides, else by its line), and the line through the lanes
 nav plans, on fillets from the lane in to the lane out through turns at junctions (in what room there is near the route's
 start or end, as a route from the car with a turn just ahead; kept until the car is past the fillet), moving across evenly over 10 m either
-side of a node where the ways' lanes jog sideways (one carriageway of a divided road joining the middle of the road it
-becomes), and keeping to its lane where a turn bay opens on its left. A map without lane tags (only lane
+side of a node where the ways' lanes jog sideways (or between route points within 30 m that leave it straightest), on a
+smooth curve where the route kinks within the move (`_curve_jogs`), and keeping to its lane where a turn bay opens on its
+left. A map without lane tags (only lane
 counts, as before) gives them from GTA's own links instead (`paths.Link`: as CodeWalker lays them out, 5.5 m wide, 4 m
 on narrow links, out from the link by its offset, or centred on a one-way link), so the bridge runs on either map.
 `lane_match.py` reads the car's lane from the map's lane tags alone, route or not: the way at its height running its
@@ -163,6 +164,13 @@ shown or a level changes.
     junctions' kerbs, nav's lane line and its lane slots run on without a step. The map view draws those ways' asphalt
     between their kerbs (roads.json's `strips`), and lanes.json's pieces that meet end to end are one line, so dashes
     run on. A lane appearing or ending at a node with no taper still steps there.
+  - A divided road's carriageway joins (or parts from) the road it becomes at a node with the other carriageway and the
+    two-way road going on (side roads aside); GTA lays its last link angled across to the road's line, so its lanes,
+    laid along the link, stepped across to the road's at the node, as kerbs and as nav's lane line, where the lanes
+    painted run on (Eclipse Blvd, Meteor St). The carriageway's lanes move across on a smoothstep over up to 30 m of
+    its end way (`CARRIAGEWAY_BLEND`) to where the road's lanes are (ours, right-aligned: the road's extra lanes are the
+    median's), the road's staying put. On the 183 divided-road ends, nav's lane line near the node is 0.39 m from the
+    painted lane's middle on average (0.62 before; 0.27 m 25-40 m away from it).
   - Both ways' bays often share one median back to back (a diamond, or one line handing the median from one way's bay
     to the other's). A line crossing the median looks the same from either way: it is the bay of the way after which
     nothing runs on at the median's right edge. Each way's bay opens from its own end, both widths on the same ways

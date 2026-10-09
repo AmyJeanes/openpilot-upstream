@@ -10,7 +10,8 @@ import numpy as np
 
 from openpilot.selfdrive.navd.planner import Through, Turn, aim, lane_plan, parse_arrows, throughs
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, _ease_jogs, _keyed, continuing, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, _curve_jogs, _ease_jogs, _keyed, \
+  continuing, \
   turn_targets, ways_from_nodes, ways_from_trace
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 
@@ -293,6 +294,46 @@ def test_keyed_lanes_step_where_keys_share_a_place():
   arriving, leaving = _keyed(np.array([-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]), np.array([0.0, 10.0, 10.0, 20.0]),
                              np.array([0.0, 1.0, 2.0, 0.0]))
   assert arriving.tolist() == [0.0, 0.0, 0.5, 1.0, 1.0, 0.0] and leaving.tolist() == [0.0, 0.0, 0.5, 2.0, 1.0, 0.0]
+
+
+def divided_road_end() -> tuple[OsmLanes, np.ndarray]:
+  """A divided road ending at node 3, (0, 0): the eastbound carriageway (two lanes, 7 m) along y = -3.5 whose last link
+  angles across to the node, the westbound one leaving the node the same way back along y = 3.5, and the two-way road
+  on east, two lanes each way, whose eastbound lanes sit where the carriageway's did (y -1.75 and -5.25)."""
+  nodes = {1: (-80.0, -3.5), 2: (-15.0, -3.5), 3: (0.0, 0.0), 4: (100.0, 0.0), 5: (-15.0, 3.5), 6: (-80.0, 3.5)}
+  one = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '7'}
+  ways = {1: (one, [1, 2]), 2: (one, [2, 3]), 3: ({'highway': 'primary', 'lanes': '4', 'width': '14'}, [3, 4]),
+          4: (one, [3, 5]), 5: (one, [5, 6])}
+  ids = np.array(sorted(nodes), np.int64)
+  data = OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {})
+  return OsmLanes(data, lambda lat, lon: (lon, lat)), np.array([nodes[1], nodes[2], nodes[3], nodes[4]])
+
+
+def test_carriageway_lanes_run_on_into_the_road():
+  # the carriageway's angled last link moves its lanes across to the road's (blend), so the lane line runs straight on
+  # in the lane rather than following the link across and jogging back at the node
+  osm, pts = divided_road_end()
+  d, knots = osm.blend(2)
+  at_node = knots[-1][1]
+  cos = 15.0 / np.hypot(15.0, 3.5)
+  assert d == 1 and np.allclose([sp.centre for sp in at_node.ours], [1.75 * cos, 5.25 * cos], atol=0.05)
+  assert osm.blend(4) is not None  # the westbound carriageway's first link, parting from the road, likewise
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  line = lanes.lane_line(0.0, [(0.0, 1.0)])
+  run = line[(line[:, 0] > -70.0) & (line[:, 0] < 60.0)]
+  assert np.abs(run[:, 1] + 5.25).max() < 0.35, np.abs(run[:, 1] + 5.25).max()
+
+
+def test_lane_line_curves_through_a_jog():
+  # a jog the lanes can't blend across (the road's lanes elsewhere at a node of three roads): where the route kinks
+  # within the move across, the lane line still turns smoothly
+  s = np.arange(0.0, 81.0, 1.0)
+  pts = np.column_stack([s, np.where(s < 40.0, 0.0, (s - 40.0) * 0.3)])  # the route bending 17 deg at 40 m
+  line = np.column_stack([pts[:, 0], pts[:, 1] - np.where(s < 40.0, 0.0, 3.0)])
+  out = _curve_jogs(line, s, [(30.0, 50.0, 0.0, 80.0)])
+  d = np.diff(out, axis=0)
+  turn = np.degrees(np.abs(np.diff(np.unwrap(np.arctan2(d[:, 1], d[:, 0])))))
+  assert turn.max() < 3.0 and np.allclose(out[s <= 25.0], line[s <= 25.0]) and np.allclose(out[s >= 55.0], line[s >= 55.0])
 
 
 def test_lane_line_eases_across_jogs():
