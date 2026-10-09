@@ -9,8 +9,8 @@ COLOURS = {"e": (40, 230, 70), "d": (255, 255, 255), "w": (255, 255, 255), "p": 
            "y": (255, 200, 0), "l": (255, 40, 40), "s": (255, 140, 0), "k": (255, 140, 0), "x": (230, 230, 230),
            "L": (60, 140, 255), "T": (255, 255, 255), "R": (255, 140, 0), "t": (0, 230, 230), "j": (70, 110, 255)}
 WIDTHS = {"e": 0.35, "l": 0.6, "s": 0.6, "k": 0.6, "x": 0.5, "t": 1.2, "j": 0.15}
-ISSUE_COLOURS = {"missing": (255, 0, 255), "stray": (0, 255, 255), "colour": (255, 128, 0), "kerb": (255, 40, 40),
-                 "stop": (255, 255, 0), "junction": (120, 160, 255)}
+ISSUE_COLOURS = {"missing": (255, 0, 255), "offset": (255, 255, 255), "stray": (0, 255, 255), "kind": (160, 255, 120),
+                 "colour": (255, 128, 0), "kerb": (255, 40, 40), "stop": (255, 255, 0), "junction": (120, 160, 255)}
 
 
 def font(size: int):
@@ -21,14 +21,19 @@ def font(size: int):
 
 
 def draw_map(tc: TileCheck, base: Image.Image, scale: float = 1.0, dashed: bool = True) -> Image.Image:
-  """Our map's marks drawn on base (the analysed image's size times scale), at their widths, dashes 3 m on 6 m off."""
+  """Our map's marks drawn on base (the analysed image's size times scale), at their widths, dashes 3 m on 6 m off;
+  other levels' marks (a deck over the road, a road under it) thin and dark, as the check leaves them out."""
   im = base.convert("RGB")
   dr = ImageDraw.Draw(im)
   cam = tc.cam
   kinds = "jexpdwcylskLTRt"
   items = tc.map.lines(kinds, level_only=False)
-  items.sort(key=lambda it: kinds.index(it[0]))
+  items.sort(key=lambda it: (bool(tc.map.on_level(it[1][:, 2].mean())), kinds.index(it[0])))
   for kind, pts in items:
+    if not tc.map.on_level(pts[:, 2].mean()):
+      if kind != "j":
+        dr.line([tuple(p) for p in cam.project(pts) * scale], fill=tuple(c // 3 for c in COLOURS.get(kind, (255, 255, 255))), width=1)
+      continue
     if kind == "j":
       uv = cam.project(pts) * scale
       dr.line([tuple(p) for p in uv], fill=COLOURS["j"], width=max(1, int(2 * scale)))
