@@ -480,12 +480,13 @@ def test_junction_lines_take_their_roads_heights(paths, osm, fresh_marks):
   outline = [s for s, k in zip(shapes, fresh_marks["shape_kind"], strict=True)
              if k == "j" and np.all(s[:, :2].min(0) < VINEWOOD_T) and np.all(s[:, :2].max(0) > VINEWOOD_T)]
   assert len(outline) == 1
-  east = outline[0][outline[0][:, 0] > 921.0]  # across the east mouth, where GTA's road is at 118.0-118.5 m
-  assert len(east) >= 3 and np.all(np.abs(east[:, 2] - 118.2) < 0.6), east
-  # every point of the outline within 0.6 m of GTA's road nearest it in plan (links of the T's roads)
   near = [(i, j) for (i, j) in paths.links if np.hypot(*(paths.xy[i] - VINEWOOD_T)) < 40.0]
   roads = np.array([[[*paths.xy[i], paths.z[i]], [*paths.xy[j], paths.z[j]]] for i, j in near])
-  np.testing.assert_allclose(outline[0][:, 2], ov.z_near(outline[0], roads, 0.0), atol=0.6)
+  east = outline[0][outline[0][:, 0] > outline[0][:, 0].max() - 1.0]  # across the east mouth, below the node's height
+  assert len(east) >= 3 and np.all(np.abs(east[:, 2] - ov.z_near(east, roads, 0.0)) < 0.6), east
+  # every point of the outline within 0.8 m of GTA's road nearest it in plan (links of the T's roads; the side road's
+  # corner on the main road's kerb lies between the two roads' heights, its own road's 0.7 m below the main road's)
+  np.testing.assert_allclose(outline[0][:, 2], ov.z_near(outline[0], roads, 0.0), atol=0.8)
   segs, nodes = fresh_marks["segs"], fresh_marks["nodes"]
   kerbs = segs[(fresh_marks["kinds"] == "e") & (nodes[:, 0] == nodes[:, 1]) &
                (np.hypot(*(segs[:, 0, :2] - VINEWOOD_T).T) < 16.0)].reshape(-1, 3)
