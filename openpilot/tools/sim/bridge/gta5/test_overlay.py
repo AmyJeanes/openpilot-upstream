@@ -86,20 +86,27 @@ def ribbon_snap(route: Route, lane: np.ndarray, v: float = 20.0, **kw) -> dict:
 
 
 def test_ribbon_starts_under_the_car_from_a_stale_plan():
+  # nav's plan from 10 m back, down the middle of the car's lane, the car 1.25 m left of it: the ribbon starts where
+  # the car will be, under it, and is on the plan's line RIBBON_EASE m on (a placed car saw it hook in from beside it)
   route = straight_route()
   route.at = 100.0
-  items = ov.Ribbon().items(ribbon_snap(route, lane_from(route, 90.0, 1.75)))  # planned 10 m back
+  items = ov.Ribbon().items(ribbon_snap(route, lane_from(route, 90.0, 1.75)))
   r = [line for k, line in items if k == "r"]
   assert len(r) == 1
-  np.testing.assert_allclose(r[0][0], [1.75, 100.0 + 20.0 * ov.ROUTE_LEAD, ov.RIBBON_LIFT], atol=0.01)
+  start = 100.0 + 20.0 * ov.ROUTE_LEAD
+  np.testing.assert_allclose(r[0][0], [0.5, start, ov.RIBBON_LIFT], atol=1e-6)
+  on = r[0][r[0][:, 1] >= start + ov.RIBBON_EASE]
+  assert len(on) and np.all(np.abs(on[:, 0] - 1.75) < 0.01)
+  assert np.all(np.diff(r[0][:, 0]) >= -1e-6)  # easing over, no hook
 
 
 def test_ribbon_behind_is_where_it_was_drawn():
   route = straight_route()
   ribbon = ov.Ribbon()
-  for y in np.arange(100.0, 141.0, 2.0):  # nav's plan moves a lane left at 120 m
+  for y in np.arange(100.0, 141.0, 2.0):  # nav's plan moves a lane left at 120 m, and the car with it
     route.at = y
-    items = ribbon.items(ribbon_snap(route, lane_from(route, y - 3.0, 1.75 if y < 120 else -1.75)))
+    x = 1.75 if y < 120 else -1.75
+    items = ribbon.items({**ribbon_snap(route, lane_from(route, y - 3.0, x)), "pos": [x, y, ov.CAR_HEIGHT]})
   r = [line for k, line in items if k == "r"]
   b = [line for k, line in items if k == "b"]
   assert len(r) == len(b) == 1
