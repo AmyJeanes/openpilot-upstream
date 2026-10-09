@@ -428,6 +428,36 @@ def test_route_heights_from_beside_the_route_not_its_length():
   np.testing.assert_allclose(far, [15.0])
 
 
+def test_z_near_reads_the_nearest_road():
+  # two roads out of a junction at (0, 0, 10): one climbing east 10%, one level north
+  roads = np.array([[[0, 0, 10], [50, 0, 15]], [[0, 0, 10], [0, 50, 10]]], float)
+  z = ov.z_near(np.array([[20.0, 3.0], [-2.0, 30.0], [40.0, -6.0]]), roads, fallback=-99.0)
+  np.testing.assert_allclose(z, [12.0, 10.0, 14.0])
+  np.testing.assert_allclose(ov.z_near(np.zeros((2, 2)), np.zeros((0, 2, 3)), fallback=7.0), [7.0, 7.0])
+
+
+VINEWOOD_T = np.array([909.5, 527.8])  # Fenwell Pl meets Vinewood Park Dr, which falls ~2.4 m to the T's east mouth
+
+
+def test_junction_lines_take_their_roads_heights(paths, osm, fresh_marks):
+  """A junction on a hill: its outline, kerbs and arrows at its roads' heights where they are, not its node's height
+  across it (at the Vinewood T the east mouth was drawn 2.4 m up, out of the plugin's reach of the ground)."""
+  shapes = np.split(fresh_marks["shape_pts"], np.cumsum(fresh_marks["shape_len"])[:-1])
+  outline = [s for s, k in zip(shapes, fresh_marks["shape_kind"], strict=True)
+             if k == "j" and np.all(s[:, :2].min(0) < VINEWOOD_T) and np.all(s[:, :2].max(0) > VINEWOOD_T)]
+  assert len(outline) == 1
+  east = outline[0][outline[0][:, 0] > 921.0]  # across the east mouth, where GTA's road is at 118.0-118.5 m
+  assert len(east) >= 3 and np.all(np.abs(east[:, 2] - 118.2) < 0.6), east
+  # every point of the outline within 0.6 m of GTA's road nearest it in plan (links of the T's roads)
+  near = [(i, j) for (i, j) in paths.links if np.hypot(*(paths.xy[i] - VINEWOOD_T)) < 40.0]
+  roads = np.array([[[*paths.xy[i], paths.z[i]], [*paths.xy[j], paths.z[j]]] for i, j in near])
+  np.testing.assert_allclose(outline[0][:, 2], ov.z_near(outline[0], roads, 0.0), atol=0.6)
+  segs, nodes = fresh_marks["segs"], fresh_marks["nodes"]
+  kerbs = segs[(fresh_marks["kinds"] == "e") & (nodes[:, 0] == nodes[:, 1]) &
+               (np.hypot(*(segs[:, 0, :2] - VINEWOOD_T).T) < 16.0)].reshape(-1, 3)
+  assert len(kerbs) and np.abs(kerbs[:, 2] - ov.z_near(kerbs, roads, 0.0)).max() < 0.6
+
+
 def test_arrow_strokes():
   strokes = ov.arrow_strokes(frozenset({"left", "through"}))
   assert [k for k, _ in strokes] == ["T", "T", "T", "L", "L"]  # the shared shaft, then each turn's branch and head

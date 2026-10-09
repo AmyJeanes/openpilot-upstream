@@ -721,3 +721,69 @@ def test_limit_cap_where_the_car_is():
   ahead = nav_mod.limit_cap([[0.0, 29.0], [200.0, 15.6]], 29.0)
   assert 15.6 < ahead < 29.0
   assert nav_mod.limit_cap([[0.0, 0.0]], 10.0) == 0.0  # unknown
+
+
+def jogging_route() -> Route:
+  """North 300 m with a 52 deg bend 2 m long half way (GTA's links jogging through a junction), then a right turn."""
+  pts = [(0.0, y) for y in (0.0, 60.0, 120.0, 148.0)] + [(1.6, 149.2)] + [(1.6, y) for y in (180.0, 240.0, 300.0)]
+  pts += [(x, 300.0) for x in (40.0, 80.0, 120.0)]
+  return Route(np.array(pts), [{'type': 1, 'begin_shape_index': 0}, {'type': 4, 'begin_shape_index': len(pts) - 1}])
+
+
+def replay_turns(r: Route, upto: float, own: bool) -> list:
+  """The next turn nav finds as the car drives along the route every 2 m, as the bridge gives it the route (points
+  every 5 m from the car), with (own) or without the route's own turns: [(m along the car, m along the turn)]."""
+  p = Planner()
+  p.min_ahead = nav_mod.MIN_AHEAD_MAP
+  out = []
+  for s in np.arange(0.0, upto, 2.0):
+    pos = np.array([np.interp(s, r.along, r.points[:, k]) for k in (0, 1)])
+    r.locate(pos)
+    t = p._next_turn(r.ahead(1000.0, 5.0), r.turns(r.length) if own else None)
+    out.append((r.at, None if t is None else r.at + t.dist))
+  return out
+
+
+def test_route_turns_hold_still():
+  # the turn ahead stays where it is along the route as the car drives towards it; found again on the points from the
+  # car every step, it moves about with them
+  r = jogging_route()
+  turns = r.turns(r.length)
+  assert [(t[1], round(t[3])) for t in turns] == [('right', 90)]
+  found = replay_turns(r, 280.0, own=True)
+  assert all(t is not None and t > at and abs(t - turns[0][0]) < 0.11 for at, t in found)
+
+
+def test_signal_point_holds_still():
+  # the overlay's signal point is where the signal comes on at the turn's own speed, whatever the car's now
+  r = jogging_route()
+  r.locate(np.array([0.0, 100.0]))
+  route, turns = r.ahead(1000.0, 5.0), r.turns(r.length)
+  p = Planner()
+  p.min_ahead = nav_mod.MIN_AHEAD_MAP
+  points = []
+  for v in (4.0, 9.0, 15.0):
+    p.v = v
+    points.append(p.turn_points(route, [], [], [], turns))
+  assert all(np.allclose(a, points[0][0]) and np.allclose(b, points[0][1]) for a, b in points)
+
+
+def test_route_68_turns_hold_still():
+  # Amy's Route 68 replay from (-1401.93, 2416.59), heading 288.9, to (-813.6, 179.5): found on the points from the car
+  # every step, the turn ahead jumped between a 50 deg bend at ~350 m and the left at ~490 m every few metres
+  import os
+  import urllib.request
+  if not os.path.exists(os.path.expanduser('~/gta5map_lanes/gta5.osm.pbf')):
+    return
+  try:
+    urllib.request.urlopen('http://127.0.0.1:8002/status', timeout=2.0).read()
+  except OSError:
+    return
+  from openpilot.tools.sim.bridge.gta5.junction_plan import make_router
+  router = make_router(os.path.expanduser('~/gta5map_lanes'), None, None)
+  router.osm = router.roads
+  r = router.route(np.array([-1401.93, 2416.59]), (-288.9) % 360, np.array([-813.603, 179.474]), 27.17)
+  ends = [t[0] for t in r.turns(r.length)]
+  found = replay_turns(r, 480.0, own=True)
+  assert all(t is not None and t > at and min(abs(t - e) for e in ends) < 0.11 for at, t in found)
+  assert len({round(t / 10.0) for _, t in found}) == 2  # the right at the start, then the left

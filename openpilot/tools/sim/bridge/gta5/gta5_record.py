@@ -61,6 +61,12 @@ FRAME_COLUMNS = ("frame_id", "t", "x", "y", "z", "heading", "pitch", "roll", "gr
 MODEL_COLUMNS = ("time", "frame_id_extra", "execution_time", "lane_change_state", "lane_change_direction", "action_curvature",
                  "action_accel", "left_blinker", "right_blinker", "v_ego", "lat_active", "nav")
 INDICATORS = {None: 0, "left": 1, "right": 2}
+# per road frame, in gta5.npz's "wrongway" array, only in segments with a wrong-way clip (gta5_wrongway.py): the clip
+# (its index in gta.json's "wrongway" list, -1 none), its phase (WW_PHASES' index; wrongway_phase_values), the lane its
+# controller aims for (from the left of ours, negative oncoming; NaN while the AI drives), that lane's centre (m right of
+# the route's line), the car's distance from the planned path, the car's m right of the route's line, and the map's lane
+# (lane_match, NaN where none) with whether it's an oncoming one
+WW_COLUMNS = ("clip", "phase", "target_lane", "target_right", "path_dev", "route_right", "map_lane", "map_oncoming")
 
 
 def state_mount(state: dict) -> tuple | None:
@@ -185,6 +191,8 @@ class Segment:
     self.routes: list[dict] = []
     self.lane_lines: list[dict] = []
     self.expert_labels: list[str] = []
+    self.ww_rows: list[list[float]] = []
+    self.ww_clips: list[dict] = []
     self.mount = None  # the plugin's report of it, which a change of ends the segment
     self.broken = ""
     self.done_at = 0.0  # when it stopped taking frames
@@ -284,7 +292,8 @@ class Recorder:
       route_idx = len(self.segment.routes) - 1
     # the game's AI driving (gta5_expert.py), and the desire its indicators stand for
     expert = getattr(w, "expert", None)
-    expert_on = bool(getattr(expert, "active", False))
+    expert_on = bool(getattr(expert, "ai_drives", getattr(expert, "active", False)))
+    self.segment.ww_rows.append(self._ww_row(expert, route, state))
     label = str(getattr(expert, "label", "")) if expert_on else ""
     if label not in self.segment.expert_labels:
       self.segment.expert_labels.append(label)
@@ -300,6 +309,26 @@ class Recorder:
             getattr(w, "cap", 0), lane[0], lane[1], route_idx,
             *((route.at, route.off, route.right) if route is not None else (np.nan,) * 3),
             expert_on, self.segment.expert_labels.index(label)]
+
+  def _ww_row(self, expert, route, state: dict) -> list[float]:
+    from openpilot.tools.sim.bridge.gta5.gta5_wrongway import PHASES
+    ww = getattr(expert, "ww", None)
+    if ww is None or not getattr(expert, "active", False):
+      return [-1, 0] + [np.nan] * 6
+    clips = self.segment.ww_clips
+    if not clips or clips[-1]["clip"] != ww.clip or clips[-1].get("path") is None and ww.path is not None:
+      rec = ww.plan_record()
+      if clips and clips[-1]["clip"] == ww.clip:
+        clips[-1] = rec
+      else:
+        clips.append(rec)
+    m = getattr(expert, "ww_map_lane", None)
+    nan = np.nan
+    return [len(clips) - 1, PHASES.index(ww.phase) if ww.phase in PHASES else 0,
+            nan if ww.target_lane is None or not expert.ww_driving else ww.target_lane,
+            nan if ww.target_right is None or not expert.ww_driving else ww.target_right, ww.dev if ww.path is not None else nan,
+            route.right if route is not None else nan,
+            nan if not m or m.get("lane") is None else m["lane"], nan if not m else float(bool(m.get("oncoming")))]
 
   def _end(self):
     seg, self.segment, self.wide_for = self.segment, None, None
@@ -327,6 +356,11 @@ class Recorder:
     seg.wide.wait()
     rows = np.array(seg.rows, dtype=np.float64).reshape(-1, len(FRAME_COLUMNS))
     out = {"frame": rows, "frame_columns": np.array(FRAME_COLUMNS), "expert_label_values": np.array(seg.expert_labels or [""])}
+    if seg.ww_clips:  # a wrong-way clip in it: its phases per frame, and the clips' plans in gta5.json
+      from openpilot.tools.sim.bridge.gta5.gta5_wrongway import PHASES
+      out.update({"wrongway": np.array(seg.ww_rows[:len(rows)], dtype=np.float64).reshape(-1, len(WW_COLUMNS)),
+                  "wrongway_columns": np.array(WW_COLUMNS), "wrongway_phase_values": np.array(PHASES)})
+      seg.info["wrongway"] = seg.ww_clips
     with self.lock:
       model = [self.model.pop(int(i), None) for i in rows[:, 0]]
       for i in [k for k in self.model if rows.size and k < rows[-1, 0]]:
