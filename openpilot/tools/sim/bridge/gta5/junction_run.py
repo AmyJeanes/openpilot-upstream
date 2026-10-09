@@ -224,7 +224,7 @@ def wrongway_trip(t: dict, run_id: str, recover: str = "plan") -> dict:
   w = t["wrongway"]
   clip = {**w["clip"], "clip": t["id"], **({"recover": recover} if recover != "plan" else {})}
   hold_onc = (w["clip"]["drift_m"] + w["clip"]["recover_m"]) / max(w["clip"]["speed"], 3.0) + w["clip"]["hold_s"]
-  return {"id": run_id, "plan_trip": t["id"], "spec": t["spec"], "start": tuple(w["start"]), "dest": tuple(w["dest"]),
+  return {"id": run_id, "plan_trip": t["id"], "spec": t["spec"], "start": tuple(w["start"][:2]), "dest": tuple(w["dest"]),
           "area": "wrongway", "length": w["length"], "time": round(w["length"] / 6.0), "maneuvers": [], "classes": ["wrongway"],
           "junctions": 0, "familiar": 0.0, "geom": w["geom"], "world": t.get("world") or {},
           "traffic": w.get("traffic"), "wrongway": clip, "oncoming_s": hold_onc + 25.0,
