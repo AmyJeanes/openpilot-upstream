@@ -1182,6 +1182,9 @@ def lane_tapers(nodes, info, lane_links, junction, survey, lines=None, why=None,
     elif beyond:  # a median between carriageways ends where the road begins, the lane in its room from there
       taper = (0.0, 0.0)
       why['no paint: open where the carriageways join'] += 1
+    elif begins < TAPER_DEFAULT + 5.0 and len(at[chain[0][0]]) > 2:  # a junction just before: open from there
+      taper = (0.0, 0.0)
+      why['no paint: full width from the junction just before it'] += 1
     elif begins >= 3.0:  # widening on the road before, to full width where its links begin
       taper = (max(begins - TAPER_DEFAULT, 0.0), begins)
       why["no paint: full width where GTA's lane begins"] += 1
