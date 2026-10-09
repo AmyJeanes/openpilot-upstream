@@ -279,7 +279,7 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
           tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None,
           gain: float = 1.0, noise: float = 0.0) -> Trip:
   """Drives a route with the map driver on the lagged car. faults: {"collision": t, "push": (t, m right),
-  "steer": t, "block": t}. lane_map(route, state) gives the state's laneMap (None: none)."""
+  "steer": t, "block": t, "surge": (path m, m/s more over 0.4 s)}. lane_map(route, state) gives the state's laneMap (None: none)."""
   import time
   if pose is None:
     route.at, route.seg = 0.0, 0  # a route driven before starts again at its start
@@ -303,6 +303,8 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
       car.x += math.cos(hr) * faults["push"][1]
       car.y += math.sin(hr) * faults["push"][1]
       pushed = True
+    if "surge" in faults and faults["surge"][0] <= md.s < faults["surge"][0] + 0.4 * max(car.v, 1.0):
+      car.v += faults["surge"][1] * FRAME / 0.4  # an uncommanded surge, as the game car over a bump on a steep rise
     st = car.state()
     route.locate(np.array(st["pos"][:2]), None, st["heading"])
     st["laneMap"] = lane_map(route, st) if lane_map is not None else None

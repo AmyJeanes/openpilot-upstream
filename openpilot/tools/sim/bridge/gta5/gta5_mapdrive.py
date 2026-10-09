@@ -5,7 +5,8 @@ The plan is made once when a route arrives (and spliced on a reroute, past the l
 nav's lane plan (planner.lane_plan, as the ribbon draws it) with absolute along-route keys, each lane change placed
 within its lane-slot window (by the trip's style, freeway ones within +-20 % of nav's schedule), then re-placed to take
 its time (the style's t_lc, no quicker than its lateral acceleration allows) at the speed the car will drive it, its end
-kept, and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
+kept, moved off jogs in the route's line (route_jogs, where the lane line swerves; jog_change where there's no
+room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
 and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in. That
 line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and wander (never
 periodic, faded out through turns and junctions), joining it from where the car is. The plan is checked against the
@@ -16,15 +17,15 @@ plan_slot_mismatch anomaly.
 Each game frame: pure pursuit (lookahead clamp(5, 0.6 v + 3, 25) m) from the rear axle (the game's position is the
 car's middle, which moves inwards of its heading in a bend), predicted `latency` (0.1) s on, plus the path's curvature
 `ff_preview` (0.32) s ahead as feedforward (the pursuit's own curve-cutting taken out), rate limited to 3x the style's
-lateral jerk and capped at 4.5 m/s^2; the speed follows a static profile (limit or road class x style, the path's
-curvature at the style's lateral acceleration and lateral jerk, nav's turn speeds) with stop signs (full stop and
+lateral jerk (more once off the path) and capped at 4.5 m/s^2; the speed follows a static profile (limit or road class x style, the path's
+curvature's envelope at the style's lateral acceleration and lateral jerk, nav's turn speeds) with stop signs (full stop and
 dwell), give way lines (slow, then on), traffic lights (no state to read: driven through and marked light_unknown +-5 s)
 and a gentle arrival stop_before m short of the end. Aborts (dev > 1.5 m for 1 s, heading off by 30 deg, a collision,
 off the road, no progress for 20 s, lateral acceleration over 4.5, the driver's input, a failed plan) brake to a stop and
 end the trip (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place, for the map-fix work:
 kerb_contact (past a road's kerbs, or into a near-side turn's corner kerb, from its legs' cross-sections), gta_edge (the
 plan's lane near GTA's road edge where the map's road is wider), lane_disagree, tracking_saturated, gta_link_offset,
-stop_line_far, plan_slot_mismatch, sharp_corner.
+stop_line_far, plan_slot_mismatch, sharp_corner, jog_change.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
@@ -63,6 +64,7 @@ CURV_SMOOTH = 7.0  # m: the path's curvature averaged over this
 FADE_NEAR, FADE_OVER = 15.0, 25.0  # m: in-lane bias and wander gone this near a turn or junction node, back over this
 SOFT_IN, SOFT_OUT = 0.5, 1.5  # m an eased corner may come inside the line drawn, and swing outside it before and after
 JERK_SHARE = 2.0  # x the style's lateral jerk the speed profile allows where the path's curvature changes
+RATE_OFF_PATH = 2.0  # x more of it, 1 m off the path
 RATE_SHARE = 3.0  # x it the commanded curvature may change at: a safety limit above the profile's
 COMPUTE_EVERY = 0.1  # s: a new frame is computed at once, else at least this often; between, the last control is resent
 DECEL_MAX = 4.0  # m/s^2
@@ -75,6 +77,7 @@ GIVE_WAY_SPEED = 3.0  # m/s at the line
 LIGHT_MARK = 5.0  # s either side of a light passed without its state
 SIGNAL_TIME, SIGNAL_DIST = 5.0, 50.0  # s, m before a turn (as the AI expert)
 TURN_DONE_HEADING, TURN_DONE_AFTER, TURN_PAST, KEEP_PAST = 20.0, 5.0, 40.0, 30.0
+JOG_LINK, JOG_TURN, JOG_BACK, JOG_PAD = 25.0, 10.0, 12.0, 10.0  # m, deg, deg, m (route_jogs)
 MIN_LC_M = 20.0  # m a lane change takes at the least
 LC_A_LAT = 0.6  # x the style's lateral acceleration, a lane change's peak at most
 LC_MAX_S = 9.0  # s a change takes at the most
@@ -367,6 +370,26 @@ def hermite_join(path: np.ndarray, pos: np.ndarray, heading: float, v: float, to
   return np.vstack([curve[:-1], path[j:]])
 
 
+def route_jogs(route) -> list[tuple[float, float]]:
+  """Where the route's line jogs sideways and back (a short link turning JOG_TURN or more one way, then back within
+  JOG_BACK of the way it was going, as across a junction where a road's line moves over to its other carriageway's):
+  [(m along from, to)], padded JOG_PAD either side. The lane line swerves there, by the lanes' offsets from a diagonal."""
+  p = route.points[:, :2]
+  if len(p) < 4:
+    return []
+  d = np.diff(p, axis=0)
+  h = np.degrees(np.arctan2(d[:, 1], d[:, 0]))
+  seg = np.hypot(*d.T)
+  out = []
+  for k in range(1, len(d) - 1):
+    if seg[k] > JOG_LINK or seg[k] < 1e-3:
+      continue
+    t_in, t_out = wrap(h[k] - h[k - 1]), wrap(h[k + 1] - h[k])
+    if abs(t_in) >= JOG_TURN and abs(t_out) >= JOG_TURN and t_in * t_out < 0 and abs(t_in + t_out) < JOG_BACK:
+      out.append((float(route.along[k]) - JOG_PAD, float(route.along[k + 1]) + JOG_PAD))
+  return out
+
+
 def along_route(route, pts: np.ndarray, start: float) -> tuple[np.ndarray, np.ndarray]:
   """Each point's (m along the route, m right of its line), searched on from `start` m along so where the route
   passes back near itself the points stay on their own part."""
@@ -462,6 +485,7 @@ class MapDriver:
     self.path = None
     self.join_m = 0.0  # m of path from the car into its lane line, where the road's own checks wait
     self.corners: list[dict] = []
+    self.jog_changes: list[tuple[float, float]] = []  # lane changes left across a jog, with no room off it
     self.unclear = np.zeros(0)
 
   # *** what expert mode and recordings read ***
@@ -726,6 +750,7 @@ class MapDriver:
     if built is None:
       return False
     fitted = self.fit_durations(route, keys, float(state.get("vEgo") or 0.0)) if self.c["fit_durations"] else keys
+    fitted = self.off_jogs(route, fitted)
     if fitted != keys:
       keys = fitted
       built = self._build(route, keys, lane, state, t)
@@ -874,6 +899,37 @@ class MapDriver:
       return original  # a re-placing gone wrong: as it was
     return keys
 
+  def off_jogs(self, route, keys: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """The keys with each single lane change moved off the route's jogs (route_jogs), where the lane line already
+    swerves: wholly before the jog where there's room back to the key before, else after it where there's room on to
+    the key after; one with neither stays, logged as a jog_change anomaly."""
+    spans = route_jogs(route)
+    if not spans:
+      return keys
+    keys = list(keys)
+    for a, b in reversed(chains(keys)):
+      if b != a + 1:
+        continue
+      (s0, la), (s1, lb) = keys[a], keys[b]
+      hit = next(((j0, j1) for j0, j1 in spans if j0 < s1 and s0 < j1), None)
+      if hit is None:
+        continue
+      length = s1 - s0
+      lower = keys[a - 1][0] if a > 0 else s0
+      upper = keys[b + 1][0] if b + 1 < len(keys) else s1
+
+      def clear(x0, x1, crossings=()):
+        return not any(j0 < x1 and x0 < j1 for j0, j1 in spans) and not any(x0 - CROSSING_CLEAR < c < x1 for c in crossings)
+      # before or after it; first where it crosses no stop line or junction node, as nav keeps changes off them
+      options = [(hit[0] - length, hit[0]), (hit[1], hit[1] + length)]
+      ok = [o for o in options if o[0] >= lower and o[1] <= upper - 1.0 and clear(*o)]
+      best = [o for o in ok if clear(*o, sorted(route.stops + route.junctions))] or ok
+      if best:
+        keys[a], keys[b] = (best[0][0], la), (best[0][1], lb)
+      else:
+        self.jog_changes.append((s0, s1))
+    return keys
+
   @staticmethod
   def _chain_lanes(keys, a: int, b: int) -> float:
     """Lanes a change crosses: its ramps' changes, without its renumbering steps."""
@@ -957,7 +1013,15 @@ class MapDriver:
     lim = np.array([road_speed(route, int(j)) for j in k]) * self.style["speed"]
     if self.c.get("speed"):
       lim = np.minimum(lim, float(self.c["speed"]))
-    curve = np.sqrt(self.style["a_lat"] / np.maximum(np.abs(self.kappa_path), 1e-4))
+    # by the curvature's envelope (its largest within CURV_SMOOTH either way): the average smooths a short S (a jog, a
+    # lane change across a bend) down to less than the car must take
+    n = max(int(CURV_SMOOTH / STEP), 1)
+    k_abs = np.abs(smooth(k_raw, 3))
+    env = k_abs.copy()
+    for j in range(1, n + 1):
+      env[j:] = np.maximum(env[j:], k_abs[:-j])
+      env[:-j] = np.maximum(env[:-j], k_abs[j:])
+    curve = np.sqrt(self.style["a_lat"] / np.maximum(np.maximum(env, np.abs(self.kappa_path)), 1e-4))
     # no faster than the lateral jerk allows where the curvature changes (jerk = v^3 dkappa/ds)
     dk = np.abs(np.gradient(self.kappa_path, self.s_path))
     curve = np.minimum(curve, np.cbrt(JERK_SHARE * self.style["j_lat"] / np.maximum(dk, 1e-6)))
@@ -1045,6 +1109,9 @@ class MapDriver:
         extra = {"why": why} if why else {}
         self._anomaly(kind, t, self.path[i], float(self.s_path[i]), planned=True, length=round(float(self.s_path[run[-1][0]] - self.s_path[run[0][0]]) + every, 1),
                       **extra, **detail)
+    for s0, s1 in self.jog_changes:
+      self._anomaly("jog_change", t, route_point(route, s0), float(np.interp(s0, self.route_s, self.s_path)),
+                    span=[round(s0, 1), round(s1, 1)])
     for c in self.corners:  # the plan cutting a junction's corner kerb
       hits = [i for i in range(len(self.path)) if abs(self.route_s[i] - c["along"]) < CORNER_SPAN and
               (self._corner_hit(c, self.path[i], float(self.theta[i])) or 0.0) > KERB_MARGIN]
@@ -1387,6 +1454,7 @@ class MapDriver:
     vv = max(v, 1.0)
     cap = min(KAPPA_MAX, A_LAT_MAX / (vv * vv))
     rate = max(RATE_SHARE * self.style["j_lat"] / (vv * vv), 0.03)
+    rate *= 1.0 + RATE_OFF_PATH * min(max((self.dev - 0.3) / 0.7, 0.0), 1.0)  # quicker back onto the path once off it
     want = k
     k = float(np.clip(k, -cap, cap))
     k = float(np.clip(k, self.kappa - rate * dt, self.kappa + rate * dt))

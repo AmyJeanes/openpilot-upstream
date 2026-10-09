@@ -245,6 +245,40 @@ def test_bias_fades_in_turns_and_soften_holds_outside():
   print("bias fades in turns, soften holds outside: ok")
 
 
+def jog_road() -> "ms.Route":
+  """North 400 m on two lanes each way, the road's line jogging 5 m right across a 13 m link at 200 m (as where a
+  road's line moves over to its other carriageway's at a junction): the lane line swerves there."""
+  pts = [(0.0, y) for y in np.arange(0.0, 201.0, 10.0)] + [(5.0, 212.0)] + [(5.0, y) for y in np.arange(222.0, 413.0, 10.0)]
+  return ms.made_route(pts, ms.section(2, 2), junctions=[20], road_class="secondary")
+
+
+def test_lane_change_kept_off_a_jog():
+  """A change across a jog in the lane line moves wholly before (or after) it; and through a jog the speed is held to
+  its curvature's envelope, so a surge (the game car over a bump) doesn't leave the steering behind."""
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+  r = jog_road()
+  spans = g.route_jogs(r)
+  assert len(spans) == 1 and spans[0][0] < 200.0 < 212.0 < spans[0][1], spans
+  md = ms.drive(r, {"seed": 2}, lane=1, seconds=0.2).md
+  keys = [(0.0, 1.0), (185.0, 1.0), (230.0, 0.0), (400.0, 0.0)]
+  out = md.off_jogs(r, keys)
+  assert out[2][0] <= spans[0][0] + 1e-6 and abs((out[2][0] - out[1][0]) - 45.0) < 1e-6, out
+  # driven with nav's change across it, a surge at the jog: tracked without saturating (the profile slows for the S)
+  orig = g.MapDriver.off_jogs
+  g.MapDriver.off_jogs = lambda self, route, k: k
+  try:
+    real = g.MapDriver.nav_keys
+    g.MapDriver.nav_keys = lambda self, route, lane: [(route.at, 1.0), (185.0, 1.0), (225.0, 0.0), (400.0, 0.0)]
+    trip = ms.drive(r, {"seed": 2, "retime": False, "fit_durations": False}, lane=1, tau=0.18, faults={"surge": (190.0, 4.5)})
+  finally:
+    g.MapDriver.off_jogs, g.MapDriver.nav_keys = orig, real
+  s_, dev, v = trip.col(9), trip.col(8), trip.col(4)
+  m = (s_ > 170) & (s_ < 260)
+  assert trip.finished == "arrived" and dev[m].max() < 0.6, (trip.finished, dev[m].max())
+  assert not [a for a in trip.md.anomalies if a["kind"] == "tracking_saturated"], trip.md.anomalies
+  print("lane change kept off a jog: ok")
+
+
 def test_corner_kerb():
   """A junction's inside corner kerb from its legs' cross-sections: a car over it is a kerb_contact, the plan's own
   line isn't."""
@@ -276,7 +310,7 @@ def test_arrival():
 
 def test_aborts():
   r = ms.straight(800)
-  for faults, why in (({"collision": 10.0}, "collision"), ({"push": (10.0, 3.0)}, "off the path"),
+  for faults, why in (({"collision": 10.0}, "collision"), ({"push": (10.0, 6.0)}, "off the"),
                       ({"steer": 10.0}, "driver input"), ({"block": 10.0}, "no progress")):
     trip = ms.drive(r, {"seed": 6}, lane=1, faults=faults, seconds=60)
     assert trip.finished is not None and trip.finished.startswith("abort") and why in trip.finished, (faults, trip.finished)
@@ -440,6 +474,7 @@ if __name__ == "__main__":
   test_turns_from_the_rear_axle()
   test_bias_fades_in_turns_and_soften_holds_outside()
   test_corner_kerb()
+  test_lane_change_kept_off_a_jog()
   test_arrival()
   test_aborts()
   test_no_oscillation()
