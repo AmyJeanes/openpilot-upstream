@@ -1,7 +1,8 @@
 """The simulated driver: what a person in the seat does, as game commands. navd asks (NavOutputs.requests) and the
 driver works the stalk: the game's indicator is the stalk, which the car's blinkers follow. It also nudges the wheel to
-start a lane change openpilot waits on, cancels the indicator once the car has come round a turn, as a car's stalk
-does, cancels cruise on arriving, and presses the gas when a light the car waits at turns green (PullAway).
+start a lane change openpilot waits on, once the blind spot that way is clear, cancels the indicator once the car has
+come round a turn, as a car's stalk does, cancels cruise on arriving, and presses the gas when a light the car waits at
+turns green (PullAway).
 
 It approves every request at once, as the bridge did before navd asked rather than acted."""
 import os
@@ -15,7 +16,9 @@ DEBUG = bool(os.getenv("GTA5_DEBUG"))
 # openpilot starts a signaled lane change on a steering nudge towards it; give that nudge for the driver.
 # Positive is left, and it must exceed the simulated Honda's steeringPressed threshold.
 NUDGE_TORQUE = 2000
-NUDGE_TIMEOUT = 3.0  # s after the indicator comes on
+# s after the indicator comes on, or after the blind spot that way clears: as sunnypilot's nudgeless lane change, which
+# waits with the blinker on while the blind spot is occupied and goes once it's clear
+NUDGE_TIMEOUT = 3.0
 TURN_CANCEL_DEG = 60.0  # heading change since the indicator came on that counts as a turn taken
 TURN_CANCEL_YAW_RATE = 0.1  # rad/s, straightened out
 # the driver's gas press that gets the car moving again, which the model won't do itself once stopped
@@ -50,10 +53,12 @@ class Driver:
     """The blinkers openpilot sees: the game's indicator, but off during navd's repeat gap (Planner.blinker_gap)."""
     return self.indicator == "left" and not gap, self.indicator == "right" and not gap
 
-  def stalk(self, indicator: str | None, heading: float, yaw_rate: float, lane_change, nav_signaling: bool) -> float:
+  def stalk(self, indicator: str | None, heading: float, yaw_rate: float, lane_change, nav_signaling: bool,
+            blindspot: bool = False) -> float:
     """The plugin's indicator is the blinker stalk: nudge the wheel to start the lane change, and cancel the indicator
     once it is done, as a car's stalk would. Returns the driver's steering torque: the nudge, else 0. lane_change is
-    openpilot's laneChangeState; nav_signaling whether navd's request on the stalk is a turn's (as of its last step)."""
+    openpilot's laneChangeState; nav_signaling whether navd's request on the stalk is a turn's (as of its last step);
+    blindspot whether the blind spot on the indicator's side is occupied."""
     now = time.monotonic()
     if indicator != self.indicator:
       self.indicator, self.indicator_t, self.lane_changing = indicator, now, False
@@ -72,9 +77,11 @@ class Driver:
       self.lane_changing = False
       if not nav_signaling:  # a lane change still going as the blinker became the turn's
         self.send({"type": "indicatorOff"})
-    elif (lane_change == LaneChangeState.preLaneChange and now - self.indicator_t < NUDGE_TIMEOUT
-          and not nav_signaling):  # a turn on the route, not a lane change
-      return NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE
+    elif lane_change == LaneChangeState.preLaneChange and not nav_signaling:  # a turn on the route, not a lane change
+      if blindspot:
+        self.indicator_t = now  # no nudge until it clears
+      elif now - self.indicator_t < NUDGE_TIMEOUT:
+        return NUDGE_TORQUE if indicator == "left" else -NUDGE_TORQUE
     return 0.0
 
 

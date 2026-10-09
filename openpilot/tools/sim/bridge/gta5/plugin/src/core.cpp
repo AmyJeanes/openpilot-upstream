@@ -1016,7 +1016,7 @@ struct DebugOverlay {
   bool ground = true;   // strips on the game's ground under each point (else at the map's heights)
   bool thin = false;    // 1-px lines as before the strips
   bool casing = true;   // white and yellow strips edged dark
-  std::string layers = "edsjrnmaxptq";  // layer letters (DebugLayer); f fills junction areas
+  std::string layers = "edsjrnmaxptqz";  // layer letters (DebugLayer); f fills junction areas
   float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
   float layerWidth[128];  // and each layer's, by its letter
@@ -1050,6 +1050,7 @@ char DebugLayer(char kind) {
     case 'g': return 'm';
     case 'w': case 'c': case 'y': return 'd';
     case 'L': case 'T': case 'R': return 'a';
+    case 'Z': return 'z';
     default: return kind;
   }
 }
@@ -1082,6 +1083,8 @@ constexpr KindStyle STYLES[] = {
     {'r', 255, 25, 25, 100, 1.75f, 0, 0, 0.0f},        // route ahead
     {'b', 140, 15, 15, 100, 1.75f, 0, 0, 0.0f},        // route behind
     {'n', 255, 255, 255, 235, 0.25f, 2, 1.5f, 0.150f},  // nav's lane plan, over the route
+    {'z', 255, 170, 0, 90, 0.20f, 0, 0, 0.165f},        // a blind-spot zone's outline, clear
+    {'Z', 255, 40, 20, 110, 2.40f, 0, 0, 0.165f},       // an occupied blind-spot zone, filled down its middle
 };
 constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
 
@@ -1854,6 +1857,76 @@ std::string Traffic(double now) {
   return traffic;
 }
 
+// m around the car (right, behind, ahead, up or down) that "nearby" reports vehicles within, for the bridge's blind-spot
+// monitor (gta5_blindspot.py)
+constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 15.0f, NEARBY_LEVEL = 4.0f;
+
+// the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "v":[[x, y, heading,
+// vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin (m right and forward of ours), heading (deg left
+// of ours), velocity (m/s right and forward, in our frame), its model's bounds (m, in its own frame) and whether anyone
+// is in its driver's seat
+std::string Nearby(double now) {
+  static std::string out;
+  static double next = 0;
+  if (now < next || !g_veh.handle) return out;
+  next = now + 0.1;
+  // ScriptHookV's pool walk sees every vehicle; the player's nearby vehicles are only those its ped has noticed
+  using GetAll = int (*)(int *, int);
+  static GetAll getAll = [] {
+    HMODULE shv = GetModuleHandleW(L"ScriptHookV.dll");
+    return shv ? reinterpret_cast<GetAll>(GetProcAddress(shv, "?worldGetAllVehicles@@YAHPEAHH@Z")) : nullptr;
+  }();
+  static int handles[1024];
+  int count = 0;
+  if (getAll) {
+    count = std::min(getAll(handles, static_cast<int>(std::size(handles))), static_cast<int>(std::size(handles)));
+  } else {
+    int slots[2 + 2 * 32] = {32};
+    count = std::min(GET_PED_NEARBY_VEHICLES(PLAYER_PED_ID(), slots), 32);
+    for (int i = 0; i < count; i++) handles[i] = slots[2 + 2 * i];
+  }
+  static std::unordered_map<Hash, std::pair<Vector3, Vector3>> bounds;
+  auto boundsOf = [](Hash model) {
+    auto it = bounds.find(model);
+    if (it == bounds.end()) {
+      Vector3 mn{}, mx{};
+      GET_MODEL_DIMENSIONS(model, &mn, &mx);
+      it = bounds.emplace(model, std::make_pair(mn, mx)).first;
+    }
+    return it->second;
+  };
+  auto num = [](float v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f", std::isfinite(v) ? v : 0.0f);
+    return std::string(buf);
+  };
+  Vector3 p = GET_ENTITY_COORDS(g_veh.handle, TRUE);
+  float heading = GET_ENTITY_HEADING(g_veh.handle), h = heading * DEG;
+  float far2 = NEARBY_BEHIND * NEARBY_BEHIND + NEARBY_SIDE * NEARBY_SIDE;
+  auto [ownMin, ownMax] = boundsOf(g_veh.model);
+  std::string list;
+  for (int i = 0; i < count; i++) {
+    Vehicle v = handles[i];
+    if (v == g_veh.handle || !DOES_ENTITY_EXIST(v)) continue;
+    Vector3 q = GET_ENTITY_COORDS(v, TRUE);
+    float dx = q.x - p.x, dy = q.y - p.y;
+    if (dx * dx + dy * dy > far2 || std::fabs(q.z - p.z) > NEARBY_LEVEL) continue;
+    Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
+    if (std::fabs(rel.x) > NEARBY_SIDE || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD) continue;
+    // headings are counterclockwise from north: right is (cos h, sin h), forward (-sin h, cos h)
+    Vector3 vel = GET_ENTITY_VELOCITY(v);
+    float vx = vel.x * std::cos(h) + vel.y * std::sin(h), vy = -vel.x * std::sin(h) + vel.y * std::cos(h);
+    auto [mn, mx] = boundsOf(GET_ENTITY_MODEL(v));
+    Ped driver = GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE);
+    bool driven = driver && DOES_ENTITY_EXIST(driver) && !IS_PED_DEAD_OR_DYING(driver, TRUE);
+    if (!list.empty()) list += ",";
+    list += "[" + num(rel.x) + "," + num(rel.y) + "," + num(WrapDeg(GET_ENTITY_HEADING(v) - heading)) + "," + num(vx) + "," + num(vy) + "," +
+            num(mn.x) + "," + num(mx.x) + "," + num(mn.y) + "," + num(mx.y) + "," + (driven ? "1" : "0") + "]";
+  }
+  out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"v\":[" + list + "]}";
+  return out;
+}
+
 std::string WeatherName(Hash h) {
   static const char *NAMES[] = {"EXTRASUNNY", "CLEAR", "CLOUDS", "SMOG", "FOGGY", "OVERCAST", "RAIN", "THUNDER", "CLEARING", "NEUTRAL",
                                 "SNOW", "BLIZZARD", "SNOWLIGHT", "XMAS", "HALLOWEEN", "RAIN_HALLOWEEN", "SNOW_HALLOWEEN"};
@@ -1945,7 +2018,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    for (const std::string &part : {Route(now), Lane(now), Traffic(now), AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now), TopCamState(),
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now), Nearby(now),AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now), TopCamState(),
                                     GpsState(), DirectionsState(now)})
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";

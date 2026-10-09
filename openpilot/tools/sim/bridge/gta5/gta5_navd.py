@@ -30,7 +30,8 @@ def nav_inputs(state: dict, engaged: bool, indicator: str | None, desire: dict[s
     stops=state.get("stops"), stop_kinds=state.get("stopKinds"), junctions=state.get("junctions"), limits=state.get("limits"),
     lane_arrows=state.get("laneArrows"), lane_drops=state.get("laneDrops"), lane_maps=state.get("laneMaps"), turns=state.get("turns"), two_way=state.get("twoWay"),
     pos=state.get("pos", (0.0, 0.0)), heading=state.get("heading", 0.0), truth_lane=state.get("lane"),
-    truth_lane_frac=state.get("laneFrac"), truth_lane_plugin=state.get("lanePlugin"), truth_lane_map=state.get("laneMap"))
+    truth_lane_frac=state.get("laneFrac"), truth_lane_plugin=state.get("lanePlugin"), truth_lane_map=state.get("laneMap"),
+    left_blindspot=bool((state.get("blindspot") or (False, False))[0]), right_blindspot=bool((state.get("blindspot") or (False, False))[1]))
 
 
 class Destination:

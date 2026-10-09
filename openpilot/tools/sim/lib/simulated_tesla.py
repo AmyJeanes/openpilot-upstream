@@ -119,7 +119,10 @@ class SimulatedTesla:
     msg.append(self.packer.make_can_msg("DI_autonomyHealth", party, {}))
 
     msg.append(self.packer.make_can_msg("SCCM_steeringAngleSensor", ap_party, {"SCCM_steeringAngleSpeed": 0}))
-    msg.append(self.packer.make_can_msg("DAS_status", ap_party, {}))
+    msg.append(self.packer.make_can_msg("DAS_status", ap_party, {
+      "DAS_blindSpotRearLeft": 1 if simulator_state.left_blindspot else 0,  # WARNING_LEVEL_1, else NO_WARNING
+      "DAS_blindSpotRearRight": 1 if simulator_state.right_blindspot else 0,
+    }))
     msg.append(self.packer.make_can_msg("DAS_control", ap_party, {}))
     msg.append(self.packer.make_can_msg("DAS_steeringControl", ap_party, {}))
     msg.append(self.packer.make_can_msg("DAS_settings", ap_party, {"DAS_autosteerEnabled": 0}))

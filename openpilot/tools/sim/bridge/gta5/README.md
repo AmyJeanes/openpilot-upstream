@@ -145,6 +145,23 @@ caps the speed for the road's bends up to the next turn and for its speed limits
 oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
 changes.
 
+### Blind-spot monitoring
+The car has a blind-spot monitor, as a Tesla's (`gta5_blindspot.py`): the plugin reports the vehicles around the car
+(`nearby`: each one's place, heading, velocity and model bounds), and the bridge flags a side while a vehicle going our
+way overlaps the lane beside us from 8 m behind our rear bumper to our front bumper, or is closing on it from up to 30 m
+behind fast enough to be there within 3 s; by the vehicles' bodies, out to the far edge of the lane beside by the map's
+lanes (4.5 m without them), never for oncoming, crossing or parked vehicles or a side with no lane our way, and held
+0.5 s once clear. The flags reach openpilot as the Model 3's own blind-spot signals (`DAS_status`, read into
+`carState.leftBlindspot`/`rightBlindspot`), so openpilot's lane change waits in preLaneChange with "Car Detected in
+Blindspot", and below 19 mph its lane turn desire waits too. A lane change nav asks for works like sunnypilot's
+nudgeless one: the blinker comes on when nav decides, stays on while the blind spot that way is occupied (the driver
+holds off the nudge, and openpilot would block it anyway), and the change starts as soon as it clears; nav's lane plan
+still shows it. Still held at the last place it may start (for a fork, its last start point; for a turn 30 m before it),
+nav gives it up and the blinker goes off, leaving the exit or turn to a reroute rather than changing into a car; and
+likewise once the lanes ahead no longer need it (a reroute, or the car's lane has moved).
+`GTA5_BLINDSPOT=0` turns it off; `GTA5_BLINDSPOT_TUNE` is a JSON file of its settings (the module's docstring says
+what each is and why), read again whenever it changes. Needs the plugin's `nearby` (no flags with an older plugin).
+
 ### navd and the GTA layer
 Navigation is being moved out of the bridge into a game-agnostic navd (`selfdrive/navd/`), which is to plan from only
 what a real car and device give it (GNSS, the car's state, the model's outputs, an OSM map and router), so it ports to
@@ -183,6 +200,7 @@ on the game's ground, colours as the map view's where it has them:
 | tapers `t` | the middle of a lane opening or closing along a taper or bay, translucent cyan, 1.2 m |
 | flags `q` | a magenta post where a road's lane count changes at a node with no taper (suspect map data) |
 | route `r`, nav `n`, points `m` | the route a 1.75 m translucent red band (darker behind the car, where it was drawn as the car passed), nav's lane plan a dashed white line over it, the next turn a white cylinder and where its signal comes on an amber cone |
+| blind spot `z` | each side's blind-spot zone outlined faintly in amber, filled red down its middle while occupied (sent with the route, every 0.1 s) |
 
 Strips widen and lift with distance beyond `grow=` m (40; up to 4x) so a 0.2 m line stays a few pixels wide; they're
 drawn to `dist=` m (120; the bridge sends 150). `width=` scales them all, `widths=e:2,d:1.5` some layers; `ground=0`
