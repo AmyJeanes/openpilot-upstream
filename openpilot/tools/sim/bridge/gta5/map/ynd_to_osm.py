@@ -2131,11 +2131,19 @@ def main():
   painted, why, left_out, centre_kinds, recounted, median_kinds = {}, Counter(), 0, {}, {}, {}
   # where the game files' paint covers the map, the camera's survey only checks it
   from_files = any(d.get('src') == paint_survey.GAMEFILES for ds in survey.values() for d in ds)
+
+  def link_survey(a, b):  # a link's samples; on a link to a node split_shared made, its GTA link's, moved onto it
+    if (samples := paint_survey.along(survey, a, b)) is not None or SPLIT_NODE_AREA not in (a[0], b[0]):
+      return samples
+    pa, pb = ((nodes[k]['a'], nodes[k]['i']) for k in (a, b))
+    found = paint_survey.along(survey, pa, pb) if pa != pb else None
+    return paint_survey.rebase(found, *((nodes[k]['x'], nodes[k]['y']) for k in (pa, pb, a, b))) or None if found else None
+
   for wid, a, b, fwd, back, *_, lf in info:
-    if (samples := paint_survey.along(survey, a, b)) is None:
+    if (samples := link_survey(a, b)) is None:
       continue
     w, offset = layout(lf, back, bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2)
-    if (back and offset < 0) or (not back and offset) or bay_to[wid]:  # bays fill medians: not the road's paint there
+    if (back and offset < 0) or (not back and offset) or (bay_to[wid] and not back):
       why['turn bay' if bay_to[wid] else 'lanes overlap' if back else 'one-way, off-centre'] += 1
       left_out += 1
       continue
@@ -2153,7 +2161,12 @@ def main():
       continue
     kerbs = (-(offset + back * w), offset + fwd * w)
     files = use[0].get('src') == paint_survey.GAMEFILES
-    painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs, counts_from_paint=files)
+    if bay_to[wid]:  # a turn bay filling the median: the bay's lane is painted where it's open, with GTA's counts
+      kerbs = WayLanes.from_tags(lane_tags(fwd, back, lf, bays=(b in bay_to[wid], a in bay_to[wid]))).edges()
+      painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs) if files else (None, 'no game files')
+      reason = reason and f'turn bay, {reason}'
+    else:
+      painted[wid], reason = paint_survey.correct(use, fwd, back, kerbs, counts_from_paint=files)
     if got := painted[wid]:
       medians.discard((a, b))  # the paint says where the turn lanes are
       medians.discard((b, a))
@@ -2164,7 +2177,7 @@ def main():
         row[3], row[4] = len(got['forward']), len(got['backward'])
         lanes_to[(a, b)], lanes_to[(b, a)] = row[3], row[4]
     why[reason or ('measured (game files)' if files else 'measured (camera)')] += 1
-    if (median := got['median'] if got and got.get('median', 0.0) > EDGE_GAP else 2 * offset) > EDGE_GAP:
+    if not bay_to[wid] and (median := got['median'] if got and got.get('median', 0.0) > EDGE_GAP else 2 * offset) > EDGE_GAP:
       median_kinds[wid] = paint_survey.median_edges(samples, median)  # the painted median's, else GTA's
     if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
       why['sources disagree' if paint_survey.disagree(painted[wid], check) else 'sources agree'] += 1
@@ -2172,13 +2185,16 @@ def main():
       centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
   print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
   unread = {wid for wid, _, _, _, back, *_ in info if back and not bay_to[wid] and not painted.get(wid)}
-  unsurveyed = {wid for wid, a, b, *_ in info if wid in unread and
-                not any(d.get('src') == paint_survey.GAMEFILES for d in paint_survey.along(survey, a, b) or [])}
+  # (a turn bay's link too: a neighbour painted with the same counts has its bay's lane open)
+  unsurveyed = {wid for wid, a, b, _, back, *_ in info if back and not painted.get(wid) and
+                not any(d.get('src') == paint_survey.GAMEFILES for d in link_survey(a, b) or [])}
   inherited = neighbours_paint(nodes, [(wid, a, b, fwd, back) for wid, a, b, fwd, back, *_ in info], painted, unsurveyed,
                                unread) if from_files else {}
   for wid, got in inherited.items():
-    painted[wid] = got
     row = row_of[wid]
+    if bay_to[wid] and (len(got['forward']), len(got['backward'])) != (row[3], row[4]):
+      continue  # a turn bay's lanes stay GTA's
+    painted[wid] = got
     medians.discard((row[1], row[2]))
     medians.discard((row[2], row[1]))
     if (len(got['forward']), len(got['backward'])) != (row[3], row[4]):  # the counts the paint has either side
@@ -2257,7 +2273,7 @@ def main():
 
   def link_samples(wid, a, b):  # the survey's samples on a way, a piece of a split link only those along it
     a0, b0 = link_ends[parent.get(wid, wid)]
-    samples = paint_survey.along(survey, a0, b0) or []
+    samples = link_survey(a0, b0) or []
     if (a, b) == (a0, b0):
       return samples
     pa, pb = nodes[a], nodes[b]
@@ -2298,6 +2314,24 @@ def main():
     painted.pop(wid, None)
   print(f"{len(tapers)} turn lanes opening ({', '.join(f'{n} {k}' for k, n in taper_why.most_common())}), {applied} widening " +
         f"from there: {len(parent)} links split")
+  # the links the tapers split or gave a lane, but for those widening one: their own sections' paint, with their lanes
+  repainted = set()
+  for wid, a, b, fwd, back, *_, lf in info:
+    if wid not in piece_bays or wid in widen or all(piece_bays[wid]) or (any(piece_bays[wid]) and not back) or \
+       not (samples := paint_survey.sources(link_samples(wid, a, b), camera_corrects=not from_files)[0]):
+      continue
+    w, offset = layout(lf, back, bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2)
+    got = None
+    if back:
+      kerbs = WayLanes.from_tags(lane_tags(fwd, back, lf, bays=piece_bays[wid])).edges()
+      got = paint_survey.correct(samples, fwd, back, kerbs)[0] if offset >= 0 else None
+    elif not offset:
+      got = paint_survey.correct_oneway(samples, fwd, (-fwd * w / 2, fwd * w / 2))[0] or \
+        paint_survey.correct_carriageway(samples, fwd)[0]
+    if got:
+      painted[wid] = got
+      repainted.add(wid)
+  print(f"{len(repainted)} ways the turn lanes split or changed painted as their own sections")
   lines_why = Counter()
   unmarked = unmarked_roads(nodes, [(wid, a, b, bool(back), cls, bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF),
                                      bool((nodes[a]['f'][0] | nodes[b]['f'][0]) & OFFROAD))
@@ -2315,7 +2349,7 @@ def main():
       continue
     freeway = bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2
     bays = piece_bays.get(wid, (b in bay_to[parent.get(wid, wid)], a in bay_to[parent.get(wid, wid)]))
-    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, bays, None if wid in piece_bays else painted.get(wid)),
+    tags = {'highway': cls, **lane_tags(fwd, back, lf, freeway, bays, None if wid in piece_bays and wid not in repainted else painted.get(wid)),
             **arrows_at.get(wid, {}), 'maxspeed': f'{limit} mph'}
     if wid in widen or (wid in piece_bays and all(bays)):
       # the turn lanes in the median, widening from nothing where they open: each its share of the median at each end,

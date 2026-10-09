@@ -95,15 +95,41 @@ def test_lines_that_cant_be_crossed():
 
 
 def test_one_way_from_the_game_files():
-  # a 3-lane freeway: yellow left edge, lane lines 6.1 m apart (a solid one), white edge line
-  marks = [mark(-9.15, 'yellow', 'solid'), mark(-3.05), mark(3.05, kind='solid'), mark(9.2, kind='edge_line')]
+  # a 3-lane freeway: yellow left edge, lane lines 6.1 m apart (a solid one), white edge line; the middle lane is about
+  # the link's line, so the line goes on its middle and every line stays where it's painted
+  marks = [mark(-9.15, 'yellow', 'solid'), mark(-3.05), mark(3.05, kind='solid'), mark(9.75, kind='edge_line')]
   files = [sample(marks, s, src='gamefiles') for s in (0, 3, 6)]
   got, _ = correct_oneway(files, 3, (-9.15, 9.15))
-  assert got == {'lanes': [6.1, 6.1, 6.15], 'change': ['yes', 'not_right', 'not_left']}
+  assert got == {'lanes': [6.1, 6.1, 6.7], 'placement': 'middle_of:2', 'change': ['yes', 'not_right', 'not_left']}, got
   assert correct_oneway(files, 2, (-6.1, 6.1))[0] is None  # GTA says 2 lanes: the paint isn't read
   assert correct_oneway([{**d, 'src': None} for d in files], 3, (-9.15, 9.15))[1] == 'one-way, no game files'
   bare = [sample([mark(0.1)], s, src='gamefiles', kerbs={'left': -5.4, 'right': 5.6}) for s in (0, 3)]  # no edge lines
-  assert correct_oneway(bare, 2, (-5.5, 5.5))[0] == {'lanes': [5.5, 5.5]}
+  assert correct_oneway(bare, 2, (-5.5, 5.5))[0] == {'lanes': [5.6, 5.4]}  # the lane line where painted
+
+
+def test_more_lanes_one_way_between_kerbs_alike():
+  # a left-turn bay and a through lane one way, one lane the other, kerbs 7.75 m either side of the link (its line down
+  # the bay's middle): the centre 2.2 m off the line, the bay's solid line 2.8 m right of it. The line stays the middle
+  # of the road and the lanes' widths say where the centre is
+  marks = [mark(-2.2, 'yellow', 'double_solid'), mark(2.8, kind='solid')]
+  files = [sample(marks, s, src='gamefiles') for s in (0, 3, 6)]
+  got, why = correct(files, 2, 1, (-7.75, 7.75))
+  assert why is None and got['forward'] == [5.0, 4.95] and got['backward'] == [5.55] and got['middle'], (got, why)
+  assert correct(files, 2, 1, (-6.75, 8.75))[1] == 'centre off the line'  # the line the centre's: it must be on it
+
+
+def test_one_way_line_placed_moving_the_fewest_lines():
+  # yellow edges 12.9 m apart, 0.25 m left of the link's middle, the lane line between 0.45 m left of it: the lanes'
+  # middle stays the line, so only the edges move (0.25 m each): the lane line stays where painted
+  edges = [mark(-6.7, 'yellow', 'solid'), mark(6.2, 'yellow', 'solid')]
+  files = [sample([*edges, mark(-0.45)], s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(files, 2, (-6.4, 6.4))[0] == {'lanes': [6.0, 6.9]}
+  # the lane line on the link's line: placed on it, the edges where painted
+  files = [sample([*edges, mark(-0.05)], s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(files, 2, (-6.4, 6.4))[0] == {'lanes': [6.7, 6.2], 'placement': 'right_of:1'}
+  # dashes 4 m in 12 cross one section in four, read as solid pieces: still the lane line, dashed
+  dashes = [sample([*edges, *([mark(-0.45, kind='solid')] if s == 3 else [])], s, src='gamefiles') for s in (0, 3, 6, 9)]
+  assert correct_oneway(dashes, 2, (-6.4, 6.4))[0] == {'lanes': [6.0, 6.9]}
 
 
 def test_centre_kind_from_the_game_files():
