@@ -962,7 +962,7 @@ class Ribbon:
   drawn along as the car passed, kept as the car goes. Without a lane plan, both along the route's carriageway_line."""
 
   def __init__(self):
-    self.trail = np.zeros((0, 3))  # behind the car, up to where the ribbon last started
+    self.trail = np.zeros((0, 3))  # behind the car, from where it started to where the ribbon last started
 
   def items(self, snap: dict) -> list[tuple[str, np.ndarray]]:
     pos3 = np.asarray(snap["pos"], np.float64)
@@ -1003,13 +1003,17 @@ class Ribbon:
     return out
 
   def _extend_trail(self, line: np.ndarray, s: np.ndarray, start: float):
-    """The trail on along line [N, 3] (s: arc(line)) from where it ended to start, its last BEHIND m kept."""
-    trail, done = self.trail, 0.0
+    """The trail on along line [N, 3] (s: arc(line)) from where it ended to start, its last BEHIND m kept. A new trail
+    starts at start: the line before it, from where nav planned it, may be a way the car never drove (a plan made
+    before the car's lane was known, ramping in from another lane)."""
+    trail, done = self.trail, start
     if len(trail):
       done, off = nearest_along(line, s, trail[-1, :2], LANE_SEARCH)
       # a jump (respawned, or a new route elsewhere), or a new route heading off another way: it starts again here
       if off > TRAIL_JUMP or trail_turn(trail, line, s, done) > TRAIL_TURN:
-        trail, done = trail[:0], 0.0
+        trail, done = trail[:0], start
+    if not len(trail):
+      trail = piece(line, s, start, start)[:1]
     if start > done + 0.05:
       new = piece(line, s, done, start)
       trail = np.vstack([trail, new[1:]]) if len(trail) else new
