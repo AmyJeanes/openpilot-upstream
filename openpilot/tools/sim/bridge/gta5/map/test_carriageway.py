@@ -126,10 +126,11 @@ def test_no_kerbs_across_a_diverge():
   def xs(pieces):
     return [(round(float(p[0, 0])), round(float(p[-1, 0]))) for p in pieces]
   # the left branch's outer kerb from where it nears the wide carriageway's edge (y = 12 - SHARED, x ~ 23), not across
-  # its lanes; its inner kerb (the gore's edge) from GORE m on, where the branches have parted
+  # its lanes; its inner kerb (the gore's edge) from GORE m on, where the branches have parted, and once they're more
+  # than GORE_SHARED apart (before that, the edge painted on the gore)
   outer, inner = xs(kept(2, False)), xs(kept(2, True))
   assert len(outer) == 1 and 20 <= outer[0][0] <= 26 and outer[0][1] == 99, outer
-  assert len(inner) == 1 and 38 <= inner[0][0] <= 42 and inner[0][1] == 101, inner
+  assert len(inner) == 1 and 40 <= inner[0][0] <= 50 and inner[0][1] == 101, inner
   assert xs(kept(1, False)) == [(-100, 0)] and xs(kept(1, True)) == [(-100, 0)]  # the wide carriageway's own
   # merging: the mirror image, back from the wide carriageway's start
   outer = xs(kept(6, False))
@@ -155,6 +156,27 @@ def test_no_kerbs_on_a_two_way_road():
   lo, hi = osm.lanes(4).edges(FORWARD)
   kept, _ = side.kerb(offset_line(pts, hi), None, 0, {4}, True)
   assert sum(float(np.hypot(*np.diff(p, axis=0).T).sum()) for p in kept) > 75.0
+
+
+def test_freeway_kerbs_by_a_gore_are_painted_edges():
+  # a motorway of two lanes along y = 0 (12 m wide) with an on-ramp lane beside it 3 m out (its middle at y = -11.75)
+  # across a flush gore, and the other carriageway beyond a 4 m median (y = 16, westbound): the kerbs facing the gore are
+  # the solid lines painted there; those at the median, beside traffic the other way, stay kerbs
+  fwy = {**FREEWAY, 'lanes': '2', 'width': '12'}
+  ramp = {'highway': 'motorway_link', 'oneway': 'yes', 'lanes': '1', 'width': '5.5'}
+  nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (0.0, -11.75), 4: (100.0, -11.75), 5: (100.0, 16.0), 6: (0.0, 16.0)}
+  osm = make(nodes, {1: (fwy, [1, 2]), 2: (ramp, [3, 4]), 3: (fwy, [5, 6])})
+  side = SideBySide(osm, [1, 2, 3], lambda w: 0)
+
+  def kerb(wid, right):
+    lo, hi = osm.lanes(wid).edges(FORWARD)
+    return side.kerb(offset_line(osm.way_points(wid), hi if right else lo), None, 0, {wid}, right)
+  for wid, right in ((1, True), (2, False)):
+    kept, lines = kerb(wid, right)
+    assert not kept and [style for _, style in lines] == ['solid'], (wid, kept, lines)
+  for wid, right in ((1, False), (3, False), (2, True)):
+    kept, lines = kerb(wid, right)
+    assert len(kept) == 1 and not lines, (wid, right)
 
 
 def test_outer_lines_and_missing_lane_lines():
