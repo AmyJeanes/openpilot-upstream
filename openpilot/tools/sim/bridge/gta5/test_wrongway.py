@@ -6,7 +6,7 @@ import math
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
-from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay, suitable
+from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay, directions, oncoming, suitable, target_lane
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, RouteLanes, Section, Span
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
@@ -108,7 +108,7 @@ def test_aborts():
   cfg = {"clip": "t", "lane": -1, "speed": 10.0, "drift_m": 60.0, "hold_s": 3.0, "recover": "path"}
   ww, car, phases, _, _ = drive(cfg, road(1), collide_at=150.0)
   assert ww.finished == "abort: collision" and phases[-1] == "abort" and car.v < 0.5, (ww.finished, phases)
-  for r, want in ((road(1, median=4.0), "median"), (road(1, junction=150.0), "junction"), (road(3), "3+3 lanes"),
+  for r, want in ((road(1, median=4.0), "median"), (road(1, junction=150.0), "junction"), (road(4), "4+4 lanes"),
                   (road(1, length=200.0), "too short")):
     ww, car, phases, _, _ = drive(cfg, r)
     assert ww.finished is not None and want in ww.finished, (want, ww.finished)
@@ -121,6 +121,28 @@ def test_suitable():
   assert suitable(road(2), 100, 300) is None
   assert "median" in suitable(road(2, median=3.0), 100, 300)
   print("suitable: ok")
+
+
+def test_targets():
+  """The drift's lane by the map's directions, not "the left one": past a centre lane, on asymmetric roads, and none
+  on a one-way street."""
+  def sec(dirs: str) -> Section:
+    spans, x = [], 0.0
+    first = next(i for i, d in enumerate(dirs) if d == ">")
+    x = -first * W
+    for d in dirs:
+      spans.append(Span(Lane(FORWARD if d != "<" else BACKWARD, W), x, x + W, {">": 1, "<": -1, "=": 0}[d]))
+      x += W
+    return Section(spans, (spans[0].left, spans[-1].right))
+  centre = sec("<<=>>")  # two each way and a centre turn lane
+  assert oncoming(centre) == [-2, -3] and directions(centre) == "<<=>>"
+  assert target_lane(centre, 1) == -2.0 and target_lane(centre, 2) == -3.0 and target_lane(centre, "straddle") == -1.5
+  asym = sec("<>>>")
+  assert target_lane(asym, 1) == -1.0 and target_lane(asym, 2) == -1.0
+  assert target_lane(sec(">>"), 1) is None  # one-way: no oncoming lane
+  # a car in the centre lane isn't oncoming; one past it is
+  assert centre.lane(centre.offset(-1)) == -1 and centre.spans[centre.first - 1].heading == 0
+  print("targets: ok")
 
 
 def test_expert():
@@ -175,6 +197,7 @@ def test_record_rows():
 
 if __name__ == "__main__":
   test_suitable()
+  test_targets()
   test_path_clip()
   test_ai_clip()
   test_aborts()

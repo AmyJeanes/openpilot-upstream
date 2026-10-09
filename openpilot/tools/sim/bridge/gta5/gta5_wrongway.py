@@ -36,8 +36,10 @@ RECOVERED_S = 1.0  # s back in one of our lanes (the plugin's reading) that ends
 AI_RECOVER_MAX = 15.0  # s for the AI to be back in our lanes
 DONE_AI_S = 3.0  # s of `done` logged before the clip hands over to the plain expert trip
 MAX_S = 120.0  # s for the whole clip
-# a road to drive it on: our lanes and the oncoming ones 1 or 2 each, no gap (median) between them, no junction node
-SUIT_LANES = (1, 2)
+# a road to drive it on: 1-3 lanes our way and 1-3 oncoming (by the map's lane directions; a centre lane used both
+# ways may lie between), one layout all along, no gap (median) between ours and the oncoming ones, GTA's own links
+# agreeing on the lanes each way (else the map's directions are suspect), no junction node
+SUIT_LANES = (1, 2, 3)
 MEDIAN_GAP = 1.0  # m between the directions' lanes
 JUNCTION_CLEAR = 15.0  # m: no junction node this near the drift, hold or recovery
 MAX_BEND = 25.0  # deg of heading change over the drift, hold and recovery
@@ -45,7 +47,7 @@ LANE_SECONDS = 1.8  # s at least to cross a lane, drifting or recovering
 
 
 def defaults(cfg: dict) -> dict:
-  c = {"clip": "", "lane": -1.0, "from_lane": None, "approach_m": 60.0, "drift_m": 60.0, "hold_s": 3.0, "speed": 10.0,
+  c = {"clip": "", "lane": -1.0, "depth": None, "from_lane": None, "approach_m": 60.0, "drift_m": 60.0, "hold_s": 3.0, "speed": 10.0,
        "recover": "ai", "recover_m": 60.0, "after_m": 40.0, **cfg}
   for k in ("lane", "approach_m", "drift_m", "hold_s", "speed", "recover_m", "after_m"):
     c[k] = float(c[k])
@@ -67,6 +69,41 @@ def phase_marks(k: list[tuple[float, float]]) -> list[tuple[float, str]]:
   return [(k[0][0], "approach"), (k[1][0], "drift"), (k[2][0], "hold"), (k[3][0], "recover"), (k[4][0], "done")]
 
 
+def oncoming(sec) -> list[int]:
+  """The section's oncoming lanes (the map's direction against ours), nearest first, as lanes from the left of ours."""
+  return sorted((i - sec.first for i, sp in enumerate(sec.spans) if sp.heading == -1), reverse=True)
+
+
+def directions(sec) -> str:
+  """The section's lanes left to right by the map's direction: > ours, < oncoming, = used both ways."""
+  return "".join(">" if sp.heading == 1 else "<" if sp.heading == -1 else "=" for sp in sec.spans)
+
+
+def road_record(route, at: float) -> dict | None:
+  """The road where a clip drifts, for labelling to check the map's lane directions against: its lanes' directions,
+  whether it's one-way, and GTA's own lane counts there."""
+  k = max(int(np.searchsorted(route.along, at, side='right')) - 1, 0)
+  sec = route.section(k)
+  if sec is None:
+    return None
+  link = route.links[k] if k < len(route.links) else None
+  return {"directions": directions(sec), "lanes": sec.lanes, "oncoming": len(oncoming(sec)), "oneway": not sec.two_way,
+          "widths": [round(sp.right - sp.left, 2) for sp in sec.spans],
+          "gta": None if link is None else {"lanes": link.lanes, "back": link.back}}
+
+
+def target_lane(sec, depth) -> float | None:
+  """The lane a clip drifts into: depth 1 the nearest oncoming lane, 2 the next, "straddle" astride the line between
+  ours and the nearest oncoming one."""
+  onc = oncoming(sec)
+  if not onc:
+    return None
+  if depth == "straddle":
+    return onc[0] + 0.5  # astride its edge towards ours (or a centre lane)
+  d = int(depth)
+  return float(onc[min(d, len(onc)) - 1])
+
+
 def suitable(route, lo: float, hi: float) -> str | None:
   """Why the route between lo and hi m along it (the drift, hold and recovery) isn't a road for a clip, or None."""
   if route is None or route.lanes is None:
@@ -75,14 +112,24 @@ def suitable(route, lo: float, hi: float) -> str | None:
     return f"route too short ({route.length:.0f} m for {hi:.0f})"
   ks = range(max(int(np.searchsorted(route.along, lo, side='right')) - 1, 0),
              min(int(np.searchsorted(route.along, hi, side='right')), len(route.points) - 1))
+  layout = None
   for k in ks:
     sec = route.section(k)
     if sec is None or not sec.lanes:
       return f"no lanes at {route.along[k]:.0f} m"
-    if not sec.two_way or sec.lanes not in SUIT_LANES or sec.back not in SUIT_LANES or sec.back != sec.lanes:
-      return f"{sec.lanes}+{sec.back} lanes at {route.along[k]:.0f} m"
-    if sec.spans[sec.first].left - sec.spans[sec.first - 1].right > MEDIAN_GAP:
+    onc = oncoming(sec)
+    if sec.lanes not in SUIT_LANES or len(onc) not in SUIT_LANES:
+      return f"{sec.lanes}+{len(onc)} lanes at {route.along[k]:.0f} m"
+    if layout is None:
+      layout = directions(sec)
+    elif directions(sec) != layout:
+      return f"the lanes change ({layout} to {directions(sec)}) at {route.along[k]:.0f} m"
+    near = sec.first + onc[0]
+    if any(sec.spans[j + 1].left - sec.spans[j].right > MEDIAN_GAP for j in range(near, sec.first)):
       return f"a median at {route.along[k]:.0f} m"
+    link = route.links[k] if k < len(route.links) else None
+    if link is not None and link.lanes and (link.lanes != sec.lanes or link.back != len(onc)):
+      return f"suspect lane directions: the map's {sec.lanes}+{len(onc)}, GTA's {link.lanes}+{link.back} at {route.along[k]:.0f} m"
   near = [j for j in route.junctions if lo - JUNCTION_CLEAR <= j <= hi + JUNCTION_CLEAR]
   if near:
     return f"a junction at {near[0]:.0f} m"
@@ -136,6 +183,7 @@ class WrongWay:
     self.path: np.ndarray | None = None
     self.s_path: np.ndarray | None = None
     self.marks: list[tuple[float, str]] = []
+    self.road: dict | None = None
     self.keys: list[tuple[float, float]] = []
     self.s0 = self.s = 0.0
     self.dev = 0.0
@@ -159,7 +207,7 @@ class WrongWay:
     """What gta5.json and the trip record keep of the clip: its settings, keys and planned path (every ~4 m)."""
     p = None if self.path is None else self.path[::2].round(2).tolist()
     return {"clip": self.clip, "cfg": self.c, "from_lane": self.from_lane, "keys": self.keys, "marks": self.marks,
-            "s0": round(self.s0, 2), "path": p}
+            "s0": round(self.s0, 2), "road": self.road, "path": p}
 
   def _set(self, phase: str, t: float, **kw):
     if phase == self.phase:
@@ -185,7 +233,16 @@ class WrongWay:
     fl = self.c.get("from_lane")
     fl = here if here is not None and 0 <= here < sec.lanes else fl if fl is not None else sec.lanes - 1
     self.from_lane = float(min(max(int(fl), 0), sec.lanes - 1))
+    if self.c.get("depth") is not None:
+      drift_sec = route.section(max(int(np.searchsorted(route.along, route.at + keys(self.c, self.from_lane)[2][0],
+                                                        side='right')) - 1, 0))
+      lane = target_lane(drift_sec, self.c["depth"]) if drift_sec is not None else None
+      if lane is None:
+        self._abort("unsuitable: no oncoming lane", t)
+        return False
+      self.c["lane"] = lane
     self.keys = keys(self.c, self.from_lane)
+    self.road = road_record(route, route.at + self.keys[2][0])
     lo, hi = route.at + self.keys[1][0], route.at + self.keys[4][0]
     why = suitable(route, lo, hi)
     if why is not None:
