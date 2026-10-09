@@ -70,6 +70,7 @@ MAX_POINTS = 3500  # vertices per update, nearest first by layer priority
 MAX_CHARS = 90000
 SIMPLIFY = 0.15  # m a dropped vertex may be off the line
 AREA_SIMPLIFY = 0.5  # m, for a junction area's outline (its kerbs are drawn to SIMPLIFY): it's drawn before them
+AREA_STEP = 3.0  # m at most between its outline's points (core.cpp DEBUG_DENSE), so it takes the road's heights between them
 RIBBON_GAP = 1.0  # m between the route's points, for the plugin's ribbon
 RIBBON_TURN = 60.0  # deg: sharper corners in the route's line are cut where a side is shorter than RIBBON_JOG
 RIBBON_JOG = 5.0  # m
@@ -98,7 +99,7 @@ PROCESS = os.getenv("GTA5_OVERLAY_PROCESS", "1") != "0"  # 0: made in a thread o
 # the lane tags' lines (road_marks) between bridge starts; empty: built each start
 CACHE_DIR = os.path.expanduser(os.getenv("GTA5_OVERLAY_CACHE", "~/.cache/gta5_overlay"))
 CACHE_KEEP = 3  # files
-MARKS_VERSION = 3  # the cache's format
+MARKS_VERSION = 4  # the cache's format
 # map/ modules road_marks depends on, as this one
 MARKS_CODE = ("osm_lanes.py", "osm_pbf.py", "paths.py", "gta5_map.py", "junctions.py", "osm_to_roads.py", "side_by_side.py")
 
@@ -373,6 +374,45 @@ def node_heights(osm, refs, z0: float, z1: float, pts: np.ndarray) -> np.ndarray
   return z
 
 
+def node_z(osm, paths, n: int) -> float:
+  """A map node's height: its `ele` (GTA's node height in ynd_to_osm's maps), else GTA's node there, else NaN."""
+  with contextlib.suppress(KeyError, ValueError):
+    return float(osm.data.node_tags[n]["ele"])
+  found = paths.nodes_at(osm.node_xy(n))
+  return float(paths.z[found[0]]) if found else float("nan")
+
+
+def junction_roads(osm, paths, j) -> np.ndarray:
+  """A junction's roads as segments [S, 2, 3] with their nodes' heights: its arms' lines out from it and the ways inside
+  it, which heights across its area are read from (z_near)."""
+  chains = [m.nodes for arm in j.arms for m in arm.members] + [osm.ways[w][1] for w in j.inside]
+  segs = []
+  for nodes in chains:
+    p = np.column_stack([osm.xy[osm.data.index(nodes)], [node_z(osm, paths, n) for n in nodes]])
+    p = p[np.isfinite(p[:, 2])]
+    if len(p) >= 2:
+      segs.append(np.stack([p[:-1], p[1:]], axis=1))
+  return np.concatenate(segs) if segs else np.zeros((0, 2, 3))
+
+
+def z_near(pts: np.ndarray, roads: np.ndarray, fallback: float) -> np.ndarray:
+  """The heights [P] of points [P, 2] from the nearest (in plan) of segments [S, 2, 3], by where each falls along it: a
+  junction's lines take its roads' heights where they are, not one height across it, which on a hill is metres off at
+  its edges (where the plugin, finding no ground near, leaves them in the air)."""
+  if not len(roads):
+    return np.full(len(pts), fallback)
+  a, ab = roads[:, 0, :2], roads[:, 1, :2] - roads[:, 0, :2]
+  za, dz = roads[:, 0, 2], roads[:, 1, 2] - roads[:, 0, 2]
+  ab2 = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-12)
+  out = np.empty(len(pts))
+  for s in range(0, len(pts), 64):
+    q = pts[s:s + 64, :2]
+    t = np.clip(np.einsum("pij,ij->pi", q[:, None] - a[None], ab) / ab2, 0.0, 1.0)
+    k = np.argmin(np.hypot(*(a[None] + ab[None] * t[..., None] - q[:, None]).transpose(2, 0, 1)), axis=1)
+    out[s:s + 64] = za[k] + dz[k] * t[np.arange(len(q)), k]
+  return out
+
+
 def arrow_strokes(turns) -> list[tuple[str, np.ndarray]]:
   """A lane's turn:lanes arrows as strokes [N, 2] in the lane's own frame (x m right, y m ahead, from the arrow's
   middle): a shaft, then a branch and its head for each turn; kind L turning left (or back), R right, T through or
@@ -468,7 +508,7 @@ def road_marks(paths, osm) -> dict:
   each stop line in to its junction, each area cutting its own layer's lines and its roads' (PaintAreas); and the
   junctions' kerbs round their corners, areas and stop lines, as shapes (their points [P, 3] run after run, each one's
   length, kind and GTA node [K]). About 40 s on the whole lane map, so the overlay keeps them in a cache (marks_key)."""
-  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas
+  from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, clip_outside as clip_areas, densify
   from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import PAINTED, ROAD_CLASSES, PaintAreas, level, z_along
   from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
@@ -527,7 +567,7 @@ def road_marks(paths, osm) -> dict:
   shape_pts, shape_len, shape_kind, shape_node = [], [], [], []
 
   def shape(kind, pts, z, node):
-    shape_pts.append(np.column_stack([pts, np.full(len(pts), z)]))
+    shape_pts.append(np.column_stack([pts, np.broadcast_to(z, len(pts))]))
     shape_len.append(len(pts))
     shape_kind.append(kind)
     shape_node.append(node)
@@ -536,12 +576,14 @@ def road_marks(paths, osm) -> dict:
     if at[n] is None:
       continue
     z, g = at[n]
+    roads = junction_roads(osm, paths, j)
     for kerb in j.kerbs:  # where junctions overlap, neither's kerb crosses the other
       for piece in clip_areas(kerb, paint.near(kerb, paint.layer[n], kerbs_only=True, but=n)):
-        add("e", np.column_stack([piece, np.full(len(piece), z)]), (g, g))
-    shape("j", simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), z, g)
+        add("e", np.column_stack([piece, z_near(piece, roads, z)]), (g, g))
+    area = densify(simplify(np.vstack([j.polygon, j.polygon[:1]]), AREA_SIMPLIFY), AREA_STEP)
+    shape("j", area, z_near(area, roads, z), g)
     for s in j.stops:
-      shape("l" if s.signal else "k" if s.kind == "give_way" else "s", s.line, z, g)
+      shape("l" if s.signal else "k" if s.kind == "give_way" else "s", s.line, z_near(s.line, roads, z), g)
     # each lane's arrows on the road into the junction, out from its stop line
     stop_at = {id(s.member): s.along for s in j.stops}
     for arm in j.arms:
@@ -557,7 +599,7 @@ def road_marks(paths, osm) -> dict:
           for sp in spans:
             for kind, xy in arrow_strokes(sp.lane.turns):
               q = p + right * sp.centre + xy[:, :1] * right + xy[:, 1:] * ahead
-              add(kind, np.column_stack([q, np.full(len(q), z)]), (g, g))
+              add(kind, np.column_stack([q, z_near(q, roads, z)]), (g, g))
   for c in junctions.crossing_lines():
     g = near_node(paths, c.mean(0))
     if g is not None:
