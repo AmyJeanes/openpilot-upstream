@@ -1558,8 +1558,9 @@ def neighbours_paint(nodes, rows, painted, unsurveyed):
   """The painted cross-sections (paint_survey.correct's) for two-way ways the game files have no sections of (`unsurveyed`
   way ids: as GTA's short links in and next to junctions, whose sections the survey leaves out), from the way the road
   runs on to at either end (within STRAIGHT) with the same lane counts each way and a painted cross-section, the longer
-  one where both have: so a road's lines run on at the paint's place and kind rather than GTA's class layout (a median
-  where the game paints a double line). `rows` are [(way id, a, b, fwd, back)]; returns {way id: cross-section}."""
+  one where both have; or other counts where the road is painted with them at both ends (a link between two whose
+  counts the paint has): so a road's lines run on at the paint's place and kind rather than GTA's class layout (a
+  median where the game paints a double line). `rows` are [(way id, a, b, fwd, back)]; returns {way id: cross-section}."""
   at = defaultdict(list)
   for r in rows:
     if r[4]:
@@ -1586,8 +1587,6 @@ def neighbours_paint(nodes, rows, painted, unsurveyed):
         if abs(wrap(heading(n, beyond) - h)) >= STRAIGHT:
           continue
         same = (o[1] == n) == (n == b)  # o runs the way r does
-        if (o[3], o[4]) != ((fwd, back) if same else (back, fwd)):
-          continue
         got = dict(painted[o[0]])
         if not same:  # seen the other way: the directions swap, and the sides
           got['forward'], got['backward'] = got['backward'], got['forward']
@@ -1595,9 +1594,14 @@ def neighbours_paint(nodes, rows, painted, unsurveyed):
             got.pop(k, None)
           if 'parking' in got:
             got['parking'] = got['parking'][::-1]
-        found.append((length(o), got))
-    if found:
-      out[wid] = max(found, key=lambda f: f[0])[1]
+        found.append((length(o), n, got))
+    counts = [f for f in found if (len(f[2]['forward']), len(f[2]['backward'])) == (fwd, back)]
+    # or other counts, painted on the road both sides (a link between two the paint recounts)
+    other = {n: (len(got['forward']), len(got['backward'])) for _, n, got in found}
+    if not counts and len(other) == 2 and len(set(other.values())) == 1:
+      counts = found
+    if counts:
+      out[wid] = max(counts, key=lambda f: f[0])[2]
   return out
 
 
@@ -2135,6 +2139,10 @@ def main():
     row = row_of[wid]
     medians.discard((row[1], row[2]))
     medians.discard((row[2], row[1]))
+    if (len(got['forward']), len(got['backward'])) != (row[3], row[4]):  # the counts the paint has either side
+      recounted[wid] = (row[3], row[4])
+      row[3], row[4] = len(got['forward']), len(got['backward'])
+      lanes_to[(row[1], row[2])], lanes_to[(row[2], row[1])] = row[3], row[4]
   print(f"{len(inherited)} two-way links without sections of their own painted as the road they run on from")
   shut = 0
   for _, a, b, _, back, *_, lf in info:

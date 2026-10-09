@@ -333,6 +333,12 @@ def test_neighbours_paint():
   rows = [(1, 'A', 'B', 1, 1), (2, 'C', 'B', 1, 1), (3, 'C', 'D', 1, 1)]
   got = neighbours_paint(nodes, rows, painted, {2, 3})
   assert got == {2: {**painted[1], 'forward': [6.0], 'backward': [5.0]}}  # drawn the other way; 3 turns off
+  # GTA's 1 + 1 between two links painted 2 + 1: painted so, at one end only it isn't
+  wide = {'forward': [4.0, 4.0], 'backward': [5.0], 'median': 0.0, 'middle': True}
+  nodes['E'] = node(0, 70)
+  rows = [(1, 'A', 'B', 2, 1), (2, 'B', 'C', 1, 1), (4, 'C', 'E', 2, 1)]
+  assert neighbours_paint(nodes, rows, {1: wide, 4: wide}, {2}) == {2: wide}
+  assert neighbours_paint(nodes, rows, {1: wide}, {2}) == {}
 
 
 def test_unmarked_roads():
