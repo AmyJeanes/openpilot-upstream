@@ -131,7 +131,14 @@ shown or a level changes.
     nothing with `width:lanes:forward:start` / `:end` (`:backward`; the widths at the way's first and last node). On
     links whose lane counts come from the paint, the lane is there where the paint counts one more than GTA. osm_lanes
     draws lines and lane centres between those sections, so the median's edge kinks across, and nav's lane slots open
-    the lane where it's wide. Elsewhere osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
+    the lane where it's wide. The opening is looked for back along the carriageways GTA lays as one-way links side by
+    side before they join into the road (read along the line midway between them; Meteor St): one opening there is
+    already partly or fully open where the road begins. Where the paint shows no opening (GTA's split alone, AI data),
+    the lane is full width where GTA's lane begins and widens over the 10 m before it (`TAPER_DEFAULT`) where the road
+    before has a median to open in; on the 58 surveyed bays the painted opening is a median 9 m long and ends 5 m before
+    GTA's split, so a lane widening from the split on (osm_lanes' default) opened about 35 m late. Where the road begins
+    at its carriageways joining (a grass median ending; Eclipse Blvd) the lane is open from there. Elsewhere osm_lanes
+    tapers a lane that appears or ends over 30 m (`TAPER_M`).
   - Where a road carries on from one way to the next (two ways meeting end to end, no junction) with the same lanes
     sitting elsewhere (other widths or line, as where the survey measured one link and not the next), osm_lanes moves
     them across on a smoothstep over up to 10 m either side of the node (`BLEND_M`, half of a shorter way; a tapered
@@ -166,7 +173,8 @@ shown or a level changes.
     layout's), so a centre line off GTA's link line is said by the lanes' widths (the way's line stays on GTA's nodes,
     the middle of the road); `source:width=survey` marks them. From the game files also: a two-way link's lane counts
     where its paint has other counts than GTA's (Eclipse Blvd's 3 + 2; arrows are then laid out for the painted
-    lanes), its centre line's kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
+    lanes; there the asphalt's edges may be up to 0.8 m off the line's middle, `COUNT_KERB_TOL`), its centre line's
+    kind (`divider`), `change:lanes` from the lines' kinds, paver strips 1.8-5.5 m wide
     between the asphalt's edge and the kerb's face as parking lanes (`parking:<side>=lane`, `:width`), one-way links'
     lanes between their painted edges (GTA's lanes evenly between them where the files miss every lane line). GTA's lane
     counts stay on one-way links. A freeway GTA draws as parallel links is painted as one carriageway: each link takes
@@ -175,8 +183,11 @@ shown or a level changes.
     white line painted at their outer edge, the line between it and the next link (`paint_survey.outer_lines`). With
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
     tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
-    gutter's edge, checked in the game). Build: `ynd_to_osm.py ... --survey rp_all/survey_gf.jsonl --survey-lines
-    rp_all/polylines.jsonl`.
+    gutter's edge, checked in the game). A two-way link the files have no sections of (GTA's short links in and next to
+    junctions, whose sections the survey leaves out) takes the painted lanes of the link its road runs on to with the
+    same lane counts (`neighbours_paint`), so its lines run on at the paint's place and kind rather than GTA's class
+    layout (a median where the game paints a double line; Mt Haan Rd). Build: `ynd_to_osm.py ... --survey
+    rp_all/survey_gf.jsonl --survey-lines rp_all/polylines.jsonl`.
   - Where a link's lanes stay the class layout (the survey didn't correct them, turn bays folded in included), its
     lines still come from the game files' (`paint_survey.lane_lines`): each line between two lanes one way is the
     white line painted nearest it, less than halfway across the lanes beside it, in half the sections, and a solid one
@@ -184,14 +195,21 @@ shown or a level changes.
     show no line between two lanes the line stays dashed: they miss thin dashed lane lines the game paints (Vinewood
     Blvd's, seen from above in the game), so no direction is left unmarked from them. Residential roads, service roads
     and tracks of two lanes or more the files show unpainted in 90% of 3 sections or more (the asphalt's edges read,
-    so not a gap in the files) are `lane_markings=no` (the Vinewood Hills' streets, car parks); major and unclassified
-    roads keep their lines there, being more likely gaps in the files (the Great Ocean Hwy, some freeways, Blaine roads).
+    so not a gap in the files; lines within 1 m of an edge are its edge lines) are `lane_markings=no` (the Vinewood
+    Hills' streets, car parks), and so are the links along such a road between unpainted ones too short to show it
+    themselves (fewer sections, all bare; `unmarked_roads`), so its lines don't stop and start (Fenwell Pl). Major and
+    unclassified roads keep their lines there, being more likely gaps in the files (the Great Ocean Hwy, some freeways,
+    Blaine roads), but for unclassified roads GTA's traffic doesn't use (switched off, back roads the minimap draws),
+    unpainted where their sections are bare even with no asphalt edges read (Baytree Canyon Rd).
   - Parking lanes on the carriageway (`parking:left|right|both=lane`, `parking:<side>:width`, OSM's street parking
     scheme) are part of `width` but not lanes: `osm_lanes.py` puts the kerb beyond them and the way's line in the
     middle of the lanes between them, and the map view draws them as faint strips. GTA's path data has no field for
     them and no measured road showed one, so our map has none; real maps do.
   - Links whose two directions share one lane (most car parks, alleys and tracks) are single-track roads: `lanes=1`,
     no direction counts, `lane_markings=no`, as real single-track lanes are mapped.
+  - A two-way link running on from a one-way link with nothing else at their node (45, mostly service roads and island
+    side roads such as Route 68's Fort Zancudo turn) has a direction that goes nowhere there, a lane GTA's AI never
+    drives: it is one-way as the one-way link (`dead_end_lanes`), rather than a lane ending at a point.
   - `turn:lanes` (`:forward` / `:backward`) on the lanes into a junction where roads cross, from the ways out of it
     less those the restrictions forbid. Each lane takes the arrow the game files paint in it up to 90 m before the
     junction (`--survey-features rp_all/features.jsonl`, placed in the lanes by position), less any move the junction

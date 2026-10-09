@@ -230,6 +230,46 @@ def split_shared(nodes, info):
   return parted
 
 
+DEAD_END_LINKS = 3  # two-way links in a row at most that a direction going nowhere is taken off
+
+
+def dead_end_lanes(info):
+  """GTA's two-way links running on from a one-way link at a node no other link meets: the direction the one-way
+  link doesn't carry goes nowhere there (or comes from nowhere), a lane GTA's AI never drives. Each takes the one-way
+  link's direction, and so on along the two-way links before it up to DEAD_END_LINKS (`info` rows [way id, a, b,
+  fwd, back, ...] changed in place, drawn in their new direction of travel); returns how many."""
+  changed = 0
+  for _ in range(DEAD_END_LINKS):
+    at = defaultdict(list)
+    for row in info:
+      at[row[1]].append(row)
+      at[row[2]].append(row)
+    keep = defaultdict(set)  # id(row) -> its directions kept: a -> b (True) or b -> a
+    rows_of = {}
+    for n, rows in at.items():
+      if len(rows) != 2 or rows[0] is rows[1]:
+        continue
+      two, one = (rows[0], rows[1]) if rows[0][4] else (rows[1], rows[0])
+      if not two[4] or one[4] or not two[3]:
+        continue
+      into = one[2] == n  # traffic arrives at n along the one-way link: it leaves along the two-way one
+      keep[id(two)].add((two[1] == n) == into)
+      rows_of[id(two)] = two
+    found = 0
+    for k, ways in keep.items():
+      if len(ways) != 1:  # going nowhere both ways
+        continue
+      two = rows_of[k]
+      if not ways.pop():
+        two[1], two[2], two[3] = two[2], two[1], two[4]
+      two[4] = 0
+      found += 1
+    changed += found
+    if not found:
+      break
+  return changed
+
+
 LANE_CHANGE_FLOW = 30.0  # deg: one-way links within this of their mean heading all run the same way
 LANE_CHANGE_AXIS = 50.0  # deg: a link within this of that heading crosses between them, as a lane change
 
@@ -948,17 +988,61 @@ TAPER_SNAP = 1.0  # m: a taper starting or ending this near a node starts or end
 KEYS = ('forward', 'backward')
 LINE_CELL = 25.0  # m: the squares the game files' polylines are looked up by
 TAPER_NODE_AREA = 4096  # GTA's areas are below this: the nodes added where tapers start and end are (this, n)
+TAPER_DEFAULT = 10.0  # m: a turn lane with no painted opening widens over this, to full width where GTA's lane begins
+CARRIAGEWAY_TURN = 40.0  # deg: a carriageway joining a two-way road bends up to this into it
+CARRIAGEWAY_APART = (3.0, 25.0)  # m between the two carriageways of a road GTA lays as one-way links side by side
 
 
-def lane_tapers(nodes, info, lane_links, junction, survey, lines=None):
+def lane_tapers(nodes, info, lane_links, junction, survey, lines=None, why=None, recounted=None):
   """Where the turn lanes folded into roads (detached_bays) or painted in medians (lane_turns) open, from the game
   files' paint: the median's right edge swings across over the taper, read off their yellow polylines (,
   paint_survey.swing_taper) where given, else off their sections (paint_survey.opening_taper). `lane_links` are the
   links (node, next node) carrying such a lane, `info` the rows [way id, a, b, fwd, back, ...]; returns [(the links
   along the road to the junction [(a, b)], m along to each one's start, the taper's start and end m along)], the road
   reaching back up to TAPER_BACK before the lane's links, across minor roads (service roads and tracks) meeting it and
-  the other way's turn lanes (back to back bays share the median, each opening from its own end)."""
+  the other way's turn lanes (back to back bays share the median, each opening from its own end).
+  The paint is looked for further back too, along the carriageways GTA lays as one-way links side by side before they
+  join into the road, read along the line midway between them: a lane opening there is already open where the road
+  begins (its start is before the road's, negative). Where the paint shows no opening, the lane widens over
+  TAPER_DEFAULT to full width where its links begin, as the game paints most bays (on the surveyed ones a median 9 m
+  long, ending 5 m before GTA's lane begins), on the road before where it has a median to open in, else from where they
+  begin; where the paint counts the lane on the links before its own (`recounted`: {way id: GTA's lanes forward and
+  backward} of the links whose counts are the paint's), to full width where that begins. `why` counts each lane's
+  case."""
   import numpy as np
+  why = why if why is not None else Counter()
+  recounted = recounted or {}
+
+  def painted_on(a, b):  # the paint counts one more lane than GTA on the link a -> b
+    row = rows[(a, b)]
+    return row[0] in recounted and row[3 if row[1] == a else 4] > recounted[row[0]][0 if row[1] == a else 1]
+  one_ways = defaultdict(list)  # one-way rows by the LINE_CELL squares their nodes are in
+  for row in info:
+    if row[3] and not row[4]:
+      for k in (row[1], row[2]):
+        one_ways[(int(nodes[k]['x'] // LINE_CELL), int(nodes[k]['y'] // LINE_CELL))].append(row)
+
+  def xy(k):
+    return np.array([nodes[k]['x'], nodes[k]['y']])
+
+  def apart(q, s0):  # m left of the one-way link q -> s0 to the middle between it and its road's other carriageway
+    p0, p1 = xy(q), xy(s0)
+    d = (p1 - p0) / max(float(np.hypot(*(p1 - p0))), 1e-9)
+    left, mid = np.array([-d[1], d[0]]), (p0 + p1) / 2
+    cx, cy = int(mid[0] // LINE_CELL), int(mid[1] // LINE_CELL)
+    best = None
+    near = {id(r): r for i in (-1, 0, 1) for k in (-1, 0, 1) for r in one_ways.get((cx + i, cy + k), ())}
+    for row in near.values():
+      a, e = xy(row[1]), xy(row[2]) - xy(row[1])
+      size = float(np.hypot(*e))
+      if size < 1.0 or (e / size) @ d > -math.cos(math.radians(STRAIGHT)):  # not running the other way
+        continue
+      foot = a + e * np.clip((mid - a) @ e / size ** 2, 0.0, 1.0)
+      lat = float((foot - mid) @ left)
+      if CARRIAGEWAY_APART[0] < lat < CARRIAGEWAY_APART[1] and abs(float((foot - mid) @ d)) < LINE_CELL / 2 and \
+         (best is None or lat < best):
+        best = lat
+    return None if best is None else best / 2
   grid = defaultdict(list)  # the polylines by LINE_CELL squares they pass through
   for k, (_, pts) in enumerate(lines or []):
     for cell in {(int(x // LINE_CELL), int(y // LINE_CELL)) for x, y in pts}:
@@ -1013,12 +1097,37 @@ def lane_tapers(nodes, info, lane_links, junction, survey, lines=None):
     median = 2 * layout(row[8], row[4])[1]
     if median < BAY_MIN:
       continue
+    begins = back  # m along where the lane's links begin, or before them the links the paint counts it on
+    while (k := int(np.searchsorted(starts, begins - 1e-6))) > 0 and painted_on(*chain[k - 1]):
+      begins = float(starts[k - 1])
+    beyond = []
     if lines is not None:
-      road = np.array([(nodes[a]['x'], nodes[a]['y']) for a, _ in chain] + [(nodes[chain[-1][1]]['x'], nodes[chain[-1][1]]['y'])])
+      beyond, ahead, run = [], chain[0], 0.0  # the line midway between the carriageways before the road, back to front
+      while back + run < TAPER_BACK:
+        s0, s1 = ahead
+        h = heading(s0, s1)
+        prev = [q for q in into[s0] if q != s1 and not rows[(q, s0)][4] and abs(wrap(heading(q, s0) - h)) < CARRIAGEWAY_TURN]
+        if len(prev) != 1:
+          break
+
+        def other_way(r, s0=s0, h=h):  # a minor road, or the other carriageway leaving s0
+          return r[5] in MINOR or (not r[4] and r[1] == s0 and abs(wrap(heading(s0, r[2]) - h - 180.0)) < 60.0)
+        if not all(other_way(r) for r in at[s0] if r is not rows[(s0, s1)] and r is not rows[(prev[0], s0)]) or \
+           (off := apart(prev[0], s0)) is None:
+          break
+        p0, p1 = xy(prev[0]), xy(s0)
+        d = (p1 - p0) / max(float(np.hypot(*(p1 - p0))), 1e-9)
+        beyond.insert(0, p0 + np.array([-d[1], d[0]]) * off)
+        run += float(np.hypot(*(p1 - p0)))
+        ahead = (prev[0], s0)
+      road = np.array(beyond + [xy(a) for a, _ in chain] + [xy(chain[-1][1])])
+      extra = float(np.hypot(*np.diff(road[:len(beyond) + 1], axis=0).T).sum())
       lo, hi = road.min(axis=0) - median, road.max(axis=0) + median
       ks = {k for cx in range(int(lo[0] // LINE_CELL), int(hi[0] // LINE_CELL) + 1)
             for cy in range(int(lo[1] // LINE_CELL), int(hi[1] // LINE_CELL) + 1) for k in grid.get((cx, cy), ())}
       taper = paint_survey.swing_taper([lines[k] for k in sorted(ks)], road, median / 2)
+      if taper is not None:
+        taper = None if taper[0] < 0.5 else (taper[0] - extra, max(taper[1] - extra, 0.0))  # (seen opening)
     else:
       sections = []
       for (a, b), d0 in zip(chain, starts, strict=False):
@@ -1026,12 +1135,31 @@ def lane_tapers(nodes, info, lane_links, junction, survey, lines=None):
           if 's' in sample:
             sections.append((d0 + sample['s'], sample))
       taper = paint_survey.opening_taper(sections, median)
-    if taper is None:
+      if taper is not None and taper[0] < 0.5:
+        taper = None
+    if taper is not None and taper[1] > starts[-1] - 5.0:  # opening into the junction
+      taper = None
+    if taper is not None:
+      why['painted' if taper[0] >= 0.0 else 'painted, opening before the road begins'] += 1
+    elif beyond:  # a median between carriageways ends where the road begins, the lane in its room from there
+      taper = (0.0, 0.0)
+      why['no paint: open where the carriageways join'] += 1
+    elif begins >= 3.0:  # widening on the road before, to full width where its links begin
+      taper = (max(begins - TAPER_DEFAULT, 0.0), begins)
+      why["no paint: full width where GTA's lane begins"] += 1
+    elif begins < back:  # the paint counts it all along the road before
+      taper = (0.0, 0.0)
+      why['no paint: full width where the painted lanes begin'] += 1
+    elif len(at[chain[0][0]]) > 2:  # beginning at a junction (or where other roads join): full width from there
+      why['no paint: full width from the junction it begins at'] += 1
       continue
-    start, end = taper
-    if start < 0.5 or end > starts[-1] - 5.0:  # not seen opening, or opening into the junction
+    elif starts[-1] - 5.0 - begins >= 3.0:
+      taper = (begins, min(begins + TAPER_DEFAULT, starts[-1] - 5.0))
+      why['no paint, no road before: widening from where it begins'] += 1
+    else:
+      why['too short to widen'] += 1
       continue
-    found.append((chain, starts, start, end))
+    found.append((chain, starts, *taper))
   return found
 
 
@@ -1406,16 +1534,16 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
 UNPAINTED_CLASSES = {'residential', 'service', 'track'}
 
 
-def painted_lines(tags, cls, two_way, samples, why):
+def painted_lines(tags, cls, two_way, samples, why, unmarked=False):
   """A way's tags with the game files' lane lines where its lanes are the class layout's (paint_survey.lane_lines,
   .unpainted): `lane_markings=no` (and no divider) on a minor road they show unpainted, else `change:lanes`
   (`:forward` / `:backward`) where a painted line between its lanes is solid (or solid on one side). Major roads keep
   their lines where the files show none: those are more likely gaps in the files (the Great Ocean Hwy, some freeways)
-  than unpainted."""
+  than unpainted. `unmarked`: the road is unpainted here (unmarked_roads), the way too short to show it itself."""
   road = WayLanes.from_tags(tags)
   if len(road.lanes) < 2:  # no lines to draw
     return tags
-  if cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples):
+  if unmarked or (cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples)):
     why['unpainted'] += 1
     return {**{k: v for k, v in tags.items() if not k.startswith('divider')}, 'lane_markings': 'no'}
   out = dict(tags)
@@ -1423,6 +1551,107 @@ def painted_lines(tags, cls, two_way, samples, why):
     for key, change in paint_survey.lane_lines(samples, [(s.left, s.right, s.heading) for s in road.section()]).items():
       out[f'change:lanes:{key}' if two_way else 'change:lanes'] = '|'.join(change)
       why['lines not to cross'] += 1
+  return out
+
+
+def neighbours_paint(nodes, rows, painted, unsurveyed):
+  """The painted cross-sections (paint_survey.correct's) for two-way ways the game files have no sections of (`unsurveyed`
+  way ids: as GTA's short links in and next to junctions, whose sections the survey leaves out), from the way the road
+  runs on to at either end (within STRAIGHT) with the same lane counts each way and a painted cross-section, the longer
+  one where both have: so a road's lines run on at the paint's place and kind rather than GTA's class layout (a median
+  where the game paints a double line). `rows` are [(way id, a, b, fwd, back)]; returns {way id: cross-section}."""
+  at = defaultdict(list)
+  for r in rows:
+    if r[4]:
+      at[r[1]].append(r)
+      at[r[2]].append(r)
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def length(r):
+    return math.hypot(nodes[r[2]]['x'] - nodes[r[1]]['x'], nodes[r[2]]['y'] - nodes[r[1]]['y'])
+  out = {}
+  for r in rows:
+    wid, a, b, fwd, back = r
+    if wid not in unsurveyed or not back:
+      continue
+    found = []
+    for n, far in ((a, b), (b, a)):
+      h = heading(far, n)  # along the way into n
+      for o in at[n]:
+        if o is r or not painted.get(o[0]):
+          continue
+        beyond = o[2] if o[1] == n else o[1]
+        if abs(wrap(heading(n, beyond) - h)) >= STRAIGHT:
+          continue
+        same = (o[1] == n) == (n == b)  # o runs the way r does
+        if (o[3], o[4]) != ((fwd, back) if same else (back, fwd)):
+          continue
+        got = dict(painted[o[0]])
+        if not same:  # seen the other way: the directions swap, and the sides
+          got['forward'], got['backward'] = got['backward'], got['forward']
+          for k in ('change:forward', 'change:backward'):
+            got.pop(k, None)
+          if 'parking' in got:
+            got['parking'] = got['parking'][::-1]
+        found.append((length(o), got))
+    if found:
+      out[wid] = max(found, key=lambda f: f[0])[1]
+  return out
+
+
+UNMARKED_REACH = 100.0  # m along a road its unpainted stretches are looked for either side of a way too short to tell
+
+
+def unmarked_roads(nodes, rows, samples_of):
+  """The minor roads to leave unpainted (`lane_markings=no`): the two-way ways the game files show unpainted
+  (paint_survey.unpainted), and the ways along the road between them too short to show it themselves (fewer sections,
+  or none, all of them bare), where the road runs on unpainted to both sides (or ends) within UNMARKED_REACH, so a
+  road's lines don't stop and start. Minor roads are UNPAINTED_CLASSES, and the unclassified roads GTA's traffic
+  doesn't use (switched off: back roads the minimap draws), unpainted there even where the files draw no asphalt edges
+  (a road blended into the ground). `rows` are [(way id, a, b, two-way, class, switched off)], `samples_of(way id, a,
+  b)` the way's samples; returns the way ids."""
+  minor = {r[0]: r for r in rows if r[3] and (r[4] in UNPAINTED_CLASSES or (r[4] == 'unclassified' and r[5]))}
+  at = defaultdict(list)
+  for r in minor.values():
+    at[r[1]].append(r)
+    at[r[2]].append(r)
+  state = {}
+  for wid, a, b, *_ in minor.values():
+    samples, edges = samples_of(wid, a, b), minor[wid][4] in UNPAINTED_CLASSES
+    state[wid] = 'bare' if paint_survey.unpainted(samples, edges_seen=edges) else \
+      'short' if not samples or paint_survey.unpainted(samples, 1, edges) else 'painted'
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def on(r, n):  # the way the road runs on to from way r past its node n, and that way's far node
+    h = heading(r[2] if n == r[1] else r[1], n)
+    nxt = [(abs(wrap(heading(n, s[2] if n == s[1] else s[1]) - h)), s) for s in at[n] if s is not r]
+    turn, s = min(nxt, key=lambda v: v[0], default=(None, None))
+    return (s, s[2] if n == s[1] else s[1]) if s is not None and turn < STRAIGHT else (None, None)
+
+  def length(r):
+    return math.hypot(nodes[r[2]]['x'] - nodes[r[1]]['x'], nodes[r[2]]['y'] - nodes[r[1]]['y'])
+
+  def reach(r, n):  # what the road is past way r's node n: 'bare', 'painted' or 'end'
+    dist = 0.0
+    while dist < UNMARKED_REACH:
+      r, n = on(r, n)
+      if r is None:
+        return 'end'
+      if state[r[0]] != 'short':
+        return state[r[0]]
+      dist += length(r)
+    return 'painted'
+  out = {wid for wid, v in state.items() if v == 'bare'}
+  for wid, v in state.items():
+    if v == 'short':
+      r = minor[wid]
+      sides = {reach(r, r[1]), reach(r, r[2])}
+      if 'bare' in sides and sides <= {'bare', 'end'}:
+        out.add(wid)
   return out
 
 
@@ -1737,6 +1966,7 @@ def main():
     info.append([i + 1, a, b, fwd, back, cls, speed_limit(nodes, a, b, cls, fwd, back), streets.get(st), lf])
   parted = split_shared(nodes, info)
   print(f"{parted} nodes with both carriageways of a divided road through them parted, a link across the median between")
+  print(f"{dead_end_lanes(info)} two-way links one-way as the one-way link they run on from (a direction going nowhere)")
   out, into = defaultdict(list), defaultdict(list)
   for _, a, b, _, back, *_ in info:
     out[a].append(b)
@@ -1896,6 +2126,16 @@ def main():
     if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
       centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
   print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
+  unsurveyed = {wid for wid, a, b, _, back, *_ in info if back and not bay_to[wid] and wid not in painted and
+                not any(d.get('src') == paint_survey.GAMEFILES for d in paint_survey.along(survey, a, b) or [])}
+  inherited = neighbours_paint(nodes, [(wid, a, b, fwd, back) for wid, a, b, fwd, back, *_ in info], painted, unsurveyed) \
+    if from_files else {}
+  for wid, got in inherited.items():
+    painted[wid] = got
+    row = row_of[wid]
+    medians.discard((row[1], row[2]))
+    medians.discard((row[2], row[1]))
+  print(f"{len(inherited)} two-way links without sections of their own painted as the road they run on from")
   shut = 0
   for _, a, b, _, back, *_, lf in info:
     for p, q in ((a, b), (b, a)):
@@ -1930,7 +2170,8 @@ def main():
   print(f"{len(layer_of)} ways over others as bridges (up to layer {max(layer_of.values(), default=0)})")
 
   yellow = paint_survey.yellow_lines(args.survey_lines) if args.survey_lines else None
-  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow) if survey else []
+  taper_why = Counter()
+  tapers = lane_tapers(nodes, info, set(left_bays) | opened, junction, survey, yellow, taper_why, recounted) if survey else []
   link_ends = {r[0]: (r[1], r[2]) for r in info}  # GTA's links, before any are split
   info, parent, widen, piece_bays, applied = split_tapers(nodes, info, tapers, set(left_bays) | opened, arrows_at, bay_to,
                                                                recounted)
@@ -1976,8 +2217,11 @@ def main():
                      f"e.g. {sorted(cut[0] | cut[1])[:5]}")
   for wid in widen:
     painted.pop(wid, None)
-  print(f"{len(tapers)} turn lanes opening where the game files paint it, {applied} widening from there: {len(parent)} links split")
+  print(f"{len(tapers)} turn lanes opening ({', '.join(f'{n} {k}' for k, n in taper_why.most_common())}), {applied} widening " +
+        f"from there: {len(parent)} links split")
   lines_why = Counter()
+  unmarked = unmarked_roads(nodes, [(wid, a, b, bool(back), cls, bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF))
+                                    for wid, a, b, _, back, cls, *_ in info if wid not in crossings], link_samples) if survey else set()
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:
     n = nodes[k]
@@ -2030,8 +2274,8 @@ def main():
       elif left != right:
         tags.update({k: v for k, v in (('divider:forward', right), ('divider:backward', left)) if v})
     if survey and 'lane_markings' not in tags and tags.get('source:width') != 'survey' and \
-        not any(k.endswith((':start', ':end')) for k in tags) and (samples := link_samples(wid, a, b)):
-      tags = painted_lines(tags, cls, bool(back), samples, lines_why)
+        not any(k.endswith((':start', ':end')) for k in tags) and (wid in unmarked or (samples := link_samples(wid, a, b))):
+      tags = painted_lines(tags, cls, bool(back), [] if wid in unmarked else samples, lines_why, wid in unmarked)
     if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
       tags = outer_changes(tags, samples, lines_why)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it

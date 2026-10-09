@@ -284,6 +284,75 @@ def test_back_to_back_bays():
   assert bays[4] == (False, True) and bays[5] == (True, False) and bays[2] == (False, False)
 
 
+def test_unpainted_bay_opens_before_gta_lane():
+  # no painted opening: the bay is full width where GTA's lane begins (S), widening over TAPER_DEFAULT before it; where
+  # the road begins at its carriageways joining (P), open from there
+  from collections import Counter
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import TAPER_DEFAULT, lane_tapers
+
+  def node(x, y):
+    return {'x': x, 'y': y, 'z': 0.0, 'f': [0, 0, 0, 0, 0], 'st': 0}
+  nodes = {'P': node(0, -100), 'S': node(0, -60), 'Q': node(0, -30), 'J': node(0, 0), 'U': node(5, -150), 'V': node(-5, -150)}
+  road = flags(2, 2, 6, False)
+  info = [[1, 'P', 'S', 2, 2, 'primary', 40, None, road], [2, 'S', 'Q', 3, 2, 'primary', 40, None, road],
+          [3, 'Q', 'J', 3, 2, 'primary', 40, None, road]]
+  lane_links, why = {('S', 'Q'), ('Q', 'J')}, Counter()
+  [(chain, starts, start, end)] = lane_tapers(nodes, info, lane_links, lambda k: k == 'J', {}, [], why)
+  assert chain == [('P', 'S'), ('S', 'Q'), ('Q', 'J')] and list(starts) == [0.0, 40.0, 70.0, 100.0]
+  assert (start, end) == (40.0 - TAPER_DEFAULT, 40.0)
+  carriageways = info + [[4, 'U', 'P', 2, 0, 'primary', 40, None, road], [5, 'P', 'V', 2, 0, 'primary', 40, None, road]]
+  [(chain, _, start, end)] = lane_tapers(nodes, carriageways, lane_links, lambda k: k == 'J', {}, [], why)
+  assert chain[0] == ('P', 'S') and (start, end) == (0.0, 0.0)
+  assert why == Counter({"no paint: full width where GTA's lane begins": 1, 'no paint: open where the carriageways join': 1})
+  # the paint counts the lane on P-S already (its counts the paint's, one more than GTA's): full width from P
+  painted = [[1, 'P', 'S', 3, 2, 'primary', 40, None, road]] + info[1:]
+  [(chain, _, start, end)] = lane_tapers(nodes, painted, lane_links, lambda k: k == 'J', {}, [], why, {1: (2, 2)})
+  assert chain[0] == ('P', 'S') and (start, end) == (0.0, 0.0)
+
+
+def test_dead_end_lanes():
+  # a two-way link running on from a one-way link with nothing else at the node takes its direction
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import dead_end_lanes
+  info = [[1, 'A', 'B', 1, 1], [2, 'C', 'B', 1, 0], [3, 'B', 'D', 1, 1], [4, 'D', 'E', 1, 0], [5, 'D', 'F', 1, 1]]
+  assert dead_end_lanes(info[:2]) == 1 and info[0] == [1, 'B', 'A', 1, 0]  # traffic leaves B towards A
+  info = [[1, 'A', 'B', 1, 1], [2, 'B', 'C', 1, 0]]
+  assert dead_end_lanes(info) == 1 and info[0] == [1, 'A', 'B', 1, 0]  # and arrives at B from A
+  info = [[3, 'B', 'D', 1, 1], [4, 'D', 'E', 1, 0], [5, 'D', 'F', 1, 1]]
+  assert dead_end_lanes(info) == 0  # a junction
+  chain = [[k, str(k), str(k + 1), 1, 1] for k in range(1, 6)] + [[9, '6', '7', 1, 0]]
+  assert dead_end_lanes(chain) == 3 and [r[4] for r in chain] == [1, 1, 0, 0, 0, 0]  # up to DEAD_END_LINKS back
+
+
+def test_neighbours_paint():
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import neighbours_paint
+
+  def node(x, y):
+    return {'x': x, 'y': y}
+  nodes = {'A': node(0, 0), 'B': node(0, 30), 'C': node(0, 36), 'D': node(30, 36)}
+  painted = {1: {'forward': [5.0], 'backward': [6.0], 'median': 0.0, 'divider': 'double_solid_line', 'middle': True}}
+  rows = [(1, 'A', 'B', 1, 1), (2, 'C', 'B', 1, 1), (3, 'C', 'D', 1, 1)]
+  got = neighbours_paint(nodes, rows, painted, {2, 3})
+  assert got == {2: {**painted[1], 'forward': [6.0], 'backward': [5.0]}}  # drawn the other way; 3 turns off
+
+
+def test_unmarked_roads():
+  # a short way between two the game files show unpainted is unpainted too, not where the road beyond is painted
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import unmarked_roads
+
+  def node(x):
+    return {'x': x, 'y': 0.0}
+  nodes = {k: node(x) for k, x in (('A', 0.0), ('B', 30.0), ('C', 36.0), ('D', 66.0))}
+  edges = {'left': -5.0, 'right': 5.0}
+
+  def bare(n):
+    return [{'src': 'gamefiles', 'marks': [], 'kerbs': edges}] * n
+  rows = [(1, 'A', 'B', True, 'residential', False), (2, 'B', 'C', True, 'residential', False), (3, 'C', 'D', True, 'residential', False)]
+  samples = {1: bare(4), 2: bare(2), 3: bare(4)}
+  assert unmarked_roads(nodes, rows, lambda w, a, b: samples[w]) == {1, 2, 3}
+  samples[3] = [{'src': 'gamefiles', 'marks': [{'conf': 1.0, 'colour': 'yellow', 'type': 'double_solid', 'offset': 0.0}], 'kerbs': edges}] * 4
+  assert unmarked_roads(nodes, rows, lambda w, a, b: samples[w]) == {1}
+
+
 def test_median_edge_kinds():
   base = {'highway': 'primary', 'lanes': '4', 'lanes:forward': '2', 'lanes:backward': '2', 'width': '27.4',
           'width:lanes:forward': '5.5|5.5', 'width:lanes:backward': '5.5|5.5'}

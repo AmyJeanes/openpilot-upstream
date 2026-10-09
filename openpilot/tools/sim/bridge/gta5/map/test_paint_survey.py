@@ -223,6 +223,23 @@ def test_unpainted():
   assert not unpainted([sample([mark(0.0, 'yellow')], s, src='gamefiles', kerbs=edges) for s in (1, 4, 7)])
   assert not unpainted([sample([], s, src='gamefiles', kerbs={'left': None, 'right': None}) for s in (1, 4, 7)])  # a gap
   assert not unpainted([sample([], s, src='gamefiles', kerbs=edges) for s in (1, 4)])  # too few
+  assert unpainted([sample([], s, src='gamefiles', kerbs=edges) for s in (1, 4)], least=1)
+  # a white line within a metre of the asphalt's edge is its edge (or a driveway's), not a line between lanes
+  assert unpainted([sample([mark(4.5, kind='double_dashed')] if s == 4 else [], s, src='gamefiles', kerbs=edges) for s in (1, 4, 7, 10)])
+  gap = [sample([], s, src='gamefiles', kerbs={'left': None, 'right': None}) for s in (1, 4, 7)]
+  assert unpainted(gap, edges_seen=False)  # a road the files draw no edges for
+
+
+def test_counts_from_paint_off_the_middle():
+  # GTA's 2 + 2 painted 3 + 2, the centre 1.9 m left of the link and the asphalt's edges 0.45 m off its middle
+  marks = [mark(-6.4), mark(-1.9, 'yellow', 'double_solid'), mark(2.2), mark(6.4)]
+  files = [sample(marks, s, src='gamefiles', kerbs={'left': -10.9, 'right': 10.45}) for s in (1, 4, 7, 10)]
+  got, why = correct(files, 2, 2, (-11.05, 11.05), counts_from_paint=True)
+  assert why is None and (len(got['forward']), len(got['backward'])) == (3, 2)
+  assert correct(files, 2, 2, (-11.05, 11.05))[0] is None  # GTA's counts only
+  one_side = [{**d, 'kerbs': {'left': None, 'right': 10.6}} for d in files]  # the left edge unread
+  got, why = correct(one_side, 2, 2, (-11.05, 11.05), counts_from_paint=True)
+  assert why is None and (len(got['forward']), len(got['backward'])) == (3, 2) and got['forward'] == [4.1, 4.2, 4.2]
 
 
 if __name__ == '__main__':

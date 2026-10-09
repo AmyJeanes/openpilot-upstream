@@ -45,6 +45,7 @@ MEDIAN_MIN = 1.0  # m between two yellow lines bounding a painted median, rather
 CENTRE_REACH = 3.0  # m from the link's line to its centre
 CENTRE_TOL = 0.4  # m, where the line must be the centre's
 KERB_TOL = 0.4  # m between the two kerbs' distances from the line, to take them as the road's
+COUNT_KERB_TOL = 0.8  # m, as KERB_TOL, where the painted lanes are more or fewer than GTA's and run out to the edges
 KERB_REACH = 2.5  # m between a seen kerb and where the class layout has it
 LANE_MIN, LANE_MAX = 3.0, 7.0  # m
 LANE_LINES = ('dashed', 'solid', 'markers')  # white lane lines; the camera's double and edge lines are mostly kerbs
@@ -384,16 +385,19 @@ def changes(lines: list[float], kinds: list[tuple[float, str | None]], flip: boo
   return [CHANGE[(a, b)] for a, b in zip(left, right, strict=True)]
 
 
-def road_kerbs(samples: list[dict], kerbs: tuple[float, float]) -> tuple[float, float]:
+def road_kerbs(samples: list[dict], kerbs: tuple[float, float], tol: float = KERB_TOL, one: bool = False) -> tuple[float, float]:
   """The kerbs to run the outer lanes out to: the game files' asphalt edges, where both are seen in half the samples,
-  near where the class layout has them and about as far either side of the line; else the layout's."""
+  near where the class layout has them and about as far either side of the line (`tol`); else the layout's. With
+  `one`, an edge seen on one side only stands for both (the line the middle of the road)."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
   lefts = [d['kerbs']['left'] for d in files if (d.get('kerbs') or {}).get('left') is not None]
   rights = [d['kerbs']['right'] for d in files if (d.get('kerbs') or {}).get('right') is not None]
+  if one and max(len(lefts), len(rights)) * 2 >= max(len(samples), 1) and min(len(lefts), len(rights)) * 2 < max(len(samples), 1):
+    lefts, rights = (lefts, [-v for v in lefts]) if len(lefts) > len(rights) else ([-v for v in rights], rights)
   if min(len(lefts), len(rights)) * 2 < max(len(samples), 1):
     return kerbs
   left, right = float(np.median(lefts)), float(np.median(rights))
-  if abs(left - kerbs[0]) > KERB_REACH or abs(right - kerbs[1]) > KERB_REACH or abs(right + left) > KERB_TOL:
+  if abs(left - kerbs[0]) > KERB_REACH or abs(right - kerbs[1]) > KERB_REACH or abs(right + left) > tol:
     return kerbs
   half = (right - left) / 2  # the line stays the middle of the road
   return -half, half
@@ -443,8 +447,15 @@ def correct(samples: list[dict], fwd: int, back: int, kerbs: tuple[float, float]
   if fwd == back or counts_from_paint:
     kerbs = road_kerbs(samples, kerbs)
   lines = [v for v, c in white if c >= need]
-  right = [v for v in lines if hi + LANE_MIN * 0.8 < v < kerbs[1] - LANE_MIN * 0.8]
-  left = sorted(-v for v in lines if kerbs[0] + LANE_MIN * 0.8 < v < lo - LANE_MIN * 0.8)
+
+  def between(kerbs):
+    return [v for v in lines if hi + LANE_MIN * 0.8 < v < kerbs[1] - LANE_MIN * 0.8], \
+      sorted(-v for v in lines if kerbs[0] + LANE_MIN * 0.8 < v < lo - LANE_MIN * 0.8)
+  right, left = between(kerbs)
+  if (len(right) != fwd - 1 or len(left) != back - 1) and counts_from_paint and kerbs == layout:
+    # other counts than GTA's want the asphalt's edges to lay them out to, a little off the middle of the line or one side seen
+    kerbs = road_kerbs(samples, layout, COUNT_KERB_TOL, one=True)
+    right, left = between(kerbs)
   if (len(right) != fwd - 1 or len(left) != back - 1) and not (counts_from_paint and kerbs != layout):
     return None, f'{len(left) + 1}+{len(right) + 1} lanes painted, GTA has {back}+{fwd}'
   f = [round(float(x), 2) for x in np.diff([hi, *right, kerbs[1]])]
@@ -577,15 +588,23 @@ def lane_lines(samples: list[dict], section: list[tuple[float, float, int]]) -> 
   return out
 
 
-def unpainted(samples: list[dict]) -> bool:
-  """Whether the game files show a road with no centre or lane lines at all: UNPAINTED of UNPAINTED_SAMPLES or more
-  samples, with the asphalt's edges read in half of them (the road surface is in the files, not a gap in them)."""
+def unpainted(samples: list[dict], least: int = UNPAINTED_SAMPLES, edges_seen: bool = True) -> bool:
+  """Whether the game files show a road with no centre or lane lines at all: UNPAINTED of `least` or more samples,
+  with the asphalt's edges read in half of them (the road surface is in the files, not a gap in them; not asked of a
+  road the files draw no edges for, `edges_seen` False). Lines within INSIDE of an edge read are its edge lines (or a
+  gutter's, a driveway's), not lines between lanes."""
   files = [d for d in samples if d.get('src') == GAMEFILES]
-  if len(files) < UNPAINTED_SAMPLES:
+  if len(files) < least:
     return False
   edges = sum(any((d.get('kerbs') or {}).get(s) is not None for s in ('left', 'right')) for d in files)
-  bare = sum(not any(m['conf'] >= CONF and (m['colour'] == 'yellow' or m['type'] in CROSSING) for m in d['marks']) for d in files)
-  return edges * 2 >= len(files) and bare >= UNPAINTED * len(files)
+
+  def between(d, m):
+    kerbs = d.get('kerbs') or {}
+    left, right = kerbs.get('left'), kerbs.get('right')
+    return (left is None or m['offset'] > left + INSIDE) and (right is None or m['offset'] < right - INSIDE)
+  bare = sum(not any(m['conf'] >= CONF and (m['colour'] == 'yellow' or m['type'] in CROSSING) and between(d, m) for m in d['marks'])
+             for d in files)
+  return (edges * 2 >= len(files) or not edges_seen) and bare >= UNPAINTED * len(files)
 
 
 OUTER_REACH = 1.2  # m from a one-way link's outer lane edge that a white lane line is that edge's

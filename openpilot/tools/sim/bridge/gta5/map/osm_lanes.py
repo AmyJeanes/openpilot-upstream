@@ -535,6 +535,25 @@ class OsmLanes:
     self._tapers: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
     self._blends: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
     self._along: dict[int, np.ndarray] = {}
+    self._carried: dict[tuple[int, int], int] = {}  # (way, node) -> the way a road carried across a junction there runs on to
+
+  def carry_across(self, pairs) -> None:
+    """Roads whose lines are painted on across a junction (junctions.py's Junction.carried): [(way, way)] meeting end to
+    end at a junction node. Their lines and kerbs run on from one to the other as where a road just carries on (blend,
+    offset_way), rather than stepping at the node."""
+    for a, b in pairs:
+      common = {self.ways[a][1][0], self.ways[a][1][-1]} & {self.ways[b][1][0], self.ways[b][1][-1]}
+      if len(common) == 1 and a != b:
+        node = common.pop()
+        self._carried[(a, node)], self._carried[(b, node)] = b, a
+    self._blends.clear()
+
+  def _onto(self, way: int, node: int) -> tuple[int, int] | None:
+    """_other's way, or at a junction the way the road carried across it runs on to (carry_across)."""
+    found = self._other(way, node)
+    if found is None and (other := self._carried.get((way, node))) is not None:
+      found = other, FORWARD if self.ways[other][1][-1] == node else BACKWARD
+    return found
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
@@ -686,7 +705,7 @@ class OsmLanes:
     """Where the road carries on at a free (untapered) way's end node onto one other way with the same lanes sitting
     elsewhere: (m of this way the change is spread over, m of the other, its cross-section there seen travelling this
     way FORWARD). None where nothing moves; nothing of a tapered way, whose lines stay as its taper has them."""
-    found = self._other(way, node)
+    found = self._onto(way, node)
     if found is None or found[0] == way:
       return None
     nb, nd = found  # nd: travelling nb into the node
@@ -726,7 +745,7 @@ class OsmLanes:
   def _beyond(self, way: int, node: int, p: np.ndarray) -> np.ndarray | None:
     """Where the road goes on past the way's end node (p runs from it into the way): the next point of the one other
     way there, None where there's none or it turns back on itself."""
-    found = self._other(way, node)
+    found = self._onto(way, node)
     if found is None or found[0] == way:
       return None
     refs = self.ways[found[0]][1]
