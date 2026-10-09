@@ -23,12 +23,15 @@ START, DEST, RIGHT, LEFT = 1, 4, 10, 15  # Valhalla maneuver types
 class LagCar:
   """The game car under the plugin's control: curvature and acceleration lag the commands (first order), the commands
   acting `delay` s after they're sent; a stop is held (the plugin's handbrake). Game heading: deg counterclockwise
-  from north."""
+  from north. Imperfections for robustness checks: `gain` scales the curvature the car takes (the plugin's adaptive
+  steering gain off), `noise` the pose's (m and deg, normal) and the yaw rate's (rad/s) noise, seeded."""
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
-               delay: float = 0.05):
+               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0):
     self.x, self.y, self.h, self.v = x, y, heading, v
     self.k = self.a = 0.0
     self.tau_k, self.tau_a, self.delay = tau_k, tau_a, delay
+    self.gain, self.noise = gain, noise
+    self.rng = np.random.default_rng(seed)
     self.queue: list[tuple[float, float, float]] = []  # (when it acts, curvature, accel)
     self.cmd = (0.0, 0.0)
     self.t = 0.0
@@ -37,7 +40,9 @@ class LagCar:
     self.blocked = False  # held still, as against a wall
 
   def state(self) -> dict:
-    return {"pos": [self.x, self.y, 0.0], "vEgo": self.v, "heading": self.h, "yawRate": self.k * self.v, "aMeas": self.a,
+    n = self.rng.normal(0.0, self.noise, 4) if self.noise else np.zeros(4)
+    return {"pos": [self.x + n[0], self.y + n[1], 0.0], "vEgo": self.v, "heading": self.h + 5 * n[2],
+            "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
             "t": int(self.t), "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
             "ai": {"on": False}}
 
@@ -52,7 +57,7 @@ class LagCar:
         _, k, a = self.queue.pop(0)
         self.cmd = (k, a)
       k_cmd, a_cmd = self.cmd
-      self.k += (k_cmd - self.k) * min(SUB / self.tau_k, 1.0)
+      self.k += (self.gain * k_cmd - self.k) * min(SUB / self.tau_k, 1.0)
       self.a += (a_cmd - self.a) * min(SUB / self.tau_a, 1.0)
       if self.blocked:
         self.v, self.a = 0.0, 0.0
@@ -220,13 +225,17 @@ COLS = ("t", "x", "y", "heading", "v", "yaw", "kappa", "accel", "dev", "s", "lan
 
 
 def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None = None, v0: float = 0.0, seconds: float = 120.0,
-          tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None) -> Trip:
+          tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None,
+          gain: float = 1.0, noise: float = 0.0) -> Trip:
   """Drives a route with the map driver on the lagged car. faults: {"collision": t, "push": (t, m right),
   "steer": t, "block": t}. lane_map(route, state) gives the state's laneMap (None: none)."""
   import time
   if pose is None:
-    pose = start_pose(route, lane if lane is not None else 0.0, route.at)
-  car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay)
+    route.at, route.seg = 0.0, 0  # a route driven before starts again at its start
+    pose = start_pose(route, lane if lane is not None else 0.0, 0.0)
+  car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise)
+  route.at, route.seg = 0.0, 0
+  route.locate(np.array(pose[:2], float), None, pose[2], search=route.length)
   md = MapDriver({"seed": 1, **(cfg or {})})
   trip = Trip(md, car)
   faults = faults or {}
