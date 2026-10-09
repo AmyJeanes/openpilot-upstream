@@ -45,7 +45,7 @@
                                                 distance to it), printed from the state; gtadirs off stops asking
   gta5_cmd.py state [/tmp/gta5state.json]       save and print the plugin's next state
   expert options (gta5_expert.py): speed style ability aggr task ramp lead launch decel turn_speed arrive=gentle stop_before
-  targets=smooth ahead_min ahead_max past retarget_every limits=0"""
+  targets=smooth ahead_min ahead_max past retarget_every limits=0 shortcuts=route|forks|off|always"""
 import glob
 import json
 import os
