@@ -94,8 +94,10 @@ LANE_CHANGE_GAP = 2.0  # s between lane changes
 LANE_CHANGE_TRIES = 3  # for one turn or fork, without getting nearer its lane
 # Out of a lane that ends (Ends, not at a fork the route may leave by instead) the car has to merge, so a change held
 # by the blind spot isn't given up at its last place: it waits on until the lane's end, and the car slows to a crawl
-# short of it, letting the vehicle alongside go by to fall in behind it. Late, it may start at any speed until the end.
-# A crawl rather than a stop (lowest's floor), as the model won't pull away from a stop by itself.
+# short of it, letting the vehicle alongside go by to fall in behind it. Late, it may start at any speed until the crawl
+# begins: nearer the end, a lane reading that only now puts the car in the ending lane is more likely a misread, and a
+# change from it can cross into the oncoming lane. A crawl rather than a stop (lowest's floor), as the model won't pull
+# away from a stop by itself.
 MERGE_DECEL = 1.0  # m/s^2
 MERGE_STOP_BEFORE = 10.0  # m before the lane's end
 MERGE_CRAWL = 0.5  # m/s from there
@@ -1706,8 +1708,8 @@ class Planner:
     late = room <= 0 and (unstarted or self.changing is None and self._lane_settled(side, now))
     if must and (late or unstarted and self.change_held):
       cap = min(cap or math.inf, max(slow_for(0.0, m.dist - MERGE_STOP_BEFORE, v, MERGE_DECEL), MERGE_CRAWL))
-    if (self.changing is None and (room > 0 or must) and due and (v > LANE_CHANGE_SPEED or must) and now - self.change_t > LANE_CHANGE_GAP
-        and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)):
+    if (self.changing is None and (room > 0 or must and m.dist > MERGE_STOP_BEFORE) and due and (v > LANE_CHANGE_SPEED or must)
+        and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING and self._lane_settled(side, now)):
       if self.change_from == self.lane:
         self.change_tries[key] = self.change_tries.get(key, 0) + 1  # the last change didn't get anywhere
       self.change_from = self.lane

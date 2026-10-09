@@ -347,3 +347,12 @@ def test_nav_gives_up_a_change_out_of_lanes_ending_at_a_split():
   d, trace = merge(lambda t, y: True, until=395.0, forks=lambda y: [[400.0 - y, "left", 1, 2, True, 1, False]])
   assert [m["type"] for m in d.sent] == ["setIndicator", "indicatorOff"] and d.nav.changing is None
   assert min(s[2] for s in trace) > 9.0  # no slowing to merge
+
+
+def test_nav_merge_doesnt_start_fresh_in_the_crawl():
+  # a lane reading that first puts the car in the ending lane within the crawl's reach of its end: no change from it
+  d = Drive((1, 2), v=1.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
+  for _ in range(60):
+    d.step(route, 200.0, {"blindspot": [False, False], "routeEnd": 900.0, "laneMaps": [[nav_mod.MERGE_STOP_BEFORE - 2.0, [0, None], 1]]})
+  assert d.nav.changing is None and d.indicator is None
