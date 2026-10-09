@@ -349,7 +349,7 @@ class Run:
         outcome, detail = "infra", bad
         break
       s, cs = self.state, self.sm["carState"]
-      lc = int(self.sm["modelV2"].meta.laneChangeState)
+      lc = self.sm["modelV2"].meta.laneChangeState.raw
       ns = self.sm["navSpeed"] if self.sm.seen["navSpeed"] else None
       cap = (ns.speedCap, str(ns.reason)) if ns is not None and now - self.sm.recv_time["navSpeed"] < 1.0 else None
       seen = tracks.update(t, s.get("pos", (0, 0)), s.get("heading", 0.0), s.get("nearby")) if s is not last_state else []
