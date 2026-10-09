@@ -18,6 +18,9 @@ class GTA5Bridge(SimulatorBridge):
     # acknowledged; in the sim that reflects game physics rather than a car, so clear it before selfdrived starts
     Params().remove("Offroad_ExcessiveActuation")
     self.port = port
+    # the base bridge engages openpilot as soon as it can after starting; in the game that sets the car driving off from
+    # wherever it was left, so only the engage key (or a harness) engages
+    self.past_startup_engaged = True
 
   def spawn_world(self, q: Queue) -> World:
     return GTA5World(self.simulator_state, q, self.port)
