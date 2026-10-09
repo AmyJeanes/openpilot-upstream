@@ -11,8 +11,9 @@ map as on our GTA V one.
   (osm2streets merges such short roads into the junction); the roads between them are inside it. Junctions further
   apart are trimmed back less, to fit. So do the nodes on a divided road's two carriageways joined by a two-way road
   across its median shorter than MEDIAN_LINK, as where a side road meets it at a gap in the median, and three junction
-  nodes joined each to each by roads shorter than TRIANGLE_LINK, as GTA's triangle of one-way slips where a side road
-  meets a main road (as junctions of their own, their areas lay across each other and their kerbs looped through it).
+  nodes joined each to each by roads shorter than TRIANGLE_LINK, two of them one-way along some of their length, that
+  make a junction of three arms, as GTA's triangle of one-way slips where a side road meets a main road (as junctions
+  of their own, their areas lay across each other and their kerbs looped through it).
 - An arm is the road out of a junction, followed through nodes where only two roads meet. Arms that run side by side
   and overlap, as a turn lane mapped as its own way beside its road, are one arm: its kerbs are the outer ones.
 - A divided road's two carriageways out of a junction side by side, one in and one out, are trimmed back as far as each
@@ -62,7 +63,8 @@ STOP_SETBACK = 0.5  # m: a stop line at the mouth is this far out from it
 MERGE_GAP = 2.0  # m: junctions whose trimmed ends come closer than this along the road between them ...
 MERGE_LINK = 20.0  # m: ... are one where that road is shorter than this; else both are trimmed less
 MAX_SPAN = 60.0  # m across a junction's nodes, at most, from merging
-TRIANGLE_LINK = 40.0  # m: three junction nodes joined each to each by roads shorter than this are one junction
+TRIANGLE_LINK = 40.0  # m: three junction nodes joined each to each by roads shorter than this, two partly one-way ...
+TRIANGLE_SPAN = 40.0  # m: ... and no further apart than this, are one junction
 CROSSING_WIDTH = 3.0  # m: a pedestrian crossing's painted width
 CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes between its stop lines and it
 CELL = 50.0  # m
@@ -512,17 +514,22 @@ class Junctions:
             (length < min(CLUSTER_LINK, max(self.widest(n), self.widest(nodes[-1]))) or self.across_median(ways, nodes)):
           parent[find(n)] = find(nodes[-1])
     near: dict[int, set[int]] = {n: set() for n in self.junction_nodes}
+    slips: set[frozenset[int]] = set()  # pairs of them joined by a road one-way somewhere along it
     for n in self.junction_nodes:
       for step in self.steps[n]:
-        _, nodes, length = self.walk(n, step, TRIANGLE_LINK)
+        ways, nodes, length = self.walk(n, step, TRIANGLE_LINK)
         if nodes[-1] in near and nodes[-1] != n and length < TRIANGLE_LINK:
           near[n].add(nodes[-1])
           near[nodes[-1]].add(n)
+          if any(oneway_of(self.ways[w][0]) for w, _ in ways):
+            slips.add(frozenset((n, nodes[-1])))
     for a in self.junction_nodes:
       for b in near[a]:
         for c in near[a] & near[b]:
           xy = np.array([self.osm.node_xy(q) for q in (a, b, c)])
-          if np.hypot(*(xy.max(0) - xy.min(0))) < MAX_SPAN:
+          sides = {frozenset((a, b)), frozenset((b, c)), frozenset((a, c))}
+          if len(sides & slips) >= 2 and np.hypot(*(xy.max(0) - xy.min(0))) < TRIANGLE_SPAN and \
+              (one := self.junction(sorted({a, b, c}))) is not None and len(one.arms) == 3:  # a side road joining
             parent[find(b)] = find(a)
             parent[find(c)] = find(a)
     # junctions whose trimmed ends overlap are one where the road between them is short; else both are trimmed less

@@ -257,8 +257,11 @@ shown or a level changes.
   lanes towards the junction (the far edge of a crossing painted there, which GTA paints as the stop line), as a node
   splitting the way there (ids as for tapers) that takes the signal or sign and its direction from GTA's node. An
   approach with a painted stop line and none in the map gets one (`traffic_signals` at a junction with signals, else
-  `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. GTA's node stays the
-  stop line where nothing is painted. Nav's stop list still comes from GTA's nodes.
+  `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. A GTA stop line with no
+  paint on its own approach but a new one from the paint on the road the other way within 15 m goes there instead
+  (GTA's node faced the wrong junction). GTA's node stays the stop line where nothing is painted. The decals' measured
+  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15). Nav's stop list still comes from GTA's nodes, so it can
+  disagree with the map's (and the paint's) where GTA's node is off or faces the wrong way.
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /
