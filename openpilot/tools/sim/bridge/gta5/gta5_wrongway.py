@@ -45,6 +45,7 @@ SUIT_LANES = (1, 2, 3)
 MEDIAN_GAP = 1.0  # m between the directions' lanes
 JUNCTION_CLEAR = 15.0  # m: no junction node this near the drift, hold or recovery
 MAX_BEND = 25.0  # deg of heading change over the drift, hold and recovery
+START_LANES = 40.0  # m on from the car a clip's start lanes may be found
 LANE_SECONDS = 1.8  # s at least to cross a lane, drifting or recovering
 
 
@@ -226,7 +227,11 @@ class WrongWay:
     self._set("abort", t, why=why)
 
   def _plan(self, route, state: dict, t: float) -> bool:
-    sec = route.section(route.seg)
+    k = route.seg  # the first segment with lanes: the route can start on a short one from the car to GTA's node
+    sec = route.section(k)
+    while (sec is None or not sec.lanes) and k + 2 < len(route.points) and route.along[k + 1] - route.at < START_LANES:
+      k += 1
+      sec = route.section(k)
     if sec is None or not sec.lanes:
       self._abort("unsuitable: no lanes where it starts", t)
       return False
@@ -266,7 +271,7 @@ class WrongWay:
     return float(np.interp(ds, [k[0] for k in ks], [k[1] for k in ks]))
 
   def step(self, route, state: dict, t: float, collisions: int) -> dict | None:
-    """The plugin control message for this frame (t: the game's clock), or None while the AI drives."""
+    """The plugin control message for this step (t: s, a monotonic clock), or None while the AI drives."""
     if self.finished is not None:
       return None
     pos, v, heading = state.get("pos"), float(state.get("vEgo") or 0.0), float(state.get("heading") or 0.0)

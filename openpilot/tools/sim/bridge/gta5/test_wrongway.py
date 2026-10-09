@@ -159,9 +159,12 @@ def test_expert(map_lane: bool = False, collide_in_recovery: bool = False):
   route = road(1)
   car = Car(route)
   ai_on_at = None
+  from openpilot.tools.sim.bridge.gta5 import gta5_expert
+  real = gta5_expert.time.monotonic
+  gta5_expert.time.monotonic = lambda: car.t  # the bridge's steps in the simulated car's time
   for _ in range(4000):
     s = car.state()
-    s["t"] = car.t  # a new game frame each step
+    s["t"] = int(car.t)  # as the plugin's state has it: whole seconds, so not a new value each frame
     if map_lane:
       s["lanePlugin"] = [-1, 1]  # the plugin's reading flicking to the oncoming lane: the map's says otherwise
       s["laneMap"] = {"lane": s["lane"][0], "kind": "own" if s["lane"][0] >= 0 else "oncoming"}
@@ -182,6 +185,7 @@ def test_expert(map_lane: bool = False, collide_in_recovery: bool = False):
       break
   assert sent[0] == {"type": "ai", "on": 0, "indicator": "off"}, sent[0]
   assert ai_on_at == "ai_recover", ai_on_at
+  gta5_expert.time.monotonic = real
   rows = [json.loads(line) for line in e.log.getvalue().splitlines()]
   events = [r for r in rows if r.get("event") == "wrongway"]
   phases = [r["phase"] for r in events]

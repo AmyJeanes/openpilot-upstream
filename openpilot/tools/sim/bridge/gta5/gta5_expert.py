@@ -229,6 +229,10 @@ class Expert:
       self.cancel_engagement()
     # once per game frame: the bridge steps at 100 Hz
     if state.get("t") == self.last_t:
+      if self.ww is not None and (self.ww_driving or self.ww.phase == "ai_recover"):
+        # a clip's controller steers on every step: the state's t only moves on once a second
+        self._wrongway_step(route, state, state.get("vEgo", 0.0), now)
+        return self.on
       return True
     self.last_t = state.get("t")
     self.game_t = float(state.get("t") or now)  # the ramp's clock: the game's, which stops while it does
@@ -283,7 +287,7 @@ class Expert:
     AI following the route."""
     ww = self.ww
     self.ww_map_lane = state.get("laneMap")
-    msg = ww.step(route, state, self.game_t, state.get("collisions", 0))
+    msg = ww.step(route, state, now, state.get("collisions", 0))
     for e in ww.take_events():
       if e.get("phase") != "end":
         print(f"gta5: wrongway {ww.clip}: {e['phase']}" + (f" ({e['why']})" if e.get("why") else "") +
