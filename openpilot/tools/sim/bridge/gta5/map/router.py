@@ -23,6 +23,9 @@ WRONG_WAY = 100.0  # deg from the route's direction: the car isn't driving that 
 FORK_BEHIND = 50.0  # m: nav keeps to a fork's side a little past it
 LANE_ALIGN = 10.0  # deg
 LANES_NEAR = 60.0  # m from a point to look for a link with its lanes
+ON_ROAD = 8.0  # m from the route's line: on its road, wherever its lanes are
+KERB_MARGIN = 1.0  # m outside the kerbs of the route's road still on it
+FORK_AT = 2.0  # m between a fork in GTA's roads and where the map's lanes change for it
 JUNCTION_BEHIND = 30.0  # m: nav times a turn from its junction's entry, which the car may be past
 # the destination on the road it faces, rather than the router's nearest road, often a drive or car park (dest_snap.py)
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
@@ -89,6 +92,7 @@ class Route:
     self.right = 0.0  # m right of the route's line
     self.off = 0.0  # m off the route
     self.misaligned = 0.0  # deg between the car's heading and the route's there
+    self.elsewhere = False  # on another level or heading the other way, where right and seg are from before
     n = len(points)
     self.z = np.full(n, np.nan)
     self.links: list[Link | None] = [None] * max(n - 1, 0)
@@ -104,6 +108,7 @@ class Route:
     self.osm_lanes = osm is not None and osm.tagged and n >= 2
     if self.osm_lanes:
       self._lanes = RouteLanes.from_osm(points, ways_from_nodes(points, osm), osm)
+    self._maps: list | None = None  # lane_maps along the whole route
     self.lane_counts = [sec.lanes if (sec := self.section(k)) is not None else 0 for k in range(max(n - 1, 0))]
 
   @property
@@ -224,7 +229,7 @@ class Route:
     hi = min(len(self.points) - 1, int(np.searchsorted(self.along, self.at + search)) + 1)
     a, b = self.points[lo:hi], self.points[lo + 1:hi + 1]
     if len(a) == 0:
-      self.off = float(np.hypot(*(pos - self.points[-1])))
+      self.off, self.elsewhere = float(np.hypot(*(pos - self.points[-1]))), True
       return self.off
     ab = b - a
     t = np.clip(np.einsum('ij,ij->i', pos - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
@@ -237,7 +242,8 @@ class Route:
     if heading is not None:
       seg_heading = np.degrees(np.arctan2(-ab[:, 0], ab[:, 1]))
       other |= np.abs((heading - seg_heading + 180) % 360 - 180) > WRONG_WAY
-    if other.all():
+    self.elsewhere = bool(other.all())
+    if self.elsewhere:
       self.off = float(d.min()) + 100.0  # off the route, though it's near
       return self.off
     d = np.where(other, np.inf, d)
@@ -249,6 +255,17 @@ class Route:
     self.off = float(d[i])
     self.misaligned = 0.0 if heading is None else abs((heading - float(np.degrees(np.arctan2(-ab[i, 0], ab[i, 1]))) + 180) % 360 - 180)
     return self.off
+
+  def on_road(self, near: float = ON_ROAD) -> bool:
+    """Whether the car is on the route's road where it is: within `near` m of the route's line, or between the kerbs
+    of the road's lanes there, as on a wide road whose line runs along its far side (a turn lane's middle)."""
+    if self.elsewhere:
+      return False
+    if self.off < near:
+      return True
+    lanes = self.lanes
+    sec = lanes.section_at(self.at, self.seg) if lanes is not None and 0 <= self.seg < len(lanes.sections) else None
+    return sec is not None and bool(sec.lanes) and sec.edges[0] - KERB_MARGIN <= self.right <= sec.edges[1] + KERB_MARGIN
 
   def ahead(self, distance: float, step: float) -> np.ndarray:
     """Points every `step` m from the car for `distance` m, or to the route's end."""
@@ -328,6 +345,7 @@ class Route:
       "junctions": [round(a - self.at, 1) for a in self.junctions if -JUNCTION_BEHIND < a - self.at < distance],
       "laneArrows": self.lane_arrows(distance),
       "laneDrops": self.lane_drops(distance),
+      "laneMaps": self.lane_maps(distance),
     }
 
   def lane_arrows(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
@@ -340,6 +358,40 @@ class Route:
     """Where lanes begin on the left of ours within `distance` m (RouteLanes.openings): [[m ahead, how many]]."""
     opens = self.lanes.openings if self.lanes is not None else []
     return [[float(s - self.at), n] for s, n in opens if -behind < s - self.at < distance]
+
+  def lane_maps(self, distance: float, here: bool = True) -> list:
+    """Where our lanes change within `distance` m (RouteLanes.lane_maps), the lane each before carries on as: [[m ahead,
+    [for each lane before (from the left), the lane after, None where it ends], how many after]]. At a fork in the
+    road the route's branch takes the lanes on its side, as many as it has (its ways start at the fork's node, so where
+    their lanes lie says nothing). With `here`, first (at 0 m) the map from the car's lanes as lane() numbers them to
+    the road's at the car, where a lane still opening there isn't one of lane()'s."""
+    out = [[float(s - self.at), list(m), n] for s, m, n in self.lane_maps_along() if 0.0 < s - self.at < distance]
+    conv = self._lane_here() if here else None
+    return ([[0.0, list(conv[0]), conv[1]]] if conv is not None else []) + out
+
+  def lane_maps_along(self) -> list[tuple[float, tuple, int]]:
+    """lane_maps along the whole route: [(m along, the lane each lane before carries on as, how many after)]."""
+    if self._maps is None:
+      self._maps = []
+      for s, m, n in self.lanes.lane_maps if self.lanes is not None else []:
+        fork = next((f for f in self.forks if abs(f.along - s) < FORK_AT), None)
+        if fork is not None and n <= len(m):
+          shift = len(m) - n if fork.side == "right" else 0
+          m = tuple(i - shift if 0 <= i - shift < n else None for i in range(len(m)))
+        self._maps.append((s, m, n))
+    return self._maps
+
+  def _lane_here(self) -> tuple[tuple[int, ...], int] | None:
+    """The map from lane()'s lanes to the road's at the car, where a lane still opening isn't one of lane()'s."""
+    lanes = self.lanes
+    if lanes is None or not 0 <= self.seg < len(lanes.sections):
+      return None
+    opening = lanes.opening(self.seg)
+    sec = lanes.section_at(self.at, self.seg)
+    if opening is None or self.at >= opening[0] or sec is None:
+      return None
+    _, extra, left = opening
+    return tuple(i + extra if left else i for i in range(sec.lanes - extra)), sec.lanes
 
   def lane_drops(self, distance: float, behind: float = JUNCTION_BEHIND) -> list:
     """The junctions within `distance` m the route goes straight on through onto fewer lanes (RouteLanes.drops):
@@ -498,7 +550,7 @@ class Navigator:
       route = self.route
     if route is not None:
       off = route.locate(pos, z, heading)
-      self.off_since = None if off < self.OFF_ROUTE else (self.off_since or now)
+      self.off_since = None if off < self.OFF_ROUTE or route.on_road() else (self.off_since or now)
       if self.off_since is not None and now - self.off_since > self.OFF_FOR and now >= self.next_try:
         self._start(pos, bearing, dest, now, z)
     elif now >= self.next_try:

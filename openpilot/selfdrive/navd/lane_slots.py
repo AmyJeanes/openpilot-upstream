@@ -191,6 +191,8 @@ class LaneSlots:
   def __init__(self, route, drive_on_right: bool = True):
     self.lanes = route.lanes
     self.drive_on_right = drive_on_right
+    along = getattr(route, "lane_maps_along", None)
+    self.maps = along() if along is not None and self.lanes is not None else []  # where our lanes change (Route)
     self.points = np.asarray(route.points, float)
     self.moves: list[Move] = []
     self.along = np.zeros(0)
@@ -251,6 +253,30 @@ class LaneSlots:
       k += step
     return None
 
+  def wanted(self, move: Move, s: float, sec: Section) -> tuple[set[int], bool]:
+    """targets() of a move in the lanes `sec` has s m along (as they are there, section_here): its target lanes at
+    its junction followed back across where our lanes change between (Route.lane_maps), the one nearest them where
+    none carry on into them (a bay opening on the way); else counted from the move's side."""
+    want, centre = targets(sec, move.nav)
+    if centre or not move.targets or not sec.lanes:
+      return want, centre
+    opening = self.lanes.opening(self.lanes.segment(s))
+    shut = opening[1] if opening is not None and s < opening[0] else 0  # lanes still opening, not yet sec's
+    shift = shut if shut and opening[2] else 0
+    maps = [m for m in self.maps if s < m[0] < move.along - planner.MAP_AT]
+    if (len(maps[0][1]) if maps else move.n) != sec.lanes + shut:
+      return want, centre  # the lanes here aren't those the maps start from
+    ends = []
+    for i in range(sec.lanes):
+      j = i + shift
+      for _, m, _ in maps:
+        j = planner.carry(m, j)
+      ends.append(j)
+    into = {i for i, j in enumerate(ends) if j in move.targets}
+    if not into:
+      into = {min(range(sec.lanes), key=lambda i: min(abs(ends[i] - t) for t in move.targets))}
+    return strict(sec, into), False
+
   def _lanes(self, s: float, after: bool) -> int:
     sec = self.section_here(s + (EXIT_PAST if after else -EXIT_PAST), after)
     return sec.lanes if sec is not None else 0
@@ -266,7 +292,7 @@ class LaneSlots:
       cuts = [a, opening[0], b] if opening is not None and a < opening[0] < b else [a, b]
       for pa, pb in reversed(list(zip(cuts, cuts[1:], strict=False))):
         sec = lanes.opened_at((pa + pb) / 2, k)
-        if sec is not None and sec.lanes and banned(sec, targets(sec, move.nav)[0]):
+        if sec is not None and sec.lanes and banned(sec, self.wanted(move, (pa + pb) / 2, sec)[0]):
           out = [(pa, out[0][1])] + out[1:] if out and abs(out[0][0] - pb) < 1e-6 else [(pa, pb), *out]
       k -= 1
     return out
@@ -285,7 +311,7 @@ class LaneSlots:
     if before and move.centre:
       want, centre = strict(here, {centre_side(here)}), False
     else:
-      want, centre = targets(here, move.nav)
+      want, centre = self.wanted(move, s, here)
     if show > s or not (want or centre):
       return here, None
     return here, Target(move, want, centre, move.start_at(s, start, end), min(end, move.opens) if before else end,

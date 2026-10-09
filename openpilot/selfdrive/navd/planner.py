@@ -510,14 +510,75 @@ def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> 
   return math.sqrt(speed ** 2 + 2 * decel * max(0.0, dist - v * SLOW_LAG))
 
 
+MAP_AT = 0.5  # m: a lane map this near a maneuver is its junction's or fork's own, past it (Route.info rounds to 0.1 m)
+
+
+def carry(mapping, lane: int) -> int:
+  """The lane `lane` carries on as through one of Route.info's laneMaps' maps; one that ends, as the nearest that
+  carries on (the one it merges into), the left one where they're as near."""
+  n = len(mapping)
+  if not n:
+    return int(lane)
+  lane = min(max(int(lane), 0), n - 1)
+  if mapping[lane] is not None:
+    return mapping[lane]
+  for d in range(1, n):
+    for k in (lane - d, lane + d):
+      if 0 <= k < n and mapping[k] is not None:
+        return mapping[k]
+  return 0
+
+
+def carry_back(mapping, lane: int) -> int:
+  """The lane before a lane map that carries on as `lane`; for a lane that begins there, the one beside it."""
+  came = [i for i, j in enumerate(mapping) if j is not None and j == lane]
+  if came:
+    return came[0]
+  near = [(abs(j - lane), i) for i, j in enumerate(mapping) if j is not None]
+  return min(near)[1] if near else min(max(int(lane), 0), max(len(mapping) - 1, 0))
+
+
+class LaneMaps:
+  """Route.info's laneMaps ([[m ahead, the lane each lane before carries on as, how many after]]): where our lanes
+  change along the route, to follow one lane across the changes as its number from the left changes."""
+  def __init__(self, maps):
+    self.maps = sorted(((float(d), list(m), int(n)) for d, m, n in maps or []), key=lambda m: m[0])
+
+  def between(self, s0: float, s1: float) -> list[tuple[float, list, int]]:
+    """The maps after s0 and before s1 (not at it: a junction's own are past its maneuver)."""
+    return [m for m in self.maps if s0 < m[0] < s1 - MAP_AT]
+
+  def carry(self, lane: int, s0: float, s1: float) -> int:
+    for _, m, _ in self.between(s0, s1):
+      lane = carry(m, lane)
+    return lane
+
+  def lanes(self, lane: int, n: int, s1: float, lo: int, hi: int) -> tuple[int, int] | None:
+    """The lanes of the n at the car (lane() numbers them) that carry on into lanes lo-hi s1 m on; where none do (a
+    bay opening on the way), the one nearest them. None where the maps don't start from n lanes (the reading is
+    from before a change)."""
+    first = self.between(-1.0, s1)
+    if first and len(first[0][1]) != n:
+      return None
+    ends = [self.carry(i, -1.0, s1) for i in range(n)]
+    into = [i for i, e in enumerate(ends) if lo <= e <= hi]
+    if into:
+      return min(into), max(into)
+    near = min(range(n), key=lambda i: (min(abs(ends[i] - lo), abs(ends[i] - hi)), abs(i - lane)))
+    return near, near
+
+
 def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tune | None = None,
-              arrows: list | None = None, drops: list | None = None, opens: list | None = None) -> list[tuple[float, float]]:
+              arrows: list | None = None, drops: list | None = None, opens: list | None = None,
+              maps: list | None = None) -> list[tuple[float, float]]:
   """The lanes nav aims for along the whole route, for the map: [(m along, lane from the left)], ramping between each
   two. From the car's lane (out of the oncoming lanes first), it changes only for a turn or fork whose lanes it isn't
   in (by the map's turn arrows where it has them, Route.info's laneArrows) or to go straight on past lanes that only
   turn or end (laneDrops), by where nav's changes for it must have ended, and arrives from a turn in its side's outside
-  lane. Where lanes begin on the left of ours (`opens`: [m ahead, how many]) it keeps to its lane, now numbered that
-  many further right. lanes_at(m, after) is the lanes the car's way just before (after: past) a point."""
+  lane. Where our lanes change along the road (`maps`, Route.info's laneMaps: lanes beginning or ending on either side,
+  at a node or across a junction) it keeps to its lane as its number changes, a lane that ends merging into the
+  nearest. Without maps, only where lanes begin on the left of ours (`opens`: [m ahead, how many]) is it renumbered.
+  lanes_at(m, after) is the lanes the car's way just before (after: past) a point."""
   t = tune or TUNE
   arrows = parse_arrows(arrows)
   ahead: list[Turn | Fork | Through] = []
@@ -529,6 +590,8 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
   for m in ahead:
     aim(m, arrows)
   ahead += throughs(route, arrows, ahead, drops if t.lane_drops else None)
+  if maps is not None:
+    return _mapped_plan(sorted(ahead, key=lambda m: m.dist), LaneMaps(maps), lane, lanes_at, v, t)
   ahead += [Opening(float(d), int(extra)) for d, extra in opens or [] if d > 0]
   ahead.sort(key=lambda m: m.dist)
   cur = lane[0] if lane else 0
@@ -571,6 +634,92 @@ def lane_plan(route: np.ndarray, forks: list, lane, lanes_at, v: float, tune: Tu
       free = m.dist
     keys += [(m.dist, float(cur)), (m.dist, float(new))]
     cur = new
+  return keys
+
+
+def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune) -> list[tuple[float, float]]:
+  """lane_plan with the lane maps: the lane followed across each change of the road's lanes by a step in its number
+  where it changes (as keys at one place, which lane_line puts either side of the node), also part way through a lane
+  change."""
+  cur = lane[0] if lane else 0
+  keys = [(0.0, float(cur))]
+  todo = list(maps.maps)  # the maps not yet passed, nearest first
+  here = [m for m in todo if m[0] <= 0.0]
+  todo = [m for m in todo if m[0] > 0.0]
+  free = 0.0  # m along from which the next change may start: past the turn or fork before
+  if cur < 0:
+    free, cur = -cur * LANE_LINE_CHANGE, 0
+    keys.append((free, 0.0))
+  elif here and lane and len(here[0][1]) == lane[1]:  # the car's lanes as the route's road numbers them there
+    for _, m, _ in here:
+      cur = carry(m, cur)
+    keys = [(0.0, float(cur))]
+  pos = free  # keys are laid to here; cur is the lane there
+
+  def upto(s: float) -> int:
+    return next((k for k, m in enumerate(todo) if m[0] >= s - MAP_AT), len(todo))
+
+  def hold(lane: int, s: float, mark: bool = True) -> int:
+    """On in the lane to s, through the maps before it, which are passed."""
+    for d, m, _ in todo[:upto(s)]:
+      new = carry(m, lane)
+      if mark:
+        keys.extend([(d, float(lane)), (d, float(new))])
+      lane = new
+    del todo[:upto(s)]
+    return lane
+
+  def ramp(x: int, s0: float, y: int, s1: float):
+    """From lane x at s0 to y at s1 (each numbered as the road is there), across the changes between."""
+    inside = todo[:upto(s1)]
+    del todo[:len(inside)]
+    xs = [x]
+    for _, m, _ in inside:
+      xs.append(carry(m, xs[-1]))
+    ys = [y]
+    for _, m, _ in reversed(inside):
+      ys.insert(0, carry_back(m, ys[0]))
+    keys.append((s0, float(x)))
+    for k, (d, _, _) in enumerate(inside):
+      f = min(max((d - s0) / max(s1 - s0, 1e-6), 0.0), 1.0)
+      keys.extend([(d, xs[k] + (ys[k] - xs[k]) * f), (d, xs[k + 1] + (ys[k + 1] - xs[k + 1]) * f)])
+    keys.append((s1, float(y)))
+
+  if pos > 0.0:
+    cur = hold(cur, pos, mark=False)  # out of the oncoming lanes meanwhile
+  for m in ahead:
+    n = lanes_at(m.dist, False)
+    if n <= 0:
+      continue
+    at = cur
+    for _, mp, _ in todo[:upto(m.dist)]:
+      at = carry(mp, at)
+    at = min(at, n - 1)
+    lo, hi = m.lanes(n)
+    if not lo <= at <= hi:
+      want = lo if at < lo else hi
+      last = max(FORK_LAST_DIST, FORK_LAST * v) if isinstance(m, Fork) else t.lane_change_last
+      end = max(min(max(m.dist - last, free), m.dist), pos)
+      start = max(min(max(end - abs(want - at) * LANE_LINE_CHANGE, free), end), pos)
+      cur = hold(cur, start)
+      to = want
+      for _, mp, _ in reversed(todo[upto(end):upto(m.dist)]):
+        to = carry_back(mp, to)
+      ramp(cur, start, to, end)
+      cur, pos = to, end
+    cur = min(hold(cur, m.dist), n - 1)
+    pos = m.dist
+    if isinstance(m, Turn):
+      # out of the junction in its side's outside lane, of the road out past any of the junction's own links
+      out = max(lanes_at(m.dist, True), lanes_at(m.dist + TURN_HOLDS, False))
+      new = 0 if m.side == "left" else max(out - 1, 0)
+      keys += [(m.dist, float(cur)), (m.dist, float(new))]
+      cur = new
+      del todo[:upto(m.dist + TURN_HOLDS)]  # the junction's: nav picks the lane out
+      free = m.dist + TURN_HOLDS
+    else:
+      free = m.dist
+  hold(cur, math.inf)
   return keys
 
 
@@ -644,6 +793,7 @@ class Planner:
     self.recover_t = 0.0
     self.oncoming_since: float | None = None
     self.lane: tuple[int, int] | None = None  # the car's lane [i from the left, of n], once it has held LANE_STEADY
+    self.maps: LaneMaps | None = None  # where the road's lanes change ahead (NavInputs.lane_maps)
     self.lane_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
     self.lane_t = 0.0  # when the lane reading last held
     self.skipped: list[np.ndarray] = []  # where turns and forks left to the route are
@@ -683,6 +833,7 @@ class Planner:
     route = inp.route
     pos = np.array(inp.pos[:2], dtype=float)
     self._read_lane(inp.truth_lane, now)
+    self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
     if not engaged:
       self._cancel(indicator)
       self._end_change(indicator)
@@ -1047,7 +1198,7 @@ class Planner:
     if self._bay_beside(turn, bay) and self.driven >= self.bay_to and turn.dist > BAY_LAST:
       return False  # into the turn bay first
     if self.lane is not None and self.lane[0] >= 0:
-      lo, hi = turn.lanes(self.lane[1])
+      lo, hi = self._lanes_for(turn)
       if not lo <= self.lane[0] <= hi:
         if turn.dist > t.lane_change_last or (self.changing is not None and turn.dist > SIGNAL_LAST_DIST):
           return False  # a lane change towards it may still come or finish
@@ -1075,6 +1226,19 @@ class Planner:
     self.bay_to = self.driven + turn.dist + TURN_HOLDS
     self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m")
 
+  def _lanes_for(self, m) -> tuple[int, int]:
+    """The lanes of the car's road (self.lane's) to be in for a turn, fork or way straight on: its own lanes at its
+    junction, followed back to the car across where the road's lanes change (laneMaps); without them, or with a
+    lane reading from before a change, its lanes counted from its side."""
+    i, n = self.lane
+    if self.maps is not None:
+      before = self.maps.between(-1.0, m.dist)
+      lo, hi = m.lanes(before[-1][2] if before else n)
+      found = self.maps.lanes(i, n, m.dist, lo, hi)
+      if found is not None:
+        return found
+    return m.lanes(n)
+
   def _sure_wrong(self, lo: int, hi: int) -> bool:
     """Whether the car is surely out of lanes lo-hi, by its position on the route's link (not just between lanes, as
     the model ends lane changes early on GTA's wide lanes), the plugin not disagreeing."""
@@ -1095,7 +1259,7 @@ class Planner:
     i, n = self.lane
     allowed = (0, n - 1)
     for m in ahead:
-      lo, hi = m.lanes(n)
+      lo, hi = self._lanes_for(m)
       if lo <= i <= hi:
         allowed = (max(allowed[0], lo), min(allowed[1], hi))
         continue
@@ -1139,7 +1303,7 @@ class Planner:
     want = self.fork_keep if self.driven < self.fork_keep_to and self.turn is None else None
     against = fork is not None and turn is not None and turn.side != fork.side and turn.dist - fork.dist < FORK_TURN
     if fork is not None and fork.keep and not against and self.turn is None and fork.dist < max(FORK_KEEP_DIST, FORK_KEEP * v):
-      lo, hi = fork.lanes(self.lane[1]) if self.lane is not None else (0, 0)
+      lo, hi = self._lanes_for(fork) if self.lane is not None else (0, 0)
       if self.lane is None or lo <= self.lane[0] <= hi:
         want = "keepLeft" if fork.side == "left" and self.one_way else "keepRight" if fork.side == "right" else None
         self.fork_keep_to = self.driven + fork.dist + FORK_KEEP_PAST

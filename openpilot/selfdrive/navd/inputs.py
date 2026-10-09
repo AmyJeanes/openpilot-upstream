@@ -32,6 +32,9 @@ class NavInputs:
   limits: list | None = None  # [[m ahead, m/s or 0 unknown], ...]
   lane_arrows: list | None = None  # [[m ahead, [each lane's arrows from the left, ";"-separated]], ...]
   lane_drops: list | None = None  # [[m ahead, first and last lane that carry on, of how many], ...]
+  # where our lanes change along the road: [[m ahead, the lane each lane before carries on as (None: it ends), how many
+  # after], ...], the first at 0 m from the car's lanes as truth_lane numbers them where they differ from the road's
+  lane_maps: list | None = None
   two_way: bool | None = None  # the road here, None unknown
   # truth
   pos: tuple | list = (0.0, 0.0)  # [x, y] m
