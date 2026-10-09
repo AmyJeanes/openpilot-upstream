@@ -114,6 +114,16 @@ entering the junction, rather than 5 s before it. How far the model turns depend
 turn's speed holds through the arc until the car heads its way out and is straight (`turn_release`, `turn_release_m`)
 and lifts at `release_accel`; nav logs the speeds into, through and out of each turn.
 
+On motorways and trunks (the map's road classes, so only on a map route), nav moves over for an exit or fork far
+ahead: `fwy_lane_time` s of travel per lane to cross (30 s; 0 times them as on any road) at the road's limit or the
+car's speed if higher, the changes done `fwy_clear` m before the gore, spread evenly over less room where there isn't
+that much, and none sooner than `fwy_settle` s past the maneuver before (a fork or keep it takes, a turn, an on-ramp's
+merge) or into lanes that leave the route before its exit; its lane line shows the same changes. The bridge's route
+reaches 3.5 km ahead for them. Nav plans from the car's lane by `lane_source`: `map` (the bridge's reading on the
+route), `model` (the driving model's `modelV2.laneHead`), or `fused` (the default; also `NAVD_LANE_SOURCE`), the model's
+once it has been sure of it (`model_lane_prob`) for `model_lane_hold` s and counts as many lanes as the map, else the
+map's. `NAVD_LANE_LOG=<file>` logs both each step as JSON lines, to score the model's lane against the map's.
+
 The model chooses where to turn and doesn't always: after a stop it can carry straight on, and with a turn asked for
 and no turning to take it stops, so a turn is signalled only within 50 m of one. `GTA5_DEBUG=1` prints nav's decisions.
 `gta5_cmd.py waypoint x= y=` sets a waypoint (`off=1` clears it).

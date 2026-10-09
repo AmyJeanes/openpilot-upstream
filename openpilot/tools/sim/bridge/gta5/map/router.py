@@ -117,8 +117,13 @@ class Route:
     self.limit_list = [round(float(v), 2) for v in self.limits]
     self._lanes: RouteLanes | None = None
     self._lanes_of: list | None = None  # the links a RouteLanes from GTA's layout was made from
+    self.classes = [""] * max(n - 1, 0)  # each segment's road class (the map's highway tag), "" unknown
     if self.osm_lanes:
-      self._lanes = RouteLanes.from_osm(points, ways_from_nodes(points, osm), osm)
+      ways_along = ways_from_nodes(points, osm)
+      self._lanes = RouteLanes.from_osm(points, ways_along, osm)
+      for w, _, i0, i1 in ways_along:
+        for k in range(max(i0, 0), min(i1, len(self.classes))):
+          self.classes[k] = osm.ways[w][0].get("highway", "")
     self._maps: list | None = None  # lane_maps along the whole route
     self._turns: list | None = None  # turns along the whole route
     self.lane_counts = [sec.lanes if (sec := self.section(k)) is not None else 0 for k in range(max(n - 1, 0))]
@@ -368,6 +373,7 @@ class Route:
                 if -FORK_BEHIND < f.along - self.at < distance],
       "limits": self.changes(self.limit_list, distance),
       "laneCounts": self.changes(self.lane_counts, distance),
+      "roadClasses": self.changes(self.classes, distance),
       "stops": [round(a - self.at, 1) for a in self.stops if -JUNCTION_BEHIND < a - self.at < distance],
       "stopKinds": [k for a, k in zip(self.stops, self.stop_kinds, strict=True) if -JUNCTION_BEHIND < a - self.at < distance],
       "junctions": [round(a - self.at, 1) for a in self.junctions if -JUNCTION_BEHIND < a - self.at < distance],
