@@ -196,6 +196,36 @@ def test_two_way_road_beside_a_turn_bay_has_a_lane_line_not_a_kerb():
   assert len(kept) == 1 and not lines and _len(kept[0]) > 99.0
 
 
+def test_kerb_runs_on_along_a_turn_bay_mouth():
+  # a two-way road 23 m wide along y = 0 to x = 0, then 14.2 m (its south kerb in from y = -11.5 to -7.1): GTA lays the
+  # right-turn bay that fills the difference as a one-way way from the road's middle at x = 0 out to (14, -9.7), its
+  # outer edge ending on the wider road's kerb carried on, where it parts into a lane back to the road and a right-turn
+  # lane along y = -9.7. The kerb runs on straight along the outside of the bay to the turn lane's, whose own kerb all
+  # stays; the narrower road's kerb along the bay doesn't (Vinewood Blvd before Meteor St)
+  road = {'highway': 'primary', 'lanes': '4', 'width': '23'}
+  narrow = {**road, 'width': '14.2'}
+  bay = {'highway': 'residential', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}
+  nodes = {1: (-30.0, 0.0), 2: (0.0, 0.0), 3: (40.0, 0.0), 4: (60.0, 0.0), 5: (14.0, -9.7), 6: (40.0, -9.7)}
+  ways = {1: (road, [1, 2]), 2: (narrow, [2, 3]), 3: (narrow, [3, 4]), 4: (bay, [2, 5]), 5: (bay, [5, 3]),
+          6: ({**bay, 'width': '4.4'}, [5, 6])}
+  osm = make(nodes, ways)
+  side = SideBySide(osm, list(ways), lambda w: 0)
+
+  def kerb(wid, right):
+    lo, hi = osm.lanes(wid).edges(FORWARD)
+    return side.kerb(offset_line(osm.way_points(wid), hi if right else lo), None, 0, {wid}, right)
+  kept, _ = kerb(1, True)
+  assert len(kept) == 1 and np.abs(kept[0][:, 1] + 11.5).max() < 0.01, [p.round(1).tolist() for p in kept]
+  assert kept[0][:, 0].min() < -29.9 and 13.5 < kept[0][:, 0].max() < 14.5, kept[0].round(1).tolist()
+  kept, _ = kerb(2, True)
+  assert all(p[:, 0].min() >= 14.0 for p in kept), [p.round(1).tolist() for p in kept]
+  kept, _ = kerb(6, True)
+  assert len(kept) == 1 and _len(kept[0]) > 25.9, [p.round(1).tolist() for p in kept]
+  assert kerb(4, True) == ([], []) and kerb(4, False) == ([], [])
+  kept, _ = kerb(1, False)  # no bay on the north side: its kerb stops at the node
+  assert len(kept) == 1 and kept[0][:, 0].max() < 0.01
+
+
 def _len(p):
   return float(np.hypot(*np.diff(p, axis=0).T).sum())
 

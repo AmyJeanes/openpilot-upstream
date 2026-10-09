@@ -523,7 +523,7 @@ def road_marks(paths, osm) -> dict:
     gta = [found[0] for n in j.nodes if (found := paths.nodes_at(osm.node_xy(n)))]
     at.append((float(np.mean(paths.z[gta])), gta[0]) if gta else None)
   paint = PaintAreas(junctions)
-  side = SideBySide(osm, [w for w in junctions.ways if w not in junctions.inside], lambda w: level(osm.ways[w][0])[0])
+  side = SideBySide(osm, [w for w in junctions.ways if w not in junctions.inside], lambda w: level(osm.ways[w][0])[0], paint)
 
   ends, kinds, nodes = [], [], []
 
