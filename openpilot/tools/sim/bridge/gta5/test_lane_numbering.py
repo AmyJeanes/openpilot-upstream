@@ -172,6 +172,25 @@ def test_map_split_takes_its_side():
   assert abs(at(100.0) - 1.75) < 0.05 and abs(at(275.0) - 5.25) < 0.05
 
 
+def test_carriageway_joins_its_two_way_road():
+  # one carriageway of a divided road (a one-lane one-way) becomes a two-way road with a left-turn bay where the median
+  # was, the other carriageway leaving the node: the carriageway's lane carries on as the road's right lane, the
+  # outside kerb kept, though the road's line runs down the bay (where the ways' lines lie says the bay)
+  nodes = {1: (0.0, 0.0), 2: (0.0, 150.0), 3: (0.0, 350.0), 5: (-12.0, 0.0)}
+  two_way = {'highway': 'residential', 'lanes': '3', 'lanes:forward': '1', 'lanes:backward': '2', 'width': '15.5',
+             'width:lanes:forward': '5.5', 'width:lanes:backward': '4.5|5.5', 'placement:backward': 'middle_of:1'}
+  for turns in (None, 'left|right;through'):
+    tags = dict(two_way, **({'turn:lanes:backward': turns} if turns else {}))
+    ways = {1: ({'highway': 'residential', 'oneway': 'yes', 'lanes': '1', 'width': '5.5'}, [1, 2]), 2: (tags, [3, 2]),
+            3: ({'highway': 'residential', 'oneway': 'yes', 'lanes': '1', 'width': '5.5'}, [2, 5])}
+    r = Route(np.array([nodes[1], nodes[2], nodes[3]]), [{'type': START, 'begin_shape_index': 0},
+                                                        {'type': DEST, 'begin_shape_index': 2}], osm=osm_map(nodes, ways))
+    r.locate(np.array([0.0, 1.0]), heading=0.0)
+    assert maps(r) == [(150, [1], 2)], turns
+    at = ribbon(r, 0, 1)
+    assert abs(at(100.0)) < 0.05 and abs(at(250.0) - 5.0) < 0.05, (turns, at(100.0), at(250.0))
+
+
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
   from openpilot.tools.sim.bridge.gta5.gta5_world import on_path
@@ -305,6 +324,19 @@ def test_live_freeway_merge_exit_and_splits():
   r, keys, ramps = live_plan(router, -741.90, -1838.37, 26.97, 196.2, dest, lane=[0, 1])
   split = next(s for s, m, _ in r.lane_maps_along() if None in m)
   assert ramps and ramps[0][1] <= split - r.at + 0.01 and ramps[0][3] == 1.0
+
+
+def test_live_meteor_carriageway_into_its_road():
+  # Meteor St (530.3, 149.1), heading 163, in the right of the divided road's carriageways as they become one road with
+  # a left-turn bay, the route turning right ahead: the carriageway's lane is the road's right lane, no change at all
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  r, keys, ramps = live_plan(router, 530.3, 149.1, 98.2, 163.0, (-813.6, 179.5))
+  assert r.lane() == [0, 1]
+  assert [(round(s - r.at), list(m)) for s, m, _ in r.lane_maps_along()][:1] == [(18, [1])]
+  assert not [c for c in ramps if c[0] < 70.0]
 
 
 def test_live_alta_bay_from_its_opening():

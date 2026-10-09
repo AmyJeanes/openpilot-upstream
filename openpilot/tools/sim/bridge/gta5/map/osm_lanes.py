@@ -1253,7 +1253,9 @@ class RouteLanes:
       pa, pb = self.points[r[1] + 1], self.points[q[0]]
       na, nb = (_right_normal(self.points[k + 1] - self.points[k]) for k in (r[1], q[0]))
       ours_a = [(float((pa + na * x - pb) @ nb), float((pa + na * y - pb) @ nb)) for x, y in ours_a]
-    side = _turn_side(a, b)
+    side = _turn_side(self._arrowed(r, sa, -1) or a, self._arrowed(q, sb, 1) or b)
+    if side is None:
+      side = _median_side(a, b)
     if side is None and sb - sa <= EPS and b.lanes > a.lanes and q[0] in self.merges:
       side = self.merges[q[0]]  # another road's lanes join ours on its side: two ways' lines meet at the node anyhow
     if side is None and sb - sa <= EPS and b.lanes < a.lanes and q[0] in self.splits:
@@ -1262,6 +1264,18 @@ class RouteLanes:
       shift = (b.lanes - a.lanes) if side else 0
       return [i + shift if 0 <= i + shift < b.lanes else None for i in range(a.lanes)]
     return match_lanes(ours_a, [(s.left, s.right) for s in b.ours])
+
+  def _arrowed(self, run: list[int], s: float, step: int) -> Section | None:
+    """The first cross-section with turn arrows in a run of segments of one layout, from its end at s (step -1: back
+    from its last segment; 1: on from its first) within ARROWS_REACH m; None for none."""
+    ks = range(run[1], run[0] - 1, -1) if step < 0 else range(run[0], run[1] + 1)
+    for k in ks:
+      if (s - self.along[k + 1] if step < 0 else self.along[k] - s) > ARROWS_REACH:
+        break
+      sec = self.sections[k]
+      if sec is not None and any(sec.turns):
+        return sec
+    return None
 
   def segment(self, s: float) -> int:
     return int(min(max(np.searchsorted(self.along, s, side='right') - 1, 0), max(len(self.sections) - 1, 0)))
@@ -1560,6 +1574,24 @@ def _turn_side(a: Section, b: Section) -> bool | None:
   if _left_only(many) and not _left_only(few):
     return True
   return False if _right_only(many) and not _right_only(few) else None
+
+
+ARROWS_REACH = 60.0  # m past a change of our lanes that the arrows of the lanes there say which side they changed on
+
+
+def _median_side(a: Section, b: Section) -> bool | None:
+  """Where one direction's carriageway of a divided road and the two-way road it becomes meet (a one-way's lanes and
+  a road's with oncoming lanes, as many or not), the side our lanes begin or end on: the side the other direction is
+  on, where the median was (True: on the left). The outside kerb carries on, whatever the ways' lines say. None
+  otherwise."""
+  if a.lanes == b.lanes or not a.lanes or not b.lanes:
+    return None
+  one, two = (a, b) if not a.two_way else (b, a)
+  if one.two_way or not two.two_way:
+    return None
+  left = any(sp.heading == -1 for sp in two.spans[:two.first])
+  right = any(sp.heading == -1 for sp in two.spans[two.first + two.lanes:])
+  return None if left == right else left
 
 
 LANE_GAP = 0.5  # of a lane's width: the cost of a lane carrying on as none, matching lanes across a change by place
