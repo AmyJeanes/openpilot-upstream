@@ -36,6 +36,14 @@ SIDE_DETOUR = 30.0  # s: arriving with the destination on the kerb side may take
 # on a map without lane tags, where nav's stop lines are GTA's nodes: a stop line counts only on the way towards its
 # junction, not for a route leaving the junction past it (off: both)
 STOP_DIRECTION = os.getenv("GTA5_STOP_DIRECTION", "0") == "1"
+# U-turns, which the expert's AI won't drive (ForceJoinInRoadDirection): Valhalla's U-turn maneuvers, and turns sharper
+# than SHARP_TURN through a junction's links (two lefts across a median). Valhalla's auto costing has no U-turn option
+# (it allows them only at dead ends, and the map forbids them where GTA's links make one), so a route with one is
+# swapped for one of ALTERNATES alternatives without, else for one avoiding the spot (UTURN_INTO m into the turn)
+UTURN_TYPES = {12, 13}
+SHARP_TURN = 150.0  # deg
+ALTERNATES = 2
+UTURN_INTO = 8.0  # m
 
 
 def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float]]:
@@ -57,6 +65,23 @@ def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float
       else:
         lon += delta
     out.append((lat / 10 ** precision, lon / 10 ** precision))
+  return out
+
+
+def sharp_turns(route: "Route") -> list[float]:
+  """m along the route to its U-turns: Valhalla's U-turn maneuvers, and turns (a run of them through a junction's links
+  as one) changing heading by more than SHARP_TURN from before the turn to past its links."""
+  from openpilot.selfdrive.navd.maneuvers import HEADING_SPAN, heading_between, junction_maneuvers, route_point
+  out, n = [], len(route.along)
+  for m in junction_maneuvers(route):
+    i = m.get("begin_shape_index", 0)
+    if m.get("type") in (0, 1, 2, 3, 4, 5, 6) or i >= n - 1:
+      continue  # the start and the destination
+    s, exit_s = float(route.along[i]), float(route.along[min(m.get("exit_shape_index", i), n - 1)])
+    heading_in = heading_between(route_point(route, s - HEADING_SPAN), route_point(route, s))
+    heading_out = heading_between(route_point(route, exit_s), route_point(route, exit_s + HEADING_SPAN))
+    if m.get("type") in UTURN_TYPES or abs(wrap(heading_out - heading_in)) > SHARP_TURN:
+      out.append(s)
   return out
 
 
@@ -98,6 +123,7 @@ class Route:
     self.off = 0.0  # m off the route
     self.misaligned = 0.0  # deg between the car's heading and the route's there
     self.elsewhere = False  # on another level or heading the other way, where right and seg are from before
+    self.uturns_avoided = False  # Router took another route for the one first found, which had a U-turn
     n = len(points)
     self.z = np.full(n, np.nan)
     self.links: list[Link | None] = [None] * max(n - 1, 0)
@@ -518,28 +544,65 @@ class Router:
         if n == len(ends) - 1:
           raise
     assert trip is not None
+    used = ends[n]
     if snap is not None and not snap.as_is and snap.kerb_side and n == 0:
       try:  # either way, if the kerb side means going a long way round
         either = self._post('route', {**request, 'locations': [start, ends[1]]})['trip']
         if either['summary']['time'] + SIDE_DETOUR < trip['summary']['time']:
-          trip = either
+          trip, used = either, ends[1]
       except urllib.error.HTTPError:
         pass
-    points, maneuvers, limits = [], [], []
+    points, maneuvers = self._shape(trip, snapped)
+    uturns, avoided = sharp_turns(Route(points, maneuvers)), False
+    if uturns:
+      other = self._without_uturns({**request, 'locations': [start, used]}, snapped, points, uturns)
+      if other is not None:
+        trip, (points, maneuvers), avoided = other, self._shape(other, snapped), True
+    route = Route(points, maneuvers, self.paths, self._trip_limits(trip, len(points)), self.osm)
+    route.uturns_avoided = avoided
+    return route
+
+  def _shape(self, trip: dict, snapped) -> tuple[np.ndarray, list[dict]]:
+    """A trip's points (game metres, from the car where the route starts at the node ahead of it) and maneuvers."""
+    points, maneuvers = [], []
     for leg in trip['legs']:
       base = len(points)
-      leg_points = [to_game(lat, lon) for lat, lon in decode_polyline(leg['shape'])]
-      points += leg_points
+      points += [to_game(lat, lon) for lat, lon in decode_polyline(leg['shape'])]
       maneuvers += [{**m, 'begin_shape_index': m['begin_shape_index'] + base} for m in leg['maneuvers']]
-      limits.append(self._limits(leg['shape'], len(leg_points)))
-      if base:
-        limits[-2] = np.append(limits[-2], 0.0)  # the segment joining the legs
-    limits = np.concatenate(limits) if limits else np.zeros(0)
     if snapped is not None and points and np.hypot(*(np.array(points[0]) - self.paths.xy[snapped[2]])) < 1.5:
       points.insert(0, tuple(snapped[0]))
       maneuvers = [{**m, 'begin_shape_index': m['begin_shape_index'] + 1} for m in maneuvers]
+    return np.array(points, dtype=float), maneuvers
+
+  def _trip_limits(self, trip: dict, n: int) -> np.ndarray:
+    """The speed limits along a trip's n points (_shape's)."""
+    limits = []
+    for leg in trip['legs']:
+      limits.append(self._limits(leg['shape'], len(decode_polyline(leg['shape']))))
+      if len(limits) > 1:
+        limits[-2] = np.append(limits[-2], 0.0)  # the segment joining the legs
+    limits = np.concatenate(limits) if limits else np.zeros(0)
+    if n and len(limits) < n - 1:  # the route starting at the car, before the node ahead
       limits = np.concatenate((limits[:1], limits))
-    return Route(np.array(points, dtype=float), maneuvers, self.paths, limits, self.osm)
+    return limits
+
+  def _without_uturns(self, request: dict, snapped, points: np.ndarray, uturns: list[float]) -> dict | None:
+    """Another trip for request without U-turns: one of Valhalla's alternatives, else one kept off the U-turns' spots."""
+    try:
+      res = self._post('route', {**request, 'alternates': ALTERNATES})
+      for alt in res.get('alternates', []):
+        if not sharp_turns(Route(*self._shape(alt['trip'], snapped))):
+          return alt['trip']
+    except (urllib.error.HTTPError, KeyError):
+      pass
+    along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))))
+    spots = [to_lat_lon(float(np.interp(s + UTURN_INTO, along, points[:, 0])), float(np.interp(s + UTURN_INTO, along, points[:, 1])))
+             for s in uturns]
+    try:
+      trip = self._post('route', {**request, 'exclude_locations': [{'lat': lat, 'lon': lon} for lat, lon in spots]})['trip']
+    except (urllib.error.HTTPError, KeyError):
+      return None
+    return trip if not sharp_turns(Route(*self._shape(trip, snapped))) else None
 
   def _limits(self, shape: str, n: int) -> np.ndarray:
     """The map's speed limit (m/s, 0 where it has none) along each segment of a route's shape."""
