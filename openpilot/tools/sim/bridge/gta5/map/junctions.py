@@ -5,7 +5,9 @@ into it at its traffic signals, stop and give way signs. Only standard tags are 
 map as on our GTA V one.
 
 - Junction nodes are where three or more roads meet, and only where they share the node: roads crossing over each
-  other never make one. A node where a road's lanes part into ways side by side (fewer than three arms) isn't one.
+  other never make one. A node where a road's lanes part into ways side by side (fewer than three arms) isn't one, nor
+  one where a one-way lane only leaves a two-way road or joins it on its own side, at a shallow angle (LANE_SPLIT), and
+  stays beside it (BESIDE_REACH), as GTA lays a turn bay as a way of its own with lane changes to and from it.
 - Junction nodes joined by a road shorter than CLUSTER_LINK (and their widest road's width), or whose trimmed ends
   would overlap along a road shorter than MERGE_LINK, make one junction, as where a divided road crosses another
   (osm2streets merges such short roads into the junction); the roads between them are inside it. Junctions further
@@ -72,7 +74,9 @@ CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
-MERGE_FLOW = 30.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
+MERGE_FLOW = 45.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
+LANE_SPLIT = 50.0  # deg: a one-way lane leaving or joining a two-way road within this of its traffic, on its side ...
+BESIDE_REACH = 30.0  # m: ... and beside the road this far along (within its kerb and the lane's width), only parts or merges
 FREEWAY_FLOW = 60.0  # deg: ... or of this where one is a freeway's (GTA lays a diverge's lane changes as short links across it)
 U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
 LANE_CHANGE_M = 40.0  # m: GTA's lane changes between carriageways are 10-25 m long
@@ -651,7 +655,7 @@ class Junctions:
         if m is not None:
           members.append(m)
     if len(members) < 3 or all(self.freeway(self.ways[m.ways[0][0]][0]) for m in members) or \
-        self.merges(members, [w for ways, _ in links for w, _ in ways]):
+        self.merges(members, [w for ways, _ in links for w, _ in ways]) or (len(nodes) == 1 and self.lane_split(members)):
       return None  # freeways only merge and part, with no junction between
     centre = np.mean([self.osm.node_xy(n) for n in nodes], axis=0)
 
@@ -699,6 +703,32 @@ class Junctions:
   def freeway(tags: dict) -> bool:
     """A motorway's, or a one-way trunk road's: a divided highway's carriageway, or a lane change across one."""
     return tags.get('highway') in FREEWAY or (tags.get('highway', '').removesuffix('_link') == 'trunk' and oneway_of(tags) != 0)
+
+  def lane_split(self, members: list[Member]) -> bool:
+    """Whether the roads out of a node are a two-way road carried straight on through it and one-way ways only leaving
+    it or joining it, each on the side its traffic that way drives on and within LANE_SPLIT of that traffic's heading: a
+    lane parting from or merging into it, with no traffic crossing."""
+    two = [m for m in members if not oneway_of(self.ways[m.ways[0][0]][0])]
+    one = [m for m in members if oneway_of(self.ways[m.ways[0][0]][0])]
+    if len(two) != 2 or not one or math.cos(two[0].heading - two[1].heading) > -math.cos(math.radians(MERGE_FLOW)):
+      return False
+    for m in one:
+      w, along = m.ways[0]
+      flow = m.heading if (oneway_of(self.ways[w][0]) == 1) == along else m.heading + math.pi
+      road = max(two, key=lambda r: math.cos(r.heading - flow)).heading  # the traffic it leaves with or joins
+      if math.cos(flow - road) < math.cos(math.radians(LANE_SPLIT)):
+        return False
+      left_of = math.sin(m.heading - road) > 0  # its way out from the node lies left of that traffic's line
+      if left_of == self.osm.drive_on_right:
+        return False
+      # beside the road: not a slip road away to another one
+      side = max(two, key=lambda r: math.cos(r.heading - m.heading))
+      p, u = side.line.at(0.0), side.line.tangent(0.0)
+      q = m.line.at(min(BESIDE_REACH, m.line.length))
+      lo, hi = self.osm.lanes(w).edges(FORWARD)
+      if abs(_cross(u, q - p)) > max(abs(e) for e in side.edges) + (hi - lo) + 1.0:
+        return False
+    return True
 
   def merges(self, members: list[Member], inside: list[int]) -> bool:
     """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW (FREEWAY_FLOW where one is a

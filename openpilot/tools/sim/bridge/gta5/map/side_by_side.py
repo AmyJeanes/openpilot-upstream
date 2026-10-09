@@ -11,6 +11,10 @@ not from its own lanes there), the branches' kerbs are left out where they lie i
 straight past its end (by GORE m, and SHARED in from its edges, so a branch running on along its edge keeps its kerb):
 they cross its lanes until the branches part, at the gore. Likewise where several merge into one, back from its start.
 
+A one-way way's kerb is also left out on a two-way road's carriageway, running along it either way: GTA lays a turn bay
+beside a two-way road as a one-way way leaving it from its middle, with lane changes to and from it across its lanes
+(junctions.py's lane_split: no junction there), and their kerbs crossed its lanes.
+
 GTA also lays lane changes (junctions.lane_changes: a one-way way up to LANE_CHANGE_M long turning off a carriageway
 that goes on, into another that came from elsewhere, all running about one way) across the painted gore where two carriageways part or meet, and
 their kerbs crossed it. One with a stretch over GAP_M on no other carriageway (`across`) is part of the surface: it has
@@ -43,6 +47,7 @@ class SideBySide:
     self.osm, self.layer_of = osm, layer_of
     self.first, self.last = {}, {}
     self._crosses: dict[int, bool] = {}
+    self.two_way: set[int] = set()  # the two-way roads among them, whose carriageways a one-way way's kerb can lie on
     # each segment's way, middle, carriageway widened by SHARED, the strip along its left edge, unit heading, layer, height
     self.quads: list[tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float | None]] = []
     self._cells: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -80,6 +85,11 @@ class SideBySide:
         near = q - u * SHARED  # from just before its end: a branch's kerb starts beside its first node
         inner = np.array([near + r * (lo + SHARED), far + r * (lo + SHARED), far + r * (hi - SHARED), near + r * (hi - SHARED)])
         self.gores[node].append((inner, u if node == refs[-1] else -u, layer_of(wid), None if zz is None else float(zz)))
+    for wid in ways:
+      tags, refs = osm.ways[wid]
+      if oneway_of(tags) == 0 and len(refs) >= 2:
+        self.two_way.add(wid)
+        self._add_quads(wid)
 
   def _add_quads(self, wid: int):
     refs = self.osm.ways[wid][1]
@@ -190,18 +200,20 @@ class SideBySide:
           covered[idx[in_fan(mids[idx], inner.mean(0), inner)]] = True
     for n, idx in tests.items():
       wid, centre, surface, strip, heading, quad_layer, quad_z = self.quads[n]
-      if wid in ways or self.last[wid] in begin or self.first[wid] in finish or quad_layer != layer:
+      two_way = wid in self.two_way
+      if wid in ways or quad_layer != layer or (not two_way and (self.last[wid] in begin or self.first[wid] in finish)):
         continue  # a way carrying on from or into this run isn't beside it
       idx = np.concatenate(idx)
       lo, hi = surface.min(0), surface.max(0)
-      idx = idx[(u[idx] @ heading >= cos) & (mids[idx] >= lo).all(1) & (mids[idx] <= hi).all(1)]
+      along = np.abs(u[idx] @ heading) if two_way else u[idx] @ heading
+      idx = idx[(along >= cos) & (mids[idx] >= lo).all(1) & (mids[idx] <= hi).all(1)]
       if zm is not None and quad_z is not None:
         idx = idx[np.abs(zm[idx] - quad_z) < LEVEL]
       if not len(idx):
         continue
       on = in_fan(mids[idx], centre, surface)
       covered[idx[on]] = True
-      if right:
+      if right and not two_way:
         meets = idx[on & in_fan(mids[idx], strip.mean(0), strip) & (u[idx] @ heading >= np.cos(np.radians(PARALLEL)))]
         beside[meets] = wid
     return pts, covered, beside

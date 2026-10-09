@@ -137,6 +137,26 @@ def test_no_kerbs_across_a_diverge():
   assert xs(kept(8, True)) == [(300, 400)]
 
 
+def test_no_kerbs_on_a_two_way_road():
+  # a one-way turn bay leaving a two-way road (18 m wide along y = 0) from its middle at x = 0, out to y = -12 by x = 20:
+  # its kerbs are left out where they lie on the road's carriageway (out to y = -9 - SHARED), not across its lanes
+  road = {'highway': 'primary', 'lanes': '4', 'width': '18'}
+  bay = {'highway': 'residential', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0), 4: (20.0, -12.0), 5: (100.0, -12.0)}
+  ways = {1: (road, [1, 2]), 2: (road, [2, 3]), 3: (bay, [2, 4]), 4: (bay, [4, 5])}
+  osm = make(nodes, ways)
+  side = SideBySide(osm, list(ways), lambda w: 0)
+  for right in (False, True):
+    pts = osm.way_points(3)
+    lo, hi = osm.lanes(3).edges(FORWARD)
+    kept, _ = side.kerb(offset_line(pts, hi if right else lo), None, 0, {3}, right)
+    assert all(np.all(p[:, 1] < -9.0) for p in kept), (right, [p.round(1).tolist() for p in kept])
+  pts = osm.way_points(4)  # its own carriageway beside the road keeps its outer kerb
+  lo, hi = osm.lanes(4).edges(FORWARD)
+  kept, _ = side.kerb(offset_line(pts, hi), None, 0, {4}, True)
+  assert sum(float(np.hypot(*np.diff(p, axis=0).T).sum()) for p in kept) > 75.0
+
+
 def test_outer_lines_and_missing_lane_lines():
   # a one-way link's lanes from -6 to 6: a solid line at its left edge, dashed at its right, the next links' lines
   samples = [sample([mark(-6.1, kind='solid'), mark(5.9), mark(12.0)], s) for s in (2.0, 5.0, 8.0)]
