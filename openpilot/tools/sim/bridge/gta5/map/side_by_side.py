@@ -194,6 +194,8 @@ class SideBySide:
     kz = None if z is None else (np.asarray(z, float)[::-1] if flip else np.asarray(z, float))
     pts, covered, beside, _ = self._cover(kerb_line, kz, layer, ways, True, gores=False, oneway_only=True)
     _, gore, _, _ = self._cover(kerb_line, kz, layer, ways, False, gores=True, oneway_only=True, quads=False)
+    if not covered.any() and not gore.any():
+      return [line], []  # as given: densified, every road's kerbs would double the lines
     kept = [pts[a:b + 1] for a, b in _runs(~covered & ~gore)]  # inside a wider road it carries on from: the bay's line
     lines = [(pts[a:b + 1], 'solid') for a, b in _runs((beside >= 0) | (gore & ~covered))]
     return [p for p in kept if _length(p) >= MIN_PIECE], [(p, st) for p, st in lines if _length(p) >= MIN_PIECE]
