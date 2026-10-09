@@ -176,6 +176,7 @@ class GTA5World(World):
     self.presses: dict[str, int] = {}
     self.curvature = 0.0  # what the steering is set for
     self.steering = False  # whether the driver was steering
+    self.braking = False
     self.pinner: subprocess.Popen | None = None
     self.log = open(LOG, "a", buffering=1) if LOG else None
     self.params = Params()
@@ -397,9 +398,11 @@ class GTA5World(World):
     simulator_state.user_gas = 1.0 if user.get("gas") else 0.0
     simulator_state.user_brake = 1.0 if user.get("brake") else 0.0
     steering = abs(user.get("steer", 0)) > 0.02
-    if steering and not self.steering and self.simulator_state.is_engaged:
+    braking = bool(user.get("brake"))
+    # the simulated car's cruise stays on through a brake press otherwise, and openpilot re-engages on its release
+    if (steering and not self.steering or braking and not self.braking) and self.simulator_state.is_engaged:
       self.q.put(control_cmd_gen("cruise_cancel"))
-    self.steering = steering
+    self.steering, self.braking = steering, braking
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
     desire = self.sm['modelV2'].meta.desireState
     turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],

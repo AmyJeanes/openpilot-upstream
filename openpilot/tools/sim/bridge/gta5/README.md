@@ -45,7 +45,7 @@ openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that
 ## Controls
 | Key | openpilot |
 |---|---|
-| F6 | Engage / disengage |
+| Insert | Engage / disengage (F5-F8 are GTA's character switch) |
 | Brake (S, left trigger), steering | Disengage |
 | Gas | Override, without disengaging |
 | Up / down arrow | Cruise speed up / down (hold to repeat); the phone is blocked while connected |
