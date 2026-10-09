@@ -7,6 +7,7 @@ link becomes a way with OSM lane tags; GTA flags with no OSM equivalent keep a g
 import argparse
 import json
 import math
+import os
 from collections import Counter, defaultdict
 
 import osmium
@@ -2325,6 +2326,21 @@ def main():
     from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
     counts = through_paint.priority_roads(args.out, args.survey_lines, to_game)
     print("roads carried through junctions: " + ', '.join(f'{n} {k}' for k, n in counts.items()))
+    tiles = os.path.join(os.path.dirname(args.survey_lines), 'tiles')  # roadpaint's, beside its polylines
+    if os.path.isdir(tiles):
+      from openpilot.tools.sim.bridge.gta5.map import painted_islands
+      synthetic = [max((k[1] for k in nodes if k[0] == TAPER_NODE_AREA), default=0)]
+
+      def new_node_id():
+        synthetic[0] += 1
+        return node_id((TAPER_NODE_AREA, synthetic[0]))
+      from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+      from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+      osm = OsmLanes.load(args.out, to_game)
+      found = painted_islands.islands(args.survey_lines, tiles, osm)
+      strips = painted_islands.flush_strips(osm, tiles)
+      painted_islands.add(args.out, found, new_node_id, to_lat_lon, strips)
+      print(f"{len(found)} painted islands (traffic_calming=painted_island), {len(strips)} flush edges' road surface (area:highway)")
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")
