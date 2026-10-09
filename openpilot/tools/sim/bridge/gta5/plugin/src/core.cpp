@@ -125,6 +125,18 @@ struct World {
   bool frozen = false;
 } g_world;
 
+// the shadows command's settings, for top-down shots where the sun's shadows hide road paint: the cascade shadow
+// natives and a timecycle modifier, held each frame while set (scripts can reset them)
+struct Shadows {
+  bool set = false;
+  float boundsScale = -1;  // CASCADE_SHADOWS_SET_CASCADE_BOUNDS_SCALE, < 0 left alone
+  std::string sample;      // CASCADE_SHADOWS_SET_SHADOW_SAMPLE_TYPE, e.g. CSM_ST_SOFT16
+  int aircraft = -1, dynamicDepth = -1, tracker = -1;
+  float depthValue = -1;
+  std::string timecycle;  // SET_TIMECYCLE_MODIFIER
+  float strength = 1;
+} g_shadows;
+
 // palette indices to apply to a car, -1 to leave one
 struct Colours {
   int primary = -1, secondary = -1, pearl = -1, wheel = -1;
@@ -436,6 +448,7 @@ struct TopCam {
   float x = 0, y = 0, height = 40, heading = 0, fov = 50;
   float ground = 0;    // the game's ground under the point, which the height is above
   float zref = NAN;    // a height near that ground (the road's, from the map), else the vehicle's
+  bool abs = false;    // the height is above zref itself, unprobed: under a bridge, where the probe finds its deck
   bool focus = false;  // the game streams the world around the point, not the player
   bool shown = false;  // the active camera
   Cam cam = 0;
@@ -543,9 +556,11 @@ void UpdateTopCam(Entity follow) {
   Vector3 ref = GET_ENTITY_COORDS(follow ? follow : PLAYER_PED_ID(), TRUE);
   if (g_top.follow) g_top.x = ref.x, g_top.y = ref.y;
   float z = 0, probe = std::isnan(g_top.zref) ? ref.z : g_top.zref;
-  g_top.ground = GET_GROUND_Z_FOR_3D_COORD(g_top.x, g_top.y, probe + 10.0f, &z, FALSE, FALSE) && std::fabs(z - probe) < 15.0f
-                     ? z
-                     : (std::isnan(g_top.zref) ? ref.z - 0.5f : g_top.zref);
+  if (g_top.abs && !std::isnan(g_top.zref)) g_top.ground = g_top.zref;
+  else
+    g_top.ground = GET_GROUND_Z_FOR_3D_COORD(g_top.x, g_top.y, probe + 10.0f, &z, FALSE, FALSE) && std::fabs(z - probe) < 15.0f
+                       ? z
+                       : (std::isnan(g_top.zref) ? ref.z - 0.5f : g_top.zref);
   SET_CAM_FOV(g_top.cam, g_top.fov);
   SET_CAM_COORD(g_top.cam, g_top.x, g_top.y, g_top.ground + g_top.height);
   SET_CAM_ROT(g_top.cam, -90.0f, 0.0f, g_top.heading, 2);
@@ -562,7 +577,7 @@ void UpdateTopCam(Entity follow) {
 std::string TopCamState() {
   return "\"topcam\":{\"on\":" + std::string(g_top.on ? "true" : "false") + ",\"x\":" + Num(g_top.x) + ",\"y\":" + Num(g_top.y) +
          ",\"ground\":" + Num(g_top.ground) + ",\"height\":" + Num(g_top.height) + ",\"heading\":" + Num(g_top.heading) +
-         ",\"fov\":" + Num(g_top.fov) + "}";
+         ",\"fov\":" + Num(g_top.fov) + ",\"abs\":" + (g_top.abs ? "true" : "false") + "}";
 }
 
 void ReleaseCamera() {
@@ -1957,6 +1972,14 @@ std::string WorldState(double now) {
   return out;
 }
 
+std::string ShadowsState() {
+  const Shadows &s = g_shadows;
+  return "\"shadows\":{\"set\":" + std::string(s.set ? "true" : "false") + ",\"bounds\":" + Num(s.boundsScale) + ",\"sample\":\"" + s.sample +
+         "\",\"aircraft\":" + std::to_string(s.aircraft) + ",\"depth\":" + std::to_string(s.dynamicDepth) + ",\"depthValue\":" +
+         Num(s.depthValue) + ",\"tracker\":" + std::to_string(s.tracker) + ",\"timecycle\":\"" + s.timecycle + "\",\"strength\":" +
+         Num(s.strength) + "}";
+}
+
 // "density":{off (traffic off), set (multipliers held), vehicles, random, parked, peds, scenario}
 std::string DensityState() {
   const Density &d = g_density;
@@ -2023,7 +2046,7 @@ void Publish(double now, bool inVehicle) {
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
-  s << "," << WorldState(now) << "," << DensityState() << "}";
+  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
 }
@@ -2559,7 +2582,8 @@ void HandleMessage(const Message &m, double now) {
     Log("grab " + path + (ok ? "" : ": not taken (no present hook, or one pending)"));
   } else if (type == "topcam") {
     g_top.on = MsgBool(m, "on", true);
-    g_top.height = std::clamp(static_cast<float>(MsgNum(m, "height", g_top.height)), 3.0f, 300.0f);
+    g_top.abs = MsgBool(m, "abs", false);
+    g_top.height = std::clamp(static_cast<float>(MsgNum(m, "height", g_top.height)), g_top.abs ? 1.0f : 3.0f, 300.0f);
     g_top.fov = std::clamp(static_cast<float>(MsgNum(m, "fov", g_top.fov)), 5.0f, 120.0f);
     g_top.heading = static_cast<float>(MsgNum(m, "heading", g_top.heading));
     g_top.hud = MsgBool(m, "hud", g_top.hud);
@@ -2715,6 +2739,33 @@ void HandleMessage(const Message &m, double now) {
     }
     Log(std::string("traffic ") + (g_noTraffic ? "off" : "on") + (d.set ? ", vehicles " + Num(d.vehicles) + ", random " + Num(d.random) +
         ", parked " + Num(d.parked) + ", peds " + Num(d.peds) + ", scenario " + Num(d.scenario) : ""));
+  } else if (type == "shadows") {
+    // cascade shadow settings and a timecycle modifier (bounds=, sample=, aircraft=, depth=, depth_value=, tracker=,
+    // timecycle=, strength=); reset=1 puts the game's back
+    Shadows &s = g_shadows;
+    if (MsgBool(m, "reset")) {
+      s = Shadows{};
+      CASCADE_SHADOWS_INIT_SESSION();
+      CASCADE_SHADOWS_CLEAR_SHADOW_SAMPLE_TYPE();
+      CLEAR_TIMECYCLE_MODIFIER();
+    } else {
+      s.set = true;
+      s.boundsScale = static_cast<float>(MsgNum(m, "bounds", s.boundsScale));
+      if (m.count("sample")) s.sample = MsgStr(m, "sample");
+      s.aircraft = static_cast<int>(MsgNum(m, "aircraft", s.aircraft));
+      s.dynamicDepth = static_cast<int>(MsgNum(m, "depth", s.dynamicDepth));
+      s.depthValue = static_cast<float>(MsgNum(m, "depth_value", s.depthValue));
+      s.tracker = static_cast<int>(MsgNum(m, "tracker", s.tracker));
+      if (m.count("timecycle")) {
+        s.timecycle = MsgStr(m, "timecycle");
+        if (s.timecycle.empty()) CLEAR_TIMECYCLE_MODIFIER();
+      }
+      s.strength = static_cast<float>(MsgNum(m, "strength", s.strength));
+      if (s.sample.empty()) CASCADE_SHADOWS_CLEAR_SHADOW_SAMPLE_TYPE();
+    }
+    Log("shadows: " + std::string(s.set ? "set" : "reset") + ", bounds " + Num(s.boundsScale) + ", sample " + s.sample + ", aircraft " +
+        std::to_string(s.aircraft) + ", depth " + std::to_string(s.dynamicDepth) + " " + Num(s.depthValue) + ", tracker " +
+        std::to_string(s.tracker) + ", timecycle " + s.timecycle + " " + Num(s.strength));
   } else if (type == "world") {
     // a repeatable scene for tests: the time of day (hour, minute), the weather held (weather=, at once or over
     // transition= s; clear=1 lets the game's weather cycle again), the rain and puddles (rain=0-1, -1 the weather's
@@ -2821,6 +2872,16 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (g_setup.step) StepSetup(ped, now);
   StepLead(now);
   StepSwap(ped, now);
+  if (g_shadows.set) {
+    const Shadows &s = g_shadows;
+    if (s.boundsScale >= 0) CASCADE_SHADOWS_SET_CASCADE_BOUNDS_SCALE(s.boundsScale);
+    if (!s.sample.empty()) CASCADE_SHADOWS_SET_SHADOW_SAMPLE_TYPE(s.sample.c_str());
+    if (s.aircraft >= 0) CASCADE_SHADOWS_SET_AIRCRAFT_MODE(s.aircraft);
+    if (s.dynamicDepth >= 0) CASCADE_SHADOWS_SET_DYNAMIC_DEPTH_MODE(s.dynamicDepth);
+    if (s.depthValue >= 0) CASCADE_SHADOWS_SET_DYNAMIC_DEPTH_VALUE(s.depthValue);
+    if (s.tracker >= 0) CASCADE_SHADOWS_ENABLE_ENTITY_TRACKER(s.tracker);
+    if (!s.timecycle.empty()) SET_TIMECYCLE_MODIFIER(s.timecycle.c_str()), SET_TIMECYCLE_MODIFIER_STRENGTH(s.strength);
+  }
   if (g_noTraffic || g_density.set) {
     const Density &d = g_noTraffic ? Density{true, 0, 0, 0, 0, 0} : g_density;
     SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(d.vehicles);
