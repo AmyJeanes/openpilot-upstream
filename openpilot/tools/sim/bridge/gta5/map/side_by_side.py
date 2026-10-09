@@ -274,9 +274,9 @@ class SideBySide:
       if not two_way and (self.last[wid] in begin or self.first[wid] in finish or
                           (oneway_only and (self.first[wid] in begin | finish or self.last[wid] in begin | finish))):
         continue  # a way carrying on from or into this run isn't beside it, nor one parting from or joining a two-way road
-      if not two_way and ((self.first[wid] in begin and self._turns(wid, True, u[0]) > JOIN_TURN) or
+      if not two_way and not freeway and ((self.first[wid] in begin and self._turns(wid, True, u[0]) > JOIN_TURN) or
                           (self.last[wid] in finish and self._turns(wid, False, u[-1]) > JOIN_TURN)):
-        continue  # nor a way turning off from the run's start or onto its end: it crosses its kerb only there
+        continue  # nor (off the freeways) a way turning off its start or onto its end: it crosses its kerb only there
       idx = np.concatenate(idx)
       if not two_way and (freeway or Junctions.freeway(self.osm.ways[wid][0])):
         lo, hi = wide.min(0), wide.max(0)
