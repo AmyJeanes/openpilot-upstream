@@ -885,6 +885,36 @@ def junction_move(osm: OsmLanes, nodes: list[int | None], points, along, k: int)
   return 'left' if turned > 0 else 'right'
 
 
+MERGE_SPREAD = 40.0  # deg: a road joining the route's this near its heading on merges into it
+
+
+def merge_side(osm: OsmLanes, nodes: list[int | None], k: int, split: bool = False) -> bool | None:
+  """Whether another road joins the route's at its shape point k from behind (driven into the node, heading within
+  MERGE_SPREAD of the route's way on) on the left of the route's road in (True) or the right (False); with `split`,
+  leaves it ahead (driven away from the node, within MERGE_SPREAD of the route's way in) on the left of the route's
+  road out. None where none does, or on both sides (nodes: route_nodes)."""
+  if not 0 < k < len(nodes) - 1 or None in (nodes[k - 1], nodes[k], nodes[k + 1]):
+    return None
+  prev, j, nxt = nodes[k - 1], nodes[k], nodes[k + 1]
+  here = osm.node_xy(j)
+  ours = osm.node_xy(nxt if split else prev) - here  # the route's road on the side the other road is
+  along = heading_of(here - osm.node_xy(prev)) if split else heading_of(osm.node_xy(nxt) - here)
+  sides = set()
+  for m in osm.links.get(j, ()):
+    if m in (prev, nxt):
+      continue
+    w, fwd = osm.pairs[(j, m) if split else (m, j)]
+    one = oneway_of(osm.ways[w][0])
+    if one != 0 and (one == 1) != fwd:
+      continue
+    v = osm.node_xy(m) - here
+    if abs(math.degrees((heading_of(v if split else -v) - along + math.pi) % (2 * math.pi) - math.pi)) > MERGE_SPREAD:
+      continue
+    cross = ours[0] * v[1] - ours[1] * v[0]
+    sides.add(bool(cross > 0) if split else bool(cross < 0))
+  return sides.pop() if len(sides) == 1 else None
+
+
 def ways_from_nodes(points, osm: OsmLanes, tol: float = MATCH_TOL) -> list[tuple[int, bool, int, int]]:
   """The ways along a route whose shape points are the map's nodes, as on our GTA map, where every route point is one
   (but the ends, part way along a way): [(way id, along the way's direction, first shape index, last shape index)] for
@@ -1001,7 +1031,8 @@ class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
-               junctions=None, explicit: dict | None = None, moves: list | None = None, blended: dict | None = None):
+               junctions=None, explicit: dict | None = None, moves: list | None = None, blended: dict | None = None,
+               merges: dict | None = None, splits: dict | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
@@ -1015,11 +1046,17 @@ class RouteLanes:
     # segments of a way whose lanes move across to the next way's (OsmLanes.blend): its knots, whether the route runs
     # along it, and m along the way at the segment's ends
     self.blended: dict[int, tuple[list[tuple[float, Section]], bool, float, float]] = blended or {}
+    # shape points where another road joins the route's from behind, as onto a freeway from its on-ramp: whether it
+    # joins on the left of ours (merge_side)
+    self.merges: dict[int, bool] = merges or {}
+    # and where another road leaves it ahead, as an exit from a freeway: whether it leaves on the left of ours
+    self.splits: dict[int, bool] = splits or {}
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     self._corners: list[tuple[float, float]] | None = None
     self._drops: list[tuple[float, tuple[int, int, int]]] | None = None
     self._openings: list[tuple[float, int]] | None = None
+    self._maps: list[tuple[float, tuple[int | None, ...], int]] | None = None
     self._runs: dict[int, tuple[int, int]] = {}
 
   @classmethod
@@ -1060,9 +1097,11 @@ class RouteLanes:
          k not in explicit and k - 1 not in explicit:
         tapers[k] = (prev, sec)
     junctions = [float(along[k]) for k in range(1, len(pts) - 1) if degree[k] >= 3]
-    nodes = route_nodes(pts, osm) if ends else []
+    nodes = route_nodes(pts, osm) if ends or any(d >= 3 for d in degree) else []
     moves = [junction_move(osm, nodes, pts, along, k) for k in ends]
-    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended)
+    merges = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k)) is not None}
+    splits = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k, True)) is not None}
+    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits)
 
   @staticmethod
   def _blended(pts: np.ndarray, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes, n: int) -> dict:
@@ -1132,6 +1171,77 @@ class RouteLanes:
         if few is not None and many is not None and 0 < few.lanes < many.lanes and (o := self.opening(k)) is not None and o[2]:
           self._openings.append((float(self.along[k]), many.lanes - few.lanes))
     return self._openings
+
+  @property
+  def lane_maps(self) -> list[tuple[float, tuple[int | None, ...], int]]:
+    """Where our lanes change along the route (in number, or where they are), the lane each one before carries on as
+    (lanes numbered from the left, as everywhere): [(m along, (for each lane before, the lane after, None where it
+    ends), how many after)]. Matched by where the lanes are (match_lanes) either side of each change: at a node as
+    the cross-sections there have them (a taper's, or a widening way's, lane opening from nothing), across a junction
+    or a stretch without lanes by where the lanes in run on to across the road out. Through a run of stretches
+    shorter than BLIP_M (a junction's own links, a lane count the map has wrong for a way) a lane comes out as the road
+    before goes on directly as the road after, so it doesn't move across for them. None through a junction the route
+    turns at, where nav picks the lane out."""
+    if self._maps is None:
+      self._maps = self._lane_maps()
+    return self._maps
+
+  def _lane_maps(self) -> list[tuple[float, tuple[int | None, ...], int]]:
+    secs = self.sections
+    runs: list[list[int]] = []  # [first segment, last] of each run of segments with one layout of our lanes
+    for k, sec in enumerate(secs):
+      if sec is None or not sec.lanes:
+        continue
+      if runs and runs[-1][1] == k - 1 and _same_ours(secs[k - 1], sec, JOG_MIN):
+        runs[-1][1] = k
+      else:
+        runs.append([k, k])
+    turns = [sc for sc, turned in self.corners if abs(turned) >= MAP_TURN]
+    anchors = [i for i, (k0, k1) in enumerate(runs)
+               if i in (0, len(runs) - 1) or self.along[k1 + 1] - self.along[k0] >= BLIP_M]
+    out = []
+    for a, b in zip(anchors, anchors[1:], strict=False):
+      chain = runs[a:b + 1]
+      s0, s1 = float(self.along[chain[0][1] + 1]), float(self.along[chain[-1][0]])
+      if any(s0 - FILLET_REACH <= sc <= s1 + FILLET_REACH for sc in turns):
+        continue
+      steps = [[float(self.along[q[0]]), self._match(r, q), secs[q[0]].lanes] for r, q in zip(chain, chain[1:], strict=False)]
+      # out of short stretches between two of the same lanes as the road before goes on as the road after
+      if len(chain) > 2 and s1 - s0 <= 2 * BLIP_M and secs[chain[0][1]].lanes == secs[chain[-1][0]].lanes:
+        direct = self._match(chain[0], chain[-1])
+        through = list(range(secs[chain[0][1]].lanes))
+        for _, m, _ in steps[:-1]:
+          through = [None if i is None else m[i] for i in through]
+        last = list(steps[-1][1])
+        for j in range(len(last)):
+          came = [i for i, t in enumerate(through) if t == j]
+          if came:
+            last[j] = direct[came[0]]
+        kept = [j for j in last if j is not None]
+        if all(a < b for a, b in zip(kept, kept[1:], strict=False)):  # still one lane each, in order
+          steps[-1][1] = last
+      out += [(s, tuple(m), n) for s, m, n in steps if len(m) != n or any(j != i for i, j in enumerate(m))]
+    return out
+
+  def _match(self, r: list[int], q: list[int]) -> list[int | None]:
+    """match_lanes from the end of run r of segments to the start of run q, where they meet or across what's between
+    (the lanes before carried on straight across the road's line after)."""
+    sa, sb = float(self.along[r[1] + 1]), float(self.along[q[0]])
+    a, b = self.section_at(sa, r[1]), self.section_at(sb, q[0])
+    ours_a = [(s.left, s.right) for s in a.ours]
+    if sb - sa > EPS:
+      pa, pb = self.points[r[1] + 1], self.points[q[0]]
+      na, nb = (_right_normal(self.points[k + 1] - self.points[k]) for k in (r[1], q[0]))
+      ours_a = [(float((pa + na * x - pb) @ nb), float((pa + na * y - pb) @ nb)) for x, y in ours_a]
+    side = _turn_side(a, b)
+    if side is None and sb - sa <= EPS and b.lanes > a.lanes and q[0] in self.merges:
+      side = self.merges[q[0]]  # another road's lanes join ours on its side: two ways' lines meet at the node anyhow
+    if side is None and sb - sa <= EPS and b.lanes < a.lanes and q[0] in self.splits:
+      side = self.splits[q[0]]  # and leave on its side
+    if side is not None:  # the turn lane's own side, wherever the lanes lie
+      shift = (b.lanes - a.lanes) if side else 0
+      return [i + shift if 0 <= i + shift < b.lanes else None for i in range(a.lanes)]
+    return match_lanes(ours_a, [(s.left, s.right) for s in b.ours])
 
   def segment(self, s: float) -> int:
     return int(min(max(np.searchsorted(self.along, s, side='right') - 1, 0), max(len(self.sections) - 1, 0)))
@@ -1308,6 +1418,21 @@ class RouteLanes:
     return xy[keep], sv[keep]
 
 
+MAP_TURN = 45.0  # deg: lanes aren't carried across a junction the route turns this much at (RouteLanes.lane_maps)
+BLIP_M = 20.0  # m: a stretch of one layout of lanes shorter than this is a junction's link or a count the map has wrong
+SAME_PLACE = 0.05  # m
+
+
+def _same_ours(a: Section, b: Section, tol: float = SAME_PLACE) -> bool:
+  return a.lanes == b.lanes and all(abs(x.left - y.left) < tol and abs(x.right - y.right) < tol
+                                    for x, y in zip(a.ours, b.ours, strict=True))
+
+
+def _right_normal(d) -> np.ndarray:
+  n = np.array([d[1], -d[0]], float)
+  return n / max(float(np.hypot(*n)), 1e-9)
+
+
 JOG_MIN = 0.5  # m between the lane in and the lane out at a node that is a jog sideways, not a road's lanes carrying on
 JOG_REACH = 10.0  # m either side of such a node the lane line moves across over
 
@@ -1373,12 +1498,101 @@ def _taperable(a: Section, b: Section) -> bool:
   return a.back == b.back and a.lanes != b.lanes and min(a.lanes, b.lanes) > 0
 
 
+def _left_only(sec: Section) -> bool:
+  return bool(sec.turns) and bool(sec.turns[0]) and sec.turns[0] <= LEFTS
+
+
+def _right_only(sec: Section) -> bool:
+  return bool(sec.turns) and bool(sec.turns[-1]) and sec.turns[-1] <= RIGHTS
+
+
 def _opens_left(few: Section, many: Section) -> bool:
-  """Whether the lanes a road gains begin on the left of ours: where its leftmost lane's arrows only turn left, and
-  the road's before didn't (a turn bay there already, the road widens on the outside)."""
-  def left_only(sec):
-    return bool(sec.turns) and bool(sec.turns[0]) and sec.turns[0] <= LEFTS
-  return left_only(many) and not left_only(few)
+  """Whether the lanes a road gains begin on the left of ours: by the turn arrows where they say (_turn_side), else
+  where our lanes before line up with the right of the lanes after better than with their left by SIDE_MARGIN a lane
+  (the two ways' lines in place), else not (the road widens on the outside)."""
+  side = _turn_side(few, many)
+  if side is not None:
+    return side
+  extra = many.lanes - few.lanes
+  if extra <= 0 or not few.lanes:
+    return False
+  fc, mc = [s.centre for s in few.ours], [s.centre for s in many.ours]
+  left = sum(abs(a - b) for a, b in zip(fc, mc[extra:], strict=True))
+  right = sum(abs(a - b) for a, b in zip(fc, mc[:few.lanes], strict=True))
+  return right - left > SIDE_MARGIN * few.lanes
+
+
+SIDE_MARGIN = 0.5  # m a lane
+
+
+def _turn_side(a: Section, b: Section) -> bool | None:
+  """Where the road's lanes change from a to b in number, the side the lanes begin or end on by their turn arrows:
+  True on the left (a lane that only turns left is new in b, or a's ends), False on the right (one that only turns
+  right), the left where both are (a left bay opening as the kerb lane becomes a right-turn lane); None where the
+  arrows don't say. A bay opens where its road widens the other side as often as on its own (the lanes moving across
+  over its taper), so where the lanes lie can't tell."""
+  few, many = (a, b) if a.lanes < b.lanes else (b, a)
+  if few.lanes == many.lanes or not few.lanes:
+    return None
+  if _left_only(many) and not _left_only(few):
+    return True
+  return False if _right_only(many) and not _right_only(few) else None
+
+
+LANE_GAP = 0.5  # of a lane's width: the cost of a lane carrying on as none, matching lanes across a change by place
+GAP_BIAS = 1e-3  # m: between matches that cost the same, lanes begin or end on the right
+SHIFT_COST = 0.1  # of each metre a's lanes are moved across to match b's (match_lanes)
+
+
+def match_lanes(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> list[int | None]:
+  """Which of lanes b each of lanes a carries on as (None: it ends), both [(left, right) m right of one line] left to
+  right: the order-keeping match by where their middles are that costs least, a lane left without a counterpart
+  (beginning or ending, a lane opening from nothing costing nothing) LANE_GAP of its width. The line may move under the
+  lanes (two ways' lines placed apart at a node, or a junction's roads in and out): a's lanes are tried where they lie,
+  and moved across by as much as either edge of them moves, or both, SHIFT_COST a metre moved. Where matches cost the
+  same, lanes begin and end on the right."""
+  if not a or not b:
+    return [None] * len(a)
+  dl, dr = b[0][0] - a[0][0], b[-1][1] - a[-1][1]
+  best = None
+  for shift in sorted({0.0, dl, dr, (dl + dr) / 2}, key=abs):
+    cost, out = _align([(x + shift, y + shift) for x, y in a], b)
+    cost += SHIFT_COST * abs(shift)
+    if best is None or cost < best[0] - EPS:
+      best = (cost, out)
+  return best[1]
+
+
+def _align(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> tuple[float, list[int | None]]:
+  na, nb = len(a), len(b)
+  ca, cb = [(x + y) / 2 for x, y in a], [(x + y) / 2 for x, y in b]
+
+  def gap(lanes, p):
+    return LANE_GAP * max(lanes[p][1] - lanes[p][0], 0.0) + GAP_BIAS * (len(lanes) - p) / len(lanes)
+  inf = math.inf
+  cost = [[inf] * (nb + 1) for _ in range(na + 1)]
+  step = [[0] * (nb + 1) for _ in range(na + 1)]
+  cost[0][0] = 0.0
+  for i in range(na + 1):
+    for j in range(nb + 1):
+      if i and j and cost[i - 1][j - 1] + abs(ca[i - 1] - cb[j - 1]) < cost[i][j]:
+        cost[i][j], step[i][j] = cost[i - 1][j - 1] + abs(ca[i - 1] - cb[j - 1]), 0
+      if i and cost[i - 1][j] + gap(a, i - 1) < cost[i][j]:
+        cost[i][j], step[i][j] = cost[i - 1][j] + gap(a, i - 1), 1
+      if j and cost[i][j - 1] + gap(b, j - 1) < cost[i][j]:
+        cost[i][j], step[i][j] = cost[i][j - 1] + gap(b, j - 1), 2
+  out: list[int | None] = [None] * na
+  i, j = na, nb
+  while i or j:
+    k = step[i][j]
+    if k == 0:
+      out[i - 1] = j - 1
+      i, j = i - 1, j - 1
+    elif k == 1:
+      i -= 1
+    else:
+      j -= 1
+  return cost[na][nb], out
 
 
 def _blend(few: Section, many: Section, t: float) -> Section:

@@ -74,7 +74,8 @@ class PlanPicker:
     self.plan, self.args, self.checker, self.write_rec = plan, args, checker, write_rec
     self.approaches = {a["id"]: a for a in plan["approaches"]}
     self.exits = {e["id"]: e for a in plan["approaches"] for e in a["exits"]}
-    self.trips = plan["trips"]
+    # wrong-way trips (junction_plan.py wrongway) go only with --wrongway; without it the plan is driven as without them
+    self.trips = [t for t in plan["trips"] if getattr(args, "wrongway", False) or not t.get("wrongway")]
     self.by_id = {t["id"]: t for t in self.trips}
     self.cv = threading.Condition()
     self.arrived, self.tried = Counter(), Counter()
@@ -139,8 +140,10 @@ class PlanPicker:
           self.cv.wait(5.0)  # the trip being driven may have to go again
           t = self._pick()
         self.out.add(t["id"])
-      a, e = self.approaches[t["approach"]], self.exits[t["exit"]]
       why = None
+      if t.get("wrongway"):
+        break  # no junction to check; the bridge checks the road as the clip starts (gta5_wrongway.suitable)
+      a, e = self.approaches[t["approach"]], self.exits[t["exit"]]
       if self.checker is not None:
         try:
           why = self.checker(a, e)
@@ -156,6 +159,8 @@ class PlanPicker:
         self.out.discard(t["id"])
         self._count(rec)
     self.seq += 1
+    if t.get("wrongway"):
+      return wrongway_trip(t, f"{self.args.name}-{self.seq:04d}", getattr(self.args, "ww_recover", "plan"))
     return {"id": f"{self.args.name}-{self.seq:04d}", "plan_trip": t["id"], "spec": t["spec"],
             "start": (a["start"]["x"], a["start"]["y"]), "dest": tuple(e["dest"]), "area": t["split"],
             "length": e["length"], "time": e["time"] or round(e["length"] / 8.0), "maneuvers": e["maneuvers"],
@@ -202,9 +207,30 @@ class JunctionRun(rr.Run):
     # the plan's time of day and weather for this trip (set after randomise's), unless --hours-of-day / --weathers
     rec = super().drive(c, settings, world or c.get("world") or {})
     rec["plan_trip"], rec["plan"] = c["plan_trip"], c["plan"]
+    if c.get("wrongway"):
+      rec["wrongway"] = c["wrongway"]
+      ends = [e for e in rec.get("wrongway_phases", []) if e.get("phase") == "end"]
+      rec["wrongway_end"] = ends[-1].get("finished") if ends else None
+      if rec["outcome"] == "expert_stopped" and "wrongway abort" in rec.get("detail", ""):
+        rec["outcome"] = "ww_abort"
     self.picker.record(rec)
     rr.say(f"junction: {rec['plan_trip']} ({c['plan']['split']}, {c['plan']['kind']}): {rec['outcome']}; plan {self.picker.progress()}")
     return rec
+
+
+def wrongway_trip(t: dict, run_id: str, recover: str = "plan") -> dict:
+  """A wrong-way clip's trip for record_run.Run.drive: its route, the clip for expert mode, its traffic, and the
+  oncoming time its controller allows."""
+  w = t["wrongway"]
+  clip = {**w["clip"], "clip": t["id"], **({"recover": recover} if recover != "plan" else {})}
+  hold_onc = (w["clip"]["drift_m"] + w["clip"]["recover_m"]) / max(w["clip"]["speed"], 3.0) + w["clip"]["hold_s"]
+  return {"id": run_id, "plan_trip": t["id"], "spec": t["spec"], "start": tuple(w["start"][:2]), "dest": tuple(w["dest"]),
+          "area": "wrongway", "length": w["length"], "time": round(w["length"] / 6.0), "maneuvers": [], "classes": ["wrongway"],
+          "junctions": 0, "familiar": 0.0, "geom": w["geom"], "world": t.get("world") or {},
+          "traffic": w.get("traffic"), "wrongway": clip, "oncoming_s": hold_onc + 25.0,
+          "expert_extra": ["wrongway=" + json.dumps(clip, separators=(",", ":"))],
+          "plan": {"approach": t["approach"], "exit": t["exit"], "pass": t["pass"], "split": "wrongway", "lane": t["lane"],
+                   "kind": "wrongway", "junction": None, "extra": False, "freeway": False}}
 
 
 def write_rec_line(path: str, rec: dict):
@@ -314,8 +340,8 @@ def cmd_run(args) -> int:
         t = picker.by_id[c["plan_trip"]]
         secs += t["est_s"]
         kinds[c["plan"]["kind"]] += 1
-        splits[t["split"]] += 1
-        print(f"{c['id']} {t['id']:12s} {t['split']:5s} pass {t['pass']} lane {t['lane']} {c['plan']['kind']:13s} " +
+        splits[c["plan"]["split"]] += 1
+        print(f"{c['id']} {t['id']:12s} {c['plan']['split']:5s} pass {t['pass']} lane {t['lane']} {c['plan']['kind']:13s} " +
               f"{c['length']:4d} m ~{t['est_s']} s  {c['spec']}", flush=True)
         picker.record({"plan_trip": t["id"], "outcome": "arrived"})
     except rr.Stop as e:
@@ -371,6 +397,10 @@ def main() -> int:
   r.add_argument("--valhalla", help="check on a valhalla.json in process (--dry-run on a copy of the map)")
   r.add_argument("--dry-run", action="store_true", help="only list --n trips in order, each checked, as if all arrived")
   r.add_argument("--n", type=int, default=10000)
+  r.add_argument("--wrongway", action="store_true", help="drive the plan's wrong-way trips too (junction_plan.py " +
+                 "wrongway); without it they're left out, as in a plan without them")
+  r.add_argument("--ww-recover", choices=["plan", "ai", "path"], default="plan",
+                 help="who brings a wrong-way clip's car back: as the plan says, the game's AI, or the map path controller")
   r.add_argument("--clear-stop", action="store_true", help="remove an old stop file first (a fresh start, not a resume)")
   rr.run_arguments(r)
   r.set_defaults(name="jr1")

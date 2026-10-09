@@ -646,6 +646,8 @@ class Run:
     try:
       if a.traffic != "keep":
         e2e.cmd("traffic", on=int(a.traffic == "on"))
+      if c.get("traffic"):  # the trip's own, over randomise's and --traffic's (a wrong-way clip's light traffic)
+        e2e.cmd("traffic", **c["traffic"])
       if world:
         e2e.cmd("world", **world, freeze=1)
     except OSError as e:
@@ -654,7 +656,7 @@ class Run:
     w.take_rows()
     w.arrived = False
     t_cmd = time.monotonic()
-    r = self.expert("route", c["spec"], *settings)
+    r = self.expert("route", c["spec"], *settings, *c.get("expert_extra", []))
     if r is None or r.returncode:
       return done("setup", "the route command failed" + (f": {r.stderr.strip()[-200:]}" if r is not None else ""))
     t0 = time.monotonic()
@@ -667,6 +669,8 @@ class Run:
     onc_max = 0.0
     coll_events, coll_last, coll_prev = 0, -1e9, 0
     reroutes, last_end = 0, None
+    oncoming_s = c.get("oncoming_s", a.oncoming_s)
+    ww_events: list[dict] = []
     outcome = None
     while outcome is None:
       time.sleep(TICK)
@@ -674,6 +678,7 @@ class Run:
       w.update()
       new = [row for row in w.take_rows() if row.get("mono", 0) >= t_cmd - 1]
       rows += [row for row in new if "event" not in row]
+      ww_events += [row for row in new if row.get("event") == "wrongway"]
       if self.check_stop():
         outcome = ("stopped", self.stop_asked)
         break
@@ -737,7 +742,7 @@ class Run:
         onc_t = (onc_t or now) if moving_onc else None
         if onc_t:
           onc_max = max(onc_max, now - onc_t)
-          if now - onc_t > a.oncoming_s:
+          if now - onc_t > oncoming_s:
             outcome = ("oncoming", f"{now - onc_t:.0f} s in the oncoming lanes on {last.get('street')}")
             break
         off = last.get("routeOff")
@@ -758,6 +763,10 @@ class Run:
         outcome = ("infra", f"no segment recorded for {RECORD_STALL:.0f} s")
         break
     self.expert("off", quiet=True)
+    if c.get("wrongway"):  # its last phase events (abort, end) may come after the loop stopped
+      w.update()
+      ww_events += [row for row in w.take_rows() if row.get("event") == "wrongway"]
+      rec["wrongway_phases"] = ww_events
     act = [row for row in rows if row.get("active")]
     v = [row.get("vEgo") or 0.0 for row in act]
     ts = [row.get("t") or row["mono"] for row in act]
@@ -853,7 +862,8 @@ class Run:
           f.write(json.dumps(rec) + "\n")
         say(f"record: {rec['id']}: {rec['outcome']} {rec.get('detail', '')} in {rec.get('duration')} s, " +
             f"{rec.get('distance')} m, {rec.get('collisions')} contact frames, segments {rec['segments']}")
-        self.fail_streak = 0 if rec["outcome"] == "arrived" else self.fail_streak + 1
+        if not rec.get("wrongway"):  # a wrong-way clip's outcome says nothing about the run's health
+          self.fail_streak = 0 if rec["outcome"] == "arrived" else self.fail_streak + 1
         if rec["outcome"] == "took_over":
           raise Stop("the driver took over (engage key)")
         if rec["outcome"] == "stopped":
