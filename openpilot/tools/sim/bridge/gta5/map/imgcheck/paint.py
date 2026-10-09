@@ -12,6 +12,8 @@ TOPHAT_MIN = 40.0  # brightness levels above the opening
 TOPHAT_REL = 0.35  # and this share of the opening's brightness, so bright concrete's texture isn't paint
 BRIGHT_MIN = 120.0  # a white line's brightness at least (shadows included)
 YELLOW_LIFT = 15.0
+YELLOW_WARM = 0.13
+WHITE_WARM = 0.07
 SPECK_M = 0.5  # m: paint fills 8% of a square this wide about it at least, more than grit does
 LOCAL_M = 2.0  # m: the square paint must stand out of for paint the map is said to miss
 STRONG = 2.2  # standard deviations
@@ -69,13 +71,22 @@ class Paint:
     lifted = (tophat > TOPHAT_MIN) & (tophat > TOPHAT_REL * self.opened)
     # yellow is told by its colour, so it needs less lift: on pale concrete it is hardly brighter than the road
     lifted_y = (tophat > YELLOW_LIFT) & (tophat > 0.1 * self.opened)
-    self.yellow = lifted_y & (r - b > 45) & (r - b > 0.32 * r) & (g > 0.55 * r) & (r > 95)
-    self.white = lifted & ~self.yellow & (v - mn < 0.22 * v + 12) & (v > BRIGHT_MIN)
+    # warmth (red over blue) as a share of red, less the road's own (the grade's tint, warm concrete): on the survey
+    # shots white paint is under 0.07 in 90% of pixels, yellow over 0.16 in 75% (worn yellow lower)
+    sat = (v - mn) / np.maximum(v, 1.0)
+    grey = (sat < 0.2) & (v > 22) & (v < 215)
+    bias = float(np.median((r - b)[grey])) if grey.any() else 0.0
+    warm = (r - b - bias) / np.maximum(r, 1.0)
+    self.yellow = lifted_y & (warm > YELLOW_WARM) & (r - b - bias > 15) & (g > 0.6 * r) & (r > 90)
+    self.white = lifted & ~self.yellow & (warm < WHITE_WARM) & (v - mn < 0.22 * v + 12) & (v > BRIGHT_MIN)
+    # paint of neither colour for sure (worn yellow, tinted white): it counts as paint, not as either colour
+    self.unsure = lifted_y & ~self.yellow & ~self.white & (warm >= WHITE_WARM) & (g > 0.6 * r) & (v > 90)
     k2 = max(3, int(round(SPECK_M / m_per_px)) | 1)
     need = max(4, int(0.08 * k2 * k2))
     self.white &= box_sum(self.white, k2) >= need
     self.yellow &= box_sum(self.yellow, k2) >= need
-    self.paint = self.white | self.yellow
+    self.unsure &= box_sum(self.unsure | self.white | self.yellow, k2) >= need
+    self.paint = self.white | self.yellow | self.unsure
     # paint that stands out of the road's own texture around it (worn concrete has bright streaks along the wheel
     # tracks): this many standard deviations over the mean of a LOCAL_M square; a line fills little of the square
     k3 = max(5, int(round(LOCAL_M / m_per_px)) | 1)
@@ -84,7 +95,6 @@ class Paint:
     std = np.sqrt(np.maximum(box_sum(v.astype(np.float64) ** 2, k3) / n - mean ** 2, 1.0))
     self.contrast = ((v - mean) / std).astype(np.float32)
     self.strong = self.paint & (self.contrast > STRONG)
-    sat = (v - mn) / np.maximum(v, 1.0)
     vegetation = (g > r + 6) & (g > b + 6) & (sat > 0.12)
     # road surface as seen: unsaturated grey of asphalt or concrete, in sun or shade, or paint
     self.asphalt = ((sat < 0.2) & (v > 22) & (v < 215) & ~vegetation) | self.paint

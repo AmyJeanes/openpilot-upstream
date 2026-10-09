@@ -228,7 +228,7 @@ class MapData:
               if np.hypot(*(self.shapes[k][:, :2].mean(0) - cam.c)) < r]
     ridx = self._near(self.road_cells, cam.c, r)
     areas = [self.areas[k] for k in self._near(self.area_cells, cam.c, r + 40).tolist()]
-    return TileMap(cam, segs, kinds, shapes, self.road_a[ridx], self.road_b[ridx], self.road_w[ridx], self.road_st[ridx], areas)
+    return TileMap(cam, segs, kinds, shapes, self.road_a[ridx], self.road_b[ridx], self.road_w[ridx], self.road_st[ridx], areas, self.road_cls[ridx])
 
 
 @dataclass
@@ -243,6 +243,7 @@ class TileMap:
   road_w: np.ndarray
   road_st: np.ndarray
   areas: list  # [(polygon [N, 2] with the centre first, z)]
+  road_cls: np.ndarray | None = None  # roads.json class index of each road piece
   level: float = field(init=False)
 
   def __post_init__(self):
@@ -307,6 +308,26 @@ class TileMap:
       if grow > 0:
         dr.line([tuple(p) for p in uv[1:]] + [tuple(uv[1])], fill=255, width=max(1, int(round(2 * grow / mpp))))
     return np.asarray(im) > 0
+
+  def classes(self, size: tuple[int, int], grow: float = 1.5) -> np.ndarray:
+    """The class (roads.json's index, smaller is bigger) of the biggest road on the tile's level over each pixel, its
+    surface grown by `grow` m; 255 where there is none: uint8 [h, w]."""
+    im = Image.new("L", size, 255)
+    if self.road_cls is None:
+      return np.asarray(im)
+    dr = ImageDraw.Draw(im)
+    mpp = self.cam.m_per_px
+    for k in np.argsort(-self.road_cls, kind="stable"):
+      a, b = self.road_a[k], self.road_b[k]
+      if abs((a[2] + b[2]) / 2 - self.level) >= LEVEL or self.road_st[k] == 2:
+        continue
+      uv = self.cam.project(np.array([a, b]))
+      wpx = max(1, int(round((self.road_w[k] + 2 * grow) / mpp)))
+      dr.line([tuple(uv[0]), tuple(uv[1])], fill=int(self.road_cls[k]), width=wpx)
+      r = wpx / 2
+      for p in uv:
+        dr.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=int(self.road_cls[k]))
+    return np.asarray(im)
 
   def overhead(self, size: tuple[int, int]) -> np.ndarray:
     """The highest map road surface over each pixel, in map metres (-inf where there is none): float32 [h, w]."""

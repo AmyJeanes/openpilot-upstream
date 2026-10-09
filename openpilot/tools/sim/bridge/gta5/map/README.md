@@ -106,6 +106,29 @@ The view keeps what it has drawn in tiles of screen pixels while the map pans, d
 shown or a level changes.
 `map_view.py roads.json --state <file>` shows the map alone, with a state from a file.
 
+## Checking the map against the game from above
+`imgcheck/` finds where the map disagrees with the game's own paint and kerbs, from top-down shots of the game, with no
+driving: `python -m openpilot.tools.sim.bridge.gta5.map.imgcheck.run plan|capture|analyse|report RUN` (its docstring
+has the options).
+- `plan` lays tiles along every road (city, a sample of districts, or the whole map), the image's long side along the
+  road: at 45 m up with a 50 degree field each 2560x1440 tile covers about 75 m by 42 m at 2.9 cm a pixel. They're
+  ordered to keep hops short, as the game streams the world around the camera.
+- `capture` shoots them with the plugin's `topcam` (fixed x/y, the map's height as `z`) and `grab` (the player's frame
+  from the present hook, written as a BMP: no desktop capture, so nothing on the screen gets in the way). It needs the
+  bridge connected and the player in a car. It sets noon, EXTRASUNNY, a frozen clock and no traffic first, checks them
+  in the state before every shot, waits longer after long hops, shoots blurry (unstreamed) frames again, resumes where
+  it stopped, rides out a bridge restart, and puts the topcam, overlay, time, weather and traffic back at the end.
+- `analyse` draws the overlay's own road marks (its cache, `gta5_overlay.road_marks`) into each tile by the topcam's
+  projection (`imgcheck/frame.py`) and compares them with the paint found in the image (top-hat brightness, colour by
+  warmth over the road's, `imgcheck/paint.py`): paint with no map line within 0.4 m, map lines with no paint, the wrong
+  colour, kerbs over even road surface (painted medians, kerbs across lanes), stop lines off the painted bar, and
+  line-like paint inside junction areas (`imgcheck/compare.py`). Tiles whose ground under the camera is off the map's
+  road height (something over the road) are left out; service roads count a quarter.
+- `report` gathers the issues into spots across overlapping tiles and writes `RUN/report/index.html` (ranked, with
+  crops: the game, our map over it, the paint found), `spots.json` and city heat maps.
+`run.py import-survey RUN` takes the map audit's survey shots (`/mnt/e/gta5_audit/map_audit/survey_trips_*`, with their
+topcam poses) as tiles, so the check runs on them without the game.
+
 ## The map
 - Street names are the nodes' street, on links whose two nodes share it. GTA's links between two streets' nodes, as
   through a junction, have none; a router charges for every change of name, so it would favour streets with no names.

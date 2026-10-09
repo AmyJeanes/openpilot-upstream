@@ -34,6 +34,9 @@ def tile_camera(side: dict) -> Camera:
   tc = side["topcam"]
   w, h = side.get("size", (2560, 1440))
   zmap = side.get("zmap")
+  if side.get("source") == "capture" and _md is not None and zmap is not None:
+    # the plan's height is roads.json's, to the metre: the marks' (GTA's node heights) are finer
+    zmap = _md.road_z((tc["x"], tc["y"]), z_hint=zmap, radius=15.0) or zmap
   return Camera(tc["x"], tc["y"], tc["ground"], tc["height"], tc["heading"], tc["fov"], w, h, float("nan") if zmap is None else zmap)
 
 

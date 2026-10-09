@@ -66,7 +66,7 @@ class Shooter:
     self.raw_dir = os.path.join(run_dir, "raw")
     os.makedirs(self.tile_dir, exist_ok=True)
     os.makedirs(self.raw_dir, exist_ok=True)
-    self.raw_win = win_path(self.raw_dir)
+    self.raw_win = win_path(self.raw_dir).replace("\\", "/")  # the plugin reads its JSON without unescaping
     self.desktop = desktop
     self.jpeg = jpeg
     self.log = log
@@ -147,6 +147,8 @@ class Shooter:
         cmds[-1]["weather"] = w["set"]
       else:
         cmds[-1]["clear"] = 1
+      if w.get("rainSet") is not None:
+        cmds[-1]["rain"] = w["rainSet"]
     if d:
       cmd = {"type": "traffic", "on": int(not d.get("off"))}
       if d.get("set"):
@@ -164,7 +166,7 @@ class Shooter:
       os.remove(bmp)
     if self.desktop:
       return bmp if desktop_shot(win_path(self.raw_dir) + "\\" + name + ".bmp") else None
-    self.send({"type": "grab", "path": self.raw_win + "\\" + name + ".bmp"})
+    self.send({"type": "grab", "path": self.raw_win + "/" + name + ".bmp"})
     end = time.monotonic() + GRAB_WAIT
     while time.monotonic() < end:
       try:

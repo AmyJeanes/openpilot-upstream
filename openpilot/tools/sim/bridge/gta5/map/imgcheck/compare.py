@@ -49,6 +49,8 @@ KERB_DIFF = 10.0  # brightness step across a kerb under which the two sides are 
 KERB_FLAT = 22.0  # brightness spread across a kerb (10th to 90th percentile of the averaged profile) of an even surface
 STOP_SEARCH = 6.0  # m before and after a stop line a painted bar is looked for
 STOP_COVER = 0.5
+MINOR_CLASS = 7  # osm_to_roads.ROAD_CLASSES: service, track
+MINOR_WEIGHT = 0.25
 COVERED = 1.5  # m between the game's ground under the camera and the map's road height
 WEIGHT = {"missing": 1.0, "stray": 1.0, "colour": 1.0, "kerb": 0.7, "stop": 1.0, "junction": 0.5}
 
@@ -129,6 +131,7 @@ class TileCheck:
     self.overhead = self.map.overhead(self.size)
     self.hidden = self.overhead > self.map.level + ABOVE
     self.road = self.map.surface(self.size, grow=ROAD_GROW) & ~self.hidden
+    self.road_class = self.map.classes(self.size)
     self.sharp = self.paint.sharpness()
     self.road_share = float(self.map.surface(self.size).mean())
     k = self.px(1.0) | 1
@@ -143,7 +146,12 @@ class TileCheck:
 
   def add(self, kind: str, u: float, v: float, length: float, detail: str, colour: str = "", score: float | None = None):
     x, y = self.world(u, v)
-    self.issues.append(Issue(kind, x, y, length, WEIGHT[kind] * length if score is None else score, detail, u, v, colour))
+    score = WEIGHT[kind] * length if score is None else score
+    cls = self.road_class[int(np.clip(v, 0, self.size[1] - 1)), int(np.clip(u, 0, self.size[0] - 1))]
+    if cls >= MINOR_CLASS:  # car parks, drives, alleys and tracks: the map lays them as a lane down the middle
+      score *= MINOR_WEIGHT
+      detail += " (service road)"
+    self.issues.append(Issue(kind, x, y, length, score, detail, u, v, colour))
 
   def junction_mask(self, shrink: float = 0.0) -> np.ndarray:
     im = Image.new("L", self.size, 0)
@@ -278,11 +286,11 @@ class TileCheck:
     # the BG_M square around (bright grit, worn concrete and gravel roofs read as scattered paint); where that density
     # is high the image can't tell, and the point isn't judged
     kn, kb = self.px(2 * TOL) | 1, self.px(BG_M) | 1
-    near = {c: box_sum(m, kn) / kn ** 2 for c, m in (("w", p.white), ("y", p.yellow))}
-    bg = {c: box_sum(m, kb) / kb ** 2 for c, m in (("w", p.white), ("y", p.yellow))}
-    white = (near["w"] >= LINE_DENSITY) & (near["w"] >= BG_RATIO * bg["w"])
-    yellow = (near["y"] >= LINE_DENSITY) & (near["y"] >= BG_RATIO * bg["y"])
-    noisy = bg["w"] + bg["y"] > NOISY
+    masks = (("w", p.white), ("y", p.yellow), ("a", p.paint))
+    near = {c: box_sum(m, kn) / kn ** 2 for c, m in masks}
+    bg = {c: box_sum(m, kb) / kb ** 2 for c, m in masks}
+    white, yellow, painted = ((near[c] >= LINE_DENSITY) & (near[c] >= BG_RATIO * bg[c]) for c in "wya")
+    noisy = bg["a"] > NOISY
     for kind, pts in self.map.lines(WHITE.replace("l", "").replace("s", "").replace("k", "") + YELLOW):
       dashed = kind in DASHED
       win = DASH_WINDOW if dashed else WINDOW
@@ -291,6 +299,7 @@ class TileCheck:
       judged &= ~noisy[iv, iu]
       same = (yellow if kind in YELLOW else white)[iv, iu]
       other = (white if kind in YELLOW else yellow)[iv, iu]
+      anyp = painted[iv, iu]
       n = max(1, int(round(win / SAMPLE)))
       stray = np.zeros(len(q), bool)
       wrong = np.zeros(len(q), bool)
@@ -301,10 +310,10 @@ class TileCheck:
         j = judged[a:b]
         if j.mean() < VISIBLE:
           continue
-        cov_same, cov_other = same[a:b][j].mean(), other[a:b][j].mean()
-        if cov_same + cov_other < need:
+        cov_same, cov_other, cov_any = same[a:b][j].mean(), other[a:b][j].mean(), anyp[a:b][j].mean()
+        if cov_any < need:
           stray[a:b] = True
-        elif cov_same < need and cov_other >= need:
+        elif cov_same < 0.5 * need and cov_other >= need:
           wrong[a:b] = True
       colour = "yellow" if kind in YELLOW else "white"
       for flags, issue in ((stray, "stray"), (wrong & ~stray, "colour")):
@@ -343,6 +352,7 @@ class TileCheck:
 
   def check_kerbs(self):
     yellow = dilate(self.paint.yellow, self.px(0.25))
+    white_edge = dilate(self.paint.white, self.px(0.3))
     for _, pts in self.map.lines("e"):
       q, t, uv, iu, iv, judged = self.samples(pts, 0.5)
       if len(q) < 2:
@@ -357,8 +367,10 @@ class TileCheck:
       even = clear & (np.nan_to_num(step, nan=1e9) < KERB_DIFF)
       flat = clear & (np.nan_to_num(spread, nan=1e9) < KERB_FLAT)
       painted = yellow[iv, iu]
-      bad = judged & clear & even & flat
-      good = judged & clear & ~(even & flat)  # a kerb seen there
+      # a white edge line along it: the map's edge on the painted edge, a shoulder beyond (not judged as a kerb)
+      edge_line = white_edge[iv, iu]
+      bad = judged & clear & even & flat & ~edge_line
+      good = judged & ((clear & ~(even & flat)) | edge_line)  # a kerb (or edge line) seen there
       total = float(np.hypot(*np.diff(pts[:, :2], axis=0).T).sum())
       if total < KERB_RUN and len(q) >= 3 and bad.sum() >= 2 and bad.sum() >= 2 * good.sum():  # a kerb stub on the road
         m = len(q) // 2
