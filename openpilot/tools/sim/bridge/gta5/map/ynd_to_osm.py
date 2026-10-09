@@ -1619,17 +1619,19 @@ def unmarked_roads(nodes, rows, samples_of):
   (paint_survey.unpainted), and the ways along the road between them too short to show it themselves (fewer sections,
   or none, all of them bare), where the road runs on unpainted to both sides (or ends) within UNMARKED_REACH, so a
   road's lines don't stop and start. Minor roads are UNPAINTED_CLASSES, and the unclassified roads GTA's traffic
-  doesn't use (switched off: back roads the minimap draws), unpainted there even where the files draw no asphalt edges
-  (a road blended into the ground). `rows` are [(way id, a, b, two-way, class, switched off)], `samples_of(way id, a,
-  b)` the way's samples; returns the way ids."""
-  minor = {r[0]: r for r in rows if r[3] and (r[4] in UNPAINTED_CLASSES or (r[4] == 'unclassified' and r[5]))}
+  doesn't use (switched off: back roads the minimap draws) or marks off-road, unpainted there even where the files draw
+  no asphalt edges (a road blended into the ground), as are tracks and other off-road ways (dirt, with no asphalt to
+  edge). `rows` are [(way id, a, b, two-way, class, switched off, off-road)], `samples_of(way id, a, b)` the way's
+  samples; returns the way ids."""
+  minor = {r[0]: r for r in rows if r[3] and (r[4] in UNPAINTED_CLASSES or (r[4] == 'unclassified' and (r[5] or r[6])))}
   at = defaultdict(list)
   for r in minor.values():
     at[r[1]].append(r)
     at[r[2]].append(r)
   state = {}
   for wid, a, b, *_ in minor.values():
-    samples, edges = samples_of(wid, a, b), minor[wid][4] in UNPAINTED_CLASSES
+    cls, offroad = minor[wid][4], minor[wid][6]
+    samples, edges = samples_of(wid, a, b), cls in UNPAINTED_CLASSES and cls != 'track' and not offroad
     state[wid] = 'bare' if paint_survey.unpainted(samples, edges_seen=edges) else \
       'short' if not samples or paint_survey.unpainted(samples, 1, edges) else 'painted'
 
@@ -2235,7 +2237,8 @@ def main():
   print(f"{len(tapers)} turn lanes opening ({', '.join(f'{n} {k}' for k, n in taper_why.most_common())}), {applied} widening " +
         f"from there: {len(parent)} links split")
   lines_why = Counter()
-  unmarked = unmarked_roads(nodes, [(wid, a, b, bool(back), cls, bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF))
+  unmarked = unmarked_roads(nodes, [(wid, a, b, bool(back), cls, bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF),
+                                     bool((nodes[a]['f'][0] | nodes[b]['f'][0]) & OFFROAD))
                                     for wid, a, b, _, back, cls, *_ in info if wid not in crossings], link_samples) if survey else set()
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:

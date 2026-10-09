@@ -356,11 +356,18 @@ def test_unmarked_roads():
 
   def bare(n):
     return [{'src': 'gamefiles', 'marks': [], 'kerbs': edges}] * n
-  rows = [(1, 'A', 'B', True, 'residential', False), (2, 'B', 'C', True, 'residential', False), (3, 'C', 'D', True, 'residential', False)]
+  rows = [(1, 'A', 'B', True, 'residential', False, False), (2, 'B', 'C', True, 'residential', False, False),
+          (3, 'C', 'D', True, 'residential', False, False)]
   samples = {1: bare(4), 2: bare(2), 3: bare(4)}
   assert unmarked_roads(nodes, rows, lambda w, a, b: samples[w]) == {1, 2, 3}
   samples[3] = [{'src': 'gamefiles', 'marks': [{'conf': 1.0, 'colour': 'yellow', 'type': 'double_solid', 'offset': 0.0}], 'kerbs': edges}] * 4
   assert unmarked_roads(nodes, rows, lambda w, a, b: samples[w]) == {1}
+  # a dirt track (or an off-road unclassified road) bare in the files is unpainted though they draw no asphalt edges;
+  # a residential street without edges read isn't (a gap in the files)
+  dirt = {w: [{'src': 'gamefiles', 'marks': [], 'kerbs': {'left': None, 'right': None}}] * 4 for w in (1, 2, 3)}
+  rows = [(1, 'A', 'B', True, 'track', True, True), (2, 'B', 'C', True, 'unclassified', False, True),
+          (3, 'C', 'D', True, 'residential', False, False)]
+  assert unmarked_roads(nodes, rows, lambda w, a, b: dirt[w]) == {1, 2}
 
 
 def test_median_edge_kinds():
