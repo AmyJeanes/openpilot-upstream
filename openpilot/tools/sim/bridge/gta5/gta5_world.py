@@ -444,6 +444,9 @@ class GTA5World(World):
     drives = self._nav_drives()
     out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic(), drives))
     self.driver.act(out)
+    for e in out.events:  # map errors nav found, in the state log as the map driver's anomalies are in its own
+      if self.log:
+        self.log.write(json.dumps({"mono": round(time.monotonic(), 3), **e}) + "\n")
     for d in out.desires:
       self._set_nav_desire(d)
     self._set_cap(simulator_state, out.cap, out.cap_reason)
@@ -597,7 +600,7 @@ class GTA5World(World):
       return None
     r = m.match(x, y, math.radians(state["heading"] + 90.0), z)
     return None if r is None else {"lane": r.lane, "lanes": r.lanes, "kind": r.kind, "bay": r.bay, "oncoming": r.oncoming,
-                                   "beside": list(r.beside), "areas": areas is not None}
+                                   "beside": list(r.beside), "areas": areas is not None, "way": r.way, "right": r.right}
 
   def _write_route_input(self, state: dict):
     """The driving model's route input for the route and the car's place on it; zero off it."""

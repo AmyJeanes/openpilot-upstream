@@ -1,5 +1,7 @@
 """Blind-spot monitoring: the detector, its way to openpilot's carState through the simulated Model 3's CAN, openpilot's
 lane change waiting on it, and nav and the driver waiting with the blinker on."""
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -417,3 +419,130 @@ def test_nav_merge_waits_for_its_lane_and_the_maps_to_agree():
       assert d.nav.changing is None and not (d.reason == "laneChange" and cap < 10.0)
     y += d.v * 0.05
   assert d.nav.changing == "left" and y >= agree_from
+
+
+
+
+
+
+def test_flag_held_through_its_zone_flickering():
+  # the map's lanes beside dropping out for a reading (as where lanes merge) don't drop the flag at once
+  bs = BlindSpot(BlindSpotTune())
+  assert bs.update(state([car(LANE, 0.0)]), 10.0) == (False, True)
+  assert bs.update(state([car(LANE, 0.0)], beside=[BESIDE[0], None]), 10.05) == (False, True)
+  assert bs.update(state([car(LANE, 0.0)]), 10.1) == (False, True)
+  assert bs.update(state([], beside=[BESIDE[0], None]), 10.7) == (False, False)  # a lane that has truly gone
+
+
+def test_openpilot_lane_change_waits_out_a_moments_gap():
+  # a car passing ahead out of the zone as the next, closing from behind, comes into it: the flag drops for a frame
+  # between them (bsm_trial 20261009b, FX1 and FX2); with the nudge held on, no lane change starts in that gap
+  c, dh = Car(), DesireHelper()
+  c.state.left_blinker = True
+  started = []
+  for k in range(120):
+    c.state.left_blindspot = k not in (40, 41) and k < 80
+    c.state.user_torque = NUDGE_TORQUE
+    dh.update(c.step(), True, 1.0)
+    started += [k] if dh.lane_change_state == LaneChangeState.laneChangeStarting else []
+  assert started and started[0] >= 80 + round(0.5 / DT_MDL) - 1  # only once clear for half a second
+
+
+def test_nav_merge_held_past_where_it_first_put_the_lanes_end():
+  # the map's end of the lane further on than first read (the route's distances shift as the car nears it): a merge
+  # held by the blind spot waits on to the end the map now gives, not given up where the first reading put it
+  d = Drive((1, 2), v=8.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 900.0, 5.0)])
+  y = 0.0
+  while y < 420.0:
+    end = 400.0 + max(0.0, y - 300.0) * 0.5
+    cap, _ = d.step(route, y, {"blindspot": [True, False], "routeEnd": 890.0 - y, "laneMaps": [[end - y, [0, None], 1]]})
+    d.v = min(8.0, cap) if cap > 0 else 8.0
+    y += max(d.v, 0.5) * 0.05
+  assert d.nav.change_end is not None and d.nav.driven > d.nav.change_end  # past where it first had the end
+  assert d.nav.changing == "left" and [m["type"] for m in d.sent] == ["setIndicator"]
+
+
+def test_nav_merge_held_through_the_lane_reading_dropping_out():
+  # the lane reading lost while a merge waits on the blind spot (lanes merging read badly): it waits on, still slowing
+  d = Drive((1, 2), v=6.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 700.0, 5.0)])
+  y, caps_lost = 0.0, []
+  while y < 395.0:
+    lost = d.nav.changing is not None and y > 330.0
+    cap, _ = d.step(route, y, {"blindspot": [True, False], "routeEnd": 690.0 - y, "laneMaps": [[400.0 - y, [0, None], 1]],
+                               **({"lane": None} if lost else {})})
+    if lost:
+      caps_lost.append(cap)
+    d.v = min(6.0, cap) if cap > 0 else 6.0
+    y += d.v * 0.05
+  assert d.nav.changing == "left" and [m["type"] for m in d.sent] == ["setIndicator"]
+  assert caps_lost and caps_lost[-1] <= nav_mod.MERGE_CRAWL + 0.5
+
+
+def test_nav_merge_held_keeps_slowing_when_the_readings_disagree():
+  # signalled and held, then nav's lane and the map's stop agreeing: it still slows for the lane's end
+  d2 = Drive((1, 2), v=10.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 700.0, 5.0)])
+  y, caps = 0.0, []
+  while y < 390.0:
+    disagree = d2.nav.changing is not None
+    cap, _ = d2.step(route, y, {"blindspot": [True, False], "routeEnd": 690.0 - y, "laneMaps": [[400.0 - y, [0, None], 1]],
+                                "laneMap": map_read(0 if disagree else 1, 2, [None, "own"] if disagree else ["own", None])})
+    caps.append(cap)
+    d2.v = min(d2.v, cap) if cap > 0 else d2.v
+    y += max(d2.v, 0.5) * 0.05
+  assert d2.nav.changing == "left" and min(caps) <= nav_mod.MERGE_CRAWL + 0.5
+
+
+def test_nav_no_merge_out_of_lanes_at_a_fork_left_to_the_route():
+  # a fork's change held by the blind spot and given up, the fork left to the route: the lanes the plan had ending at
+  # its split carry on as the branch the car now takes, so no merge out of them follows (bsm_trial 20261009b: a crawl
+  # on the freeway, and late changes into a closing car)
+  d = Drive((0, 2), v=15.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 800.0, 5.0)])
+  fork_at, y, caps, left = 400.0, 0.0, [], False
+  while y < 398.0:
+    cap, _ = d.step(route, y, {"blindspot": [False, True], "laneFrac": 0.0, "routeEnd": 790.0 - y,
+                               "forks": [[fork_at - y, "right", 1, 2, True, 0, False]],
+                               "laneMaps": [[fork_at - 5.0 - y, [None, 0], 1]] if y < fork_at - 5.0 else []})
+    caps.append((d.nav.changing, cap))
+    left |= bool(d.nav.skipped)
+    y += d.v * 0.05
+  assert left and d.nav.changing is None  # the fork left to the route
+  assert [m["type"] for m in d.sent] == ["setIndicator", "indicatorOff"]  # the change, given up; no merge after
+  given_up = max(k for k, (changing, _) in enumerate(caps) if changing)
+  assert all(c == 0 or c > 9.0 for _, c in caps[given_up + 1:])  # nor slowing for one
+
+
+def test_nav_reports_a_bay_the_map_reads_as_oncoming():
+  # the bay test's drive, but the map reads the lane left of the car as oncoming: no change into it, and the bay is
+  # reported once as a map error, with the map's reading
+  route = route_to_turn(200.0, "left")
+  d = Drive((0, 2), v=6.0)
+  y, lines = 0.0, io.StringIO()
+  debug, nav_mod.DEBUG = nav_mod.DEBUG, True
+  try:
+    with contextlib.redirect_stdout(lines):
+      while y < 195.0:
+        bay_at = 170.0 - y
+        forks = [[bay_at, "right", 2, 2, False, 0, True]] if bay_at > 0 else []
+        read = {**map_read(0, 2, ["oncoming", "own"]), "way": 123, "right": 2.5}
+        d.step(route, y, {"forks": forks, "routeEnd": 300.0 - y, "laneMap": read})
+        y += d.v * 0.05
+  finally:
+    nav_mod.DEBUG = debug
+  bay = [e for e in d.events if e.get("kind") == "bay_reads_oncoming"]
+  assert len(bay) == 1 and bay[0]["event"] == "anomaly" and bay[0]["side"] == "left"
+  assert bay[0]["map"]["way"] == 123 and bay[0]["map"]["beside"] == ["oncoming", "own"]
+  assert abs(bay[0]["pos"][1] + bay[0]["turn_dist"] - 200.0) < 1.0  # the left turn's bay, reported as it opens
+  assert lines.getvalue().count("map error: the turn bay left") == 1
+  assert d.nav.bay_to == 0.0  # never changed into it
+
+
+def test_nav_merge_still_held_after_a_moments_gap():
+  # the blind spot clear for a single step while a merge waits: openpilot doesn't start on it, so nav still holds the
+  # change and keeps slowing for the lane's end rather than taking it as gone
+  d, trace = merge(lambda t, y: not 20.0 <= t < 20.06, until=399.0)
+  assert d.nav.changing == "left" and not d.nav.change_went and [m["type"] for m in d.sent] == ["setIndicator"]
+  assert max(s[2] for s in trace if s[1] > 400.0 - nav_mod.MERGE_STOP_BEFORE) < 1.0

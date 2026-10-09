@@ -27,7 +27,7 @@ class Drive:
   """navd's planner driven along a route by a car whose driver does as it's asked, northwards at a steady speed."""
   def __init__(self, lane, v=8.0):
     self.clock = Clock()
-    self.sent, self.desires = [], []
+    self.sent, self.desires, self.events = [], [], []
     self.indicator = None
     self.nav = Planner()
     self.driver = Driver(self._send, lambda: None)
@@ -40,6 +40,7 @@ class Drive:
     out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
     self.driver.act(out)
     self.desires += out.desires
+    self.events += out.events
     self.reason = out.cap_reason
     if out.arrived:
       self._send({"type": "waypoint", "off": True})

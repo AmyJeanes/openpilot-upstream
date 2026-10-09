@@ -51,7 +51,7 @@ class NavInputs:
   truth_lane_frac: float | None = None  # the lane, between lanes as it changes
   truth_lane_plugin: list | None = None  # the simulator's own lane reading, as truth_lane
   # the lane by the map's lanes at the true pose: lane, lanes, kind, bay, oncoming, beside (the lanes left and right of
-  # it: "own", "oncoming", "centre" or None for none), areas
+  # it: "own", "oncoming", "centre" or None for none), areas, way (its OSM way) and right (m right of the way's line)
   truth_lane_map: dict | None = None
 
 
@@ -62,3 +62,5 @@ class NavOutputs:
   requests: list[str]  # to the driver, in order
   desires: list[str]  # NavDesire's values set this step, in order ("" clears it)
   cap_reason: str = ""  # what sets the cap, as cereal's NavSpeed.Reason ("turnLeft", "bendRight", ...), "" with none
+  # map errors found this step, for the map-fix work: {"event": "anomaly", "kind": ..., "pos": [x, y], ...}
+  events: list[dict] = field(default_factory=list)
