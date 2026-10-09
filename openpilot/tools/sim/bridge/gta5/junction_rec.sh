@@ -53,7 +53,7 @@ if [ "$1" = --inner ]; then
   exit 0
 fi
 
-[ $# -ge 2 ] || { sed -n '2,13p' "$0"; exit 1; }
+[ $# -ge 2 ] || { sed -n '2,15p' "$0"; exit 1; }
 tmux has-session -t gta5 2>/dev/null || tmux new-session -d -s gta5 -n shell
 if tmux list-windows -t gta5 -F '#W' | grep -qx jrec; then
   echo "a jrec window is open already (tmux attach -t gta5); close it first"; exit 1
