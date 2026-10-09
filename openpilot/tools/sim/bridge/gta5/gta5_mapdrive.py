@@ -11,8 +11,8 @@ against the lane slots' targets (lane_slots.py, compared by where the lanes are)
 plan_check=fix (the default) changes into it by the target's end, event only logs it, abort ends the trip; each is a
 plan_slot_mismatch anomaly.
 
-Each game frame: pure pursuit (lookahead clamp(5, 0.6 v + 3, 25) m) from the pose ~70 ms on, plus the path's curvature
-0.3 s ahead as feedforward (the pursuit's own curve-cutting taken out), rate limited to 3x the style's lateral jerk and
+Each game frame: pure pursuit (lookahead clamp(5, 0.6 v + 3, 25) m) from the pose `latency` (0.1) s on, plus the path's
+curvature `ff_preview` (0.38) s ahead as feedforward (the pursuit's own curve-cutting taken out), rate limited to 3x the style's lateral jerk and
 capped at 4.5 m/s^2; the speed follows a static profile (limit or road class x style, the path's curvature at the
 style's lateral acceleration and lateral jerk, nav's turn speeds) with stop signs (full stop and dwell), give way lines (slow, then on),
 traffic lights (no state to read: driven through and marked light_unknown +-5 s) and a gentle arrival stop_before m
@@ -22,8 +22,8 @@ to the game's AI). Map anomalies (kerb_contact, lane_disagree, tracking_saturate
 plan_slot_mismatch, sharp_corner) are logged with their place, for the map-fix work.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
-0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix"}; bias_max 0 and wander 0 drive exactly on
-the line."""
+0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.38}; bias_max
+0 and wander 0 drive exactly on the line."""
 import bisect
 import hashlib
 import math
@@ -47,8 +47,8 @@ STEP = 1.0  # m between the path's points
 LANE_W = 5.5  # m, GTA's lanes
 FRONT = 2.4  # m from the car's origin to its front bumper
 HALF_WIDTH = 1.0  # m
-LATENCY = 0.07  # s from the game's frame to the plugin acting on the control
-FF_PREVIEW = 0.3  # s ahead the path's curvature is fed forward (the plugin's yaw-rate loop lag)
+LATENCY = 0.1  # s from the game's frame to the plugin acting on the control (the pose is predicted this far)
+FF_PREVIEW = 0.38  # s ahead the path's curvature is fed forward: the car's curvature lag (0.2-0.3 s) and the delay
 LOOKAHEAD = (5.0, 0.6, 3.0, 25.0)  # m: min, s of speed, plus, max
 KAPPA_MAX = 0.2  # 1/m
 A_LAT_MAX = 4.5  # m/s^2 commanded at most, and an abort measured above it
@@ -79,6 +79,7 @@ HEADING_ABORT, HEADING_ABORT_S = 30.0, 0.5
 NO_PROGRESS_S = 20.0
 A_LAT_ABORT_S = 0.5
 OFF_ROAD = 1.0  # m past the kerb
+OFF_ROAD_DEV = 0.75  # m off the path as well, for an off-road abort
 USER_STEER = 0.02
 # anomalies
 KERB_MARGIN = 0.2  # m the car's side may come past the kerb before it counts
@@ -104,7 +105,7 @@ STYLE_RANGES = {
 PRESETS = {"calm": 0.2, "normal": 0.5, "brisk": 0.8}
 DEFAULTS = {"seed": None, "preset": "normal", "style": {}, "bias_max": 0.3, "wander": 0.1, "wander_m": 300.0,
             "on_abort": "stop", "speed": None, "plan_check": "fix", "stop_before": 15.0, "hold_after": 3.0, "retime": True,
-            "drive_on_right": True}
+            "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW}
 
 
 def pick_style(seed: int, preset: str = "normal", over: dict | None = None) -> dict:
@@ -947,7 +948,10 @@ class MapDriver:
     if self.phase != "abort" and route.off < 30.0 and not route.elsewhere:
       sec = route.section(route.seg)
       near_j = self._unclear(route.at) or self.s < self.join_m
-      if sec is not None and sec.lanes and not near_j and not (sec.edges[0] - OFF_ROAD <= route.right <= sec.edges[1] + OFF_ROAD):
+      # off the road and off the plan: on the plan, it's the plan past the map's kerbs (a kerb_contact anomaly), not
+      # the driving
+      if sec is not None and sec.lanes and not near_j and self.dev > OFF_ROAD_DEV and \
+         not (sec.edges[0] - OFF_ROAD <= route.right <= sec.edges[1] + OFF_ROAD):
         if held("off_road", True, 0.5):
           self._abort(f"off the road ({route.right:+.1f} m right of its line)", t, pos)
       else:
@@ -1052,13 +1056,14 @@ class MapDriver:
     h = float(state.get("heading") or 0.0)
     yaw = float(state.get("yawRate") or 0.0)
     # the pose when the control acts
-    hm = math.radians(h + math.degrees(yaw * LATENCY) / 2)
-    pred = pos + v * LATENCY * np.array([-math.sin(hm), math.cos(hm)])
-    h_pred = h + math.degrees(yaw * LATENCY)
+    lat = float(self.c["latency"])
+    hm = math.radians(h + math.degrees(yaw * lat) / 2)
+    pred = pos + v * lat * np.array([-math.sin(hm), math.cos(hm)])
+    h_pred = h + math.degrees(yaw * lat)
     s_pred, _ = project(self.path, self.s_path, pred, self.s, window=40.0)
     ld = min(max(LOOKAHEAD[0], LOOKAHEAD[1] * v + LOOKAHEAD[2]), LOOKAHEAD[3])
     sp = self.s_path
-    k_ff = float(np.interp(s_pred + v * FF_PREVIEW, sp, self.kappa_path))
+    k_ff = float(np.interp(s_pred + v * float(self.c["ff_preview"]), sp, self.kappa_path))
     k_pp = pursuit(self.path, sp, s_pred, pred, h_pred, v, ld)
     # the pursuit's own curvature from the path itself (its chord), taken out as the feedforward stands for it; the
     # heading interpolated, as a per-point one steps several degrees in a tight bend and makes the steering chatter

@@ -62,6 +62,7 @@ DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "ag
             "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0, "wrongway": None,
             "shortcuts": "route", "driver": "ai", "mapdrive": None}
 MAP_DRIVERS = ("map", "map+ai")
+MAP_LOG_EVERY = 0.1  # s between the map driver's rows in the expert log
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
 DEST_NEAR = 50.0  # m from the destination asked for, the end of a route for it
 LIMIT_LOOKAHEAD = 600.0  # m, lower speed limits ahead slowed for
@@ -169,6 +170,7 @@ class Expert:
     self.md: MapDriver | None = None  # the map driver (gta5_mapdrive.py), with driver=map or map+ai
     self.md_driving = False  # its controls drive this frame
     self.md_fallback = False  # it aborted and the game's AI drives on (map+ai)
+    self.md_logged = 0.0  # when its last row went to the expert log
 
   # *** control file ***
 
@@ -432,7 +434,9 @@ class Expert:
         self._stop(f"mapdrive {md.finished}")
         self._write_control({"on": False})
         return False
-    self._write(state, state.get("ai") or {})
+    if now - self.md_logged >= MAP_LOG_EVERY:  # the bridge steps at 100 Hz: a row each tenth of a second is plenty
+      self.md_logged = now
+      self._write(state, state.get("ai") or {})
     return True
 
   def _fallback(self, state: dict, now: float):
@@ -796,5 +800,6 @@ class Expert:
       "collisionsTotal": state.get("collisions"), "street": state.get("street"), "unstick": self.unstick_from is not None,
       "shortcuts": self.shortcuts_on,
       **({"ww": self.ww.info(), "wwDriving": self.ww_driving, "laneMap": state.get("laneMap")} if self.ww is not None else {}),
-      **({"src": self.source, "map": self.md.info(), "laneMap": state.get("laneMap")} if self.md is not None else {}),
+      **({"src": self.source, "map": self.md.info(), "laneMap": state.get("laneMap"), "yawRate": state.get("yawRate"),
+          "steerCurvature": state.get("steerCurvature")} if self.md is not None else {}),
     }) + "\n")

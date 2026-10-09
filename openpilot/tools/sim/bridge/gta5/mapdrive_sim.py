@@ -15,6 +15,7 @@ from openpilot.tools.sim.bridge.gta5.map.router import Route
 
 FRAME = 0.05  # s, the game's frames reaching the bridge
 SUB = 0.01  # s, the car's integration step
+LAT_KI = 1.0  # 1/s, the plugin's lat_ki
 LIVE_MAP = os.path.expanduser(os.getenv("GTA5_MAP", "~/gta5map_lanes"))
 RECORDINGS = os.getenv("GTA5_RECORDINGS", "/mnt/e/gta5rec/data")
 START, DEST, RIGHT, LEFT = 1, 4, 10, 15  # Valhalla maneuver types
@@ -28,7 +29,7 @@ class LagCar:
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
                delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0):
     self.x, self.y, self.h, self.v = x, y, heading, v
-    self.k = self.a = 0.0
+    self.k = self.a = self.lat_i = 0.0
     self.tau_k, self.tau_a, self.delay = tau_k, tau_a, delay
     self.gain, self.noise = gain, noise
     self.rng = np.random.default_rng(seed)
@@ -57,7 +58,12 @@ class LagCar:
         _, k, a = self.queue.pop(0)
         self.cmd = (k, a)
       k_cmd, a_cmd = self.cmd
-      self.k += (self.gain * k_cmd - self.k) * min(SUB / self.tau_k, 1.0)
+      # the plugin's integral on the yaw rate error (lat_ki 1/s), which takes out a steering gain error in about a second
+      if self.v > 3.0:
+        self.lat_i = float(np.clip(self.lat_i + LAT_KI * (k_cmd - self.k) * SUB, -0.1, 0.1))
+      else:
+        self.lat_i *= max(0.0, 1.0 - SUB)
+      self.k += (self.gain * (k_cmd + self.lat_i) - self.k) * min(SUB / self.tau_k, 1.0)
       self.a += (a_cmd - self.a) * min(SUB / self.tau_a, 1.0)
       if self.blocked:
         self.v, self.a = 0.0, 0.0
