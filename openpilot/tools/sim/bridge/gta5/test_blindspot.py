@@ -6,6 +6,7 @@ import tempfile
 
 import numpy as np
 
+import openpilot.selfdrive.navd.planner as nav_mod
 import openpilot.tools.sim.bridge.gta5.gta5_driver as driver_mod
 import openpilot.tools.sim.bridge.gta5.gta5_overlay as ov
 import openpilot.tools.sim.lib.simulated_tesla as tesla_mod
@@ -280,3 +281,69 @@ def test_nav_gives_up_a_waiting_change_no_longer_needed():
     y += d.v * 0.05
   assert started is not None and gave_up is not None and 3.0 < gave_up - started < 3.2
   assert [m["type"] for m in d.sent] == ["setIndicator", "indicatorOff"] and d.nav.changing is None
+
+
+def merge(car_beside, until: float, end_at: float = 400.0, forks=None, v0: float = 15.0):
+  """The car in the right lane of two, the right lane ending at end_at m, driving north from 0 towards it with its speed
+  following nav's cap (openpilot braking at up to 3 m/s^2); car_beside(t, y) whether the left blind spot is occupied at
+  time t s with the car at y m. Once clear with the blinker on for 1 s, openpilot changes lanes. Returns the Drive and
+  [(t, y, v, cap, occupied, indicator)] each step until y passes `until` or the car changes lanes."""
+  d = Drive((1, 2), v=v0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, end_at + 300.0, 5.0)])
+  y, t, clear_for, trace = 0.0, 0.0, 0.0, []
+  while y < until and d.lane == (1, 2):
+    occupied = car_beside(t, y)
+    cap, _ = d.step(route, y, {"blindspot": [occupied, False], "routeEnd": end_at + 290.0 - y, "forks": forks(y) if forks else [],
+                               "laneMaps": [[end_at - y, [0, None], 1]] if end_at > y else []})
+    trace.append((t, y, d.v, cap, occupied, d.indicator))
+    clear_for = clear_for + 0.05 if d.indicator == "left" and not occupied else 0.0
+    if clear_for >= 1.0:
+      d.lane, d.indicator = (0, 2), None  # openpilot changed lanes once clear, and the stalk cancelled
+    want = min(v0, cap) if cap > 0 else v0
+    d.v = max(want, d.v - 3.0 * 0.05) if want < d.v else min(want, d.v + 1.0 * 0.05)
+    y += d.v * 0.05
+    t += 0.05
+  return d, trace
+
+
+def test_nav_falls_in_behind_the_car_alongside_out_of_an_ending_lane():
+  # a car alongside at our speed all the way: the lane ends, so the change isn't given up at its last place; the car
+  # slows, the other gets ahead, and the change goes once it's clear, short of the lane's end
+  d, trace = merge(lambda t, y: abs(15.0 * t - y) < 12.0, until=400.0)
+  assert d.lane == (0, 2)
+  assert [m["type"] for m in d.sent] == ["setIndicator"]  # on once, never given up
+  t, y, v, *_ = trace[-1]
+  assert y < 400.0 and 15.0 * t - y > 12.0  # changed behind it, before the end
+  assert min(s[2] for s in trace) < 13.0  # slowed to let it by
+  held = [s for s in trace if s[4] and s[5] == "left"]
+  assert held and held[0][1] < 400.0 - 30.0  # held before its last place to start (lane_change_last), and past it
+
+
+def test_nav_crawls_to_the_lanes_end_while_the_blind_spot_holds():
+  d, trace = merge(lambda t, y: True, until=399.0)
+  assert d.lane == (1, 2) and d.nav.changing == "left" and d.indicator == "left"  # still waiting at the end, not given up
+  assert [m["type"] for m in d.sent] == ["setIndicator"]
+  crawl = [s for s in trace if s[1] > 400.0 - nav_mod.MERGE_STOP_BEFORE]
+  assert crawl and max(s[2] for s in crawl) < 1.0 and crawl[-1][3] == nav_mod.MERGE_CRAWL  # over its last m
+  assert d.reason == "laneChange"
+
+
+def test_nav_merge_starts_late_at_any_speed():
+  # a lane ending the car only finds itself in past the last place to start (the lane reading late): it still changes
+  d = Drive((1, 2), v=1.0)
+  route = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
+  caps = []
+  for _ in range(60):
+    waiting = d.nav.changing is None
+    cap, _ = d.step(route, 200.0, {"blindspot": [False, False], "routeEnd": 900.0, "laneMaps": [[12.0, [0, None], 1]]})
+    if waiting and d.reason == "laneChange":
+      caps.append(cap)
+  assert d.nav.changing == "left" and d.indicator == "left"
+  assert caps and max(caps) < 2.0  # slowing for the end until it goes
+
+
+def test_nav_gives_up_a_change_out_of_lanes_ending_at_a_split():
+  # lanes ending where the route leaves by a fork are the other branch's: a reroute will do, so it's given up as ever
+  d, trace = merge(lambda t, y: True, until=395.0, forks=lambda y: [[400.0 - y, "left", 1, 2, True, 1, False]])
+  assert [m["type"] for m in d.sent] == ["setIndicator", "indicatorOff"] and d.nav.changing is None
+  assert min(s[2] for s in trace) > 9.0  # no slowing to merge

@@ -168,7 +168,11 @@ nudgeless one: the blinker comes on when nav decides, stays on while the blind s
 holds off the nudge, and openpilot would block it anyway), and the change starts as soon as it clears; nav's lane plan
 still shows it. Still held at the last place it may start (for a fork, its last start point; for a turn 30 m before it),
 nav gives it up and the blinker goes off, leaving the exit or turn to a reroute rather than changing into a car; and
-likewise once the lanes ahead no longer need it (a reroute, or the car's lane has moved).
+likewise once the lanes ahead no longer need it (a reroute, or the car's lane has moved). Out of a lane that ends
+(a lane drop rather than a split the route leaves by), where a reroute won't help, it isn't given up: the blinker stays
+on to the lane's end, and nav caps the speed down to a crawl 10 m before it, so the vehicle alongside goes by and the car
+falls in behind it. `bsm_trial.py` drives trips in traffic and measures each lane change nav asks for against the blind
+spot: occupied as the blinker came on, the wait, whether it started into an occupied side, squeezes and give-ups.
 `GTA5_BLINDSPOT=0` turns it off; `GTA5_BLINDSPOT_TUNE` is a JSON file of its settings (the module's docstring says
 what each is and why), read again whenever it changes. Needs the plugin's `nearby` (no flags with an older plugin).
 
