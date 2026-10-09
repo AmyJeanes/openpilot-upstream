@@ -109,7 +109,7 @@ can't tell, and waits for the gas, as on the real car; nor does it go while traf
 Nav's turn parameters (speeds by turn angle, where slowing starts and ends, when to signal, re-pulsing, lane change
 lead) can come from a JSON file, `GTA5_NAVTUNE`, read again whenever it changes, for sweeps with `e2e.py sweep`; keys
 left out keep the defaults (`selfdrive/navd/planner.py` Tune). With `"signal_mode": "entry"` a turn is signalled at
-`signal_entry_offset` m past its junction's entry (GTA's stop line, else its junction nodes), as a driver signals on
+`signal_entry_offset` m past its junction's entry (the map's stop line, else GTA's junction nodes), as a driver signals on
 entering the junction, rather than 5 s before it. How far the model turns depends on its speed in the turn, so the
 turn's speed holds through the arc until the car heads its way out and is straight (`turn_release`, `turn_release_m`)
 and lifts at `release_accel`; nav logs the speeds into, through and out of each turn.

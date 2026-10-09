@@ -159,6 +159,22 @@ class LaneMatcher:
     return x + d[1] * shift, y - d[0] * shift, math.atan2(d[1], d[0])
 
 
+def map_hash(osm_path: str, version: int) -> str:
+  """A map file's caches' key: its contents and the version of what's kept."""
+  h = hashlib.sha1(str(version).encode())
+  with open(osm_path, 'rb') as f:
+    h.update(f.read())
+  return h.hexdigest()[:16]
+
+
+def keep(obj, path: str):
+  """Saves obj (with a save(path)) to a cache file whole, so a reader never finds it half written."""
+  os.makedirs(os.path.dirname(path), exist_ok=True)
+  tmp = f"{path}.{os.getpid()}.tmp.npz"
+  obj.save(tmp)
+  os.replace(tmp, path)
+
+
 class JunctionAreas:
   """The areas of a map's junctions (junctions.py), with their heights, to tell whether a point is in one."""
   def __init__(self, centres: np.ndarray, polygons: list[np.ndarray], heights: np.ndarray):
@@ -189,15 +205,12 @@ class JunctionAreas:
   @staticmethod
   def cache_file(osm_path: str, cache_dir: str = CACHE_DIR) -> str:
     """Where a map's junction areas are kept, by the map file's contents."""
-    h = hashlib.sha1(str(AREAS_VERSION).encode())
-    with open(osm_path, 'rb') as f:
-      h.update(f.read())
-    return os.path.join(cache_dir, f"junction_areas-{h.hexdigest()[:16]}.npz")
+    return os.path.join(cache_dir, f"junction_areas-{map_hash(osm_path, AREAS_VERSION)}.npz")
 
   @classmethod
-  def cached(cls, osm: OsmLanes, cache_dir: str = CACHE_DIR, build: bool = True) -> 'JunctionAreas | None':
+  def cached(cls, osm: OsmLanes, cache_dir: str = CACHE_DIR, build: bool = True, junctions=None) -> 'JunctionAreas | None':
     """A map's junction areas (osm read from a file) from the cache; if they aren't there yet and `build`, built (about
-    half a minute on the whole GTA map) and kept there, else None."""
+    half a minute on the whole GTA map, or from `junctions` where given) and kept there, else None."""
     path = cls.cache_file(osm.path, cache_dir)
     try:
       return cls.load(path)
@@ -205,11 +218,8 @@ class JunctionAreas:
       if not build:
         return None
     from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
-    areas = cls.from_junctions(Junctions(osm))
-    os.makedirs(cache_dir, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp.npz"
-    areas.save(tmp)
-    os.replace(tmp, path)
+    areas = cls.from_junctions(junctions if junctions is not None else Junctions(osm))
+    keep(areas, path)
     return areas
 
   def inside(self, x: float, y: float, z: float | None = None) -> bool:
@@ -228,15 +238,26 @@ class JunctionAreas:
 
 
 def main():
-  """`lane_match.py MAP.osm.pbf`: builds a map's junction areas into the cache, as the bridge does in the background."""
+  """`lane_match.py MAP.osm.pbf`: builds a map's junction areas and stop lines (stop_lines.py) into the cache, as the
+  bridge does in the background."""
   import argparse
   from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
   ap = argparse.ArgumentParser(description=main.__doc__)
   ap.add_argument("osm")
   ap.add_argument("--cache", default=CACHE_DIR)
   args = ap.parse_args()
-  areas = JunctionAreas.cached(OsmLanes.load(args.osm, to_game), args.cache)
+  osm = OsmLanes.load(args.osm, to_game)
+  areas, stops = JunctionAreas.cached(osm, args.cache, build=False), StopLines.cached(osm, args.cache, build=False)
+  if areas is None or stops is None:  # the junctions worked out once for both
+    from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
+    junctions = Junctions(osm)
+    if areas is None:
+      areas = JunctionAreas.cached(osm, args.cache, junctions=junctions)
+    if stops is None:
+      stops = StopLines.cached(osm, args.cache, junctions=junctions)
   print(f"{len(areas.centres)} junction areas in {JunctionAreas.cache_file(args.osm, args.cache)}")
+  print(f"{len(stops)} stop lines in {StopLines.cache_file(args.osm, args.cache)}")
 
 
 if __name__ == "__main__":

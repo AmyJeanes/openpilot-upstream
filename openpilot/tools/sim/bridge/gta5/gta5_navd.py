@@ -27,8 +27,8 @@ def nav_inputs(state: dict, engaged: bool, indicator: str | None, desire: dict[s
   return NavInputs(
     t=now, engaged=engaged, drive=drive, v=state.get("vEgo", 0.0), yaw_rate=state.get("yawRate", 0.0), blinker=indicator, desire=desire,
     route=state.get("route"), dest=state.get("waypoint"), route_end=state.get("routeEnd"), forks=state.get("forks"),
-    stops=state.get("stops"), junctions=state.get("junctions"), limits=state.get("limits"), lane_arrows=state.get("laneArrows"),
-    lane_drops=state.get("laneDrops"), lane_maps=state.get("laneMaps"), turns=state.get("turns"), two_way=state.get("twoWay"),
+    stops=state.get("stops"), stop_kinds=state.get("stopKinds"), junctions=state.get("junctions"), limits=state.get("limits"),
+    lane_arrows=state.get("laneArrows"), lane_drops=state.get("laneDrops"), lane_maps=state.get("laneMaps"), turns=state.get("turns"), two_way=state.get("twoWay"),
     pos=state.get("pos", (0.0, 0.0)), heading=state.get("heading", 0.0), truth_lane=state.get("lane"),
     truth_lane_frac=state.get("laneFrac"), truth_lane_plugin=state.get("lanePlugin"), truth_lane_map=state.get("laneMap"))
 
