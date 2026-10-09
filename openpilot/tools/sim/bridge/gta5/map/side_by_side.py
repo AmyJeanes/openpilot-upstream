@@ -5,6 +5,11 @@ same way on its level, other than the ways it carries on from or into. Where two
 the left draws the line between them as a lane line: dashed, solid where change:lanes says either outer lane there may
 not cross it. Only standard tags are read. Real maps don't split a carriageway without a physical separation between
 its parts, so there it rarely applies.
+
+Where a one-way way parts into several (a diverge: GTA starts each branch from the middle of the carriageway it leaves,
+not from its own lanes there), the branches' kerbs are left out where they lie inside that carriageway carried on
+straight past its end (by GORE m, and SHARED in from its edges, so a branch running on along its edge keeps its kerb):
+they cross its lanes until the branches part, at the gore. Likewise where several merge into one, back from its start.
 """
 from collections import defaultdict
 
@@ -23,6 +28,7 @@ LEVEL = 2.5  # m of height between ways on one level
 STEP = 0.5  # m: kerbs are cut to this
 MIN_PIECE = 0.3  # m
 CELL = 25.0  # m
+GORE = 40.0  # m a carriageway that parts or merges is carried on past its end, or back from its start
 
 
 class SideBySide:
@@ -35,11 +41,16 @@ class SideBySide:
     # each segment's way, middle, carriageway widened by SHARED, the strip along its left edge, unit heading, layer, height
     self.quads: list[tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float | None]] = []
     self._cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+    self.ends_at, self.starts_at = defaultdict(list), defaultdict(list)  # node -> the one-way ways ending, starting there
+    # node -> the carriageways that part or merge there, carried on past it: (inner quad, unit heading, layer, height)
+    self.gores: dict[int, list[tuple[np.ndarray, np.ndarray, int, float | None]]] = defaultdict(list)
     for wid in ways:
       tags, refs = osm.ways[wid]
       if oneway_of(tags) != 1 or len(refs) < 2:
         continue
       self.first[wid], self.last[wid] = refs[0], refs[-1]
+      self.ends_at[refs[-1]].append(wid)
+      self.starts_at[refs[0]].append(wid)
       pts = osm.xy[osm.data.index(refs)]
       z = self._heights(refs)
       lo, hi = osm.lanes(wid).edges(FORWARD)
@@ -60,6 +71,22 @@ class SideBySide:
         for cx in range(int(lo_c[0]), int(hi_c[0]) + 1):
           for cy in range(int(lo_c[1]), int(hi_c[1]) + 1):
             self._cells[(cx, cy)].append(n)
+    for wid in self.first:
+      refs = osm.ways[wid][1]
+      lo, hi = osm.lanes(wid).edges(FORWARD)
+      if hi - lo <= 2 * SHARED:
+        continue
+      pts, z = osm.xy[osm.data.index(refs)], self._heights(refs)
+      for node, (p, q), zz in ((refs[-1], pts[-2:], None if z is None else z[-1]), (refs[0], pts[1::-1], None if z is None else z[0])):
+        parts = self.starts_at[node] if node == refs[-1] else self.ends_at[node]
+        if len(parts) < 2 or np.hypot(*(q - p)) < 0.1:
+          continue
+        u = (q - p) / np.hypot(*(q - p))  # out past the node, the way it's carried on
+        r = np.array([u[1], -u[0]]) * (1.0 if node == refs[-1] else -1.0)  # right of its direction of travel
+        far = q + u * GORE
+        near = q - u * SHARED  # from just before its end: a branch's kerb starts beside its first node
+        inner = np.array([near + r * (lo + SHARED), far + r * (lo + SHARED), far + r * (hi - SHARED), near + r * (hi - SHARED)])
+        self.gores[node].append((inner, u if node == refs[-1] else -u, layer_of(wid), None if zz is None else float(zz)))
 
   def _heights(self, refs) -> np.ndarray | None:
     try:
@@ -94,13 +121,15 @@ class SideBySide:
     as GTA lays them between its freeway links, rather than a way of lanes of its own."""
     if wid not in self._crosses:
       refs = self.osm.ways[wid][1]
-      _, covered, _ = self._cover(self.osm.xy[self.osm.data.index(refs)], self._heights(refs), self.layer_of(wid), {wid}, False)
+      _, covered, _ = self._cover(self.osm.xy[self.osm.data.index(refs)], self._heights(refs), self.layer_of(wid), {wid}, False,
+                                  gores=False)
       self._crosses[wid] = bool(covered.mean() > 0.5) if len(covered) else False
     return self._crosses[wid]
 
-  def _cover(self, line, z, layer: int, ways: set, right: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  def _cover(self, line, z, layer: int, ways: set, right: bool, gores: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The line densified (points [N, 2]), whether each of its segments is on the carriageway of a way beside `ways`,
-    and (`right`) the way whose left edge each meets, else -1."""
+    and (`right`) the way whose left edge each meets, else -1. With `gores`, inside a carriageway the run parts from or
+    merges into counts too (not for a way's own line: that isn't a lane change across others)."""
     starts, ends = {self.first[w] for w in ways if w in self.first}, {self.last[w] for w in ways if w in self.last}
     begin, finish = starts - ends, ends - starts  # the ends of the run of ways
     pts = densify(line, STEP)
@@ -122,6 +151,17 @@ class SideBySide:
     covered = np.zeros(len(mids), bool)
     beside = np.full(len(mids), -1)  # the way whose left edge this right-hand kerb meets
     cos = np.cos(np.radians(SAME_WAY))
+    # inside the carriageway this run parts from, or merges into, carried on past it
+    for node in begin | finish if gores else ():
+      for inner, heading, gore_layer, gore_z in self.gores.get(node, ()):
+        if gore_layer != layer:
+          continue
+        sel = u @ heading >= cos
+        if zm is not None and gore_z is not None:
+          sel &= np.abs(zm - gore_z) < LEVEL
+        idx = np.nonzero(sel)[0]
+        if len(idx):
+          covered[idx[in_fan(mids[idx], inner.mean(0), inner)]] = True
     for n, idx in tests.items():
       wid, centre, surface, strip, heading, quad_layer, quad_z = self.quads[n]
       if wid in ways or self.last[wid] in begin or self.first[wid] in finish or quad_layer != layer:

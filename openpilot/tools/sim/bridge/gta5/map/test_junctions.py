@@ -166,6 +166,32 @@ def test_stop_lines():
   assert len(j.stops) == 4 and sum(at_mouth) == 3  # the south one behind its crossing
 
 
+def test_stop_line_between_two_junctions():
+  # a stop sign between two crossroads 60 m apart, for traffic heading north, at a node the ways either side are both
+  # drawn out of: its direction (forward) faces both junctions by one way or the other; the line goes only on the
+  # approach to the junction whose mouth is nearer (north), not across the southbound lanes to the south one too
+  nodes = {1: (0.0, 0.0), 2: (0.0, -12.0), 3: (0.0, -60.0), 4: (-100.0, 0.0), 5: (100.0, 0.0), 6: (0.0, 100.0),
+           7: (-100.0, -60.0), 8: (100.0, -60.0), 9: (0.0, -160.0)}
+  ways = {1: (TWO_WAY, [2, 1]), 2: (TWO_WAY, [2, 3]), 3: (TWO_WAY, [1, 4]), 4: (TWO_WAY, [1, 5]), 5: (TWO_WAY, [1, 6]),
+          6: (TWO_WAY, [3, 7]), 7: (TWO_WAY, [3, 8]), 8: (TWO_WAY, [3, 9])}
+  js = Junctions(make(nodes, ways, {2: {'highway': 'stop', 'direction': 'forward'}}))
+  stops = [(j.nodes, s) for j in js.junctions for s in j.stops]
+  assert len(stops) == 1 and stops[0][0] == [1], [(n, s.line.tolist()) for n, s in stops]
+  assert np.allclose(sorted(stops[0][1].line[:, 0]), [0.0, 5.5])  # the northbound lanes
+
+
+def test_slip_triangle_is_one_junction():
+  # a side road from the east (node 3) meets a main road running north-west to south-east through nodes 1 and 2, 25 m
+  # apart, by a one-way slip into it at 1 and one out of it at 2, as GTA lays a triangle where a side road joins: one
+  # junction of the three nodes, the triangle's roads inside it, three arms (the main road either way, the side road)
+  one = {'highway': 'residential', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}
+  nodes = {1: (-23.0, 10.0), 2: (0.0, 0.0), 3: (9.0, 14.0), 4: (-100.0, 43.0), 5: (90.0, -38.0), 6: (100.0, 14.0)}
+  ways = {1: (TWO_WAY, [4, 1]), 2: (TWO_WAY, [1, 2]), 3: (TWO_WAY, [2, 5]), 4: (one, [3, 1]), 5: (one, [2, 3]),
+          6: (TWO_WAY, [3, 6])}
+  j = only(Junctions(make(nodes, ways)))
+  assert sorted(j.nodes) == [1, 2, 3] and len(j.arms) == 3 and j.inside == {2, 4, 5}, (j.nodes, j.inside)
+
+
 def test_surveyed_stop_lines():
   # a stop line surveyed where it's painted (source:position=survey), 8 m from the crossroads' node, nearer than the
   # road would be trimmed: the road ends there and the line is drawn at it, not moved out behind the crossing

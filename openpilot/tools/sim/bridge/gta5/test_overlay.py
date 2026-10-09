@@ -114,6 +114,23 @@ def test_ribbon_behind_is_where_it_was_drawn():
   assert not [line for k, line in items if k == "b"]
 
 
+def test_ribbon_behind_starts_again_for_a_route_the_other_way():
+  # the car turning round in a junction: the route behind it was north along x = 1.75; the new route from where it
+  # stands heads back south. The old line isn't kept behind the car, crossing the new one
+  route = straight_route()
+  ribbon = ov.Ribbon()
+  for y in np.arange(100.0, 131.0, 2.0):
+    route.at = y
+    ribbon.items(ribbon_snap(route, lane_from(route, y - 3.0, 1.75)))
+  assert len(ribbon.trail) >= 2
+  back = Route(np.column_stack([np.zeros(31), 130.0 - np.arange(31) * 10.0]), [])
+  south = np.column_stack([np.full(60, -1.75), 132.0 - np.arange(60) * 2.0])
+  items = ribbon.items({**ribbon_snap(back, south, v=0.0), "pos": [0.0, 130.0, ov.CAR_HEIGHT]})
+  b = [line for k, line in items if k == "b"]
+  assert not b or all(np.all(line[:, 1] >= 129.0) for line in b), b
+  assert ov.trail_turn(np.array([[0.0, 0.0], [0.0, 5.0]]), south, ov.arc(south), 10.0) > 170.0
+
+
 def test_route_goes_between_full_updates_with_the_rest_as_sent():
   route = straight_route()
   route.at = 100.0

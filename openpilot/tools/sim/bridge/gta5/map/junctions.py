@@ -10,7 +10,10 @@ map as on our GTA V one.
   would overlap along a road shorter than MERGE_LINK, make one junction, as where a divided road crosses another
   (osm2streets merges such short roads into the junction); the roads between them are inside it. Junctions further
   apart are trimmed back less, to fit. So do the nodes on a divided road's two carriageways joined by a two-way road
-  across its median shorter than MEDIAN_LINK, as where a side road meets it at a gap in the median.
+  across its median shorter than MEDIAN_LINK, as where a side road meets it at a gap in the median, and three junction
+  nodes joined each to each by roads shorter than TRIANGLE_LINK, two of them one-way along some of their length, that
+  make a junction of three arms, as GTA's triangle of one-way slips where a side road meets a main road (as junctions
+  of their own, their areas lay across each other and their kerbs looped through it).
 - An arm is the road out of a junction, followed through nodes where only two roads meet. Arms that run side by side
   and overlap, as a turn lane mapped as its own way beside its road, are one arm: its kerbs are the outer ones.
 - A divided road's two carriageways out of a junction side by side, one in and one out, are trimmed back as far as each
@@ -19,7 +22,9 @@ map as on our GTA V one.
   nodes (fill the triangles, in_fan). Its kerbs go round the outside of the roads inside it.
 - A stop line is at its node (`highway=traffic_signals` / `stop` / `give_way`), across the lanes towards the junction
   the node's direction tag (`traffic_signals:direction`, `direction`) faces, or towards the nearest junction without
-  one; no nearer the junction than its mouth, and behind a crossing (`footway=crossing`) near it. Signals on a
+  one (nearest past its mouth), and for one junction only: where the tag faces two (the node's ways drawn opposite ways
+  out of it), the one whose mouth is nearer; no nearer the junction than its mouth, and behind a crossing
+  (`footway=crossing`) near it. Signals on a
   junction's own node stop every way into it at the mouth. A stop line surveyed where it's painted
   (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that.
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
@@ -58,12 +63,15 @@ STOP_SETBACK = 0.5  # m: a stop line at the mouth is this far out from it
 MERGE_GAP = 2.0  # m: junctions whose trimmed ends come closer than this along the road between them ...
 MERGE_LINK = 20.0  # m: ... are one where that road is shorter than this; else both are trimmed less
 MAX_SPAN = 60.0  # m across a junction's nodes, at most, from merging
+TRIANGLE_LINK = 40.0  # m: three junction nodes joined each to each by roads shorter than this, two partly one-way ...
+TRIANGLE_SPAN = 40.0  # m: ... and no further apart than this, are one junction
 CROSSING_WIDTH = 3.0  # m: a pedestrian crossing's painted width
 CROSSING_REACH = 8.0  # m out from a junction's mouth: a crossing this near goes between its stop lines and it
 CELL = 50.0  # m
 STOPS = {'traffic_signals': 'stop', 'stop': 'stop', 'give_way': 'give_way'}
 FREEWAY = frozenset({'motorway', 'motorway_link'})
 MERGE_FLOW = 30.0  # deg: one-way roads all running within this of one heading only merge and part, with no junction
+FREEWAY_FLOW = 60.0  # deg: ... or of this where one is a freeway's (GTA lays a diverge's lane changes as short links across it)
 U_TURN = 160.0  # deg: a move turning back more than this is a U-turn, left out
 MEET = 0.6  # m: lines of a road either side of a junction this near each other at its node are one line carried across
 CLASSES = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street', 'service', 'track')
@@ -353,6 +361,7 @@ class Junctions:
     self.junctions: list[Junction] = []
     self.trims: dict[tuple[int, int], float] = {}
     self.inside: set[int] = set()
+    self.triangle_sides: set[frozenset[int]] = set()  # the node pairs of the slip triangles merged into junctions
     self._rules: tuple[dict, list] | None = None  # read from the map's relations when first needed
     self._build()
 
@@ -505,6 +514,26 @@ class Junctions:
         if nodes[-1] in self.junction_nodes and nodes[-1] != n and \
             (length < min(CLUSTER_LINK, max(self.widest(n), self.widest(nodes[-1]))) or self.across_median(ways, nodes)):
           parent[find(n)] = find(nodes[-1])
+    near: dict[int, set[int]] = {n: set() for n in self.junction_nodes}
+    slips: set[frozenset[int]] = set()  # pairs of them joined by a road one-way somewhere along it
+    for n in self.junction_nodes:
+      for step in self.steps[n]:
+        ways, nodes, length = self.walk(n, step, TRIANGLE_LINK)
+        if nodes[-1] in near and nodes[-1] != n and length < TRIANGLE_LINK:
+          near[n].add(nodes[-1])
+          near[nodes[-1]].add(n)
+          if any(oneway_of(self.ways[w][0]) for w, _ in ways):
+            slips.add(frozenset((n, nodes[-1])))
+    for a in self.junction_nodes:
+      for b in near[a]:
+        for c in near[a] & near[b]:
+          xy = np.array([self.osm.node_xy(q) for q in (a, b, c)])
+          sides = {frozenset((a, b)), frozenset((b, c)), frozenset((a, c))}
+          if len(sides & slips) >= 2 and np.hypot(*(xy.max(0) - xy.min(0))) < TRIANGLE_SPAN and \
+              (one := self.junction(sorted({a, b, c}))) is not None and len(one.arms) == 3:  # a side road joining
+            parent[find(b)] = find(a)
+            parent[find(c)] = find(a)
+            self.triangle_sides |= sides
     # junctions whose trimmed ends overlap are one where the road between them is short; else both are trimmed less
     caps: dict[tuple[int, int], float] = {}  # (node, way) -> how far at most the road out of the node is trimmed
     for _ in range(4):
@@ -604,7 +633,8 @@ class Junctions:
     for ways, chain in links:
       pts = self.osm.xy[self.osm.data.index(chain)]
       mids = np.vstack([pts[:-1] + (pts[1:] - pts[:-1]) * t for t in (0.25, 0.5, 0.75)])
-      if in_fan(mids, centre, polygon).mean() >= 0.5 or any(self.straight_on(ways, chain, c) for c in across):
+      if in_fan(mids, centre, polygon).mean() >= 0.5 or any(self.straight_on(ways, chain, c) for c in across) or \
+          frozenset((chain[0], chain[-1])) in self.triangle_sides:  # a slip triangle's are its own, not roads round it
         inside |= {w for w, _ in ways}
     if inside:  # the kerbs go round the roads inside where they reach out past the corners
       samples = []
@@ -622,9 +652,9 @@ class Junctions:
     return tags.get('highway') in FREEWAY or (tags.get('highway', '').removesuffix('_link') == 'trunk' and oneway_of(tags) != 0)
 
   def merges(self, members: list[Member], inside: list[int]) -> bool:
-    """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW of one heading, and the roads
-    between its nodes (`inside`) are one-way: lanes merging, parting or changing across one carriageway (as lane changes
-    laid as links of their own), with no traffic crossing."""
+    """Whether the roads out of a junction are all one-way and all run within MERGE_FLOW (FREEWAY_FLOW where one is a
+    motorway's or its link's) of one heading, and the roads between its nodes (`inside`) are one-way: lanes merging,
+    parting or changing across one carriageway (as lane changes laid as links of their own), with no traffic crossing."""
     if any(not oneway_of(self.ways[w][0]) for w in inside):
       return False
     flows = []
@@ -635,7 +665,8 @@ class Junctions:
         return False
       flows.append(m.heading if (way == 1) == along else m.heading + math.pi)
     mean = math.atan2(sum(math.sin(f) for f in flows), sum(math.cos(f) for f in flows))
-    return all(math.cos(f - mean) > math.cos(math.radians(MERGE_FLOW)) for f in flows)
+    spread = FREEWAY_FLOW if any(self.ways[m.ways[0][0]][0].get('highway') in FREEWAY for m in members) else MERGE_FLOW
+    return all(math.cos(f - mean) > math.cos(math.radians(spread)) for f in flows)
 
   def bundle(self, members: list[Member]) -> list[Arm]:
     """Groups members (counterclockwise) running side by side into arms."""
@@ -774,7 +805,12 @@ class Junctions:
         if not _faces(tags, m, k):
           continue
         found.append((along, j, m))
-      for along, j, m in sorted(found, key=lambda f: f[0])[:1 if facing not in ('forward', 'backward') else None]:
+      if not found:
+        continue
+      # one junction's: a node between two junctions, its ways drawn opposite ways out of it, faces both by its tag
+      # (forward along one is backward along the other); the line is the one nearest its own junction's mouth
+      best = min(found, key=lambda f: f[0] - f[2].trim)
+      for along, j, m in [best] if facing not in ('forward', 'backward') else [f for f in found if f[1] is best[1]]:
         self._add_stop(j, m, kind, along, tags['highway'] == 'traffic_signals', node)
     for j in self.junctions:
       node = next((n for n in j.nodes if STOPS.get(tags_of.get(n, {}).get('highway', ''))), None)
