@@ -36,6 +36,8 @@ PARKING_STRIP = 'parking_strip'  # a parking lane's middle, in a road's lines
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
 PAINTED = (DIVIDER, CENTRE, MEDIAN)  # the lines between lanes, which a road carried on through a junction keeps across it
 CELL = 50.0  # m
+NODE_REACH = 2.0  # m out from a junction node along each road that where they start reaches (node_ends) ...
+NODE_PAD = 0.3  # m: ... and this much wider all round
 
 
 def drawn(tags: dict) -> bool:
@@ -236,16 +238,39 @@ def joint(osm: OsmLanes, junctions: Junctions, node: int, reach: float = 0.6) ->
   return hull(np.array(pts))
 
 
+def node_ends(members, reach: float = NODE_REACH, pad: float = NODE_PAD) -> np.ndarray:
+  """Where the roads out of one junction node start: the hull of their kerbs from the node out to `reach` (or to where
+  each is trimmed, if nearer), `pad` wider all round but no further out than that along each road."""
+  pts = np.array([kerb.at(s) for m in members for kerb in (m.left, m.right) for s in (0.0, max(min(m.trim, reach) - pad, 0.0))])
+  out = hull(pts)
+  centre = out.mean(0)
+  away = out - centre
+  return out + away / np.maximum(np.hypot(*away.T), 1e-9)[:, None] * pad
+
+
 class PaintAreas:
   """Where no lines are painted: each junction's area and the road from each stop line in to it. An area cuts the lines
   on its junction's layer (its roads' highest) and those of the roads meeting it on any layer, as a bridge starting
   there: layer tags alone can't tell a road meeting a junction from one passing under it. A junction's area doesn't cut
-  the lines of the road carried on through it (Junction.carried)."""
+  the lines of the road carried on through it (Junction.carried). Where the roads out of a junction's node start
+  (node_ends) also cuts the lines of those trimmed back from it: a road meeting the junction at a slant has its lines'
+  ends at the node reaching out of the area, across the mouth of a road beside it trimmed little or not at all."""
   def __init__(self, junctions: Junctions):
     js = junctions.junctions
     self.layer = [max(level(junctions.ways[w][0])[0] for w in j.ways) for j in js]
     self.areas = [(j.centre, j.polygon) for j in js] + [(s.area.mean(0), s.area) for j in js for s in j.stops]
     of = list(range(len(js))) + [n for n, j in enumerate(js) for _ in j.stops]  # each area's junction
+    self._own: dict[int, set[int]] = {}  # a node_ends area -> the ways whose lines it cuts
+    for n, j in enumerate(js):
+      for node in j.nodes:
+        members = [m for arm in j.arms for m in arm.members if m.start == node]
+        ways = {w for m in members if m.trim > 0.0 for k, (w, _) in enumerate(m.ways) if k == 0 or Junctions._along(m, k) < m.trim}
+        if len(members) < 2 or not ways:
+          continue
+        self._own[len(self.areas)] = ways
+        outline = node_ends(members)
+        self.areas.append((outline.mean(0), outline))
+        of.append(n)
     self._of, self._roads, self._carried = of, [j.roads for j in js], [j.carried for j in js]
     self._index: dict[tuple[int, int], list[int]] = defaultdict(list)
     for n, (_, a) in enumerate(self.areas):
@@ -262,9 +287,17 @@ class PaintAreas:
     lo, hi = pts.min(0) // CELL, pts.max(0) // CELL
     found = {n for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1) for n in self._index.get((cx, cy), ())}
     key = None if offset is None else round(offset, 2)
-    return [self.areas[n] for n in sorted(found) if (self.layer[self._of[n]] == layer or self._roads[self._of[n]] & ways)
-            and n != but and (not kerbs_only or n < len(self.layer))
-            and not (key is not None and n < len(self.layer) and any(key in self._carried[n].get(w, ()) for w in ways))]
+    out = []
+    for n in sorted(found):
+      j = self._of[n]
+      carried = key is not None and any(key in self._carried[j].get(w, ()) for w in ways)
+      if n in self._own:
+        if self._own[n] & ways and j != but and not carried:
+          out.append(self.areas[n])
+      elif (self.layer[j] == layer or self._roads[j] & ways) and n != but and (not kerbs_only or n < len(self.layer)) \
+          and not (carried and n < len(self.layer)):
+        out.append(self.areas[n])
+    return out
 
 
 def main():
