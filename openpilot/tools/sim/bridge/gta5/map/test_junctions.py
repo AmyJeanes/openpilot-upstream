@@ -219,6 +219,16 @@ def test_turn_bay_beside_a_two_way_road_is_no_junction():
   assert 2 in {n for j in Junctions(make(mirrored, ways)).junctions for n in j.nodes}
 
 
+def test_driveway_off_a_main_road_is_minor():
+  # a driveway (service road, 5.5 m) off a 20 m main road: its junction is minor, the main road's lines carried on
+  # across it; a residential side road as wide is not
+  road = {'highway': 'primary', 'lanes': '4', 'width': '20'}
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0), 4: (0.0, -60.0)}
+  for side, minor in (({'highway': 'service', 'lanes': '1', 'width': '5.5'}, True), (TWO_WAY, False)):
+    j = only(Junctions(make(nodes, {1: (road, [1, 2]), 2: (road, [2, 3]), 3: (side, [2, 4])})))
+    assert j.minor == minor and (set(j.carried) >= {1, 2}) == minor, (side, j.minor, j.carried)
+
+
 def test_surveyed_stop_lines():
   # a stop line surveyed where it's painted (source:position=survey), 8 m from the crossroads' node, nearer than the
   # road would be trimmed: the road ends there and the line is drawn at it, not moved out behind the crossing
