@@ -237,7 +237,7 @@ def test_capture_runner():
       grabs = [c for c in game.cmds if c["type"] == "grab"]
       assert len(grabs) == 5  # t00002 shot again after it came out blank
       assert game.cmds[-1]["type"] == "traffic" and game.cmds[-2]["type"] == "world"  # the scene put back
-      assert any(c["type"] == "topcam" and not c.get("on") for c in game.cmds[-3:])
+      assert any(c["type"] == "topcam" and not c.get("on") for c in game.cmds[-4:])
       assert capture.run(d, plan, log=lambda *a: None)["shot"] == 0  # resumed: nothing left
   finally:
     capture.gta5_cmd.send, capture.gta5_cmd.read_state, capture.win_path, capture.RETRY_WAITS, capture.time.sleep = saved

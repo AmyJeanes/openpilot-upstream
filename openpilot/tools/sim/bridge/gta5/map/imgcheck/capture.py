@@ -6,7 +6,8 @@ is connected and the player is in a car (the camera is the plugin's then, and th
 `--desktop` falls back to a screen capture, taken only while the game is the foreground window.
 
 Before the first tile, and whenever the plugin's state shows them drifting (a core reload, a bridge restart), the scene
-is set: noon (13:00), EXTRASUNNY, the clock frozen, no traffic, pedestrians or parked cars, then the camera's focus is
+is set: noon (13:00), EXTRASUNNY, the clock frozen, cast shadows off (trial.py: they hide the paint), no traffic,
+pedestrians or parked cars, then the camera's focus is
 moved away and back so cars already there go; each tile's sidecar records the scene its state showed. The game streams
 the world around the camera's focus (SET_FOCUS_POS_AND_VEL away from the player), so after a hop the shot waits
 tiles.wait_for(hop); a frame that comes out blurry or blank (unstreamed LOD) is shot again at the end after a longer
@@ -29,6 +30,7 @@ from openpilot.tools.sim.bridge.gta5.map.imgcheck.tiles import FOV, HEIGHT, Tile
 
 SCENE_WORLD = {"type": "world", "hour": 13, "minute": 0, "weather": "EXTRASUNNY", "freeze": 1, "rain": 0}
 SCENE_TRAFFIC = {"type": "traffic", "on": 0, "vehicles": 0, "peds": 0, "parked": 0}
+SCENE_SHADOWS = {"type": "shadows", "bounds": 0.0}  # cascade shadow bounds 0: no cast shadows
 GRAB_WAIT = 6.0  # s for the plugin to write a grab
 RETRY_WAITS = (4.0, 8.0)  # s before shooting an unloaded tile again
 RECONNECT_WAIT = 300.0  # s a bridge restart may take
@@ -52,6 +54,9 @@ def scene_ok(state: dict) -> tuple[bool, str]:
     bad.append(f"rain {w.get('rain')}")
   if not d.get("set") or any((d.get(k) or 0) > 0 for k in ("vehicles", "peds", "parked")):
     bad.append(f"traffic {d}")
+  sh = state.get("shadows")
+  if sh is not None and not (sh.get("set") and sh.get("bounds") == 0):
+    bad.append(f"shadows {sh}")
   return not bad, ", ".join(bad)
 
 
@@ -107,7 +112,7 @@ class Shooter:
     return st
 
   def set_scene(self, near: tuple[float, float] | None = None) -> dict:
-    self.send(SCENE_WORLD, SCENE_TRAFFIC)
+    self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS)
     time.sleep(1.0)
     if near is not None:  # the focus away and back, so the cars that were there go
       self.send({"type": "topcam", "on": 1, "x": near[0] + 900.0, "y": near[1] + 900.0, "height": HEIGHT, "fov": FOV, "hud": 0})
@@ -120,7 +125,7 @@ class Shooter:
       if ok:
         return st
       self.log(f"imgcheck: scene not set yet: {why}")
-      self.send(SCENE_WORLD, SCENE_TRAFFIC)
+      self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS)
       time.sleep(1.5)
     raise RuntimeError("imgcheck: the game won't take the scene (noon, sunny, no traffic)")
 
@@ -134,7 +139,7 @@ class Shooter:
     self.set_scene((first.x, first.y))
 
   def finish(self) -> None:
-    self.send({"type": "topcam", "on": 0})
+    self.send({"type": "topcam", "on": 0}, {"type": "shadows", "reset": 1})
     if not self.initial:
       return
     w, d = self.initial.get("world") or {}, self.initial.get("density") or {}
