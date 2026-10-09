@@ -119,6 +119,17 @@ def test_right_turn_bay_opening():
   assert all(abs(at(y) - 5.25) < 0.05 for y in (100.0, 190.0, 250.0, 380.0))
 
 
+def test_right_turn_bay_beside_an_open_left_lane():
+  # a lane already open on the left (no arrows of its own) and a right-turn bay opening at a node with no taper tags,
+  # left | through | right after: the arrows have a new turn lane on each side, so where the lanes lie says the bay is
+  # the new one, for the taper's lane as for the lane maps (the taper opened on the left by the arrows alone)
+  r = road((150.0, one_way(2, 'left_of:1')), (100.0, one_way(3, 'left_of:1', 'left|through|right')), (100.0, one_way(3, 'left_of:1')))
+  assert maps(r) == [(150, [0, 1], 3)]
+  assert r.lanes.opening(1) == (180.0, 1, False)
+  at = ribbon(r, 1, 2)
+  assert all(abs(at(y) - 5.25) < 0.05 for y in (100.0, 160.0, 190.0))
+
+
 def test_lane_drops():
   # the right lane ends: the car in it merges into the one beside it, the others keep theirs
   r = road((150.0, one_way(3, 'left_of:1')), (250.0, one_way(2, 'left_of:1')))
@@ -275,7 +286,7 @@ def test_lane_slots_follow_the_maps():
   from openpilot.selfdrive.navd import lane_slots as ls
   r = road((150.0, one_way(2, 'left_of:1', 'left|through')), (100.0, one_way(3, 'left_of:1', 'left|through|right')),
            (100.0, one_way(2, 'left_of:1')))
-  assert maps(r) == [(150, [0, 1], 3), (250, [None, 0, 1], 2)]
+  assert maps(r) == [(150, [0, 1], 3), (250, [0, 1, None], 2)]  # the lanes lie on the left both sides: the right one ends
   slots = ls.LaneSlots(r)
   move = next(m for m in slots.moves if abs(m.along - 250.0) < 1.0)
   here = slots.section_here(100.0)
@@ -443,7 +454,8 @@ def test_live_eclipse_carriageways_join():
   x, y, h = -133.6, 245.0, 276.0
   r, keys, ramps = live_plan(router, x, y, 95.2, h, (120.0, 240.0))
   turn = r.turns(r.length)[0][0]
-  assert r.lane() == [1, 2] and ramps and ramps[0][0] < 1.0 and ramps[-1][1] <= turn - 30.0 + 0.1, ramps
+  before = [c for c in ramps if c[0] < turn]
+  assert r.lane() == [1, 2] and before and before[0][0] < 1.0 and before[-1][1] <= turn - 30.0 + 0.1, ramps
 
 
 def test_live_fx2_right_carriageway_from_the_split():
@@ -478,29 +490,32 @@ def test_live_hairpin_is_no_turn():
   assert [(t[1], round(t[0] / 10.0)) for t in turns][:1] == [('left', 16)], turns
 
 
-def test_live_alta_bay_from_its_opening():
-  # Alta St (227.2, 276.2), left at the junction 85 m on, its left-turn bay opening 34 m on: beside the bay as it
-  # opens, then into it once fully open (BAY_ENTER on), by the stop line, not as late as the turn allows
-  from openpilot.selfdrive.navd.planner import BAY_ENTER
+def test_live_alta_left_turn_lane():
+  # Alta St (227.2, 276.2), left at the junction 85 m on: the game swings the double yellow over 5-25 m on to open the
+  # left-turn lane, which the map has as our left lane (in the median) from before the car, and the right-turn lane
+  # opens at the kerb 34 m on where the hatching ends (left | through | right). The car's lane carries on as the
+  # through lane and the left lane as the left-turn lane, so it's one move left, into it by the stop line (taking the
+  # right-turn lane's opening for the left's, nav moved into the left lane, then on into a bay opening beside it)
   router = live_router()
   if router is None:
     print("skipped: no live map")
     return
   r, keys, ramps = live_plan(router, 227.24, 276.22, 105.19, 159.0, (1727.2, 1403.26), lane=[1, 2])
-  opens = next(s for s, m, n in r.lane_maps_along() if n > len(m)) - r.at
-  stop = min(a - r.at for a in r.stops if a > r.at + opens)
-  assert round(opens) == 34
-  before = [c for c in ramps if c[1] <= opens + 0.1]
-  into = [c for c in ramps if opens - 0.1 <= c[0] < 85.0]
-  assert before == [(0.0, opens, 1.0, 0.0)] or before[-1][1:] == (opens, 1.0, 0.0)  # beside the bay as it opens
-  assert len(into) == 1 and abs(into[0][0] - opens - BAY_ENTER) < 0.1 and into[0][1] < stop and into[0][3] == 0.0
+  maps = [(round(s - r.at), list(m), n) for s, m, n in r.lane_maps_along()]
+  stop = min(a - r.at for a in r.stops if a > r.at + 34.0)
+  assert maps[0] == (34, [0, 1], 3), maps
+  before = [c for c in ramps if c[0] < stop]
+  assert before and before[0][0] < 1.0 and all(c[3] < c[2] for c in before), ramps
+  assert before[-1][3] == 0.0 and before[-1][1] < stop, ramps
 
 
 def test_live_sr4b_through_lane_past_a_left_bay_into_the_right_bay():
-  # SR4b, Strawberry Ave south (373.5, -626.2) to the right onto San Andreas Ave 245 m on: a left bay opens at 191 m,
-  # then a right-turn bay at 201 m beside it (left | through | right). The through lane carries on as the through lane
-  # (taking both arrows for new lanes on the left put it in the right bay at its first node, across its kerb's nose);
-  # the move into the right bay starts once it's open and ends by the stop line at 222 m
+  # SR4b, Strawberry Ave south (373.5, -626.2) to the right onto San Andreas Ave 245 m on: the left lane opens at 135 m
+  # (GTA has a median there; the map opens a lane in it at the left arrow painted at 152 m, the game paints the lane
+  # from the crossing at 60 m), then a right-turn bay at 201 m where the kerb's bulb-out ends (left | through | right).
+  # The through lane carries on as the through lane (taking both arrows for new lanes on the left put it in the right
+  # bay at its first node, across its kerb's nose); the move into the right bay starts once it's open and ends by the
+  # stop line at 222 m
   from openpilot.selfdrive.navd.planner import BAY_ENTER
   router = live_router()
   if router is None:
@@ -508,7 +523,7 @@ def test_live_sr4b_through_lane_past_a_left_bay_into_the_right_bay():
     return
   r, keys, ramps = live_plan(router, 373.5, -626.2, 28.0, 158.0, (197.0, -818.5))
   maps = [(round(s - r.at), list(m)) for s, m, _ in r.lane_maps_along()][:2]
-  assert maps == [(191, [1]), (201, [0, 1])], maps
+  assert maps == [(135, [1]), (201, [0, 1])], maps
   into = [c for c in ramps if c[3] == 2.0]
   assert len(into) == 1 and abs(into[0][0] - 201.3 - BAY_ENTER) < 0.5 and into[0][1] <= 222.3, ramps
 
