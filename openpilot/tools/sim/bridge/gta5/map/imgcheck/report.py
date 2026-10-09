@@ -26,7 +26,7 @@ LINK = 8.0  # m
 CROP_M = 32.0  # m: a crop's side
 TOP = 150  # spots with crops in the report
 HIDDEN_MIN = 0.05  # share of a tile's road a deck hides before the place is listed as not judged
-TYPE_COLOURS = {k: v for k, v in render.ISSUE_COLOURS.items()} | {"offset": (255, 255, 255)}
+TYPE_COLOURS = dict(render.ISSUE_COLOURS) | {"offset": (255, 255, 255)}
 
 _md: MapData | None = None
 
@@ -63,8 +63,8 @@ def _analyse(args) -> str:
     img = load_image(image_path(run_dir, side))
     cam = tile_camera({**side, "size": [img.shape[1], img.shape[0]]})
     tc = compare.check(img, cam, _md)
-    res = {"name": side["name"], "map_hash": _md.map_hash, "marks": os.path.basename(_md.marks_file), "camera": tc.cam.to_json(), "summary": compare.summary(tc),
-           "issues": [] if compare.unloaded(tc) else [i.to_json() for i in tc.issues]}
+    res = {"name": side["name"], "map_hash": _md.map_hash, "marks": os.path.basename(_md.marks_file), "camera": tc.cam.to_json(),
+           "summary": compare.summary(tc), "issues": [] if compare.unloaded(tc) else [i.to_json() for i in tc.issues]}
   except Exception as e:  # one bad tile shouldn't stop the run
     res = {"name": side["name"], "error": f"{type(e).__name__}: {e}"}
   with open(out, "w") as f:
@@ -293,15 +293,17 @@ def hidden_places(results: list[dict], sides: dict) -> list[dict]:
 def page(stats: dict, shown: list[dict], everything: list[dict], review: list[dict] = ()) -> str:
   rows = []
   for s in shown:
-    lines = "".join(f"<li><b>{html.escape(i['kind'])}</b> {html.escape(i['detail'])} <span class=d>({i['x']:.1f}, {i['y']:.1f}; "
+    lines = "".join(f"<li><b>{html.escape(i['kind'])}</b> {html.escape(i['detail'])} <span class=d>({i['x']:.1f}, {i['y']:.1f}; " +
                     f"{html.escape(i['tile'])})</span></li>" for i in s["issues"][:6])
     kinds = ", ".join(f"{k} {v}" for k, v in s["kinds"].items())
     rows.append(f"""<section id="s{s['rank']}"><h2>#{s['rank']} <span class="t {s['type']}">{s['type']}</span> score {s['score']}
 <span class=d>({s['x']}, {s['y']}) &middot; seen in {s['seen']} tiles, flagged in {s['flagged']} &middot; {kinds}</span></h2>
 <img loading=lazy src="crops/spot{s['rank']:04d}.jpg" alt="game | our map over the game | paint found and issues"><ul>{lines}</ul></section>""")
   by_type = ", ".join(f"{k}: {v}" for k, v in sorted(stats["by_type"].items(), key=lambda kv: -kv[1]))
-  table = "".join(f"<tr><td>{s['rank']}</td><td>{s['type']}</td><td>{s['score']}</td><td>{s['x']}, {s['y']}</td><td>{s['seen']}</td>"
+  table = "".join(f"<tr><td>{s['rank']}</td><td>{s['type']}</td><td>{s['score']}</td><td>{s['x']}, {s['y']}</td><td>{s['seen']}</td>" +
                   f"<td>{html.escape(s['issues'][0]['detail'])}</td></tr>" for s in everything[len(shown):len(shown) + 400])
+  hidden = "".join(f"<tr><td>{h['x']}, {h['y']}</td><td>{', '.join(h['why'])}</td><td>{h['hidden_share']}</td><td>{len(h['tiles'])}</td>" +
+                   f"<td>{h['under_shots']}</td></tr>" for h in review)
   return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Lane map image check</title><style>
 :root{{--bg:#121417;--fg:#e8e8e8;--dim:#9aa0a6;--card:#1c1f24}}
@@ -312,8 +314,8 @@ h2{{font-size:16px;margin:4px 0 8px}} .d{{color:var(--dim);font-weight:normal;fo
 .kerb{{background:#f44}} .stop{{background:#ff0}} .junction{{background:#8af}} .offset{{background:#fff}}
 table{{border-collapse:collapse;font-size:13px}} td{{padding:2px 8px;border-bottom:1px solid #333}}
 </style></head><body><h1>Lane map vs the game's paint, from above</h1>
-<p>{stats['checked']} tiles checked ({stats['unloaded']} unloaded, {stats['covered']} looking down on something over the road, {stats['errors']} errors) against map {stats['map_hash']}
-({stats['marks']}), {stats['made']}. {stats['spots']} spots: {by_type}.</p>
+<p>{stats['checked']} tiles checked ({stats['unloaded']} unloaded, {stats['covered']} looking down on something over the road,
+{stats['errors']} errors) against map {stats['map_hash']} ({stats['marks']}), {stats['made']}. {stats['spots']} spots: {by_type}.</p>
 <p>Each crop is {CROP_M:.0f} m square: the game; our map over it (kerbs green, lane lines white, centre lines yellow, stop
 lines red/orange, arrows, junction outlines blue); the paint found (white, yellow), paint no map line accounts for
 (magenta), what a bridge hides (blue tint), and the issues circled.</p>
@@ -325,5 +327,4 @@ lines red/orange, arrows, junction outlines blue); the paint found (white, yello
 the road under it is left out, not called missing) and tiles looking down on something over the road. Under-deck shots
 (<code>plan --under</code>) cover the first where the deck is high enough; the rest need a look by hand.</p>
 <table><tr><td>x, y</td><td>why</td><td>hidden share</td><td>tiles</td><td>under-deck shots</td></tr>
-{''.join(f"<tr><td>{h['x']}, {h['y']}</td><td>{', '.join(h['why'])}</td><td>{h['hidden_share']}</td><td>{len(h['tiles'])}</td>"
-         f"<td>{h['under_shots']}</td></tr>" for h in review)}</table></body></html>"""
+{hidden}</table></body></html>"""

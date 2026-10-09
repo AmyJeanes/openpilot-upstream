@@ -58,8 +58,8 @@ def shoot(trial: str, plan: list[tiles.Tile], under: list[tiles.Tile], log=print
         if bmp is None:
           log(f"imgcheck trial: {cond} {t.name}: no grab")
           continue
-        sh.saved.put((bmp, {"name": t.name, "source": "capture", "time": time.time(), "target": t.__dict__, "topcam": st["topcam"],
-                            "wait": 2.5, "scene": {**capture.scene_of(st), "shadows": st.get("shadows")}, "zmap": t.z,
+        stamp = time.time()  # noqa: TID251  (sidecars carry the wall clock time)
+        sh.saved.put((bmp, {"name": t.name, "source": "capture", "time": stamp, "target": t.__dict__, "topcam": st["topcam"], "wait": 2.5, "scene": {**capture.scene_of(st), "shadows": st.get("shadows")}, "zmap": t.z,
                             "condition": cond}))
       sh.saved.join()
   finally:

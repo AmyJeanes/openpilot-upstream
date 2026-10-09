@@ -271,8 +271,8 @@ class TileCheck:
       w = np.array([p[2] for p in pieces])
       u, v = (np.array([p[:2] for p in pieces]) * w[:, None]).sum(0) / w.sum()
       yellow = sum(p[2] for p in pieces if p[3] == "yellow")
-      self.add("junction", float(u), float(v), total, f"{total:.0f} m of line-like paint in {len(pieces)} pieces inside a junction "
-               f"area ({yellow:.0f} m yellow)", "yellow" if yellow > total / 2 else "white")
+      detail = f"{total:.0f} m of line-like paint in {len(pieces)} pieces inside a junction area ({yellow:.0f} m yellow)"
+      self.add("junction", float(u), float(v), total, detail, "yellow" if yellow > total / 2 else "white")
 
   # -------------------------------------------------------------------------------------------- map lines off the paint
   def samples(self, pts: np.ndarray, step: float):

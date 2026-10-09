@@ -104,7 +104,7 @@ def candidates(md: MapData, classes, boxes=None, step: float = STEP) -> list[lis
   """Centres along each way's middle, a list per way, every `step` m (at least one per way, at its middle)."""
   out = []
   wanted = {md.classes.index(c) for c in classes}
-  for k, (cls, _, _, pts, _, structure) in enumerate(md.ways):
+  for cls, _, _, pts, _, structure in md.ways:
     if cls not in wanted or structure == 2 or len(pts) < 2:
       continue
     if boxes is not None and not any(in_box(pts[:, :2], b).any() for b in boxes):

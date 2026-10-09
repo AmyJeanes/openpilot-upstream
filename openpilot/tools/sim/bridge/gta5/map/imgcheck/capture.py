@@ -127,7 +127,8 @@ class Shooter:
   def start(self, first: Tile) -> None:
     st = self.wait_state()
     self.initial = {**scene_of(st), "debug": st.get("debug")}
-    with open(os.path.join(self.run_dir, f"scene_before_{int(time.time())}.json"), "w") as f:
+    stamp = int(time.time())  # noqa: TID251  (a wall clock name)
+    with open(os.path.join(self.run_dir, f"scene_before_{stamp}.json"), "w") as f:
       json.dump({**self.initial, "topcam": st.get("topcam")}, f, indent=1)
     self.send({"type": "debug", "on": 0})
     self.set_scene((first.x, first.y))
@@ -203,7 +204,8 @@ class Shooter:
     if bmp is None:
       self.log(f"imgcheck: {t.name}: no grab")
       return False
-    side = {"name": t.name, "source": "capture", "time": time.time(), "target": t.__dict__, "topcam": tc, "wait": wait,
+    stamp = time.time()  # noqa: TID251  (sidecars carry the wall clock time)
+    side = {"name": t.name, "source": "capture", "time": stamp, "target": t.__dict__, "topcam": tc, "wait": wait,
             "scene": scene_of(st), "car": st.get("pos"), "zmap": t.z}
     self.saved.put((bmp, side))
     return True
@@ -252,7 +254,7 @@ def run(run_dir: str, tiles: list[Tile], minutes: float | None = None, desktop: 
   shot, failed, retry = 0, [], []
   prev = None
   try:
-    for n, t in enumerate(todo):
+    for t in todo:
       if minutes and time.monotonic() - t0 > minutes * 60:
         log(f"imgcheck: time's up after {shot} tiles")
         break
