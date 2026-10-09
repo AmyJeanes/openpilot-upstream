@@ -516,7 +516,7 @@ def nav_lane_changes(router, spec: str, v: float = 20.0) -> tuple[list[tuple[flo
   cur = min(lane if lane is not None and lane < 9 else n - 1, n - 1)
   keys = lane_plan(r.rest(), forks, [cur, n], r.lanes_at, v, None, r.lane_arrows(r.length, 0.0), r.lane_drops(r.length, 0.0),
                    maps=r.lane_maps(r.length, here=False), turns=r.turns(r.length), classes=r.changes(r.classes, r.length),
-                   limits=r.changes(r.limit_list, r.length), crossings=[a - r.at for a in r.stops + r.junctions if a > r.at])
+                   limits=r.changes(r.limit_list, r.length), crossings=[a - r.at for a in r.stops if a > r.at])
   return [(round(a[0]), round(b[0]), b[1] - a[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] and b[1] != a[1]], n
 
 

@@ -227,6 +227,19 @@ def test_arrows_show_from_where_the_lanes_go_on_into_the_junction():
   assert [g['directions'] for g in nm.lane_guide(slots, 200.0, 10.0, None).lanes] == [['left'], ['straight'], ['right']]
 
 
+def test_crossing_between_carriageways():
+  # two one-way carriageways of two lanes heading east side by side, joined by a link angling across: with hatching
+  # between them (their lanes 3 m apart) it's no way for a driver; lanes side by side (a dashed line), a lane change
+  from openpilot.tools.sim.bridge.gta5.map.router import separated
+  for apart, expect in ((10.0, True), (7.0, False)):
+    nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (200.0, 0.0), 4: (0.0, -apart), 5: (125.0, -apart), 6: (200.0, -apart)}
+    tags = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '7'}
+    ways = {1: (tags, [1, 2]), 2: (tags, [2, 3]), 3: (tags, [4, 5]), 4: (tags, [5, 6]),
+            5: ({'highway': 'motorway', 'oneway': 'yes', 'lanes': '1', 'width': '3.5'}, [2, 5])}
+    osm = osm_map(nodes, ways)
+    assert separated(osm, np.array(nodes[2]), np.array(nodes[5])) is expect, apart
+
+
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
   from openpilot.tools.sim.bridge.gta5.gta5_world import on_path
@@ -332,7 +345,7 @@ def live_plan(router, x, y, z, heading, dest, lane=None):
   r = live_route(router, x, y, z, heading, dest)
   info = r.info(r.length)
   keys = lane_plan(r.rest(), info['forks'], lane or r.lane(), r.lanes_at, 20.0, None, info['laneArrows'], info['laneDrops'],
-                   maps=r.lane_maps(r.length), turns=r.turns(r.length), crossings=[a - r.at for a in r.stops + r.junctions if a > r.at])
+                   maps=r.lane_maps(r.length), turns=r.turns(r.length), crossings=[a - r.at for a in r.stops if a > r.at])
   ramps = [(a[0], b[0], a[1], b[1]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] + 0.01 and abs(b[1] - a[1]) > 0.01]
   return r, keys, ramps
 
@@ -355,11 +368,13 @@ def test_live_freeway_merge_exit_and_splits():
   dest = (-680.13, -2021.56)
   r, keys, ramps = live_plan(router, -193.62, -1196.23, 36.84, 96.3, dest)
   assert r.lane() == [1, 4] and not [c for c in ramps if c[0] < 440.0]
-  # Dutch London St ramp split (-741.9, -1838.4): the route's branch is the right one, which a road joining on the
-  # right begins just before: into it before the split, not across the gore after
+  # Dutch London St ramp split (-741.9, -1838.4), the route's branch the right one: GTA's link from the split straight
+  # across the hatched gore to it is no way; the route takes the right branch's lane from the node at the car (its
+  # link off at 64 deg, which a route can't set off along: from just behind the car), with no lane change
   r, keys, ramps = live_plan(router, -741.90, -1838.37, 26.97, 196.2, dest, lane=[0, 1])
-  split = next(s for s, m, _ in r.lane_maps_along() if None in m)
-  assert ramps and ramps[0][1] <= split - r.at + 0.01 and ramps[0][3] == 1.0
+  assert r.length < 300.0 and not router.crossings(r.points) and not ramps, (r.length, ramps)
+  k = int(np.argmin(np.hypot(*(r.points - np.array([-752.0, -1851.0])).T)))
+  assert np.hypot(*(r.points[k] - np.array([-752.0, -1851.0]))) < 1.0  # onto the right branch's own lane
 
 
 def bridge_line(r: Route, lane) -> np.ndarray:
@@ -421,13 +436,45 @@ def test_live_eclipse_carriageways_join():
   d = sideways(r, keys, x, y, h, [1.0, 10.0, 15.0, 20.0, 30.0, 40.0])
   line = np.interp([10.0, 15.0, 20.0, 30.0], [1.0, 40.0], [d[0], d[-1]])  # the road runs straight, a little off the car's heading
   assert max(abs(a - b) for a, b in zip(d[1:5], line, strict=True)) < 1.3, d
-  # further east, the same join (-133.6, 245.0), the route on east and turning left 170 m on: no move into the new
-  # left lane as it begins (it's no turn bay: a junction is between), only before the turn
+  # further east, the same join (-133.6, 245.0), the route on east and turning left 170 m on: the move into the left
+  # lane is nav's early one for the turn, from the car, not one starting as the new left lane begins at the nose (no
+  # turn bay: a junction is between)
   x, y, h = -133.6, 245.0, 276.0
   r, keys, ramps = live_plan(router, x, y, 95.2, h, (120.0, 240.0))
-  assert r.lane() == [1, 2] and not [c for c in ramps if c[0] < 50.0], ramps  # two changes, by 30 m before the turn
-  d = sideways(r, keys, x, y, h, [1.0, 20.0, 30.0, 40.0])
-  assert max(d) - min(d) < 3.0, d  # the road's own slight angle, no lane's swing
+  turn = r.turns(r.length)[0][0]
+  assert r.lane() == [1, 2] and ramps and ramps[0][0] < 1.0 and ramps[-1][1] <= turn - 30.0 + 0.1, ramps
+
+
+def test_live_fx2_right_carriageway_from_the_split():
+  # Olympic Fwy (FX2: 17.0, -1234.8, heading 271, to the right exit at (913, -1215)): at x 461 the four lanes split into
+  # two carriageways with hatching between, and GTA joins them by a shortcut link at x 774 (-> 798.5, -1219). The route
+  # took the left carriageway and that link across the hatching; it now takes the right carriageway from the split,
+  # and nav is in its lanes (the right two of four) before the split
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  r, keys, ramps = live_plan(router, 17.0, -1234.8, 37.2, 271.0, (1038.5, -1369.0), lane=[0, 4])
+  assert not router.crossings(r.points)
+  for x in (480.0, 600.0, 760.0):  # on the right carriageway (its line at y -1230 to -1220), not the left (-1218 to -1203)
+    k = int(np.argmin(np.abs(r.points[:, 0] - x)))
+    assert r.points[k, 1] < -1219.0, (x, r.points[k])
+  split = next(f.along for f in r.forks if 400.0 < f.along < 480.0)
+  before = [c for c in ramps if c[0] < split]
+  assert before and before[-1][1] <= split and before[-1][3] == 2.0, ramps  # into the third lane of four by the split
+
+
+def test_live_hairpin_is_no_turn():
+  # Mt Vinewood Dr (-896.8, 1732.3), heading 153, on D2b: a hairpin of the road itself 22 m on, no junction: no turn for
+  # nav to signal, only the left at the junction 159 m on
+  router = live_router()
+  if router is None:
+    print("skipped: no live map")
+    return
+  r = live_route(router, -896.8, 1732.3, 0.0 + float(router.paths.z[int(np.argmin(np.hypot(*(router.paths.xy - np.array([-896.8, 1732.3])).T)))]) + 1.0,
+                 153.0, (-709.0, 1758.8))
+  turns = r.turns(r.length)
+  assert [(t[1], round(t[0] / 10.0)) for t in turns][:1] == [('left', 16)], turns
 
 
 def test_live_alta_bay_from_its_opening():
