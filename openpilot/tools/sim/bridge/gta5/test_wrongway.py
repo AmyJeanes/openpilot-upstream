@@ -224,7 +224,23 @@ def test_record_rows():
   print("record rows: ok")
 
 
+def test_trip():
+  """junction_run's wrong-way trip has what record_run.Run.drive and run read of a trip."""
+  from openpilot.tools.sim.bridge.gta5.junction_run import wrongway_trip
+  t = {"id": "W000p0", "approach": "W000", "exit": "W000x0", "pass": 0, "lane": 0, "spec": "1,2,3,90,0>4,5",
+       "wrongway": {"start": [1.0, 2.0, 3.0, 90], "dest": [4.0, 5.0], "length": 500, "geom": [[1, 2], [4, 5]],
+                    "traffic": {"on": 1, "vehicles": 0.0}, "clip": {"depth": 1, "drift_m": 30.0, "hold_s": 3.0, "speed": 10.0,
+                                                                   "recover": "ai", "recover_m": 50.0, "from_lane": 0}}}
+  c = wrongway_trip(t, "x-0001", "path")
+  sx, sy = c["start"]
+  for k in ("id", "spec", "area", "length", "time", "maneuvers", "classes", "junctions", "familiar", "geom", "plan_trip", "plan"):
+    assert k in c, k
+  assert c["wrongway"]["recover"] == "path" and c["expert_extra"][0].startswith("wrongway={")
+  print("trip: ok")
+
+
 if __name__ == "__main__":
+  test_trip()
   test_suitable()
   test_targets()
   test_path_clip()
