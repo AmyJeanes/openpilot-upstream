@@ -283,10 +283,18 @@ shown or a level changes.
   lanes towards the junction (the far edge of a crossing painted there, which GTA paints as the stop line), as a node
   splitting the way there (ids as for tapers) that takes the signal or sign and its direction from GTA's node. An
   approach with a painted stop line and none in the map gets one (`traffic_signals` at a junction with signals, else
-  `stop`) where the line covers only its own lanes and no crossing is painted just ahead of it. A GTA stop line with no
+  `stop`) where the line doesn't reach on across the other direction's lanes (a crossing's edge; past the kerb is the
+  class layout's lanes narrower than the road) and no crossing is painted just ahead of it. A GTA stop line with no
   paint on its own approach but a new one from the paint on the road the other way within 15 m goes there instead
   (GTA's node faced the wrong junction). GTA's node stays the stop line where nothing is painted. The decals' measured
-  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15).
+  widths of stop lines run 0.16-0.3 m (`MIN_WIDTH` 0.15). The polylines run some stop lines on round the corner into
+  the edge line they meet (an L): a bent polyline gives its straight end pieces. roadpaint reads an atlas decal's bands
+  only at their own place in the texture, so a decal laid with its UVs a whole tile over misses them (many STOP
+  decals' stop lines, as on Mt Haan Dr's T): those are read from `decals.jsonl` and `textures.tsv` beside
+  features.jsonl. Of the 9724 approaches, those with a stop line painted across their own lanes and none in the map
+  went from 126 to 28 (the rest are crossings' edges); 48 more have a painted STOP word and no line (the port's grid).
+  A stop line painted level with the road it meets, nearer the junction's node than the class layout's kerbs meet,
+  is drawn where it's painted, its road trimmed square where the kerbs meet (junctions.py).
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /

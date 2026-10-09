@@ -26,7 +26,8 @@ map as on our GTA V one.
   out of it), the one whose mouth is nearer; no nearer the junction than its mouth, and behind a crossing
   (`footway=crossing`) near it. Signals on a
   junction's own node stop every way into it at the mouth. A stop line surveyed where it's painted
-  (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that.
+  (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that, unless its kerbs
+  meet the next road's further out (a line painted level with the road it meets): it's trimmed there, square.
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
   road has no stop or give way line or crossing into it, nothing of a higher class and wider meets it there, and its
   lines meet the same lines of the road on the far side at the junction's node (a turn lane's line, which doesn't, is
@@ -300,6 +301,7 @@ class Arm:
   width: float  # m, its widest member's
   trim: float = 0.0
   cap: float = MAX_TRIM  # m: trimmed no further than this, short of the next junction
+  stop: float = math.inf  # m: back to its surveyed stop line, unless its kerbs meet the next arms' further out
 
   def mouth(self) -> tuple[np.ndarray, np.ndarray]:
     """Its kerbs where it's trimmed: (right, left)."""
@@ -616,8 +618,8 @@ class Junctions:
     if len(arms) < 3:
       return None
     for arm in arms:
-      arm.cap = min([MAX_TRIM] + [caps[k] for m in arm.members if (k := (m.start, m.ways[0][0])) in (caps or {})] +
-                    [along - STOP_SETBACK for m in arm.members for along in self._surveyed_stops(m)])
+      arm.cap = min([MAX_TRIM] + [caps[k] for m in arm.members if (k := (m.start, m.ways[0][0])) in (caps or {})])
+      arm.stop = min([along - STOP_SETBACK for m in arm.members for along in self._surveyed_stops(m)], default=math.inf)
     corners = self.shape(arms)
     self.square(arms)
     polygon, kerbs = self.outline(arms, corners)
@@ -722,7 +724,7 @@ class Junctions:
         p = b.line.at(b.trim)
         s = a.line.project(p)
         if np.hypot(*(a.line.at(s) - p)) <= MEDIAN_REACH:
-          a.trim = min(max(a.trim, s), a.cap)
+          a.trim = min(max(a.trim, s), a.cap, max(a.stop, a.trim))
 
   @staticmethod
   def side_by_side(a: Member, b: Member) -> bool:
@@ -738,9 +740,12 @@ class Junctions:
   def shape(arms: list[Arm]) -> list[tuple[float, float, np.ndarray] | None]:
     """Sets each arm's trim; returns each corner's kerb, between an arm and the next counterclockwise: (where it rounds
     from on this arm's left kerb, where to on the next's right kerb, the point the two kerbs meet at), or None where
-    they don't meet ahead of the junction and the kerb between them is straight."""
+    they don't meet ahead of the junction and the kerb between them is straight. A corner rounds no further out than a
+    surveyed stop line, and is square where the kerbs meet beyond it: the road is trimmed there, its stop line inside
+    the area (a stop line painted level with the road it meets, which the class layout draws a little wider)."""
     n = len(arms)
     trims = [0.0] * n
+    meet = [0.0] * n  # m out along each arm to where its kerbs meet its neighbours'
     corners: list[tuple[float, float, np.ndarray] | None] = []
     for i in range(n):
       a, b = arms[i], arms[(i + 1) % n]
@@ -752,13 +757,15 @@ class Junctions:
         continue
       sa, sb, x = hit
       radius = min(max(min(a.width, b.width) / 2, MIN_RADIUS), CORNER_RADIUS)
-      t = min(radius / math.tan(gap / 2), MAX_TANGENT, a.cap - a.line.project(x), b.cap - b.line.project(x))
+      pa, pb = a.line.project(x), b.line.project(x)
+      t = min(radius / math.tan(gap / 2), MAX_TANGENT, min(a.cap, a.stop) - pa, min(b.cap, b.stop) - pb)
       ta, tb = sa + max(t, 0.0), sb + max(t, 0.0)
+      meet[i], meet[(i + 1) % n] = max(meet[i], pa), max(meet[(i + 1) % n], pb)
       trims[i] = max(trims[i], a.line.project(a.left.at(ta)))
       trims[(i + 1) % n] = max(trims[(i + 1) % n], b.line.project(b.right.at(tb)))
       corners.append((ta, tb, x))
-    for arm, t in zip(arms, trims, strict=True):
-      arm.trim = min(max(t, 0.0), arm.cap)
+    for arm, t, m in zip(arms, trims, meet, strict=True):
+      arm.trim = min(max(t, 0.0), arm.cap, max(arm.stop, m))
     return corners
 
   @staticmethod
@@ -846,7 +853,7 @@ class Junctions:
     if not spans:
       return
     surveyed = node is not None and self.osm.data.node_tags.get(node, {}).get('source:position') == 'survey'
-    s = max(along, m.trim) if surveyed else max(along, m.trim + STOP_SETBACK)
+    s = along if surveyed else max(along, m.trim + STOP_SETBACK)  # surveyed: where painted, even inside the area
     for c in [] if surveyed else self._near(self.crossings, self._crossing_cells, m.line.at(s)):  # a stop line goes before a crossing
       hit = crossing(Poly(c, 0.0, 0.0), m.line, math.inf, max(s, m.trim + CROSSING_REACH) + CROSSING_WIDTH)
       if hit is not None and hit[1] > m.trim - CROSSING_WIDTH:

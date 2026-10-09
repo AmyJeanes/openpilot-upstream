@@ -208,6 +208,18 @@ def test_surveyed_stop_lines():
   assert all(m.trim > 8.0 for arm in j.arms for m in arm.members if m is not stop.member)
 
 
+def test_surveyed_stop_line_level_with_the_road_it_meets():
+  # a T whose side road's stop line is painted 4 m from the node, inside the main road's 5.5 m to its kerb: the side
+  # road ends where its kerbs meet the main road's, the corners square there, and the line is drawn where it's painted
+  nodes = {1: (0.0, 0.0), 2: (-100.0, 0.0), 3: (100.0, 0.0), 4: (0.0, -100.0), 7: (0.0, -4.0)}
+  ways = {1: (TWO_WAY, [2, 1]), 2: (TWO_WAY, [1, 3]), 3: (TWO_WAY, [4, 7]), 4: (TWO_WAY, [7, 1])}
+  j = only(Junctions(make(nodes, ways, {7: {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey'}})))
+  stop = j.stops[0]
+  assert len(j.stops) == 1 and abs(stop.along - 4.0) < 1e-6 and abs(stop.member.trim - 5.5) < 0.05
+  for kerb in j.kerbs:  # none runs back out down the side road past its mouth
+    assert (kerb[:, 1] >= -5.5 - 0.05).all(), kerb
+
+
 def test_crossing_lines_on_the_road():
   nodes = {1: (0.0, 0.0), 2: (0.0, -100.0), 3: (-100.0, 0.0), 4: (100.0, 0.0), 20: (-10.0, -20.0), 21: (10.0, -20.0)}
   ways = {1: (TWO_WAY, [2, 1]), 2: (TWO_WAY, [3, 1]), 3: (TWO_WAY, [1, 4]),
