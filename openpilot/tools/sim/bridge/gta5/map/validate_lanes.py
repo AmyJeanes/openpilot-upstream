@@ -95,9 +95,12 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
       out.append(('width', f'{tag}={tags[tag]}'))
   if 'width' in tags and not metres(tags['width']):
     out.append(('width', f"width={tags['width']}"))
-  for key in ('divider', 'divider:forward', 'divider:backward'):  # a median's two edges where they differ
+  # a median's two edges where they differ; a one-way way's lines along its lanes' edges
+  for key in ('divider', 'divider:forward', 'divider:backward', 'divider:left', 'divider:right'):
     if key in tags and tags[key] not in DIVIDERS and not set(tags[key].split(';')) <= PHYSICAL_DIVIDERS:
       out.append(('divider', f"{key}={tags[key]}"))
+  if tags.get('divider:colour', 'yellow') not in ('white', 'yellow'):
+    out.append(('divider', f"divider:colour={tags['divider:colour']}"))
   if tags.get('lane_markings', 'yes') not in ('yes', 'no'):
     out.append(('lane_markings', f"lane_markings={tags['lane_markings']}"))
   for side in ('left', 'right', 'both'):

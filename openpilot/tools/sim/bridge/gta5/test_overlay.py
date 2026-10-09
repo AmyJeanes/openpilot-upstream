@@ -305,6 +305,13 @@ def test_median_edges_take_their_own_kind():
   assert ov.marking_kinds(Line(CENTRE, 3.0, "double_solid")) == [("c", -ov.DOUBLE), ("c", ov.DOUBLE)]
 
 
+def test_lines_in_their_paint():
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CENTRE, DIVIDER, EDGE_LINE, Line
+  assert ov.marking_kinds(Line(CENTRE, 0.0, "dashed", "white")) == [("d", 0.0)]  # the port's white centre
+  assert ov.marking_kinds(Line(EDGE_LINE, -6.0, "solid", "yellow")) == [("c", 0.0)]  # a carriageway's edge by its median
+  assert ov.marking_kinds(Line(DIVIDER, 2.0, "solid")) == [("w", 0.0)]
+
+
 def test_z_along_a_clipped_piece():
   from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import z_along
   line = np.array([[0, 0], [10, 0], [10, 10]], float)

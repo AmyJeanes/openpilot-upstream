@@ -161,7 +161,17 @@ topcam poses) as tiles, so the check runs on them without the game.
     tag says a median's two edges apart). The game paints single and double edges about equally often; unsurveyed
     medians have no `divider`, and osm_lanes draws them one solid line each.
   - A two-lane two-way street's centre is `divider=double_solid_line`, as GTA paints most of them (OSM's default
-    reading is a dashed line); not on service roads and tracks.
+    reading is a dashed line); not on service roads and tracks. Where the game files show the link's centre line,
+    it's theirs: its kind, and `divider:colour=white` where it's white (the port's streets, the airport's, Greenwich
+    Pkwy: a section with no yellow line near the link takes the white line within 2 m of it as its centre;
+    `paint_survey.centre_line`). A dashed line laid a decal a dash shows only in the sections that cross a dash: in a
+    fifth of them, the rest bare, it's dashed. A two-lane link the files say nothing of (GTA's short links in and next
+    to junctions) takes the centre of the road it runs on as either side, straight on with a lane each way, past such
+    links up to 150 m (the nearer side's; none where that's unpainted; `street_centres`), rather than the default.
+  - A one-way link's lane edge where the game files paint a yellow line along it (within 1.5 m, in half its sections)
+    is `divider:left` / `divider:right` (a carriageway's edge beside its median or a barrier, usually its left;
+    `paint_survey.edge_lines`): osm_lanes draws a yellow line there, the kerb staying where it is, and the white line
+    side_by_side would draw at that edge (a flush shoulder's, or between ways side by side) is left out.
   - GTA lays a left-turn bay as a one-way link of its own (through its slip lane or left turn only nodes) from where
     it splits off its road to the junction ahead, over a two-way road's median or beside a one-way road's left lane.
     Real maps make it a lane of the road (osm_lanes.md P3), and so does ours (`detached_bays`): the bay's links are
@@ -242,7 +252,10 @@ topcam poses) as tiles, so the check runs on them without the game.
     edge or middle (the lines move up to 1 m to fit), and a one-way link's outer lanes take `change:lanes` from the
     white line painted at their outer edge, the line between it and the next link (`paint_survey.outer_lines`). With
     `--survey-lines polylines.jsonl` (the game files' lines whole) a section's line kind is the whole line's (worn and
-    tiled solid lines read as dashed in sections), and raised markers at the asphalt's edge or the kerb are dropped (the
+    tiled solid lines read as dashed in sections) but where its dashes say otherwise over 12 m either side (a dash
+    20 m or longer is a solid stretch; short dashes mostly gap, or evenly laid, are dashed: Senora Rd's centre, solid
+    for 900 m then dashed; Swiss St's 3.9 m dashes 2.1 m apart), and short solid lines laid in line a gap apart are
+    dashes (`paint_survey.line_kinds`), and raised markers at the asphalt's edge or the kerb are dropped (the
     gutter's edge, checked in the game). A two-way link the files have no sections of (GTA's short links in and next to
     junctions, whose sections the survey leaves out) takes the painted lanes of the link its road runs on to with the
     same lane counts (`neighbours_paint`), so its lines run on at the paint's place and kind rather than GTA's class

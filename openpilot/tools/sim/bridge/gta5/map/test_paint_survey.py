@@ -5,8 +5,8 @@ import tempfile
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrow_marks, centre_kind, correct, correct_oneway, disagree, \
-  lane_lines, line_kinds, load, median_edges, median_runs_in, opening_taper, sources, strips, swing_taper, unpainted
+from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrow_marks, centre_bare, centre_kind, centre_line, correct, \
+  correct_oneway, disagree, edge_lines, lane_lines, line_kinds, load, median_edges, median_runs_in, opening_taper, sources, strips, swing_taper, unpainted
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -143,6 +143,83 @@ def test_cleaning_the_game_files_lines():
   assert [(m['offset'], m['type']) for m in _clean(d, kinds)['marks']] == [(2.0, 'solid'), (0.1, 'dashed')]
   centre = sample([{**mark(0.1, kind='dashed'), 'line': 3}, mark(5.3, kind='edge_line')], src='gamefiles')
   assert centre_kind([_clean(centre, kinds)] * 2, 0.0, 0.4) == 'dashed_line'  # no yellow: the white centre
+
+
+def polylines_file(polylines):
+  f = tempfile.NamedTemporaryFile('w', suffix='.jsonl', delete=False)
+  f.write('\n'.join(json.dumps(p) for p in polylines))
+  f.close()
+  return f.name
+
+
+def test_line_kinds_where_they_cross():
+  # a centre solid for 100 m, then dashed (Senora Rd); dashes laid a decal each, in line 8 m apart; a lone short line
+  stretch = {'id': 1, 'colour': 'yellow', 'style': 'dashed', 'painted': 0.8, 'pts': [[0, 0, 0], [200, 0, 0]],
+             'dashes': [[0, 100]] + [[s, s + 4] for s in range(108, 200, 12)]}
+  dashes = [{'id': 10 + k, 'colour': 'yellow', 'style': 'solid', 'painted': 1.0, 'len': 4.0, 'pts': [[x, 20, 0], [x + 4, 20, 0]]}
+            for k, x in enumerate((0, 12, 24))]
+  lone = {'id': 20, 'colour': 'yellow', 'style': 'solid', 'painted': 1.0, 'len': 4.0, 'pts': [[0, 40, 0], [4, 40, 0]]}
+  # East Galileo Ave's dashes on a bend: 14 degrees apart, the next 1.1 m off this one's line 12 m on
+  bend = [{'id': 40, 'colour': 'yellow', 'style': 'solid', 'painted': 1.0, 'len': 4.0, 'pts': [[-378.9, 1175.8, 0], [-375.2, 1174.3, 0]]},
+          {'id': 41, 'colour': 'yellow', 'style': 'solid', 'painted': 1.0, 'len': 4.0, 'pts': [[-367.0, 1171.7, 0], [-363.0, 1171.1, 0]]}]
+  # Swiss St's white centre: 3.9 m dashes 2.1 m apart, mostly paint but evenly laid; a worn solid line's breaks aren't
+  even = {'id': 30, 'colour': 'white', 'style': 'dashed', 'painted': 0.72, 'pts': [[0, 60, 0], [100, 60, 0]],
+          'dashes': [[s, s + 3.9] for s in range(0, 100, 6)]}
+  worn = {'id': 31, 'colour': 'white', 'style': 'dashed', 'painted': 0.8, 'pts': [[0, 80, 0], [100, 80, 0]],
+          'dashes': [[0, 5.0], [6.0, 8.0], [10.5, 15.5], [16.5, 19.0], [21.0, 26.0], [27.0, 40.0]]}
+  path = polylines_file([stretch, *dashes, lone, even, worn, *bend])
+  try:
+    kinds = line_kinds(path)
+  finally:
+    os.unlink(path)
+  assert kinds == {1: 'solid', 10: 'dashed', 11: 'dashed', 12: 'dashed', 20: 'solid', 30: 'solid', 31: 'solid', 40: 'dashed', 41: 'dashed'}
+  assert (kinds.kind_at(1, 50.0, 3.0), kinds.kind_at(1, 150.0, 3.0), kinds.kind_at(1)) == ('solid', 'dashed', 'solid')
+  assert (kinds.kind_at(30, 50.0, 60.0), kinds.kind_at(31, 13.0, 80.0)) == ('dashed', 'solid')
+
+  def at(x):
+    return _clean(sample([{**mark(0.1, 'yellow', 'solid'), 'line': 1}], src='gamefiles', x=x, y=0.0), kinds)['marks'][0]['type']
+  assert (at(50.0), at(150.0)) == ('solid', 'dashed')
+
+
+def test_centre_line_colour_and_dashes():
+  # the port's white dashed centre, other roads' yellow lines 10 m off (beyond any centre)
+  port = [sample([mark(0.2), mark(10.3, 'yellow', 'solid'), mark(-10.3, 'yellow', 'solid'), mark(5.4, kind='edge_line')],
+                 s, src='gamefiles') for s in (0, 3, 6)]
+  assert centre_line(port) == ('dashed_line', 'white')
+  # the airport's: yellow edge lines either side, the centre white
+  airport = [sample([mark(-6.1, 'yellow', 'solid'), mark(0.3), mark(6.0, 'yellow', 'solid')], s, src='gamefiles') for s in (0, 3)]
+  assert centre_line(airport, 0.0, 0.4) == ('dashed_line', 'white')
+  # a thin white line read off the road's texture where the game shows a thin double yellow one: not the centre
+  thin = [sample([{**mark(0.1), 'width': 0.08}], s, src='gamefiles') for s in (0, 3)]
+  assert centre_line(thin) is None and centre_line([sample([{**mark(0.1), 'width': 0.13}], s, src='gamefiles') for s in (0, 3)])
+  assert centre_line([sample([mark(0.1, 'yellow', 'double_solid')], s, src='gamefiles') for s in (0, 3)]) == ('double_solid_line', 'yellow')
+  # a dashed yellow centre whose sections mostly fall between its dashes; not where a section shows another kind
+  dashed = [sample([mark(0.2, 'yellow', 'dashed')], 0, src='gamefiles')] + [sample([], s, src='gamefiles') for s in (3, 6, 9)]
+  assert centre_line(dashed) == ('dashed_line', 'yellow')
+  assert centre_line(dashed + [sample([mark(0.2, 'yellow', 'solid')], 12, src='gamefiles')]) is None
+  assert centre_line([sample([mark(0.2, 'yellow', 'solid')], 0, src='gamefiles')] + dashed[1:]) is None  # a solid one needs more
+
+
+def test_centre_bare():
+  # Prosperity St's bridge: the asphalt's edges read, no line near the link; not where its edges aren't read (a gap in
+  # the files), nor with a line at the centre, nor from one section
+  edges = {'left': -5.5, 'right': 5.3}
+  bare = [sample([mark(5.1, kind='edge_line'), mark(-5.3, 'yellow', 'solid')], s, src='gamefiles', kerbs=edges) for s in (0, 3)]
+  assert centre_bare(bare)
+  assert not centre_bare([{**d, 'kerbs': {'left': None, 'right': None}} for d in bare])
+  assert not centre_bare(bare[:1])
+  assert not centre_bare(bare + [sample([mark(0.2, 'yellow', 'dashed')], 6, src='gamefiles', kerbs=edges)])
+  assert not centre_bare(bare + [sample([mark(1.2)], 6, src='gamefiles', kerbs=edges)])  # a white line near: its centre
+
+
+def test_edge_lines():
+  # a one-way link's yellow left edge (the median's) and white right edge; lanes from -5.5 to 5.5
+  files = [sample([mark(-5.3, 'yellow', 'solid'), mark(5.4, kind='edge_line'), mark(0.0)], s, src='gamefiles') for s in (0, 3, 6)]
+  assert edge_lines(files, (-5.5, 5.5)) == ('solid_line', None)
+  assert edge_lines(files, (-8.0, 5.5)) == (None, None)  # too far from the edge
+  assert edge_lines(files[:1], (-5.5, 5.5)) == (None, None)  # too few sections
+  double = [sample([mark(-5.5, 'yellow', 'double_solid', pair=[-5.6, -5.4])], s, src='gamefiles') for s in (0, 3)]
+  assert edge_lines(double, (-5.5, 5.5)) == ('double_solid_line', None)
 
 
 def test_opening_taper():

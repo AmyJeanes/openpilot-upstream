@@ -1692,6 +1692,137 @@ def outer_changes(tags, samples, why):
   return out
 
 
+def edge_line_tags(tags, samples, why):
+  """A one-way way's tags with `divider:left` / `divider:right` where the game files paint a yellow line along that edge
+  of its lanes (paint_survey.edge_lines): a carriageway's edge beside a median, a barrier or the other direction."""
+  sec = WayLanes.from_tags(tags).section(FORWARD)
+  if not sec:
+    return tags
+  left, right = paint_survey.edge_lines(samples, (sec[0].left, sec[-1].right))
+  for side, kind in (('left', left), ('right', right)):
+    if kind:
+      tags = {**tags, f'divider:{side}': kind}
+      why[f'yellow {side} edge'] += 1
+  return tags
+
+
+EDGE_CARRY = 60.0  # m at most of one-way links without sections that a carriageway's yellow edge is carried along
+
+
+def carried_edges(nodes, ways, unread):
+  """divider:left / :right for the one-way links the game files have too few sections of (`unread`, ids of `ways`:
+  [(id, a, b, tags)]; GTA's short links in and next to junctions) where the carriageway's links either side, straight
+  on past such links up to EDGE_CARRY m, both have one: so its yellow edge runs on. {id: tags to add}."""
+  rows = {r[0]: r for r in ways if r[3].get('oneway') == 'yes'}
+  starts, ends = defaultdict(list), defaultdict(list)
+  for r in rows.values():
+    starts[r[1]].append(r)
+    ends[r[2]].append(r)
+
+  def heading(r):
+    return game_heading(nodes[r[2]]['x'] - nodes[r[1]]['x'], nodes[r[2]]['y'] - nodes[r[1]]['y'])
+
+  def length(r):
+    return math.hypot(nodes[r[2]]['x'] - nodes[r[1]]['x'], nodes[r[2]]['y'] - nodes[r[1]]['y'])
+
+  def beyond(r, ahead):  # the tags of the nearest link read, straight on ahead (else behind)
+    dist = 0.0
+    while True:
+      nxt = [(abs(wrap(heading(s) - heading(r))), s) for s in (starts[r[2]] if ahead else ends[r[1]]) if s is not r]
+      turn, s = min(nxt, key=lambda v: v[0], default=(None, None))
+      if s is None or turn >= STRAIGHT:
+        return None
+      if s[0] not in unread:
+        return s[3]
+      dist += length(s)
+      if dist > EDGE_CARRY:
+        return None
+      r = s
+
+  out = {}
+  for wid in unread & set(rows):
+    after, before = beyond(rows[wid], True), beyond(rows[wid], False)
+    if after is None or before is None:
+      continue
+    got = {k: after[k] for k in ('divider:left', 'divider:right') if k in after and after[k] == before.get(k)}
+    if got:
+      out[wid] = got
+  return out
+
+
+PAINT_END = 4.0  # m at each end of a link where paint across it (stop lines, crossings) is no centre line along it
+PAINT_ALONG = 2.0  # m of a link's line at least with paint on it: a centre line there
+
+
+def painted_along(paint, nodes, a, b) -> bool:
+  """Whether the game files paint a line along a link's line (`paint`: through_paint.Paint), away from its ends."""
+  pa, pb = nodes[a], nodes[b]
+  length = math.hypot(pb['x'] - pa['x'], pb['y'] - pa['y'])
+  ts = [(PAINT_END + 0.5 * k) / length for k in range(max(int((length - 2 * PAINT_END) / 0.5), 0))]
+  hits = sum(paint.near((pa['x'] + (pb['x'] - pa['x']) * t, pa['y'] + (pb['y'] - pa['y']) * t),
+                        pa['z'] + (pb['z'] - pa['z']) * t) for t in ts)
+  return hits * 0.5 >= PAINT_ALONG or len(ts) == 0  # (too short to tell: as painted)
+
+
+CENTRE_CARRY = 150.0  # m at most of ways with the class default centre that a road's centre is carried along
+HALVES_SWAPPED = {'solid_line;dashed_line': 'dashed_line;solid_line', 'dashed_line;solid_line': 'solid_line;dashed_line'}
+
+
+def street_centres(nodes, ways, defaulted):
+  """The centre lines of the two-lane ways given the class default double line (`defaulted`, ids of `ways`: [(id, a,
+  b, tags)]) as the road they run on as has them either side: the nearest way straight on (within STRAIGHT, past other
+  such ways up to CENTRE_CARRY m) with a lane each way whose centre comes from the game files, its `divider` (and
+  `divider:colour`), or none where it's unpainted (lane_markings=no); the nearer where the two sides differ. GTA's
+  short links in and next to junctions have few sections or none, which miss a dashed line's dashes (East Galileo
+  Ave). Returns {id: tags to replace the default's with}."""
+  def two_lane(tags):
+    road = WayLanes.from_tags(tags)
+    return tags.get('oneway') != 'yes' and road.counts == (1, 1, 0) and not road.gaps
+  rows = {r[0]: r for r in ways if r[3].get('highway') != 'footway'}  # not the crossings
+  # (but those made unpainted since)
+  defaulted = {w for w in defaulted if w in rows and rows[w][3].get('divider') == 'double_solid_line' and 'lane_markings' not in rows[w][3]}
+  at = defaultdict(list)
+  for r in rows.values():
+    at[r[1]].append(r)
+    at[r[2]].append(r)
+
+  def heading(p, q):
+    return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
+
+  def known(r, same):  # the centre a way gives, seen along the way walked from (same: it runs that way)
+    tags = r[3]
+    if tags.get('lane_markings') == 'no':
+      return {'divider': 'no'}
+    if 'divider' not in tags:
+      return None
+    kind = tags['divider'] if same else HALVES_SWAPPED.get(tags['divider'], tags['divider'])
+    return {'divider': kind, **({'divider:colour': tags['divider:colour']} if 'divider:colour' in tags else {})}
+
+  def side(r, n, same):  # (the centre, m to it) past way r's node n, walking on from r
+    dist, name = 0.0, r[3].get('name')
+    while True:
+      h = heading(r[2] if n == r[1] else r[1], n)
+      nxt = [(abs(wrap(heading(n, s[2] if n == s[1] else s[1]) - h)), s) for s in at[n] if s is not r]
+      turn, s = min(nxt, key=lambda v: v[0], default=(None, None))
+      if s is None or turn >= STRAIGHT or not two_lane(s[3]) or name and s[3].get('name') not in (None, name):
+        return None
+      same = same == ((s[1] == n) == (r[2] == n))  # it runs on the way r does
+      if s[0] not in defaulted:
+        return (found, dist) if (found := known(s, same)) else None
+      dist += math.hypot(nodes[s[2]]['x'] - nodes[s[1]]['x'], nodes[s[2]]['y'] - nodes[s[1]]['y'])
+      if dist > CENTRE_CARRY:
+        return None
+      r, n = s, s[2] if n == s[1] else s[1]
+
+  out = {}
+  for wid in defaulted:
+    r = rows[wid]
+    sides = [v for v in (side(r, r[2], True), side(r, r[1], True)) if v]
+    if sides:
+      out[wid] = min(sides, key=lambda v: v[1])[0]
+  return out
+
+
 def arrows(n, out):
   """The turn arrows of n lanes into a junction from its ways out, `out` {move: lanes out that way (left, through,
   right)}: the lanes taken in order from the left, each move as many as it has lanes out to go on in. Through takes
@@ -2168,9 +2299,10 @@ def main():
       median_kinds[wid] = paint_survey.median_edges(samples, median)  # the painted median's, else GTA's
     if painted[wid] and len(other) >= paint_survey.MIN_SAMPLES and (check := paint_survey.correct(other, fwd, back, kerbs)[0]):
       why['sources disagree' if paint_survey.disagree(painted[wid], check) else 'sources agree'] += 1
-    if not painted[wid] and offset <= 0 and (kind := paint_survey.centre_kind(samples, 0.0, paint_survey.CENTRE_TOL)):
-      centre_kinds[wid] = kind  # the centre line's kind still shows where the lanes don't add up
-  print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint")
+    if not painted[wid] and offset <= 0 and (found := paint_survey.centre_line(samples, 0.0, paint_survey.CENTRE_TOL)):
+      centre_kinds[wid] = found  # the centre line's kind and colour still show where the lanes don't add up
+  print(f"{len(centre_kinds)} more two-way links' centre lines of the kind the game files paint " +
+        f"({sum(c == 'white' for _, c in centre_kinds.values())} white)")
   unread = {wid for wid, _, _, _, back, *_ in info if back and not bay_to[wid] and not painted.get(wid)}
   unsurveyed = {wid for wid, a, b, *_ in info if wid in unread and
                 not any(d.get('src') == paint_survey.GAMEFILES for d in paint_survey.along(survey, a, b) or [])}
@@ -2302,16 +2434,21 @@ def main():
   unmarked = unmarked_roads(nodes, [(wid, a, b, bool(back), cls, bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF),
                                      bool((nodes[a]['f'][0] | nodes[b]['f'][0]) & OFFROAD))
                                     for wid, a, b, _, back, cls, *_ in info if wid not in crossings], link_samples) if survey else set()
+  centre_paint = None
+  if survey and args.survey_lines:
+    from openpilot.tools.sim.bridge.gta5.map import through_paint
+    centre_paint = through_paint.Paint(args.survey_lines)
   w = osmium.SimpleWriter(args.out, overwrite=True)
   for k in used:
     n = nodes[k]
     lat, lon = to_lat_lon(n['x'], n['y'])
     tags = {} if k[0] == TAPER_NODE_AREA else node_tags(n, stop.get(k, 'both'))
     w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat), tags={**tags, 'ele': f"{n['z']:.1f}"}))
+  written, defaulted = [], set()  # the ways (id, a, b, tags); those whose centre is the class default
+  unread_edges = set()  # one-way ways the game files have too few sections of to read their edges
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
     if wid in crossings:
-      w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)],
-                                       tags={'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
+      written.append((wid, a, b, {'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
       continue
     freeway = bool(nodes[a]['f'][2] & nodes[b]['f'][2] & FREEWAY) and fwd >= 2
     bays = piece_bays.get(wid, (b in bay_to[parent.get(wid, wid)], a in bay_to[parent.get(wid, wid)]))
@@ -2343,10 +2480,19 @@ def main():
         else:
           tags = {**plain, 'placement:forward': f'left_of:{1 + int(bays[0])}', 'placement:backward': f'left_of:{1 + int(bays[1])}'}
     median = any(WayLanes.from_tags(tags, at=end).gaps for end in ('', 'start', 'end'))
-    if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED and not median:
-      tags.setdefault('divider', 'double_solid_line')  # how GTA paints most two-lane roads' centre (OSM reads dashed)
+    if fwd == back == 1 and 'lane_markings' not in tags and cls in MARKED and not median and 'divider' not in tags:
+      tags['divider'] = 'double_solid_line'  # how GTA paints most two-lane roads' centre (OSM reads dashed)
+      defaulted.add(wid)
     if wid in centre_kinds and 'lane_markings' not in tags:
-      tags['divider'] = centre_kinds[wid]
+      tags['divider'] = centre_kinds[wid][0]
+      if centre_kinds[wid][1] == 'white':
+        tags['divider:colour'] = 'white'
+      defaulted.discard(wid)
+    if wid in defaulted and cls in UNPAINTED_CLASSES and centre_paint is not None and \
+        paint_survey.centre_bare(link_samples(wid, a, b)) and not painted_along(centre_paint, nodes, a, b):
+      tags['divider'] = 'no'  # the game files paint no centre line on it (Prosperity St's bridge)
+      defaulted.discard(wid)
+      lines_why['no centre painted'] += 1
     if median and (kinds := median_kinds.get(parent.get(wid, wid))) and 'lane_markings' not in tags:
       left, right = kinds  # seen along the way: beside the backward lanes, beside the forward ones
       if left == right and left:
@@ -2358,6 +2504,9 @@ def main():
       tags = painted_lines(tags, cls, bool(back), [] if wid in unmarked else samples, lines_why, wid in unmarked)
     if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
       tags = outer_changes(tags, samples, lines_why)
+      tags = edge_line_tags(tags, samples, lines_why)
+    if survey and not back and sum(d.get('src') == paint_survey.GAMEFILES for d in link_samples(wid, a, b)) < paint_survey.MIN_SAMPLES:
+      unread_edges.add(wid)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
       tags['name'] = name
     if wid in destination:
@@ -2372,9 +2521,20 @@ def main():
       tags['surface'] = 'unpaved'
     if lf[2] & 1:
       tags['gta:no_nav'] = 'yes'
+    written.append((wid, a, b, tags))
+  carried = street_centres(nodes, written, defaulted) if survey else {}
+  edges_on = carried_edges(nodes, written, unread_edges) if survey else {}
+  for wid, a, b, tags in written:
+    if wid in carried:
+      tags = {**{k: v for k, v in tags.items() if k not in ('divider', 'divider:colour')}, **carried[wid]}
+    if wid in edges_on and 'lane_markings' not in tags:
+      tags = {**tags, **edges_on[wid]}
     w.add_way(osmium.osm.mutable.Way(id=wid, version=1, nodes=[node_id(a), node_id(b)], tags=tags))
   if survey:
     print("lane lines from the game files' paint: " + ', '.join(f'{n} {k}' for k, n in lines_why.most_common()))
+    print(f"{len(edges_on)} one-way ways without sections with the yellow edges of the carriageway either side")
+    print(f"{len(carried)} two-lane ways' centre lines as the road's either side, not the class default (" +
+          ', '.join(f'{n} {k}' for k, n in Counter(' '.join(v.values()) for v in carried.values()).most_common()) + ")")
   for i, (kind, wi, via, wo) in enumerate(restrictions):
     via = [(t, node_id(ref) if t == 'n' else ref, 'via') for t, ref in via]
     w.add_relation(osmium.osm.mutable.Relation(id=i + 1, version=1, tags={'type': 'restriction', 'restriction': kind},
