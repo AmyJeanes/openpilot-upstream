@@ -405,6 +405,7 @@ TAPER_M = 30.0  # m: a lane begins (or ends) where a way's lane count changes, w
 CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m either side of a point has a corner there
 CORNER_CHORD = 10.0  # m
 FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a fillet
+FILLET_MIN = 1.0  # m: a corner nearer the route's start or end than this has no room for a fillet
 CORNER_SHARP, SHARP_SHARE = 10.0, 0.6  # a turn through a junction turns this share of its angle within this many m
 FILLET_RADIUS = {'left': 20.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns
 MATCH_TOL = 0.5  # m between a route's shape point and a map node it is at
@@ -1356,7 +1357,7 @@ class RouteLanes:
     side), as a car drives through a junction rather than along its ways to the node in the middle."""
     if not keys or at >= self.along[-1] - 1e-6:
       return None
-    back = max(at - FILLET_REACH - CORNER_CHORD, 0.0)  # from a little behind, so a corner the car is in still has its fillet
+    back = max(at - 2 * FILLET_REACH - CORNER_CHORD, 0.0)  # from behind, so a corner the car is in keeps its fillet
     kx = np.array([at + d for d, _ in keys], dtype=float)
     ky = np.array([lane for _, lane in keys], dtype=float)
     near = np.clip(np.searchsorted(self.along, kx), 1, len(self.along) - 1)
@@ -1409,9 +1410,11 @@ class RouteLanes:
     for n, (sc, _) in enumerate(cs):
       lo = cs[n - 1][0] if n else -np.inf
       hi = cs[n + 1][0] if n + 1 < len(cs) else np.inf
-      a = sc - min(FILLET_REACH, (sc - lo) / 2)
-      b = sc + min(FILLET_REACH, (hi - sc) / 2)
-      if a - CORNER_CHORD < s[0] or b + CORNER_CHORD > s[-1]:
+      # a corner near the route's start (where it was routed from the car) or its end has less room either side
+      start = s[0] <= self.along[0] + EPS
+      a = sc - min(FILLET_REACH, (sc - lo) / 2, sc - s[0] - FILLET_MIN if start else np.inf)
+      b = sc + min(FILLET_REACH, (hi - sc) / 2, s[-1] - sc - FILLET_MIN)
+      if min(sc - a, b - sc) < FILLET_MIN or (not start and a - CORNER_CHORD < s[0]):
         continue
 
       def at(v, pts=line):
@@ -1419,7 +1422,8 @@ class RouteLanes:
 
       def route(v):
         return np.array([np.interp(v, self.along, self.points[:, 0]), np.interp(v, self.along, self.points[:, 1])])
-      u_in, u_out = route(a) - route(a - CORNER_CHORD), route(b + CORNER_CHORD) - route(b)
+      u_in = route(a) - route(max(a - CORNER_CHORD, self.along[0]))
+      u_out = route(min(b + CORNER_CHORD, self.along[-1])) - route(b)
       u_in, u_out = u_in / max(np.hypot(*u_in), 1e-6), u_out / max(np.hypot(*u_out), 1e-6)
       path = fillet(at(a), u_in, at(b), u_out, FILLET_RADIUS['left'], FILLET_RADIUS['right'])
       i0, i1 = int(np.searchsorted(s, a)), int(np.searchsorted(s, b, side='right'))

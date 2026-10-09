@@ -10,6 +10,11 @@ Where a one-way way parts into several (a diverge: GTA starts each branch from t
 not from its own lanes there), the branches' kerbs are left out where they lie inside that carriageway carried on
 straight past its end (by GORE m, and SHARED in from its edges, so a branch running on along its edge keeps its kerb):
 they cross its lanes until the branches part, at the gore. Likewise where several merge into one, back from its start.
+
+GTA also lays lane changes (a one-way way up to LANE_CHANGE_M long turning off a carriageway that goes on, into another
+that came from elsewhere, all running about one way) across the painted gore where two carriageways part or meet, and
+their kerbs crossed it. One with a stretch over GAP_M on no other carriageway (`across`) is part of the surface: it has
+no kerbs, covers no other way's kerb and parts no carriageway, so the gore's edges are the carriageways' own kerbs.
 """
 from collections import defaultdict
 
@@ -29,6 +34,9 @@ STEP = 0.5  # m: kerbs are cut to this
 MIN_PIECE = 0.3  # m
 CELL = 25.0  # m
 GORE = 40.0  # m a carriageway that parts or merges is carried on past its end, or back from its start
+LANE_CHANGE_M = 40.0  # m: GTA's lane changes between carriageways are 10-25 m long
+BRANCH = 10.0  # deg more a lane change turns off a carriageway than the carriageway turns going on
+GAP_M = 1.0  # m of a lane change on no carriageway (but other lane changes'): it crosses a gore
 
 
 class SideBySide:
@@ -51,34 +59,22 @@ class SideBySide:
       self.first[wid], self.last[wid] = refs[0], refs[-1]
       self.ends_at[refs[-1]].append(wid)
       self.starts_at[refs[0]].append(wid)
-      pts = osm.xy[osm.data.index(refs)]
-      z = self._heights(refs)
-      lo, hi = osm.lanes(wid).edges(FORWARD)
-      for k in range(len(pts) - 1):
-        p, q = pts[k], pts[k + 1]
-        length = float(np.hypot(*(q - p)))
-        if length < 0.1:
-          continue
-        u = (q - p) / length
-        r = np.array([u[1], -u[0]])  # right of the direction of travel
-
-        def quad(a, b, p=p, q=q, r=r):
-          return np.array([p + r * a, q + r * a, q + r * b, p + r * b])
-        surface, strip = quad(lo - SHARED, hi + SHARED), quad(lo - SHARED, lo + MEETS)
-        self.quads.append((wid, surface.mean(0), surface, strip, u, layer_of(wid), None if z is None else float(z[k:k + 2].mean())))
-        n = len(self.quads) - 1
-        lo_c, hi_c = surface.min(0) // CELL, surface.max(0) // CELL
-        for cx in range(int(lo_c[0]), int(hi_c[0]) + 1):
-          for cy in range(int(lo_c[1]), int(hi_c[1]) + 1):
-            self._cells[(cx, cy)].append(n)
+    changes = self._lane_changes()
+    for wid in self.first:
+      if wid not in changes:
+        self._add_quads(wid)
+    # the lane changes across a gap between the carriageways (a gore) rather than over their lanes
+    self.across = {w for w in changes if self._gap(w) > GAP_M}
+    for wid in sorted(changes - self.across):
+      self._add_quads(wid)
     for wid in self.first:
       refs = osm.ways[wid][1]
       lo, hi = osm.lanes(wid).edges(FORWARD)
-      if hi - lo <= 2 * SHARED:
+      if hi - lo <= 2 * SHARED or wid in self.across:
         continue
       pts, z = osm.xy[osm.data.index(refs)], self._heights(refs)
       for node, (p, q), zz in ((refs[-1], pts[-2:], None if z is None else z[-1]), (refs[0], pts[1::-1], None if z is None else z[0])):
-        parts = self.starts_at[node] if node == refs[-1] else self.ends_at[node]
+        parts = [w for w in (self.starts_at[node] if node == refs[-1] else self.ends_at[node]) if w not in self.across]
         if len(parts) < 2 or np.hypot(*(q - p)) < 0.1:
           continue
         u = (q - p) / np.hypot(*(q - p))  # out past the node, the way it's carried on
@@ -87,6 +83,68 @@ class SideBySide:
         near = q - u * SHARED  # from just before its end: a branch's kerb starts beside its first node
         inner = np.array([near + r * (lo + SHARED), far + r * (lo + SHARED), far + r * (hi - SHARED), near + r * (hi - SHARED)])
         self.gores[node].append((inner, u if node == refs[-1] else -u, layer_of(wid), None if zz is None else float(zz)))
+
+  def _add_quads(self, wid: int):
+    refs = self.osm.ways[wid][1]
+    pts = self.osm.xy[self.osm.data.index(refs)]
+    z = self._heights(refs)
+    lo, hi = self.osm.lanes(wid).edges(FORWARD)
+    for k in range(len(pts) - 1):
+      p, q = pts[k], pts[k + 1]
+      length = float(np.hypot(*(q - p)))
+      if length < 0.1:
+        continue
+      u = (q - p) / length
+      r = np.array([u[1], -u[0]])  # right of the direction of travel
+
+      def quad(a, b, p=p, q=q, r=r):
+        return np.array([p + r * a, q + r * a, q + r * b, p + r * b])
+      surface, strip = quad(lo - SHARED, hi + SHARED), quad(lo - SHARED, lo + MEETS)
+      self.quads.append((wid, surface.mean(0), surface, strip, u, self.layer_of(wid), None if z is None else float(z[k:k + 2].mean())))
+      n = len(self.quads) - 1
+      lo_c, hi_c = surface.min(0) // CELL, surface.max(0) // CELL
+      for cx in range(int(lo_c[0]), int(hi_c[0]) + 1):
+        for cy in range(int(lo_c[1]), int(hi_c[1]) + 1):
+          self._cells[(cx, cy)].append(n)
+
+  def _gap(self, wid: int) -> float:
+    """m of the longest stretch of a way's line on no carriageway of the ways with quads so far."""
+    refs = self.osm.ways[wid][1]
+    pts, covered, _ = self._cover(self.osm.xy[self.osm.data.index(refs)], self._heights(refs), self.layer_of(wid), {wid}, False,
+                                  gores=False)
+    seg = np.hypot(*np.diff(pts, axis=0).T)
+    return max((float(seg[a:b].sum()) for a, b in _runs(~covered)), default=0.0)
+
+  def _lane_changes(self) -> set[int]:
+    """The one-way ways up to LANE_CHANGE_M long that leave a carriageway going on through their first node and join
+    one going on through their last: at each, another way in and another out run on straighter (by BRANCH) than this
+    one turns off them, and within SAME_WAY of it. Where carriageways braid, both are such ways' neighbours."""
+    def heading(wid, at_end):
+      pts = self.osm.xy[self.osm.data.index(self.osm.ways[wid][1])]
+      d = pts[-1] - pts[-2] if at_end else pts[1] - pts[0]
+      return d / max(float(np.hypot(*d)), 1e-9)
+
+    def angle(u, v):
+      return float(np.degrees(np.arccos(np.clip(u @ v, -1.0, 1.0))))
+
+    out = set()
+    for wid in self.first:
+      pts = self.osm.xy[self.osm.data.index(self.osm.ways[wid][1])]
+      if float(np.hypot(*np.diff(pts, axis=0).T).sum()) > LANE_CHANGE_M:
+        continue
+      ends = []
+      for node, u, leaving in ((self.first[wid], heading(wid, False), True), (self.last[wid], heading(wid, True), False)):
+        ins = [heading(w, True) for w in self.ends_at[node] if w != wid]
+        outs = [heading(w, False) for w in self.starts_at[node] if w != wid]
+        if not ins or not outs:
+          ends.append(False)
+          continue
+        on = min(angle(a, b) for a in ins for b in outs)  # the carriageway going on through the node
+        off = min(angle(a, u) for a in ins) if leaving else min(angle(u, b) for b in outs)
+        ends.append(off > on + BRANCH and off < SAME_WAY)
+      if all(ends):
+        out.add(wid)
+    return out
 
   def _heights(self, refs) -> np.ndarray | None:
     try:
@@ -103,6 +161,8 @@ class SideBySide:
     ways = set(ways)
     if len(line) < 2 or not all(w in self.first for w in ways):  # two-way roads keep their kerbs
       return ([line] if len(line) >= 2 else []), []
+    if ways <= self.across:
+      return [], []
     pts, covered, beside = self._cover(line, z, layer, ways, right and not any(self.crosses(w) for w in ways))
     kept = [pts[a:b + 1] for a, b in _runs(~covered)]
     lines = []
