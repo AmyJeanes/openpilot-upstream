@@ -193,7 +193,11 @@ topcam poses) as tiles, so the check runs on them without the game.
     sections read both that direction's outer edge lines and no mark within 1.5 m of the boundary
     (`paint_survey.bare_lane_lines`), the captured top-down images show none there either (`--lines-bare`, from
     `imgcheck/lane_paint.py`: the files miss some freeways' lane lines, the Olympic Fwy's), and the ways so joined end
-    to end run 60 m or more (`short_unmarked`). Lanes, `change:lanes`, lane numbering and nav read nothing of it.
+    to end run 60 m or more (`short_unmarked`). The images carry such a stretch on past its ends onto the ways joined
+    end to end with as many lanes that way (the files read neither edge on some of them, and carry decals the game
+    doesn't show on others): onto a way where they show no line along its first half from the stretch's end, and on
+    past it where they show none on it at all (`lane_paint.carries`), so the first painted dash stops it.
+    Lanes, `change:lanes`, lane numbering and nav read nothing of it.
   - GTA lays a left-turn bay as a one-way link of its own (through its slip lane or left turn only nodes) from where
     it splits off its road to the junction ahead, over a two-way road's median or beside a one-way road's left lane.
     Real maps make it a lane of the road (osm_lanes.md P3), and so does ours (`detached_bays`): the bay's links are

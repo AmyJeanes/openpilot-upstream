@@ -1706,21 +1706,24 @@ def outer_changes(tags, samples, why):
   return out
 
 
-def unmarked_lane_lines(tags, samples, bare, why):
+def unmarked_lane_lines(tags, samples, bare, why, carried=()):
   """A way's tags with `divider:lanes` (`:forward` / `:backward` on a two-way way) `no` on each lane with no line
   painted on its right beside another lane its way: GTA's two lanes in one painted lane, Senora Fwy's. The lanes stay
   as they are. Where the game files paint no line there (paint_survey.bare_lane_lines) and the captured game images
-  show none either, `bare`: offsets m right of the way's line (imgcheck.lane_paint): the files miss some freeways'."""
+  show none either, `bare`: offsets m right of the way's line (imgcheck.lane_paint): the files miss some freeways'.
+  `carried`: offsets the images carry such a bare stretch on onto past the ways the files read bare (lane_paint)."""
   sec = WayLanes.from_tags(tags).section(FORWARD)
   found = paint_survey.bare_lane_lines(samples, [(s.left, s.right, s.heading) for s in sec]) if bare else {}
   two_way = {s.heading for s in sec} >= {1, -1}
   out = dict(tags)
   for key, heading in (('forward', 1), ('backward', -1)):
-    if key not in found:
-      continue
     bounds = [b for _, b in sorted((s.left, s.right) for s in sec if s.heading == heading)[:-1]]
-    seen = [any(abs(o - v) <= paint_survey.BARE_REACH for o in bare) for v in bounds]
-    flags = [f and s for f, s in zip(found[key], seen if heading == 1 else seen[::-1], strict=True)]
+    if not bounds or not (key in found or carried):
+      continue
+    order = 1 if heading == 1 else -1
+    seen = [any(abs(o - v) <= paint_survey.BARE_REACH for o in bare) for v in bounds][::order]
+    runs_on = [any(abs(o - v) <= paint_survey.BARE_REACH for o in carried) for v in bounds][::order]
+    flags = [(f and s) or c for f, s, c in zip(found.get(key, [False] * len(bounds)), seen, runs_on, strict=True)]
     if any(flags):
       out[f'divider:lanes:{key}' if two_way else 'divider:lanes'] = '|'.join(['no' if f else '' for f in flags] + [''])
       why['lane lines painted nowhere'] += sum(flags)
@@ -2305,7 +2308,8 @@ def main():
   p.add_argument('--survey-features', help="the game files' painted features (features.jsonl): crossings, for the stop "
                  "lines added where the map has none, and turn arrows, for the lanes' turn:lanes")
   p.add_argument('--lines-bare', help="lane boundaries the game files paint no line on that captured game images show "
-                 "none on either (imgcheck.lane_paint's JSON: \"bare\": {\"<a>|<b>\": [m right of a -> b]}): no line drawn")
+                 "none on either (imgcheck.lane_paint's JSON: \"bare\": {\"<a>|<b>\": [m right of a -> b]}): no line drawn; nor on "
+                 "those its \"carried\" says such a stretch carries on onto")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -2677,13 +2681,15 @@ def main():
     w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat), tags={**tags, 'ele': f"{n['z']:.1f}"}))
   written, defaulted = [], set()  # the ways (id, a, b, tags); those whose centre is the class default
   unread_edges = set()  # one-way ways the game files have too few sections of to read their edges
-  bare_at = {}
-  for k, offsets in (json.load(open(args.lines_bare))['bare'] if args.lines_bare else {}).items():
-    a, b = (tuple(int(v) for v in end.split(':')) for end in k.split('|'))
-    bare_at[(a, b)], bare_at[(b, a)] = offsets, [-v for v in offsets]
+  lines_json = json.load(open(args.lines_bare)) if args.lines_bare else {}
+  bare_at = {'bare': {}, 'carried': {}}
+  for kind, at in bare_at.items():
+    for k, offsets in lines_json.get(kind, {}).items():
+      a, b = (tuple(int(v) for v in end.split(':')) for end in k.split('|'))
+      at[(a, b)], at[(b, a)] = offsets, [-v for v in offsets]
 
-  def lines_bare(a, b):
-    return bare_at.get((a, b), ())
+  def lines_bare(a, b, kind='bare'):
+    return bare_at[kind].get((a, b), ())
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
     if wid in crossings:
       written.append((wid, a, b, {'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
@@ -2755,8 +2761,8 @@ def main():
       tags = road_edges(tags, samples, edges_why)
     if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
       tags = edge_line_tags(tags, samples, lines_why)  # at the lanes' edges road_edges left them
-    if survey and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
-      tags = unmarked_lane_lines(tags, samples, lines_bare(a, b), lines_why)
+    if survey and 'lane_markings' not in tags and ((samples := link_samples(wid, a, b)) or lines_bare(a, b, 'carried')):
+      tags = unmarked_lane_lines(tags, samples or [], lines_bare(a, b), lines_why, lines_bare(a, b, 'carried'))
     if survey and not back and sum(d.get('src') == paint_survey.GAMEFILES for d in link_samples(wid, a, b)) < paint_survey.MIN_SAMPLES:
       unread_edges.add(wid)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it

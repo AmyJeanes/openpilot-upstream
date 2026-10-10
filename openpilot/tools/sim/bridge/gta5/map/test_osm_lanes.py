@@ -421,6 +421,9 @@ def test_lane_lines_the_files_paint_none_of():
   assert unmarked_lane_lines(tags, game_files([(-5.9, 'yellow', 'solid'), (0.4, 'white', 'dashed'), (6.1, 'white', 'solid')]), (0.0,), why) == tags
   assert unmarked_lane_lines(tags, senora[:2], (0.0,), why) == tags
   assert unmarked_lane_lines(tags, game_files([(-5.9, 'yellow', 'solid')]), (0.0,), why) == tags
+  # a way the images carry such a bare stretch on onto, whatever its files read
+  assert unmarked_lane_lines(tags, [], (), why, (0.1,)) == {**tags, 'divider:lanes': 'no|'}
+  assert unmarked_lane_lines(tags, senora[:2], (), why, (3.0,)) == tags
   # each direction of a two-way way, left to right as seen travelling it
   marks = [(-11.0, 'white', 'solid'), (-5.5, 'white', 'dashed'), (0.0, 'yellow', 'double_solid'), (11.0, 'white', 'solid')]
   sec = [(-11.0, -5.5, -1), (-5.5, 0.0, -1), (0.0, 5.5, 1), (5.5, 11.0, 1)]
