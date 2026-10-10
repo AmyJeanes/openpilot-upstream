@@ -876,7 +876,8 @@ def road_edges(samples: list[dict], edges: tuple[float, float], inner: tuple[flo
     best = max(clusters(found), key=lambda c: c[1], default=None)
     line = best[0] if best and best[1] >= need else None
     paint = Counter(colour[k] for k, v in found if line is not None and abs(v - line) <= AGREE).most_common(1)
-    asphalt = [d['kerbs'][side] for d in files if (d.get('kerbs') or {}).get(side) is not None]
+    # an edge read in past the outer lane's inner edge is a median's kerb the link's line runs beside, not the road's
+    asphalt = [v for d in files if (v := (d.get('kerbs') or {}).get(side)) is not None and (v - inner[i]) * sign >= 0.0]
     edge = float(np.median(asphalt)) if len(asphalt) >= need and max(asphalt) - min(asphalt) <= EDGE_SPREAD else None
     clear = False
     if edge is not None:
