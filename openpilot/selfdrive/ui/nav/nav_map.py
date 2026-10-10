@@ -25,6 +25,7 @@ class MapStyle:
   car_size: float = 34.0  # px, the car arrow's half length
   marker_radius: float = 13.0
   car_at: float = 0.80  # of the view's height from its top
+  car_x: float = 0.5  # of the view's width from its left
   top_margin: float = 80.0  # px kept above the next maneuver
   view_min: float = 150.0  # m shown ahead of the car, between these, by the next maneuver's distance
   view_max: float = 650.0
@@ -64,7 +65,7 @@ class NavMap:
       self._zoom.x, self._zoom.initialized = ahead, True
     ahead = self._zoom.update(ahead)
 
-    cx, cy = rect.x + rect.width / 2, rect.y + rect.height * st.car_at
+    cx, cy = rect.x + rect.width * st.car_x, rect.y + rect.height * st.car_at
     scale = max(cy - rect.y - st.top_margin, 1.0) / ahead  # px per m
     s, c = math.sin(math.radians(b)), math.cos(math.radians(b))
     # local (east, north) m -> screen: right of the heading along x, ahead up

@@ -5,6 +5,7 @@ import pyray as rl
 import random
 import string
 from dataclasses import dataclass
+from collections.abc import Callable
 from openpilot.cereal import messaging, log
 from opendbc.car.structs import car
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -97,6 +98,7 @@ class AlertRenderer(Widget):
                                            letter_spacing=0.025)
 
     self._prev_alert: Alert | None = None
+    self._fallback_alert: Callable[[], Alert | None] | None = None
     self._text_gen_time = 0
     self._alert_text2_gen = ''
 
@@ -116,6 +118,10 @@ class AlertRenderer(Widget):
     self._txt_turn_signal_right = gui_app.texture('icons_mici/onroad/turn_signal_left.png', 104, 96, flip_x=True)
     self._txt_blind_spot_left = gui_app.texture('icons_mici/onroad/blind_spot_left.png', 134, 150)
     self._txt_blind_spot_right = gui_app.texture('icons_mici/onroad/blind_spot_left.png', 134, 150, flip_x=True)
+
+  def set_fallback_alert(self, fallback: Callable[[], Alert | None]) -> None:
+    """An alert of the UI's own (navigation's lane request) for when selfdriveState has none."""
+    self._fallback_alert = fallback
 
   def get_alert(self, sm: messaging.SubMaster) -> Alert | None:
     """Generate the current alert based on selfdrive state."""
@@ -141,7 +147,10 @@ class AlertRenderer(Widget):
 
     # No alert if size is none
     if ss.alertSize == 0:
-      return None
+      fallback = self._fallback_alert() if self._fallback_alert is not None else None
+      if fallback is not None:
+        self._prev_alert = fallback
+      return fallback
 
     # Return current alert
     ret = Alert(text1=ss.alertText1, text2=ss.alertText2, size=ss.alertSize.raw, status=ss.alertStatus.raw,
@@ -162,13 +171,13 @@ class AlertRenderer(Widget):
     # alert_type format is "EventName/eventType" (e.g., "preLaneChangeLeft/warning")
     event_name = alert.alert_type.split('/')[0] if alert.alert_type else ''
 
-    if event_name == 'preLaneChangeLeft':
+    if event_name in ('preLaneChangeLeft', 'navLaneChangeLeft'):
       icon_side = IconSide.left
       txt_icon = self._txt_turn_signal_left
       icon_margin_x = 2
       icon_margin_y = 5
 
-    elif event_name == 'preLaneChangeRight':
+    elif event_name in ('preLaneChangeRight', 'navLaneChangeRight'):
       icon_side = IconSide.right
       txt_icon = self._txt_turn_signal_right
       icon_margin_x = 2
@@ -274,9 +283,9 @@ class AlertRenderer(Widget):
     # alert_type format is "EventName/eventType" (e.g., "preLaneChangeLeft/warning")
     event_name = alert.alert_type.split('/')[0] if alert.alert_type else ''
 
-    if event_name == 'preLaneChangeLeft':
+    if event_name in ('preLaneChangeLeft', 'navLaneChangeLeft'):
       bg_height = small_alert_height
-    elif event_name == 'preLaneChangeRight':
+    elif event_name in ('preLaneChangeRight', 'navLaneChangeRight'):
       bg_height = small_alert_height
     elif event_name == 'laneChange':
       bg_height = small_alert_height
