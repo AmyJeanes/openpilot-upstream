@@ -325,10 +325,15 @@ def kinds(md, kind: str) -> list[dict]:
 def test_clamp_corners():
   """The lane line's fillet cutting a turn's inside corner kerb: the plan pushed out of it, a plan_clamp anomaly, not a
   kerb_contact. A far-side turn's inside is a kerb where it's a median: one-way legs (map1010b 012, a left turn past a
-  tram median's nose) or a median between the directions; a near-side turn's into a narrow street."""
+  tram median's nose) or a median between the directions, else the road's far edge (map1010c 015, a left turn off a
+  two-way road, its front corner past the edge into a bridge parapet's end); a near-side turn's into a narrow street."""
   one_way = ms.section(2, 0, 4.4)
   cases = [("left 60, one-way legs", ms.junction_turn("left", stop=None, angle=60.0, sec=one_way), 0, 0.5),
            ("left 60, a 4 m median", ms.junction_turn("left", stop=None, angle=60.0, sec=ms.section(2, 2, median=4.0)), 0, 0.05),
+           ("left 90, two-way 3 m lanes", ms.junction_turn("left", stop=None, sec=ms.section(1, 1, 3.0)), 0, 0.2),
+           # 015's side road bends away past its first metres: the corner from shorter legs, not taken for a bend
+           ("left 90 onto a road bending away", ms.made_route(ms.line((200.0, 0.0), (10.0, 90.0), *[(10.0, 4.0)] * 6, (100.0, 0.0)),
+                                                             ms.section(1, 1, 3.0), junctions=[20], turns={20: ms.LEFT}), 0, 0.5),
            ("right 90 into 3.5 m lanes", ms.junction_turn("right", stop=None, out=ms.section(1, 1, 3.5)), 1, None)]
   for name, r, lane, cut in cases:
     cfg = {"seed": 3, "bias_max": 0, "wander": 0}

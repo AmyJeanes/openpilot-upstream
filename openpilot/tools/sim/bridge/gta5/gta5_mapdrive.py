@@ -9,10 +9,11 @@ its time (the style's t_lc, no quicker than its lateral acceleration allows) at 
 kept, moved off jogs in the route's line (route_jogs, where the lane line swerves; jog_change where there's no
 room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
 and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in, and
-kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner kerb (a far-side turn's where it's a
-median), within its lane outside lane changes and turns' corners, and past a fork off its gore. That line is the
-intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and wander (never periodic,
-faded out through turns, junctions and forks, and within its lane), joining it from where the car is. The plan is
+kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner kerb (a far-side turn's a median's
+edge, else the road's far edge), within its lane outside lane changes and turns' corners, and past a fork off its
+gore. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
+wander (never periodic, faded out through turns, junctions and forks, and within its lane), joining it from where the
+car is (on the trip's first plan, a bend it can't take there fails the plan). The plan is
 checked against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another
 lane, plan_check=fix (the default) changes into it by the target's end, event only logs it, abort ends the trip; each
 is a plan_slot_mismatch anomaly.
@@ -195,6 +196,7 @@ KERB_MARGIN = 0.2  # m the car's side may come past the kerb before it counts
 CORNER_LEG = 25.0  # m before and after a turn's point its legs' kerbs are taken, outside the junction
 CORNER_ANGLE = (30.0, 150.0)  # deg a turn checked against its corner kerb turns
 CORNER_LEG_MIN = 6.0  # m: a corner nearer the next than twice this has no legs of its own to take
+CORNER_LEGS_SHORT = (15.0,)  # m: shorter legs tried where the road bends away into the block beyond the first
 CORNER_SAME = 10.0  # m between a turn and a corner of the lane line that are one
 MEDIAN_GAP = 1.0  # m between the two directions that's a median
 MEDIAN_RADIUS = 2.0  # m a median's nose is taken as rounded
@@ -1305,11 +1307,11 @@ class MapDriver:
                bends: list | None = None) -> list[dict]:
     """Each turn's corner kerb on its inside (the route's turns, and its corners where the lane line takes a fillet): the
     kerb lines of the road in and the road out (the map's cross-sections a leg from the turn's point, CORNER_LEG or half
-    the way to the next corner, carried on straight), meeting at the corner. Near-side turns (right turns where traffic
-    drives on the right) always; far-side ones where that side is a median (_kerb). Only where that's a junction's corner
-    the line (the path, or `line` at line_s m along the route) clears: a turn of CORNER_ANGLE at a junction node, the
-    corner near the turn's point, and the line inside both kerb lines on the legs. Turns whose kerb runs inside the
-    block (the road bends there) are added to `bends`."""
+    the way to the next corner, carried on straight), meeting at the corner: a median's edge on the far side, else the
+    road's (_kerb). Only where that's a junction's corner the line (the path, or `line` at line_s m along the route)
+    clears: a turn of CORNER_ANGLE at a junction node, the corner near the turn's point, and the line inside both kerb
+    lines on the legs. Turns whose kerb runs inside the block (the road bends there), with CORNER_LEGS_SHORT's legs too,
+    are added to `bends`."""
     line = self.path if line is None else line
     line_s = self.route_s if line_s is None else line_s
     out = []
@@ -1328,44 +1330,57 @@ class MapDriver:
         continue
       if not len(junctions) or np.abs(junctions - dist).min() > CORNER_NODE:
         continue
-      sa, sb = lanes.section_at(a), lanes.section_at(b)
-      if sa is None or sb is None or not sa.lanes or not sb.lanes:
-        continue
-      kerb_a, kerb_b = self._kerb(sa, side), self._kerb(sb, side)
-      if kerb_a is None or kerb_b is None:
-        continue
-      chord = min(10.0, leg)
-      pa, pb = route_point(route, a), route_point(route, b)
-      da, db = pa - route_point(route, a - chord), route_point(route, b + chord) - pb
-      da, db = da / max(np.hypot(*da), 1e-6), db / max(np.hypot(*db), 1e-6)
-      right = side == "right"
-      # outward of the road, into the corner block
-      na = np.array([da[1], -da[0]]) * (1 if right else -1)
-      nb = np.array([db[1], -db[0]]) * (1 if right else -1)
-      ka = pa + np.array([da[1], -da[0]]) * kerb_a[0]
-      kb = pb + np.array([db[1], -db[0]]) * kerb_b[0]
-      m = np.array([da, -db]).T
-      if abs(np.linalg.det(m)) < 0.2:
-        continue  # the legs near parallel: no corner to speak of
-      u = np.linalg.solve(m, kb - ka)
-      corner = ka + da * u[0]
-      if np.hypot(*(corner - route_point(route, dist))) > CORNER_NEAR:
-        continue
-      if self._road_in_block(route, a, b, ka, na, kb, nb, side):
-        if bends is not None:
-          bends.append(float(dist))
-        continue  # the map's own kerb runs inside the block: a bend, a slip or a wide corner, not a square one
-      ia, ib = (int(np.argmin(np.abs(line_s - x))) for x in (a, b))
-      if (line[ia] - ka) @ na > -CORNER_INSIDE or (line[ib] - kb) @ nb > -CORNER_INSIDE:
-        continue  # the line outside a leg's kerb line: the line isn't the kerb
-      out.append({"along": float(dist), "side": side, "ka": ka, "na": na, "kb": kb, "nb": nb, "corner": corner,
-                  "radius": min(kerb_a[1], kerb_b[1]), "leg": leg})
+      # the legs shortened where the road beyond them bends away into the block (a side road curving off)
+      tries = [self._corner_at(route, dist, side, leg)]
+      if tries[0] == "bend":
+        tries += [self._corner_at(route, dist, side, x) for x in CORNER_LEGS_SHORT if CORNER_LEG_MIN <= x < leg]
+      c = next((c for c in tries if isinstance(c, dict)), None)
+      if c is not None:
+        ia, ib = (int(np.argmin(np.abs(line_s - x))) for x in (dist - c["leg"], dist + c["leg"]))
+        if (line[ia] - c["ka"]) @ c["na"] > -CORNER_INSIDE or (line[ib] - c["kb"]) @ c["nb"] > -CORNER_INSIDE:
+          c = None  # the line outside a leg's kerb line: the line isn't the kerb
+      if c is not None:
+        out.append(c)
+      elif tries[0] == "bend" and bends is not None:
+        bends.append(float(dist))  # the map's own kerb runs inside the block: a bend, a slip or a wide corner
     return out
 
-  def _kerb(self, sec, side: str) -> tuple[float, float] | None:
+  def _corner_at(self, route, dist: float, side: str, leg: float) -> dict | str | None:
+    """A turn's corner kerb block from its legs' cross-sections `leg` m either side of its point (_corners): "bend"
+    where the map's kerb between runs into it, None where there's none."""
+    a, b = dist - leg, dist + leg
+    lanes = route.lanes
+    sa, sb = lanes.section_at(a), lanes.section_at(b)
+    if sa is None or sb is None or not sa.lanes or not sb.lanes:
+      return None
+    kerb_a, kerb_b = self._kerb(sa, side), self._kerb(sb, side)
+    chord = min(10.0, leg)
+    pa, pb = route_point(route, a), route_point(route, b)
+    da, db = pa - route_point(route, a - chord), route_point(route, b + chord) - pb
+    da, db = da / max(np.hypot(*da), 1e-6), db / max(np.hypot(*db), 1e-6)
+    right = side == "right"
+    # outward of the road, into the corner block
+    na = np.array([da[1], -da[0]]) * (1 if right else -1)
+    nb = np.array([db[1], -db[0]]) * (1 if right else -1)
+    ka = pa + np.array([da[1], -da[0]]) * kerb_a[0]
+    kb = pb + np.array([db[1], -db[0]]) * kerb_b[0]
+    m = np.array([da, -db]).T
+    if abs(np.linalg.det(m)) < 0.2:
+      return None  # the legs near parallel: no corner to speak of
+    u = np.linalg.solve(m, kb - ka)
+    corner = ka + da * u[0]
+    if np.hypot(*(corner - route_point(route, dist))) > CORNER_NEAR:
+      return None
+    if self._road_in_block(route, a, b, ka, na, kb, nb, side):
+      return "bend"
+    return {"along": float(dist), "side": side, "ka": ka, "na": na, "kb": kb, "nb": nb, "corner": corner,
+            "radius": min(kerb_a[1], kerb_b[1]), "leg": leg}
+
+  def _kerb(self, sec, side: str) -> tuple[float, float]:
     """m right of the line of a cross-section's kerb on `side`, and how rounded its corner is taken: the road's edge on
     the near side; on the far side our own carriageway's edge where it's a median's (nothing coming the other way, or
-    MEDIAN_GAP between the directions), MEDIAN_RADIUS; None where the other way's lanes run beside ours."""
+    MEDIAN_GAP between the directions), MEDIAN_RADIUS; where the other way's lanes run beside ours, the road's far edge,
+    KERB_RADIUS (crossing the oncoming lanes is the turn, cutting past the road's edge isn't)."""
     near = side == ("right" if self.c["drive_on_right"] else "left")
     if near:
       return (sec.edges[1] if side == "right" else sec.edges[0]), KERB_RADIUS
@@ -1377,7 +1392,7 @@ class MapDriver:
     beyond = sec.first + sec.lanes
     if side == "right" and beyond < len(sec.spans) and sec.spans[beyond].left - ours[-1].right >= MEDIAN_GAP:
       return ours[-1].right, MEDIAN_RADIUS
-    return None
+    return (sec.edges[1] if side == "right" else sec.edges[0]), KERB_RADIUS
 
   def _road_in_block(self, route, a: float, b: float, ka, na, kb, nb, side: str) -> bool:
     """Whether the map's kerb on `side` between a and b m along (the route's cross-sections there, every 2 m) reaches
