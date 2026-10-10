@@ -97,12 +97,15 @@ class LagCar:
   `dims` (its model's bounds: min x, max x, min y, max y) reach the state as the plugin's nearby.dims; `vehicles` around
   it as nearby.v, read every 0.1 s within `reach` (NEARBY's; with an "ahead" key it's in nearby, as a plugin that reports
   its reach), each one touched a collision; `peds` (pedestrian()s) likewise as nearby.p within PED_NEARBY, or with
-  `ped_list` False (a plugin before it listed them) only as state.traffic.peds, those just ahead (PED_BOX)."""
+  `ped_list` False (a plugin before it listed them) only as state.traffic.peds, those just ahead (PED_BOX). `brake`: the
+  deceleration (m/s^2) it delivers at most, as the game short of the plugin's -4.0."""
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
                delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8,
                dims: tuple[float, float, float, float] | None = None, vehicles: list[Vehicle] | None = None,
-               reach: dict | None = None, peds: list[Vehicle] | None = None, ped_list: bool = True):
+               reach: dict | None = None, peds: list[Vehicle] | None = None, ped_list: bool = True,
+               brake: float | None = None):
     self.x, self.y, self.h, self.v = x, y, heading, v
+    self.brake = brake
     self.wheel_base = wheel_base
     self.dims = dims
     self.vehicles = vehicles
@@ -194,6 +197,8 @@ class LagCar:
         self.lat_i *= max(0.0, 1.0 - SUB)
       self.k += (self.gain * (k_cmd + self.lat_i) - self.k) * min(SUB / self.tau_k, 1.0)
       self.a += (a_cmd - self.a) * min(SUB / self.tau_a, 1.0)
+      if self.brake is not None:
+        self.a = max(self.a, -self.brake)
       if self.blocked:
         self.v, self.a = 0.0, 0.0
       elif self.v < 0.3 and a_cmd <= 0:
@@ -419,7 +424,7 @@ COLS = ("t", "x", "y", "heading", "v", "yaw", "kappa", "accel", "dev", "s", "lan
 def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None = None, v0: float = 0.0, seconds: float = 120.0,
           tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None,
           gain: float = 1.0, noise: float = 0.0, dims=None, vehicles: list[Vehicle] | None = None, reach: dict | None = None,
-          peds: list[Vehicle] | None = None, ped_list: bool = True) -> Trip:
+          peds: list[Vehicle] | None = None, ped_list: bool = True, brake: float | None = None) -> Trip:
   """Drives a route with the map driver on the lagged car. faults: {"collision": t, "push": (t, m right),
   "steer": t, "block": t, "surge": (path m, m/s more over 0.4 s)}. lane_map(route, state) gives the state's laneMap (None: none)."""
   import time
@@ -427,7 +432,7 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
     route.at, route.seg = 0.0, 0  # a route driven before starts again at its start
     pose = start_pose(route, lane if lane is not None else 0.0, 0.0)
   car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise, dims=dims, vehicles=vehicles, reach=reach,
-               peds=peds, ped_list=ped_list)
+               peds=peds, ped_list=ped_list, brake=brake)
   route.at, route.seg = 0.0, 0
   route.locate(np.array(pose[:2], float), None, pose[2], search=route.length)
   md = MapDriver({"seed": 1, **(cfg or {})})

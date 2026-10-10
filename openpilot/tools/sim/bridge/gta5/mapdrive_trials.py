@@ -35,7 +35,8 @@ def summary(lines: list[dict]) -> dict:
           "collisions": max((r.get("collisions") or 0 for r in rows), default=0), "anomalies": anomalies,
           "anomaly_places": [[r["kind"], r.get("pos")] for r in ev if r["event"] == "anomaly"][:40],
           "lights": sum(r["event"] == "light_unknown" for r in ev), "stops": sum(r["event"] == "stopped" for r in ev),
-          "slot_check": plan.get("slot_check"), "keys": plan.get("keys"), "rows": len(rows)}
+          "slot_check": plan.get("slot_check"), "keys": plan.get("keys"), "rows": len(rows),
+          "nudges": [{k: r.get(k) for k in ("ok", "why", "shift", "clear", "need", "pos")} for r in ev if r["event"] == "nudge"]}
 
 
 def main():
