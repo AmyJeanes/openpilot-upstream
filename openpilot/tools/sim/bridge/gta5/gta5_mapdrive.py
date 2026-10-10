@@ -27,7 +27,10 @@ and a gentle arrival stop_before m short of the end. Other vehicles: one whose b
 the path ahead (in a turn too) is followed (the intelligent driver model's braking, by the style's headway) or stopped
 behind, LEAD_STOP short; before a junction or turn the car waits while a moving one's way (straight on at its speed)
 crosses ours within CROSS_GAP s of when we'd be there; and it's no faster than stops for one at the edge of what the
-plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Aborts (dev >
+plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Pedestrians
+(nearby's "p") likewise: one within PED_SIDE of our body along the path is stopped behind, and one walking across it
+(anywhere, PED_T s on) waited for, braking however late; where the plugin lists none, one it counts just ahead
+(traffic.peds) is braked to a stop for. Aborts (dev >
 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s, held by a vehicle for WAIT_MAX s
 with none moving (PARKED_WAIT s by a parked one), lateral acceleration over 4.5, the driver's input, a failed plan) brake
 to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
@@ -53,7 +56,8 @@ from openpilot.selfdrive.navd.planner import FREEWAY, TUNE, FwyState, Turn, lane
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
-REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range")
+REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
+           "ped")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -120,6 +124,12 @@ CROSS_ANGLE = 25.0  # deg off our way at least, for a crossing
 CROSS_NEAR = 25.0  # m from a junction node or turn the crossing may be, to be held for
 CROSS_STOP = 2.0  # m short of its way we stop at
 CROSS_KEEP = 0.5  # s a hold is kept after the crossing last looked likely
+# pedestrians (the plugin's nearby "p": their places and velocities, a body PED_HALF m either way of each)
+PED_HALF = 0.3  # m
+PED_SIDE = 1.0  # m beside our body a pedestrian's may come before it's in the way (they step about)
+PED_MOVING = 0.5  # m/s: a slower pedestrian isn't crossing
+PED_T = 4.0  # s ahead a crossing pedestrian's way is predicted
+PED_BOX = (2.5, 1.0, 12.0)  # m: the plugin's traffic.peds counts those within this either side of our origin, this far ahead to this
 # aborts
 DEV_ABORT, DEV_ABORT_S = 1.5, 1.0
 HEADING_ABORT, HEADING_ABORT_S = 30.0, 0.5
@@ -535,6 +545,7 @@ class MapDriver:
     self.front, self.rear, self.half_width = FRONT, FRONT, HALF_WIDTH  # our car's body from its origin (_body)
     self.cars: list[dict] | None = None  # the vehicles around, in the world (_vehicles); None: the plugin reports none
     self.cars_rows = None
+    self.peds_reported = False  # whether the plugin's nearby lists pedestrians ("p")
     self.reach = (NEARBY_AHEAD, NEARBY_SIDE)  # m ahead of our origin and to either side the plugin reports them
     self.lead_gap = math.nan  # m from our front bumper to the vehicle in our way along the path
     self.lead_right = math.nan  # m right of the path its body comes nearest
@@ -1455,14 +1466,16 @@ class MapDriver:
   # *** vehicles ***
 
   def _vehicles(self, state: dict, t: float):
-    """The vehicles around from the plugin's nearby, into the world by the pose of the state that brought them (it
-    reports every 0.1 s, the state comes each frame, and its places are from the car where it was then)."""
+    """The vehicles and pedestrians around from the plugin's nearby, into the world by the pose of the state that
+    brought them (it reports every 0.1 s, the state comes each frame, and its places are from the car where it was then);
+    pedestrians are kept with the vehicles, flagged "ped"."""
     nb = state.get("nearby")
     if nb is None:
       self.cars = None
       return
     self.reach = (float(nb.get("ahead") or NEARBY_AHEAD), float(nb.get("side") or NEARBY_SIDE))
-    rows = nb.get("v") or []
+    self.peds_reported = "p" in nb
+    rows = (nb.get("v") or [], nb.get("p") or [])
     if self.cars is not None and rows == self.cars_rows:
       return
     self.cars_rows = rows
@@ -1470,7 +1483,7 @@ class MapDriver:
     right, fwd = np.array([math.cos(h), math.sin(h)]), np.array([-math.sin(h), math.cos(h)])
     pos = np.asarray(state["pos"][:2], float)
     cars = []
-    for v in rows:
+    for v in rows[0]:
       if len(v) < 9:
         continue
       x, y, rel, vx, vy, mnx, mxx, mny, mxy = (float(a) for a in v[:9])
@@ -1478,6 +1491,10 @@ class MapDriver:
       local = np.array([(x + cx * c - cy * s, y + cx * s + cy * c) for cx, cy in ((mnx, mny), (mxx, mny), (mxx, mxy), (mnx, mxy))])
       cars.append({"c": pos + np.outer(local[:, 0], right) + np.outer(local[:, 1], fwd), "vel": right * vx + fwd * vy, "t": t,
                    "driven": len(v) < 10 or bool(v[9])})
+    body = np.array([(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]) * PED_HALF
+    for x, y, vx, vy in (r[:4] for r in rows[1] if len(r) >= 4):
+      cars.append({"c": pos + right * float(x) + fwd * float(y) + body, "vel": right * float(vx) + fwd * float(vy), "t": t,
+                   "driven": True, "ped": True})
     self.cars = cars
 
   def _place(self, pts: np.ndarray, ahead: float) -> tuple[np.ndarray, np.ndarray]:
@@ -1513,7 +1530,8 @@ class MapDriver:
     return np.vstack([c, (c + np.roll(c, -1, axis=0)) / 2, c.mean(axis=0)[None]])
 
   def _lead(self, t: float) -> tuple[float, float, dict, float] | None:
-    """The nearest vehicle in our way along the path ahead (its body within LEAD_SIDE of ours, or across the path):
+    """The nearest vehicle or pedestrian in our way along the path ahead (its body within LEAD_SIDE of ours, PED_SIDE for
+    a pedestrian, or across the path):
     (m from our front bumper to it, its speed along the path, it, m right of the path its body comes nearest); None."""
     if not self.cars:
       return None
@@ -1525,7 +1543,7 @@ class MapDriver:
       ok = ~np.isnan(along)
       if not ok.any():
         continue
-      near = ok & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + LEAD_SIDE)
+      near = ok & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + (PED_SIDE if car.get("ped") else LEAD_SIDE))
       across = ok.sum() >= 2 and np.nanmin(right) < 0.0 < np.nanmax(right) and np.nanmax(along) - np.nanmin(along) < 12.0
       if not near.any() and not across:
         continue
@@ -1561,7 +1579,8 @@ class MapDriver:
 
   def _crossing(self, t: float, v: float) -> tuple[float, dict] | None:
     """A moving vehicle whose way (straight on at its speed, CROSS_T s) crosses ours near a junction or turn ahead
-    within CROSS_GAP s of when we'd be there: (m from our front bumper to where we'd stop for it, details); None."""
+    within CROSS_GAP s of when we'd be there, or a walking pedestrian's (PED_T s, within PED_SIDE of our body) anywhere
+    along the path: (m from our front bumper to where we'd stop for it, details); None."""
     if not self.cars:
       return None
     # s for the car to go on from here: speeding up from v at the style's accel, no faster than the profile
@@ -1576,19 +1595,21 @@ class MapDriver:
       return float(np.interp(d, ds, secs)) if len(ds) > 1 else math.inf
     best = None
     for car in self.cars:
+      ped = bool(car.get("ped"))
       speed = float(np.hypot(*car["vel"]))
-      if speed < CROSS_MOVING:
+      if speed < (PED_MOVING if ped else CROSS_MOVING):
         continue
-      times = np.arange(0.0, CROSS_T + 1e-6, 0.25)
+      times = np.arange(0.0, (PED_T if ped else CROSS_T) + 1e-6, 0.25)
       pts = self._outline(self._car_now(car, t))
       along, right = self._place(np.concatenate([pts + car["vel"] * dt for dt in times]), LEAD_AHEAD)
-      m = (~np.isnan(along) & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + LEAD_SIDE)).reshape(len(times), -1)
+      side = self.half_width + (PED_SIDE if ped else LEAD_SIDE)
+      m = (~np.isnan(along) & (np.abs(np.nan_to_num(right, nan=99.0)) < side)).reshape(len(times), -1)
       along = along.reshape(len(times), -1)
       hits = [(float(times[k]), float(np.min(along[k][m[k]])), float(np.max(along[k][m[k]]))) for k in range(len(times)) if m[k].any()]
       if not hits:
         continue
       first = min(h[1] for h in hits)
-      if first < self.s + self.front - LEAD_BESIDE or not self._near_crossing(first):
+      if first < self.s + self.front - LEAD_BESIDE or not (ped or self._near_crossing(first)):
         continue  # in our way already (a lead), or not where ways cross
       j = int(np.clip(np.searchsorted(self.s_path, first), 0, len(self.s_path) - 1))
       th = self.theta[j]
@@ -1602,11 +1623,11 @@ class MapDriver:
       if us_in > t_out + CROSS_GAP or us_out < t_in - CROSS_GAP:
         continue  # it's gone before we're there, or we're through before it comes
       d = first - self.s - self.front - CROSS_STOP
-      if d + CROSS_STOP - 0.5 < v * RANGE_LAG + v * v / (2 * DECEL_MAX):
-        continue  # too late to stop short of it: on through
+      if not ped and d + CROSS_STOP - 0.5 < v * RANGE_LAG + v * v / (2 * DECEL_MAX):
+        continue  # too late to stop short of it: on through (a pedestrian: as much braking as there's room for)
       if best is None or d < best[0]:
         best = (d, {"at": round(first, 1), "in": round(t_in, 1), "out": round(t_out, 1), "us": round(us_in, 1),
-                    "angle": round(angle), "speed": round(speed, 1)})
+                    "angle": round(angle), "speed": round(speed, 1), **({"ped": True} if ped else {})})
     return best
 
   def _near_crossing(self, s: float) -> bool:
@@ -1807,7 +1828,7 @@ class MapDriver:
         cap = math.sqrt(2 * b * 0.8 * max(d - 0.3, 0.0))
         stop_d = min(stop_d, d)
         if cap < vp:
-          vp, reason, phase, detail = cap, "cross", "yield", info
+          vp, reason, phase, detail = cap, "ped" if info.get("ped") else "cross", "yield", info
           if v > cap:  # as much as stops short of it, no harder where it was seen late
             need = -v * v / (2.0 * max(d - v * STOP_LAG, 0.15))
       lead = self._lead(t)
@@ -1817,9 +1838,16 @@ class MapDriver:
         a_lead = self._follow(gap, vl, v)
         if a_lead < min(need, (vp * vp - v * v) / (2.0 * look)):
           cap = math.sqrt(vl * vl + 2 * b * max(gap - LEAD_STOP - st["headway"] * vl, 0.0))  # what it holds us to, for the record
-          vp, reason, phase, need = min(cap, vp), "lead", "follow", a_lead
-          detail = {"gap": round(gap, 1), "speed": round(vl, 1), "right": round(side, 2), "driven": car["driven"]}
+          vp, reason, phase, need = min(cap, vp), "ped" if car.get("ped") else "lead", "follow", a_lead
+          detail = {"gap": round(gap, 1), "speed": round(vl, 1), "right": round(side, 2), "driven": car["driven"],
+                    **({"ped": True} if car.get("ped") else {})}
           holder = car
+      # a plugin whose nearby has no pedestrians still counts those just ahead (traffic.peds, PED_BOX): stop for them
+      peds = int((state.get("traffic") or {}).get("peds") or 0)
+      if not self.peds_reported and peds:
+        vp, reason, phase, detail = 0.0, "ped", "yield", {"peds": peds}
+        if v > STOPPED:
+          need = min(need, -DECEL_MAX)
     # held up: the wait starts again whenever the vehicle holding us moves (a queue at a light we can't see creeping on);
     # one that's parked won't, so it ends the trip sooner
     held = phase in ("follow", "yield") and v < STOPPED and not (phase == "follow" and float(np.hypot(*holder["vel"])) > LEAD_MOVING)
@@ -1827,7 +1855,8 @@ class MapDriver:
     parked = phase == "follow" and not holder["driven"]
     wait = PARKED_WAIT if parked else WAIT_MAX
     if self.held_since is not None and t - self.held_since > wait:
-      self._abort(f"held {wait:.0f} s by a {'parked ' if parked else ''}vehicle in the way", t, state.get("pos"))
+      who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle"
+      self._abort(f"held {wait:.0f} s by a {who} in the way", t, state.get("pos"))
       return self.a
     self._set(phase, t, **detail)
     self.v_prof, self.reason = min(vp_here, vp), reason

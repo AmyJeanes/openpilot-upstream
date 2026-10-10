@@ -1878,6 +1878,8 @@ std::string Traffic(double now) {
 // length ahead from freeway speed, and crossing or oncoming traffic, a few seconds' travel to either side ahead of the car);
 // up or down in the car's frame, so a whole grade's length ahead counts
 constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 120.0f, NEARBY_SIDE_AHEAD = 40.0f, NEARBY_LEVEL = 4.0f;
+// and pedestrians on foot, for the map driver: those in its way or walking into it, a stop's length ahead at city speeds
+constexpr float NEARBY_PED_SIDE = 25.0f, NEARBY_PED_BEHIND = 5.0f, NEARBY_PED_AHEAD = 60.0f;
 
 // every vehicle in the game's pool, into handles
 using VehicleHandles = std::array<int, 1024>;
@@ -1896,10 +1898,26 @@ int AllVehicles(VehicleHandles &handles) {
   return count;
 }
 
+// every ped in the game's pool, likewise
+int AllPeds(VehicleHandles &handles) {
+  using GetAll = int (*)(int *, int);
+  static GetAll getAll = [] {
+    HMODULE shv = GetModuleHandleW(L"ScriptHookV.dll");
+    return shv ? reinterpret_cast<GetAll>(GetProcAddress(shv, "?worldGetAllPeds@@YAHPEAHH@Z")) : nullptr;
+  }();
+  int size = static_cast<int>(handles.size());
+  if (getAll) return std::clamp(getAll(handles.data(), size), 0, size);
+  int slots[2 + 2 * 32] = {32};
+  int count = std::clamp(GET_PED_NEARBY_PEDS(PLAYER_PED_ID(), slots, -1), 0, 32);
+  for (int i = 0; i < count; i++) handles[i] = slots[2 + 2 * i];
+  return count;
+}
+
 // the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
-// "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin
-// (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward, in our frame), its model's
-// bounds (m, in its own frame) and whether anyone is in its driver's seat
+// "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...], "p":[[x, y, vx, vy],
+// ...]}: each vehicle's origin (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward,
+// in our frame), its model's bounds (m, in its own frame) and whether anyone is in its driver's seat; each pedestrian on
+// foot's place and velocity, within NEARBY_PED_*
 std::string Nearby(double now) {
   static std::string out;
   static double next = 0;
@@ -1947,8 +1965,27 @@ std::string Nearby(double now) {
     list += "[" + num(rel.x) + "," + num(rel.y) + "," + num(WrapDeg(GET_ENTITY_HEADING(v) - heading)) + "," + num(vx) + "," + num(vy) + "," +
             num(mn.x) + "," + num(mx.x) + "," + num(mn.y) + "," + num(mx.y) + "," + (driven ? "1" : "0") + "]";
   }
+  static VehicleHandles peds;
+  count = AllPeds(peds);
+  Ped player = PLAYER_PED_ID();
+  float pedFar2 = NEARBY_PED_AHEAD * NEARBY_PED_AHEAD + NEARBY_PED_SIDE * NEARBY_PED_SIDE;
+  std::string pedList;
+  for (int i = 0; i < count; i++) {
+    Ped ped = peds[i];
+    if (ped == player || !DOES_ENTITY_EXIST(ped) || IS_PED_DEAD_OR_DYING(ped, TRUE) || IS_PED_IN_ANY_VEHICLE(ped, FALSE)) continue;
+    Vector3 q = GET_ENTITY_COORDS(ped, TRUE);
+    float dx = q.x - p.x, dy = q.y - p.y;
+    if (dx * dx + dy * dy > pedFar2) continue;
+    Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
+    if (std::fabs(rel.x) > NEARBY_PED_SIDE || rel.y < -NEARBY_PED_BEHIND || rel.y > NEARBY_PED_AHEAD || std::fabs(rel.z) > NEARBY_LEVEL)
+      continue;
+    Vector3 vel = GET_ENTITY_VELOCITY(ped);
+    float vx = vel.x * std::cos(h) + vel.y * std::sin(h), vy = -vel.x * std::sin(h) + vel.y * std::cos(h);
+    if (!pedList.empty()) pedList += ",";
+    pedList += "[" + num(rel.x) + "," + num(rel.y) + "," + num(vx) + "," + num(vy) + "]";
+  }
   out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
-        num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "]}";
+        num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "],\"p\":[" + pedList + "]}";
   return out;
 }
 

@@ -12,6 +12,10 @@ car of mapdrive_sim.py: run as a script.
   a stop: stopped behind it
 - a vehicle crossing the junction ahead as we'd reach it: held for, then on; one that's through first, or comes long
   after, not
+- pedestrians (the plugin's nearby "p"): one walking across the road we turn into as we'd reach it is waited for (mdlead
+  traffic trip 1 hit one there at 5 m/s); without the list, braked for from the plugin's count of those just ahead, too
+  late to miss it in the turn, but slower;
+  one standing in our lane is stopped behind until it walks off; one on the pavement, walking along it, driven past
 - what the plugin reports reaches only so far: without vehicles in view, no faster than stops for one at its edge (but
   for range_share of the speed); none of it where the plugin reports nothing"""
 import math
@@ -171,6 +175,53 @@ def test_crossing():
   print("crossing: ok")
 
 
+def test_pedestrians():
+  # mdlead traffic trip 1: turning left at 5 m/s, a pedestrian crossing the road out (walking across it, 12 m past the
+  # node) was hit; the driver had no pedestrians. Here one walks north across the road out at x -12, reaching our lane as
+  # we would
+  r = ms.junction_turn("left", stop=None)
+  base = ms.drive(r, {"seed": 3}, lane=0, seconds=60)
+  k = int(np.argmax(base.col(1) < -12.0))
+  t_at, y_at = base.col(0)[k], base.col(2)[k]
+
+  def walker(meet: float = 0.0) -> ms.Vehicle:
+    return ms.pedestrian(-12.0, y_at - 1.4 * (t_at + meet), 0.0)
+  real = ms.PED_BOX
+  ms.PED_BOX = (0.0, 0.0, 0.0)
+  try:  # neither listed nor counted (the plugin before either): it's hit, as in the game
+    blind = ms.drive(r, {"seed": 3}, lane=0, peds=[walker()], ped_list=False, reach=REACH, seconds=60)
+  finally:
+    ms.PED_BOX = real
+  assert blind.car.collisions and blind.finished == "abort: collision", blind.finished
+  for meet in (-1.0, 0.0, 1.0):
+    trip = ms.drive(r, {"seed": 3}, lane=0, peds=[walker(meet)], reach=REACH, seconds=90)
+    assert trip.finished == "arrived" and trip.car.collisions == 0, (meet, trip.finished)
+    held = [e for e in phases(trip, "yield") + phases(trip, "follow") if e.get("ped")]
+    assert held and trip.col(13).min() > 0.8, (meet, held[:2], trip.col(13).min())
+  # a plugin without the list counts only those within 2.5 m of our heading, 1-12 m ahead (traffic.peds): in a turn the
+  # walker comes into that 2 m from us, too late to stop, but braking hard for it takes the edge off
+  late = ms.drive(r, {"seed": 3}, lane=0, peds=[walker()], ped_list=False, reach=REACH, seconds=90)
+
+  def impact(trip) -> float:
+    return float(trip.col(4)[np.argmax(trip.col(13) <= 0.0)]) if trip.car.collisions else 0.0
+  assert phases(late, "yield") and impact(late) < impact(blind) - 0.5, (impact(late), impact(blind))
+  # standing in our lane on a straight, walking off east to the pavement at 40 s: stopped behind, then on
+  r = ms.straight(600)
+  x, y, _ = ms.start_pose(r, 1, 150.0)
+  trip = ms.drive(r, {"seed": 2}, lane=1, peds=[ms.pedestrian(x, y, 270.0, 0.0, start=40.0, accel=2.0, until=1.4)], reach=REACH, seconds=120)
+  t, v = trip.col(0), trip.col(4)
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and not trip.md.aborts, trip.finished
+  assert (v[(t > 25.0) & (t < 40.0)] < 0.1).all() and phases(trip, "follow")[0].get("ped"), "held behind it"
+  # on the pavement beside our lane, walking along it either way: driven past at the speed without it
+  free = ms.drive(r, {"seed": 2}, lane=1, reach=REACH, seconds=120)
+  for heading in (0.0, 180.0):
+    walk = ms.pedestrian(x + 5.5 / 2 + 1.5, y, heading)
+    trip = ms.drive(r, {"seed": 2}, lane=1, peds=[walk], reach=REACH, seconds=120)
+    assert trip.finished == "arrived" and not phases(trip, "yield") and not phases(trip, "follow"), (heading, trip.events[:4])
+    assert abs(trip.col(0)[-1] - free.col(0)[-1]) < 0.5, (trip.col(0)[-1], free.col(0)[-1])
+  print("pedestrians: ok")
+
+
 def test_range():
   r = ms.straight(800)
   free = ms.drive(r, {"seed": 2}, lane=1, seconds=40).col(4).max()
@@ -194,5 +245,6 @@ if __name__ == "__main__":
   test_queue_that_moves()
   test_following()
   test_crossing()
+  test_pedestrians()
   test_range()
   print(f"all passed in {time.monotonic() - t0:.0f} s")
