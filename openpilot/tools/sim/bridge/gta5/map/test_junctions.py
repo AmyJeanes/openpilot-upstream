@@ -486,6 +486,24 @@ def test_carried_on_past_a_short_way():
   assert j.through == {1: {0.0}, 2: {0.0}} and j.carried == {1: {0.0}, 2: {0.0}, 4: {0.0}}
 
 
+def test_edge_lines_carried_past_a_side_road():
+  # a priority road with painted edge lines (edge_line:<side>, 5.5 m out) past a side road from the north: its edge
+  # line on the far side runs on across the junction, the one across the side road's mouth stops there
+  lined = {**PRIORITY, 'edge_line:left': 'white', 'edge_line:right': 'white'}
+  arms = {1: (lined, (-100.0, 0.0)), 2: (lined, (100.0, 0.0)), 3: (SIDE, (0.0, 100.0))}
+  j = only(Junctions(cross(arms, into={1})))
+  assert j.carried == {1: {0.0, 5.5}, 2: {0.0, 5.5}}, j.carried  # both drawn east: the south one, on their right
+  # a dirt road's mouth doesn't stop it (the game paints the edge line across), and a wide one is still minor
+  dirt = {'highway': 'unclassified', 'surface': 'unpaved', 'lanes': '2', 'width': '11'}
+  plain = {**TWO_WAY, 'edge_line:left': 'white', 'edge_line:right': 'white'}
+  j = only(Junctions(cross({1: (plain, (-100.0, 0.0)), 2: (plain, (100.0, 0.0)), 3: (dirt, (0.0, 100.0))}, into={1})))
+  assert j.minor and j.carried == {1: {0.0, -5.5, 5.5}, 2: {0.0, -5.5, 5.5}}, j.carried
+  # not where the two ways' edge lines don't meet across the node
+  offset = {**lined, 'edge_line:right:offset': '1'}
+  j = only(Junctions(cross({**arms, 2: (offset, (100.0, 0.0))}, into={1})))
+  assert j.carried == {1: {0.0}, 2: {0.0}}, j.carried
+
+
 def test_through_only_by_a_road_with_the_way():
   arms = {1: (PRIORITY, (-100.0, 0.0)), 2: (PRIORITY, (100.0, 0.0)), 3: (SIDE, (0.0, 100.0))}
   signals = cross(arms)
