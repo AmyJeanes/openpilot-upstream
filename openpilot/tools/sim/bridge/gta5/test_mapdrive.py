@@ -296,6 +296,150 @@ def test_corner_kerb():
   print("corner kerb: ok")
 
 
+def without_clamp():
+  """MapDriver._clamp left out, as before it (a context manager)."""
+  from contextlib import contextmanager
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+
+  @contextmanager
+  def off():
+    real = g.MapDriver._clamp
+    g.MapDriver._clamp = lambda self, route, keys, intent: (intent, np.full(len(intent), 0.45), np.full(len(intent), 0.45))
+    try:
+      yield
+    finally:
+      g.MapDriver._clamp = real
+  return off()
+
+
+def corner_depth(md) -> float:
+  """How deep (m) our body reaches into a turn's corner kerb along the plan, at most."""
+  return max([md._corner_hit(c, md.path[i], float(md.theta[i]), md.body) or 0.0 for c in md.corners
+              for i in range(len(md.path)) if abs(md.route_s[i] - c["along"]) < 40.0] + [0.0])
+
+
+def kinds(md, kind: str) -> list[dict]:
+  return [a for a in md.anomalies if a["kind"] == kind]
+
+
+def test_clamp_corners():
+  """The lane line's fillet cutting a turn's inside corner kerb: the plan pushed out of it, a plan_clamp anomaly, not a
+  kerb_contact. A far-side turn's inside is a kerb where it's a median: one-way legs (map1010b 012, a left turn past a
+  tram median's nose) or a median between the directions; a near-side turn's into a narrow street."""
+  one_way = ms.section(2, 0, 4.4)
+  cases = [("left 60, one-way legs", ms.junction_turn("left", stop=None, angle=60.0, sec=one_way), 0, 0.5),
+           ("left 60, a 4 m median", ms.junction_turn("left", stop=None, angle=60.0, sec=ms.section(2, 2, median=4.0)), 0, 0.05),
+           ("right 90 into 3.5 m lanes", ms.junction_turn("right", stop=None, out=ms.section(1, 1, 3.5)), 1, None)]
+  for name, r, lane, cut in cases:
+    cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+    with without_clamp():
+      before = ms.drive(r, cfg, lane=lane).md
+    trip = ms.drive(r, cfg, lane=lane)
+    md = trip.md
+    assert kinds(before, "kerb_contact") and (cut is None or corner_depth(before) > cut), (name, corner_depth(before))
+    assert trip.finished == "arrived" and not kinds(md, "kerb_contact") and corner_depth(md) == 0.0, (name, kinds(md, "kerb_contact"))
+    assert any(c["why"] == "corner" for c in md.clamps), (name, md.clamps)
+    assert trip.col(8).max() < 1.0, (name, trip.col(8).max())
+  print("clamp corners: ok")
+
+
+def lane_offsets(md, route) -> np.ndarray:
+  """The plan's intent: m right of its lane's centre at each point."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import along_route, lane_at, segment_of
+  along, right = along_route(route, md.intent, 0.0)
+  return np.array([r_ - route.section(segment_of(route, a)).offset(lane_at(md.keys, a)) for a, r_ in zip(along, right, strict=True)])
+
+
+def bumped(route, at: float, length: float, right: float):
+  """The route's lane line moved `right` m right over `length` m from `at` m along, eased in and out over 10 m (as a
+  fillet or an eased corner swings it off its lane)."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import headings
+  real = route.lanes.lane_line
+
+  def line(at0, keys, step=2.0):
+    out = real(at0, keys, step)
+    s = at0 + np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(out, axis=0).T))))
+    u = np.clip(np.minimum(s - at + 10.0, at + length + 10.0 - s) / 10.0, 0.0, 1.0)
+    th = headings(out)
+    return out + np.stack([np.sin(th), -np.cos(th)], axis=1) * (right * u * u * (3 - 2 * u))[:, None]
+  route.lanes.lane_line = line
+  return route
+
+
+def test_clamp_lane_and_fork():
+  """Outside lane changes and turns' corners the plan keeps our body in its lane, CLAMP_MARGIN in from its edges
+  (map1010b 029: a soft right's lane line 3-4 m right of its lane, onto the pavement); near a fork, within FORK_ROOM of
+  its centre on the gore's side (014: 2 m towards the gore past a ramp's split). Inside that, it's left alone."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import CLAMP_MARGIN, FORK_ROOM, HALF_WIDTH, LANE_W
+  from openpilot.tools.sim.bridge.gta5.map.router import Fork
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+  room = LANE_W / 2 - HALF_WIDTH - CLAMP_MARGIN
+  span = slice(290, 340)  # path m about the bump
+
+  def plan(right: float, fork: str | None = None):
+    r = bumped(ms.straight(600), 300.0, 30.0, right)
+    if fork:
+      r.forks.append(Fork(300.0, fork, 1, 2, True))
+    md = ms.drive(r, cfg, lane=1, seconds=0.2).md
+    return md, lane_offsets(md, r)
+  md, off = plan(2.0)
+  assert abs(off[span]).max() < room + 0.05 and [c for c in md.clamps if c["why"] == "lane"], (abs(off[span]).max(), md.clamps)
+  assert kinds(md, "plan_clamp")
+  md, off = plan(1.0)
+  assert 0.95 < off[span].max() < 1.05 and not md.clamps, (off[span].max(), md.clamps)
+  # the branch taken the right one: the gore on our left
+  md, off = plan(-1.0, "right")
+  assert -FORK_ROOM - 0.05 < off[span].min() and [c for c in md.clamps if c["why"] == "fork"], (off[span].min(), md.clamps)
+  md, off = plan(-1.0, "left")
+  assert -1.05 < off[span].min() < -0.95 and not md.clamps, (off[span].min(), md.clamps)
+  print("clamp lane and fork: ok")
+
+
+COLLISIONS = [  # map1010b's trips that hit the kerb or the gore: spec, map driver seed, where it first touched
+  ("012", "883.2,-2077.8,29.5,96,0>-250.5,-1067.2", 165189838, (187.0, -1776.9)),
+  ("014", "670.0,-2893.8,5.2,0,9>1358.8,-1110.4", 375068520, (561.3, -2547.6)),
+  ("029", "-236.0,-597.2,33.2,20,9>-743.5,-168.0", 1600219813, (-550.5, -53.9)),
+]
+
+
+def test_collision_routes():
+  """map1010b's 012 (1.0 m inside a left turn, onto a tram median's nose), 014 (1.9 m towards a ramp's gore) and 029
+  (4.1 m inside a soft right, onto the pavement): replanned on the live map, the plan within 0.6 m of its lane's centre
+  where the car touched."""
+  if ms.live_map() is None:
+    print("collision routes: skipped (no live map)")
+    return
+  done = []
+  for name, spec, seed, contact in COLLISIONS:
+    got = ms.trip_route(spec)
+    if got is None:
+      continue
+    route, pose = got
+    md = ms.drive(route, {"seed": seed}, pose=pose, seconds=0.2).md
+    j = int(np.argmin(np.hypot(*(md.intent - np.array(contact)).T)))
+    off = lane_offsets(md, route)[j]
+    assert abs(off) < 0.6 and md.clamps, (name, off)
+    done.append(f"{name} {off:+.2f}")
+  print(f"collision routes: ok ({', '.join(done)} m)" if done else "collision routes: skipped (no router)")
+
+
+def test_body_from_dims():
+  """Our car's front, rear and half width from the plugin's nearby.dims (a van here), else the constants: the stop
+  sign's mark is the van's front bumper margin short of the line."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import FRONT, HALF_WIDTH
+  md = MapDriver()
+  assert md.body == (FRONT, FRONT, HALF_WIDTH)
+  md._body({"nearby": {"dims": [-1.25, 1.2, -2.9, 3.1], "v": []}})
+  assert md.body == (3.1, 2.9, 1.25)
+  md._body({"nearby": {"dims": [0.0, 0.0, 0.0, 0.0]}})  # a model without bounds: kept
+  assert md.body == (3.1, 2.9, 1.25)
+  r = ms.junction_turn("right")
+  trip = ms.drive(r, {"seed": 3}, lane=1, seconds=1.0, dims=(-1.25, 1.2, -2.9, 3.1))
+  st = trip.md.stops[0]
+  assert abs(st["s"] - st["target"] - 3.1 - trip.md.style["stop_margin"]) < 1e-6
+  print("body from dims: ok")
+
+
 def test_arrival():
   r = ms.straight(400)
   trip = ms.drive(r, {"seed": 5, "stop_before": 15.0}, lane=1)
@@ -477,6 +621,10 @@ if __name__ == "__main__":
   test_turns_from_the_rear_axle()
   test_bias_fades_in_turns_and_soften_holds_outside()
   test_corner_kerb()
+  test_body_from_dims()
+  test_clamp_corners()
+  test_clamp_lane_and_fork()
+  test_collision_routes()
   test_lane_change_kept_off_a_jog()
   test_arrival()
   test_aborts()

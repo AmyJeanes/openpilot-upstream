@@ -19,6 +19,61 @@ LAT_KI = 1.0  # 1/s, the plugin's lat_ki
 LIVE_MAP = os.path.expanduser(os.getenv("GTA5_MAP", "~/gta5map_lanes"))
 RECORDINGS = os.getenv("GTA5_RECORDINGS", "/mnt/e/gta5rec/data")
 START, DEST, RIGHT, LEFT = 1, 4, 10, 15  # Valhalla maneuver types
+CAR_DIMS = (-1.0, 1.0, -2.4, 2.4)  # m: a car's model bounds, as the plugin reports them (min x, max x, min y, max y)
+NEARBY = {"side": 15.0, "behind": 45.0, "ahead": 15.0}  # m around the car the plugin reports vehicles within (core.cpp)
+
+
+@dataclass
+class Vehicle:
+  """Another vehicle: its middle (x, y), game heading (deg counterclockwise from north) and speed along it (m/s),
+  which from `start` s changes at `accel` (m/s^2) until it reaches `until` m/s; its model's bounds and whether anyone
+  drives it."""
+  x: float
+  y: float
+  heading: float
+  speed: float = 0.0
+  accel: float = 0.0
+  until: float = 0.0
+  start: float = 0.0
+  dims: tuple = CAR_DIMS
+  driven: bool = True
+
+  def advance(self, t: float, secs: float):
+    if t >= self.start and self.accel:
+      self.speed = max(self.speed + self.accel * secs, self.until) if self.accel < 0 else min(self.speed + self.accel * secs, self.until)
+    h = math.radians(self.heading)
+    self.x += -math.sin(h) * self.speed * secs
+    self.y += math.cos(h) * self.speed * secs
+
+  def corners(self) -> np.ndarray:
+    h = math.radians(self.heading)
+    right, fwd = np.array([math.cos(h), math.sin(h)]), np.array([-math.sin(h), math.cos(h)])
+    mnx, mxx, mny, mxy = self.dims
+    return np.array([self.x, self.y]) + np.array([right * cx + fwd * cy for cx, cy in ((mnx, mny), (mxx, mny), (mxx, mxy), (mnx, mxy))])
+
+
+def overlap(a: np.ndarray, b: np.ndarray) -> bool:
+  """Whether two convex outlines (corners in order) overlap: no side of either separates them."""
+  for poly in (a, b):
+    for k in range(len(poly)):
+      e = poly[(k + 1) % len(poly)] - poly[k]
+      n = np.array([-e[1], e[0]])
+      pa, pb = a @ n, b @ n
+      if pa.max() < pb.min() or pb.max() < pa.min():
+        return False
+  return True
+
+
+def clearance(a: np.ndarray, b: np.ndarray) -> float:
+  """m between two convex outlines, 0 where they overlap."""
+  if overlap(a, b):
+    return 0.0
+
+  def to_sides(pts, poly):
+    q, e = poly, np.roll(poly, -1, axis=0) - poly
+    t = np.clip(np.einsum("nij,ij->ni", pts[:, None] - q[None], e) / np.einsum("ij,ij->i", e, e), 0.0, 1.0)
+    return float(np.hypot(*(pts[:, None] - (q[None] + e[None] * t[..., None])).transpose(2, 0, 1)).min())
+  return min(to_sides(a, b), to_sides(b, a))
 
 
 class LagCar:
@@ -26,11 +81,23 @@ class LagCar:
   acting `delay` s after they're sent; a stop is held (the plugin's handbrake). Game heading: deg counterclockwise
   from north. Imperfections for robustness checks: `gain` scales the curvature the car takes (the plugin's adaptive
   steering gain off), `noise` the pose's (m and deg, normal) and the yaw rate's (rad/s) noise, seeded. Its position
-  (x, y) is its middle, `wheel_base` / 2 ahead of the rear axle, which moves along its heading, as the game reports it."""
+  (x, y) is its middle, `wheel_base` / 2 ahead of the rear axle, which moves along its heading, as the game reports it.
+  `dims` (its model's bounds: min x, max x, min y, max y) reach the state as the plugin's nearby.dims; `vehicles` around
+  it as nearby.v, read every 0.1 s within `reach` (NEARBY's; with an "ahead" key it's in nearby, as a plugin that reports
+  its reach), each one touched a collision."""
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
-               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8):
+               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8,
+               dims: tuple[float, float, float, float] | None = None, vehicles: list[Vehicle] | None = None,
+               reach: dict | None = None):
     self.x, self.y, self.h, self.v = x, y, heading, v
     self.wheel_base = wheel_base
+    self.dims = dims
+    self.vehicles = vehicles
+    self.reach = {**NEARBY, **(reach or {})}
+    self.report_reach = reach is not None and "ahead" in reach
+    self.nearby: dict | None = None
+    self.nearby_t = -math.inf
+    self.touching: set[int] = set()
     self.k = self.a = self.lat_i = 0.0
     self.tau_k, self.tau_a, self.delay = tau_k, tau_a, delay
     self.gain, self.noise = gain, noise
@@ -44,10 +111,37 @@ class LagCar:
 
   def state(self) -> dict:
     n = self.rng.normal(0.0, self.noise, 4) if self.noise else np.zeros(4)
-    return {"pos": [self.x + n[0], self.y + n[1], 0.0], "vEgo": self.v, "heading": self.h + 5 * n[2],
-            "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
-            "t": int(self.t), "wheelBase": self.wheel_base, "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
-            "ai": {"on": False}}
+    out = {"pos": [self.x + n[0], self.y + n[1], 0.0], "vEgo": self.v, "heading": self.h + 5 * n[2],
+           "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
+           "t": int(self.t), "wheelBase": self.wheel_base, "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
+           "ai": {"on": False}}
+    if self.dims is not None or self.vehicles is not None:
+      if self.t >= self.nearby_t + 0.1 - 1e-9:
+        self.nearby, self.nearby_t = self._nearby(), self.t
+      out["nearby"] = self.nearby
+    return out
+
+  def _nearby(self) -> dict:
+    """The plugin's nearby: each vehicle's middle (m right and forward of ours), heading (deg left of ours), velocity (m/s
+    right and forward), its bounds and whether it's driven, rounded to 0.1 as the plugin sends them."""
+    h = math.radians(self.h)
+    right, fwd = np.array([math.cos(h), math.sin(h)]), np.array([-math.sin(h), math.cos(h)])
+    rows = []
+    for o in self.vehicles or []:
+      d = np.array([o.x - self.x, o.y - self.y])
+      x, y = float(d @ right), float(d @ fwd)
+      if abs(x) > self.reach["side"] or y < -self.reach["behind"] or y > self.reach["ahead"]:
+        continue
+      oh = math.radians(o.heading)
+      vel = np.array([-math.sin(oh), math.cos(oh)]) * o.speed
+      rows.append([round(v, 1) for v in (x, y, (o.heading - self.h + 180) % 360 - 180, vel @ right, vel @ fwd, *o.dims)] + [int(o.driven)])
+    out = {"dims": list(self.dims or CAR_DIMS), "v": rows}
+    if self.report_reach:
+      out["ahead"] = self.reach["ahead"]
+    return out
+
+  def body(self) -> np.ndarray:
+    return Vehicle(self.x, self.y, self.h, dims=self.dims or CAR_DIMS).corners()
 
   def control(self, msg: dict | None):
     if msg is not None and msg.get("type") == "control" and msg.get("active"):
@@ -81,7 +175,14 @@ class LagCar:
       rx += -math.sin(hr) * self.v * SUB
       ry += math.cos(hr) * self.v * SUB
       self.x, self.y = rx - math.sin(hr) * b, ry + math.cos(hr) * b
+      for o in self.vehicles or []:
+        o.advance(self.t, SUB)
       self.t += SUB
+    if self.vehicles:
+      ours = self.body()
+      now = {k for k, o in enumerate(self.vehicles) if overlap(ours, o.corners())}
+      self.collisions += len(now - self.touching)
+      self.touching = now
 
 
 # *** made routes ***
@@ -154,12 +255,15 @@ def curve(radius: float, angle: float, ours: int = 2, back: int = 2, **kw) -> Ro
 
 
 def junction_turn(side: str = "left", lead: float = 200.0, tail: float = 150.0, ours: int = 2, back: int = 2,
-                  stop: str | None = "stop", stop_back: float = 12.0) -> Route:
-  """North `lead` m to a junction node, then a square turn and `tail` m on; a stop line `stop_back` m before it."""
-  pts = line((lead, 0.0), (tail, 90.0 if side == "left" else -90.0))
+                  stop: str | None = "stop", stop_back: float = 12.0, angle: float = 90.0, sec: Section | None = None,
+                  out: Section | None = None) -> Route:
+  """North `lead` m to a junction node, then a turn of `angle` deg (square by default) and `tail` m on; a stop line
+  `stop_back` m before it. The roads' cross-sections: `sec` in (ours and back lanes by default) and `out` out (as in)."""
+  pts = line((lead, 0.0), (tail, angle if side == "left" else -angle))
   corner = int(round(lead / 10.0))
-  return made_route(pts, section(ours, back), junctions=[corner], turns={corner: LEFT if side == "left" else RIGHT},
-                    stops=[(lead - stop_back, stop)] if stop else [])
+  sec = sec or section(ours, back)
+  return made_route(pts, [sec] * corner + [out or sec] * (len(pts) - 1 - corner), junctions=[corner],
+                    turns={corner: LEFT if side == "left" else RIGHT}, stops=[(lead - stop_back, stop)] if stop else [])
 
 
 def start_pose(route: Route, lane: float, along: float = 0.0) -> tuple[float, float, float]:
@@ -258,7 +362,7 @@ def trip_route(spec: str, router_url: str = "http://127.0.0.1:8002") -> tuple[Ro
 class Trip:
   md: MapDriver
   car: LagCar
-  rows: list = field(default_factory=list)  # per frame: t, x, y, heading, v, yaw rate, kappa cmd, accel cmd, dev, s, phase
+  rows: list = field(default_factory=list)  # per frame, as COLS
   events: list = field(default_factory=list)
   msgs: int = 0
   step_ms: list = field(default_factory=list)
@@ -272,19 +376,19 @@ class Trip:
     return self.md.finished
 
 
-COLS = ("t", "x", "y", "heading", "v", "yaw", "kappa", "accel", "dev", "s", "lane_off", "indicator")
+COLS = ("t", "x", "y", "heading", "v", "yaw", "kappa", "accel", "dev", "s", "lane_off", "indicator", "lead_gap", "clear")
 
 
 def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None = None, v0: float = 0.0, seconds: float = 120.0,
           tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None,
-          gain: float = 1.0, noise: float = 0.0) -> Trip:
+          gain: float = 1.0, noise: float = 0.0, dims=None, vehicles: list[Vehicle] | None = None, reach: dict | None = None) -> Trip:
   """Drives a route with the map driver on the lagged car. faults: {"collision": t, "push": (t, m right),
   "steer": t, "block": t, "surge": (path m, m/s more over 0.4 s)}. lane_map(route, state) gives the state's laneMap (None: none)."""
   import time
   if pose is None:
     route.at, route.seg = 0.0, 0  # a route driven before starts again at its start
     pose = start_pose(route, lane if lane is not None else 0.0, 0.0)
-  car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise)
+  car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise, dims=dims, vehicles=vehicles, reach=reach)
   route.at, route.seg = 0.0, 0
   route.locate(np.array(pose[:2], float), None, pose[2], search=route.length)
   md = MapDriver({"seed": 1, **(cfg or {})})
@@ -320,7 +424,8 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
     trip.msgs += msg is not None
     sec = route.section(route.seg)
     trip.rows.append((car.t, car.x, car.y, car.h, car.v, car.k * car.v, md.kappa, md.a, md.dev, md.s, route.right,
-                      {"left": -1, "right": 1}.get(md.indicator, 0)))
+                      {"left": -1, "right": 1}.get(md.indicator, 0), md.lead_gap,
+                      min((clearance(car.body(), o.corners()) for o in vehicles), default=math.inf) if vehicles else math.inf))
     if until_done and md.finished is not None and (md.finished != "arrived" or car.v < 0.05):
       break
     car.advance(FRAME)

@@ -5,6 +5,7 @@
 #include <Xinput.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -1873,33 +1874,39 @@ std::string Traffic(double now) {
 }
 
 // m around the car (right, behind, ahead, up or down) that "nearby" reports vehicles within, for the bridge's blind-spot
-// monitor (gta5_blindspot.py)
-constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 15.0f, NEARBY_LEVEL = 4.0f;
+// monitor (gta5_blindspot.py) and the map driver (gta5_mapdrive.py: vehicles in its way, which it must see a stop's
+// length ahead from freeway speed, and crossing or oncoming traffic, a few seconds' travel to either side ahead of the car);
+// up or down in the car's frame, so a whole grade's length ahead counts
+constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 120.0f, NEARBY_SIDE_AHEAD = 40.0f, NEARBY_LEVEL = 4.0f;
 
-// the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "v":[[x, y, heading,
-// vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin (m right and forward of ours), heading (deg left
-// of ours), velocity (m/s right and forward, in our frame), its model's bounds (m, in its own frame) and whether anyone
-// is in its driver's seat
-std::string Nearby(double now) {
-  static std::string out;
-  static double next = 0;
-  if (now < next || !g_veh.handle) return out;
-  next = now + 0.1;
+// every vehicle in the game's pool, into handles
+using VehicleHandles = std::array<int, 1024>;
+int AllVehicles(VehicleHandles &handles) {
   // ScriptHookV's pool walk sees every vehicle; the player's nearby vehicles are only those its ped has noticed
   using GetAll = int (*)(int *, int);
   static GetAll getAll = [] {
     HMODULE shv = GetModuleHandleW(L"ScriptHookV.dll");
     return shv ? reinterpret_cast<GetAll>(GetProcAddress(shv, "?worldGetAllVehicles@@YAHPEAHH@Z")) : nullptr;
   }();
-  static int handles[1024];
-  int count = 0;
-  if (getAll) {
-    count = std::min(getAll(handles, static_cast<int>(std::size(handles))), static_cast<int>(std::size(handles)));
-  } else {
-    int slots[2 + 2 * 32] = {32};
-    count = std::min(GET_PED_NEARBY_VEHICLES(PLAYER_PED_ID(), slots), 32);
-    for (int i = 0; i < count; i++) handles[i] = slots[2 + 2 * i];
-  }
+  int size = static_cast<int>(handles.size());
+  if (getAll) return std::clamp(getAll(handles.data(), size), 0, size);
+  int slots[2 + 2 * 32] = {32};
+  int count = std::clamp(GET_PED_NEARBY_VEHICLES(PLAYER_PED_ID(), slots), 0, 32);
+  for (int i = 0; i < count; i++) handles[i] = slots[2 + 2 * i];
+  return count;
+}
+
+// the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
+// "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin
+// (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward, in our frame), its model's
+// bounds (m, in its own frame) and whether anyone is in its driver's seat
+std::string Nearby(double now) {
+  static std::string out;
+  static double next = 0;
+  if (now < next || !g_veh.handle) return out;
+  next = now + 0.1;
+  static VehicleHandles handles;
+  int count = AllVehicles(handles);
   static std::unordered_map<Hash, std::pair<Vector3, Vector3>> bounds;
   auto boundsOf = [](Hash model) {
     auto it = bounds.find(model);
@@ -1917,7 +1924,7 @@ std::string Nearby(double now) {
   };
   Vector3 p = GET_ENTITY_COORDS(g_veh.handle, TRUE);
   float heading = GET_ENTITY_HEADING(g_veh.handle), h = heading * DEG;
-  float far2 = NEARBY_BEHIND * NEARBY_BEHIND + NEARBY_SIDE * NEARBY_SIDE;
+  float far2 = std::max(NEARBY_BEHIND * NEARBY_BEHIND + NEARBY_SIDE * NEARBY_SIDE, NEARBY_AHEAD * NEARBY_AHEAD + NEARBY_SIDE_AHEAD * NEARBY_SIDE_AHEAD);
   auto [ownMin, ownMax] = boundsOf(g_veh.model);
   std::string list;
   for (int i = 0; i < count; i++) {
@@ -1925,9 +1932,11 @@ std::string Nearby(double now) {
     if (v == g_veh.handle || !DOES_ENTITY_EXIST(v)) continue;
     Vector3 q = GET_ENTITY_COORDS(v, TRUE);
     float dx = q.x - p.x, dy = q.y - p.y;
-    if (dx * dx + dy * dy > far2 || std::fabs(q.z - p.z) > NEARBY_LEVEL) continue;
+    if (dx * dx + dy * dy > far2) continue;
     Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
-    if (std::fabs(rel.x) > NEARBY_SIDE || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD) continue;
+    if (std::fabs(rel.x) > (rel.y > 0 ? NEARBY_SIDE_AHEAD : NEARBY_SIDE) || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD ||
+        std::fabs(rel.z) > NEARBY_LEVEL)
+      continue;
     // headings are counterclockwise from north: right is (cos h, sin h), forward (-sin h, cos h)
     Vector3 vel = GET_ENTITY_VELOCITY(v);
     float vx = vel.x * std::cos(h) + vel.y * std::sin(h), vy = -vel.x * std::sin(h) + vel.y * std::cos(h);
@@ -1938,7 +1947,8 @@ std::string Nearby(double now) {
     list += "[" + num(rel.x) + "," + num(rel.y) + "," + num(WrapDeg(GET_ENTITY_HEADING(v) - heading)) + "," + num(vx) + "," + num(vy) + "," +
             num(mn.x) + "," + num(mx.x) + "," + num(mn.y) + "," + num(mx.y) + "," + (driven ? "1" : "0") + "]";
   }
-  out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"v\":[" + list + "]}";
+  out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
+        num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "]}";
   return out;
 }
 
@@ -2230,6 +2240,79 @@ void ClearModel(Hash model, float radius) {
     SET_ENTITY_AS_MISSION_ENTITY(v, TRUE, TRUE);
     DELETE_VEHICLE(&v);
   }
+}
+
+// scenario points that put drivers and working trucks on the road (the parked, empty and broken-down ones stay on)
+const char *const DRIVEN_SCENARIOS[] = {
+    "WORLD_VEHICLE_AMBULANCE", "WORLD_VEHICLE_BICYCLE_BMX", "WORLD_VEHICLE_BICYCLE_BMX_BALLAS", "WORLD_VEHICLE_BICYCLE_BMX_FAMILY",
+    "WORLD_VEHICLE_BICYCLE_BMX_HARMONY", "WORLD_VEHICLE_BICYCLE_BMX_VAGOS", "WORLD_VEHICLE_BICYCLE_MOUNTAIN", "WORLD_VEHICLE_BICYCLE_ROAD",
+    "WORLD_VEHICLE_BIKE_OFF_ROAD_RACE", "WORLD_VEHICLE_BIKER", "WORLD_VEHICLE_BOAT_IDLE", "WORLD_VEHICLE_BOAT_IDLE_ALAMO",
+    "WORLD_VEHICLE_BOAT_IDLE_MARQUIS", "WORLD_VEHICLE_BUSINESSMEN", "WORLD_VEHICLE_HELI_LIFEGUARD", "WORLD_VEHICLE_CONSTRUCTION_SOLO",
+    "WORLD_VEHICLE_CONSTRUCTION_PASSENGERS", "WORLD_VEHICLE_DRIVE_PASSENGERS", "WORLD_VEHICLE_DRIVE_PASSENGERS_LIMITED",
+    "WORLD_VEHICLE_DRIVE_SOLO", "WORLD_VEHICLE_FARM_WORKER", "WORLD_VEHICLE_FIRE_TRUCK", "WORLD_VEHICLE_MILITARY_PLANES_BIG",
+    "WORLD_VEHICLE_MILITARY_PLANES_SMALL", "WORLD_VEHICLE_PASSENGER_EXIT", "WORLD_VEHICLE_POLICE_BIKE", "WORLD_VEHICLE_POLICE_CAR",
+    "WORLD_VEHICLE_POLICE_NEXT_TO_CAR", "WORLD_VEHICLE_QUARRY", "WORLD_VEHICLE_SALTON", "WORLD_VEHICLE_SALTON_DIRT_BIKE",
+    "WORLD_VEHICLE_SECURITY_CAR", "WORLD_VEHICLE_STREETRACE", "WORLD_VEHICLE_TOURBUS", "WORLD_VEHICLE_TOURIST", "WORLD_VEHICLE_TANDL",
+    "WORLD_VEHICLE_TRACTOR", "WORLD_VEHICLE_TRACTOR_BEACH", "WORLD_VEHICLE_TRUCK_LOGS", "WORLD_VEHICLE_TRUCKS_TRAILERS"};
+
+// the game's sources of traffic that the density multipliers leave going, held until set again; off also stops new
+// parked cars from the generators
+void TrafficSources(bool on) {
+  SET_ALL_VEHICLE_GENERATORS_ACTIVE_IN_AREA(-10000.0f, -10000.0f, -1000.0f, 10000.0f, 10000.0f, 2000.0f, on, TRUE);
+  if (on) SET_ALL_VEHICLE_GENERATORS_ACTIVE();
+  SET_ALL_LOW_PRIORITY_VEHICLE_GENERATORS_ACTIVE(on);
+  if (on) RESET_SCENARIO_TYPES_ENABLED();
+  else
+    for (const char *s : DRIVEN_SCENARIOS) SET_SCENARIO_TYPE_ENABLED(s, FALSE);
+  SET_GARBAGE_TRUCKS(on);
+  SET_RANDOM_BOATS(on);
+  SET_CREATE_RANDOM_COPS(on);
+  SET_CREATE_RANDOM_COPS_NOT_ON_SCENARIOS(on);
+  SET_CREATE_RANDOM_COPS_ON_SCENARIOS(on);
+  SET_VEHICLE_POPULATION_BUDGET(on ? 3 : 0);
+}
+
+// m: with traffic off, vehicles still turning up are deleted within CULL_RADIUS, but one on screen only past CULL_NEAR,
+// so none vanishes right in front of the camera
+constexpr float CULL_RADIUS = 500.0f, CULL_NEAR = 30.0f;
+constexpr double CULL_EVERY = 2.0;  // s
+
+// deletes the game's own moving or driven vehicles (and who's in them) around the car, anywhere or as CULL_NEAR allows;
+// parked cars, the player's, script-made ones (our test lead) and trains stay. Returns how many went.
+int CullTraffic(bool anywhere) {
+  if (!g_veh.handle) return 0;
+  static VehicleHandles handles;
+  int count = AllVehicles(handles), culled = 0;
+  Vector3 p = GET_ENTITY_COORDS(g_veh.handle, TRUE);
+  for (int i = 0; i < count; i++) {
+    Vehicle v = handles[i];
+    if (v == g_veh.handle || v == g_lead.veh || !DOES_ENTITY_EXIST(v)) continue;
+    int population = GET_ENTITY_POPULATION_TYPE(v);
+    if (population < 1 || population > 5 || IS_THIS_MODEL_A_TRAIN(GET_ENTITY_MODEL(v))) continue;
+    Vector3 q = GET_ENTITY_COORDS(v, TRUE);
+    float d2 = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y);
+    if (d2 > CULL_RADIUS * CULL_RADIUS) continue;
+    Ped occupants[16];
+    int n = 0;
+    bool driven = false, player = false;
+    for (int seat = -1; seat < GET_VEHICLE_MAX_NUMBER_OF_PASSENGERS(v) && n < static_cast<int>(std::size(occupants)); seat++) {
+      Ped o = GET_PED_IN_VEHICLE_SEAT(v, seat, FALSE);
+      if (!o || !DOES_ENTITY_EXIST(o)) continue;
+      player |= IS_PED_A_PLAYER(o) != 0;
+      driven |= seat == -1 && !IS_PED_DEAD_OR_DYING(o, TRUE);
+      occupants[n++] = o;
+    }
+    if (player || (!driven && GET_ENTITY_SPEED(v) < 1.0f)) continue;
+    if (!anywhere && d2 < CULL_NEAR * CULL_NEAR && IS_ENTITY_ON_SCREEN(v)) continue;
+    for (int k = 0; k < n; k++) {
+      SET_ENTITY_AS_MISSION_ENTITY(occupants[k], TRUE, TRUE);
+      DELETE_PED(&occupants[k]);
+    }
+    SET_ENTITY_AS_MISSION_ENTITY(v, TRUE, TRUE);
+    DELETE_VEHICLE(&v);
+    culled++;
+  }
+  return culled;
 }
 
 void StepLead(double now) {
@@ -2724,8 +2807,16 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "traffic") {
     // on=0 clears and stops traffic; density multipliers, held each frame until changed: vehicles (random= follows it
     // unless given), parked, peds (scenario= follows it unless given); reset=1 lets the game choose again
+    bool wasOff = g_noTraffic;
     g_noTraffic = !MsgBool(m, "on", true);
-    if (g_noTraffic) ClearModel(0, 300.0f);  // any model
+    int culled = 0;
+    if (g_noTraffic) {
+      TrafficSources(false);
+      ClearModel(0, 300.0f);  // any model
+      culled = CullTraffic(true);
+    } else if (wasOff) {
+      TrafficSources(true);
+    }
     Density &d = g_density;
     auto mult = [&](const char *key, float fallback) { return std::clamp(static_cast<float>(MsgNum(m, key, fallback)), 0.0f, 3.0f); };
     if (MsgBool(m, "reset")) d = Density{};
@@ -2738,7 +2829,8 @@ void HandleMessage(const Message &m, double now) {
       d.scenario = mult("scenario", m.count("peds") ? d.peds : d.scenario);
     }
     Log(std::string("traffic ") + (g_noTraffic ? "off" : "on") + (d.set ? ", vehicles " + Num(d.vehicles) + ", random " + Num(d.random) +
-        ", parked " + Num(d.parked) + ", peds " + Num(d.peds) + ", scenario " + Num(d.scenario) : ""));
+        ", parked " + Num(d.parked) + ", peds " + Num(d.peds) + ", scenario " + Num(d.scenario) : "") +
+        (g_noTraffic ? ", " + std::to_string(culled) + " moving cleared" : ""));
   } else if (type == "shadows") {
     // cascade shadow settings and a timecycle modifier (bounds=, sample=, aircraft=, depth=, depth_value=, tracker=,
     // timecycle=, strength=); reset=1 puts the game's back
@@ -2890,6 +2982,12 @@ extern "C" __declspec(dllexport) void CoreTick() {
     SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(d.peds);
     SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(d.scenario, d.scenario);
   }
+  static double nextCull = 0;
+  if (g_noTraffic && now >= nextCull) {
+    nextCull = now + CULL_EVERY;
+    TrafficSources(false);  // again, in case a script turned them back on
+    if (int culled = CullTraffic(false)) Log("traffic off: " + std::to_string(culled) + " moving cleared");
+  }
   Vehicle v = IS_PED_IN_ANY_VEHICLE(ped, FALSE) ? GET_VEHICLE_PED_IS_IN(ped, FALSE) : 0;
   if (v != g_veh.handle) OnVehicleChanged(v);
   if (v && g_veh.dashcamAt > 0 && now >= g_veh.dashcamAt) {
@@ -2995,6 +3093,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   ReleaseTopCam();
   ReleaseCamera();
   RemoveLead();
+  if (g_noTraffic) TrafficSources(true);  // a reloaded core starts with traffic on
   script_hook::Uninstall();
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();

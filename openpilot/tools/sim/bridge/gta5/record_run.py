@@ -701,6 +701,12 @@ class Run:
         if pos and math.hypot(pos[0] - sx, pos[1] - sy) < PLACED_NEAR:
           placed, anchor, last_pos = True, pos[:2], pos[:2]
           progress_t = now
+          if a.traffic == "off" and not c.get("traffic"):
+            try:  # again at the start: its one-off clear went round the last trip's end, before the route's teleport
+              e2e.cmd("traffic", on=0)
+            except OSError as e:
+              outcome = ("infra", f"the bridge's debug port: {e}")
+              break
         elif now - t0 > PLACE_WAIT:
           outcome = ("teleport", f"at {[round(v) for v in pos[:2]] if pos else None}, not the start")
           break
