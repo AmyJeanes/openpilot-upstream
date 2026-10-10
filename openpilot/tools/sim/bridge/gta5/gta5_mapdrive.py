@@ -30,8 +30,11 @@ crosses ours within CROSS_GAP s of when we'd be there; and it's no faster than s
 plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Pedestrians
 (nearby's "p") likewise: one within PED_SIDE of our body along the path is stopped behind, and one walking across it
 (anywhere, PED_T s on) waited for, braking however late; where the plugin lists none, one it counts just ahead
-(traffic.peds) is braked to a stop for. A parked vehicle (no one at its wheel, standing) whose body comes within
-nudge_clear (0.5) m of ours along the path is passed within our own lane (_nudge): the path shifted away from it to
+(traffic.peds) is braked to a stop for. Near a junction or turn one within PED_KERB of our body beside the path (waiting
+at the kerb, maybe for a light of theirs we can't see), or one anywhere heading for it, caps the speed at what could
+still stop short of where they'd step in (ped_kerb). Whether a stop can still be made is judged by what the game
+delivers (DECEL_REAL), not what's commanded (DECEL_MAX). A parked vehicle (no one at its wheel, standing) whose body
+comes within nudge_clear (0.5) m of ours along the path is passed within our own lane (_nudge): the path shifted away from it to
 nudge_want (0.8) m where the lane has room, at least nudge_clear, held from NUDGE_MARGIN before its body to after it and
 eased in and out (minimum jerk) over NUDGE_EASE_T s at the speed it's passed at, slower the tighter the pass; our body
 kept CLAMP_MARGIN in from the lane's edges (the plan clamp's lane room: never into the next lane or across the centre
@@ -64,7 +67,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
-           "ped", "nudge")
+           "ped", "nudge", "ped_kerb")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -87,7 +90,11 @@ JERK_SHARE = 2.0  # x the style's lateral jerk the speed profile allows where th
 RATE_OFF_PATH = 2.0  # x more of it, 1 m off the path
 RATE_SHARE = 3.0  # x it the commanded curvature may change at: a safety limit above the profile's
 COMPUTE_EVERY = 0.1  # s: a new frame is computed at once, else at least this often; between, the last control is resent
-DECEL_MAX = 4.0  # m/s^2
+DECEL_MAX = 4.0  # m/s^2 commanded at most
+# m/s^2 the game delivers at most for DECEL_MAX (traffic2 trip 6: -3.2 to -3.4): the plugin clamps the command plus its
+# integral on the measured acceleration at -4.0, so the integral has no authority left to make up the shortfall there.
+# What can still stop in time is judged by this
+DECEL_REAL = 3.2
 ABORT_DECEL = 3.5
 HOLD_ACCEL = -1.5  # m/s^2 holding a stop
 STOPPED = 0.25  # m/s
@@ -137,6 +144,10 @@ PED_SIDE = 1.0  # m beside our body a pedestrian's may come before it's in the w
 PED_MOVING = 0.5  # m/s: a slower pedestrian isn't crossing
 PED_T = 4.0  # s ahead a crossing pedestrian's way is predicted
 PED_BOX = (2.5, 1.0, 12.0)  # m: the plugin's traffic.peds counts those within this either side of our origin, this far ahead to this
+PED_KERB = 4.0  # m beside our body a pedestrian near a crossing, or heading for our path, is made ready for
+PED_KERB_DECEL = 3.0  # m/s^2 the car could stop short of where one would step into the path with (after RANGE_LAG)
+PED_KERB_MIN = 6.0  # m/s the cap holds at the least, beside them (a step out then is a crossing's, braked for at once)
+PED_STEP = 2.0  # m/s a pedestrian may step towards the path at: one we'd be past before they could reach it is no matter
 # passing a parked vehicle within our lane (_nudge)
 NUDGE_CLEAR = 0.5  # m our body keeps from its passing it, at the least; above LEAD_SIDE, so once shifted it's no lead
 NUDGE_WANT = 0.8  # m, where the lane has room
@@ -578,6 +589,7 @@ class MapDriver:
     self.nudge_groups: list[dict] = []  # the shifts made (_group), until passed
     self.nudge_blocked: list[dict] = []  # parked vehicles with no shift past them, until passed
     self.nudge_log: list[dict] = []  # each nudge event, for the summary
+    self.kerb_logged = -math.inf  # when the pedestrian kerb cap last held the car back
 
   def _body(self, state: dict):
     """Our car's body from the plugin's nearby.dims (its model's bounds: min x, max x, min y, max y)."""
@@ -1537,7 +1549,7 @@ class MapDriver:
     body = np.array([(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]) * PED_HALF
     for x, y, vx, vy in (r[:4] for r in rows[1] if len(r) >= 4):
       cars.append({"c": pos + right * float(x) + fwd * float(y) + body, "vel": right * float(vx) + fwd * float(vy), "t": t,
-                   "driven": True, "ped": True})
+                   "driven": None, "ped": True})
     self.cars = cars
 
   def _place(self, pts: np.ndarray, ahead: float, path: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -1667,11 +1679,45 @@ class MapDriver:
       if us_in > t_out + CROSS_GAP or us_out < t_in - CROSS_GAP:
         continue  # it's gone before we're there, or we're through before it comes
       d = first - self.s - self.front - CROSS_STOP
-      if not ped and d + CROSS_STOP - 0.5 < v * RANGE_LAG + v * v / (2 * DECEL_MAX):
+      if not ped and d + CROSS_STOP - 0.5 < v * RANGE_LAG + v * v / (2 * DECEL_REAL):
         continue  # too late to stop short of it: on through (a pedestrian: as much braking as there's room for)
       if best is None or d < best[0]:
         best = (d, {"at": round(first, 1), "in": round(t_in, 1), "out": round(t_out, 1), "us": round(us_in, 1),
                     "angle": round(angle), "speed": round(speed, 1), **({"ped": True} if ped else {})})
+    return best
+
+  def _ped_kerb(self, t: float, v: float, look: float) -> tuple[float, dict] | None:
+    """The speed (m/s) from which the car could stop CROSS_STOP short of where a pedestrian beside the path ahead would
+    step into it (PED_KERB_DECEL after RANGE_LAG, but PED_KERB_MIN at the least), for those within PED_KERB of our
+    body near a junction or turn (waiting to cross, a light we can't see may be theirs), or anywhere heading for our path;
+    not those walking away from it, or we'd be past before they could reach it at PED_STEP. With the nearest such one's
+    details; None."""
+    best = None
+    for car in self.cars or []:
+      if not car.get("ped"):
+        continue
+      c = self._car_now(car, t).mean(axis=0)
+      along, right = self._place(c[None], LEAD_AHEAD + self.front)
+      a, r = float(along[0]), float(right[0])
+      if math.isnan(a):
+        continue
+      d = a - self.s - self.front
+      side = abs(r) - self.half_width - PED_HALF  # m from our body's side to theirs (nearer ones are leads too)
+      if d < 0.0 or side + PED_HALF >= PED_KERB:
+        continue
+      j = int(np.clip(np.searchsorted(self.s_path, a), 0, len(self.s_path) - 1))
+      th = self.theta[j]
+      towards = -math.copysign(1.0, r) * float(car["vel"] @ np.array([math.sin(th), -math.cos(th)]))
+      if towards < -PED_MOVING or not (self._near_crossing(a) or towards > PED_MOVING):
+        continue  # walking away, or neither near a crossing nor heading for the path
+      if v * max(side, 0.0) / PED_STEP > d + self.front + self.rear:
+        continue  # past before they could step in
+      k = PED_KERB_DECEL * RANGE_LAG
+      # vp is the speed `look` m on
+      cap = max(-k + math.sqrt(k * k + 2 * PED_KERB_DECEL * max(d - look - CROSS_STOP, 0.0)), PED_KERB_MIN)
+      if best is None or cap < best[0]:
+        best = (cap, {"gap": round(d, 1), "right": round(r, 2), "speed": round(float(np.hypot(*car["vel"])), 1),
+                      "cap": round(cap, 1)})
     return best
 
   def _near_crossing(self, s: float) -> bool:
@@ -2054,8 +2100,8 @@ class MapDriver:
     need = math.inf  # the acceleration a vehicle holding the car up allows
     if self.cars is not None:
       vis = self._visible()
-      k = DECEL_MAX * RANGE_LAG
-      cap = max(-k + math.sqrt(k * k + 2 * DECEL_MAX * max(vis - RANGE_STOP, 0.0)), float(self.c["range_share"]) * vp)
+      k = DECEL_REAL * RANGE_LAG
+      cap = max(-k + math.sqrt(k * k + 2 * DECEL_REAL * max(vis - RANGE_STOP, 0.0)), float(self.c["range_share"]) * vp)
       if cap < vp:
         vp, reason = cap, "range"
       cross = self._crossing(t, v)
@@ -2071,6 +2117,12 @@ class MapDriver:
           vp, reason, phase, detail = cap, "ped" if info.get("ped") else "cross", "yield", info
           if v > cap:  # as much as stops short of it, no harder where it was seen late
             need = -v * v / (2.0 * max(d - v * STOP_LAG, 0.15))
+      kerb = self._ped_kerb(t, v, look)
+      if kerb is not None and kerb[0] < vp:
+        vp, reason = kerb[0], "ped_kerb"
+        if t - self.kerb_logged > 2.0:  # once as it starts holding the car back, not each time it takes over again
+          self._event("ped_kerb", t, **kerb[1])
+        self.kerb_logged = t
       lead = self._lead(t)
       if lead is not None:
         gap, vl, car, side = lead
@@ -2092,7 +2144,7 @@ class MapDriver:
     # one that's parked won't, so it ends the trip sooner
     held = phase in ("follow", "yield") and v < STOPPED and not (phase == "follow" and float(np.hypot(*holder["vel"])) > LEAD_MOVING)
     self.held_since = (self.held_since if self.held_since is not None else t) if held else None
-    parked = phase == "follow" and not holder["driven"]
+    parked = phase == "follow" and holder["driven"] is False
     wait = PARKED_WAIT if parked else WAIT_MAX
     if self.held_since is not None and t - self.held_since > wait:
       who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle"

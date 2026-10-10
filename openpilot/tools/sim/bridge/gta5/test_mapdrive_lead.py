@@ -324,6 +324,7 @@ def test_pedestrians():
   t, v = trip.col(0), trip.col(4)
   assert trip.finished == "arrived" and trip.car.collisions == 0 and not trip.md.aborts, trip.finished
   assert (v[(t > 25.0) & (t < 40.0)] < 0.1).all() and phases(trip, "follow")[0].get("ped"), "held behind it"
+  assert phases(trip, "follow")[0]["driven"] is None  # a pedestrian: neither driven nor parked (held WAIT_MAX)
   # on the pavement beside our lane, walking along it either way: driven past at the speed without it
   free = ms.drive(r, {"seed": 2}, lane=1, reach=REACH, seconds=120)
   for heading in (0.0, 180.0):
@@ -332,6 +333,45 @@ def test_pedestrians():
     assert trip.finished == "arrived" and not phases(trip, "yield") and not phases(trip, "follow"), (heading, trip.events[:4])
     assert abs(trip.col(0)[-1] - free.col(0)[-1]) < 0.5, (trip.col(0)[-1], free.col(0)[-1])
   print("pedestrians: ok")
+
+
+def test_pedestrian_at_the_kerb():
+  # traffic2 trip 6: a man waiting at the right kerb of a junction's crosswalk 45 m ahead, at 15.5 m/s towards a light we
+  # can't see, stepped out at 0.9 m/s and was hit at 4.25 m/s; the game gave -3.3 m/s^2 for the -4.0 asked. Here he steps
+  # out when we'd be 2.5 s from his line at speed, on a car that delivers no more than 3.3 m/s^2 either
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30])
+  cfg = {"seed": 2, "speed": 15.5}
+  base = ms.drive(r, cfg, lane=1, v0=15.5, reach=REACH, seconds=60, brake=3.3)
+  t_at = float(np.interp(302.0, base.col(2) + base.md.front, base.col(0)))
+
+  def walker(early: float) -> ms.Vehicle:
+    return ms.pedestrian(11.5, 302.0, 90.0, 0.0, start=t_at - early, accel=2.0, until=0.9)
+  real = MapDriver._ped_kerb
+  MapDriver._ped_kerb = lambda self, t, v, look: None
+  try:  # standing at the kerb he counts for nothing until he steps out: too late to stop then, as in the game
+    blind = ms.drive(r, cfg, lane=1, v0=15.5, peds=[walker(2.5)], reach=REACH, seconds=60, brake=3.3)
+  finally:
+    MapDriver._ped_kerb = real
+  hit = float(blind.col(0)[np.argmax(blind.col(13) <= 0.0)]) - (t_at - 2.5)
+  assert blind.finished == "abort: collision" and 2.8 < hit < 3.8, (blind.finished, hit)
+  for early in (1.8, 2.5, 3.3, 6.0):
+    trip = ms.drive(r, cfg, lane=1, v0=15.5, peds=[walker(early)], reach=REACH, seconds=90, brake=3.3)
+    assert trip.finished == "arrived" and trip.car.collisions == 0 and trip.col(13).min() > 1.5, (early, trip.finished, trip.col(13).min())
+    kerb = [e for e in trip.events if e["event"] == "ped_kerb"]
+    assert kerb and trip.col(7).min() > -3.3 - 0.1, (early, kerb[:1], trip.col(7).min())  # no harder than the game gives
+  # a busy pavement away from junctions, standing and walking along it: no slower
+  r = ms.straight(700)
+  free = ms.drive(r, {"seed": 2}, lane=1, reach=REACH, seconds=90)
+  peds = [ms.pedestrian(12.0 + (k % 3) * 0.7, float(y), (0.0, 180.0, 0.0)[k % 3], (0.0, 1.4, 1.2)[k % 3])
+          for k, y in enumerate(np.arange(100.0, 560.0, 12.0))]
+  trip = ms.drive(r, {"seed": 2}, lane=1, peds=peds, reach=REACH, seconds=90)
+  assert trip.finished == "arrived" and not [e for e in trip.events if e["event"] == "ped_kerb"], trip.finished
+  assert abs(trip.col(0)[-1] - free.col(0)[-1]) < 0.5, (trip.col(0)[-1], free.col(0)[-1])
+  # one there walking towards the road: ready for him
+  t0 = float(np.interp(195.0, free.col(2), free.col(0)))  # setting off from the pavement as we are 55 m from him
+  trip = ms.drive(r, {"seed": 2}, lane=1, peds=[ms.pedestrian(13.5, 250.0, 90.0, 0.0, start=t0, accel=2.0, until=0.8)], reach=REACH, seconds=90)
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and [e for e in trip.events if e["event"] == "ped_kerb"]
+  print("pedestrian at the kerb: ok")
 
 
 def test_range():
@@ -363,5 +403,6 @@ if __name__ == "__main__":
   test_following()
   test_crossing()
   test_pedestrians()
+  test_pedestrian_at_the_kerb()
   test_range()
   print(f"all passed in {time.monotonic() - t0:.0f} s")
