@@ -30,7 +30,13 @@ crosses ours within CROSS_GAP s of when we'd be there; and it's no faster than s
 plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Pedestrians
 (nearby's "p") likewise: one within PED_SIDE of our body along the path is stopped behind, and one walking across it
 (anywhere, PED_T s on) waited for, braking however late; where the plugin lists none, one it counts just ahead
-(traffic.peds) is braked to a stop for. Aborts (dev >
+(traffic.peds) is braked to a stop for. A parked vehicle (no one at its wheel, standing) whose body comes within
+nudge_clear (0.5) m of ours along the path is passed within our own lane (_nudge): the path shifted away from it to
+nudge_want (0.8) m where the lane has room, at least nudge_clear, held from NUDGE_MARGIN before its body to after it and
+eased in and out (minimum jerk) over NUDGE_EASE_T s at the speed it's passed at, slower the tighter the pass; our body
+kept CLAMP_MARGIN in from the lane's edges (the plan clamp's lane room: never into the next lane or across the centre
+line, and none where the lane is no guide, as about turns and through lane changes). Where there's no room for that, or
+it's seen too late to ease out, it's stopped behind as before. Each is a `nudge` event. Aborts (dev >
 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s, held by a vehicle for WAIT_MAX s
 with none moving (PARKED_WAIT s by a parked one), lateral acceleration over 4.5, the driver's input, a failed plan) brake
 to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
@@ -40,8 +46,9 @@ gta_link_offset, stop_line_far, plan_slot_mismatch, sharp_corner, jog_change, pl
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
-"rear_axle": null, "range_share": 0.75}; bias_max 0 and wander 0 drive exactly on the line; rear_axle (m behind the car's
-position, default half the state's wheelBase) 0 steers from the car's middle; range_share 1 drops the range cap."""
+"rear_axle": null, "range_share": 0.75, "nudge": true, "nudge_clear": 0.5, "nudge_want": 0.8}; bias_max 0 and wander 0
+drive exactly on the line; rear_axle (m behind the car's position, default half the state's wheelBase) 0 steers from the
+car's middle; range_share 1 drops the range cap; nudge false stops behind every parked vehicle in the way."""
 import bisect
 import hashlib
 import math
@@ -57,7 +64,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
-           "ped")
+           "ped", "nudge")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -130,6 +137,17 @@ PED_SIDE = 1.0  # m beside our body a pedestrian's may come before it's in the w
 PED_MOVING = 0.5  # m/s: a slower pedestrian isn't crossing
 PED_T = 4.0  # s ahead a crossing pedestrian's way is predicted
 PED_BOX = (2.5, 1.0, 12.0)  # m: the plugin's traffic.peds counts those within this either side of our origin, this far ahead to this
+# passing a parked vehicle within our lane (_nudge)
+NUDGE_CLEAR = 0.5  # m our body keeps from its passing it, at the least; above LEAD_SIDE, so once shifted it's no lead
+NUDGE_WANT = 0.8  # m, where the lane has room
+NUDGE_MARGIN = 2.0  # m before and after its body the shift is held
+NUDGE_EASE_T = 2.0  # s a shift eases in and out over at the least, at the speed it's passed at
+NUDGE_EASE_MIN = 8.0  # m: a shift with less room to ease in or out isn't made
+NUDGE_A_LAT = 0.5  # x the style's lateral acceleration an ease's peak at most (a quintic's is 5.77 shift / length^2 x v^2)
+NUDGE_V = (6.0, 20.0)  # m/s passing at NUDGE_CLEAR, and more for each m clearer
+NUDGE_LATE = 1.3  # x the speed an ease is made for the car may still be doing where it starts, braking from now
+NUDGE_GUARD = 1.0  # m ahead of the car within which the path is never moved
+NUDGE_SAME = 1.0  # m between a parked vehicle's readings that are one
 # aborts
 DEV_ABORT, DEV_ABORT_S = 1.5, 1.0
 HEADING_ABORT, HEADING_ABORT_S = 30.0, 0.5
@@ -185,7 +203,7 @@ PRESETS = {"calm": 0.2, "normal": 0.5, "brisk": 0.8}
 DEFAULTS = {"seed": None, "preset": "normal", "style": {}, "bias_max": 0.3, "wander": 0.1, "wander_m": 300.0,
             "on_abort": "stop", "speed": None, "plan_check": "fix", "stop_before": 15.0, "hold_after": 3.0, "retime": True,
             "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW, "fit_durations": True,
-            "rear_axle": None, "range_share": 0.75}
+            "rear_axle": None, "range_share": 0.75, "nudge": True, "nudge_clear": NUDGE_CLEAR, "nudge_want": NUDGE_WANT}
 
 
 def pick_style(seed: int, preset: str = "normal", over: dict | None = None) -> dict:
@@ -552,6 +570,14 @@ class MapDriver:
     self.lead_driven: bool | None = None  # whether anyone drives it
     self.held_since: float | None = None  # when a vehicle in the way began holding the car up
     self.cross_hold: tuple | None = None  # (path m we stop at, when, details) of the last crossing held for
+    self.lane_room = None  # _clamp's _lane_room of the plan
+    self.path0 = None  # the path without the nudges (_derive's)
+    self.nudge_off = np.zeros(0)  # m right of path0 the path is moved at each point
+    self.nudge_fixed = np.zeros(0)  # of it, the shifts passed
+    self.room_lo = self.room_hi = np.zeros(0)  # how far (m right) each point may move within its lane; NaN: no guide
+    self.nudge_groups: list[dict] = []  # the shifts made (_group), until passed
+    self.nudge_blocked: list[dict] = []  # parked vehicles with no shift past them, until passed
+    self.nudge_log: list[dict] = []  # each nudge event, for the summary
 
   def _body(self, state: dict):
     """Our car's body from the plugin's nearby.dims (its model's bounds: min x, max x, min y, max y)."""
@@ -570,7 +596,16 @@ class MapDriver:
             "vProf": None if math.isnan(self.v_prof) else round(self.v_prof, 2), "a": round(self.a, 2), "kappa": round(self.kappa, 5),
             "reason": self.reason, "lcTau": None if math.isnan(self.lc_tau) else round(self.lc_tau, 2), "label": self.label,
             "lead": None if math.isnan(self.lead_gap) else round(self.lead_gap, 1),
-            "leadRight": None if math.isnan(self.lead_right) else round(self.lead_right, 2), "leadDriven": self.lead_driven}
+            "leadRight": None if math.isnan(self.lead_right) else round(self.lead_right, 2), "leadDriven": self.lead_driven,
+            "nudge": self._nudge_now()}
+
+  def _nudge_now(self) -> dict | None:
+    """The shift under way where the car is: m right of the path without it now, and the clearance it was made for."""
+    g = next((g for g in self.nudge_groups if g["start"] <= self.s <= g["end"]), None)
+    if g is None:
+      return None
+    return {"off": round(float(np.interp(self.s, self.s_path, self.nudge_off)), 2),
+            "clear": round(min(e["clear"] for e in g["entries"]), 2)}
 
   def mapx_row(self) -> list[float]:
     return [PHASES.index(self.phase) if self.phase in PHASES else 0, self.s, self.dev, self.target_lane, self.target_right, self.v_prof,
@@ -580,7 +615,8 @@ class MapDriver:
     """gta5.json's mapx: the trip's style and seed, its plans' keys, splices, aborts, anomalies and lights passed."""
     return {"seed": self.seed, "style": self.style, "cfg": {k: v for k, v in self.c.items() if k != "style"}, "version": map_version(),
             "keys": self.plan["keys"] if self.plan else None, "plans": self.plans, "splices": self.splices, "aborts": self.aborts,
-            "anomalies": self.anomalies, "lights": self.lights, "slot_check": self.plan["slot_check"] if self.plan else None}
+            "anomalies": self.anomalies, "lights": self.lights, "slot_check": self.plan["slot_check"] if self.plan else None,
+            "nudges": self.nudge_log}
 
   def intent_line(self, step: int = 2) -> list:
     """The intent (the planned path without the in-lane wander) from the car on, for the ribbon and recordings."""
@@ -1075,6 +1111,9 @@ class MapDriver:
     self.kappa_path = smooth(k_raw, max(int(CURV_SMOOTH / STEP) | 1, 1))
     self.route_s, self.route_r = along_route(route, target, route.at - 5.0)
     self.route = route
+    self.path0, self.nudge_off, self.nudge_fixed = target, np.zeros(len(target)), np.zeros(len(target))
+    self.nudge_groups, self.nudge_blocked = [], []
+    self.room_lo, self.room_hi = self._nudge_room()
     # where the route's own line says little about the road beside it: junction nodes, and its points where it bends
     # sharply (a lane line or the car cuts inside such a corner, past the segment's own kerbs)
     d = np.diff(route.points[:, :2], axis=0)
@@ -1347,6 +1386,7 @@ class MapDriver:
     bends: list[float] = []
     self._corners(route, intent, along, bends)
     lanes_ = self._lane_room(route, keys, np.arange(along[0], along[-1] + LANE_GRID, LANE_GRID), bends)
+    self.lane_room = lanes_
     for n in range(4):  # a push turns the body, and moves it nearer another corner
       need, why, room_l, room_r = self._strays(route, intent, lanes_)
       if n == 3 or not np.any(need):
@@ -1445,6 +1485,9 @@ class MapDriver:
     for s0, s1, *_ in self.changes:
       if s0 <= s <= s1:
         cut = max(cut, s1)
+    for g in self.nudge_groups:  # a shift begun kept whole: the new path is from the plan, without it
+      if g["start"] <= cut and g["end"] >= s:
+        cut = max(cut, g["end"])
     part = (old_s >= s - 2.0) & (old_s <= cut)  # from the car on: the new route starts there
     keep, old_intent = old_path[part], self.intent[part]
     if not self._make_plan(route, state, t):
@@ -1497,13 +1540,14 @@ class MapDriver:
                    "driven": True, "ped": True})
     self.cars = cars
 
-  def _place(self, pts: np.ndarray, ahead: float) -> tuple[np.ndarray, np.ndarray]:
-    """Points' (m along the path, m right of it) on the path from the car to `ahead` m on; NaN beyond LEAD_OFF off it
-    or off either end."""
+  def _place(self, pts: np.ndarray, ahead: float, path: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Points' (m along the path, or `path` of the same length, m right of it) on the path from the car to `ahead` m on;
+    NaN beyond LEAD_OFF off it or off either end."""
     sp = self.s_path
+    path = self.path if path is None else path
     lo = max(int(np.searchsorted(sp, self.s - 5.0)) - 1, 0)
     hi = min(int(np.searchsorted(sp, self.s + ahead)) + 1, len(sp) - 1)
-    a, ab = self.path[lo:hi], self.path[lo + 1:hi + 1] - self.path[lo:hi]
+    a, ab = path[lo:hi], path[lo + 1:hi + 1] - path[lo:hi]
     if not len(a):
       return np.full(len(pts), np.nan), np.full(len(pts), np.nan)
     ab2 = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-9)
@@ -1636,6 +1680,194 @@ class MapDriver:
     spots = list(self.route.junctions) + [tr.dist for tr in (getattr(self.route, "_turns", None) or [])]
     return any(abs(a - along) < CROSS_NEAR for a in spots)
 
+  # *** passing a parked vehicle within our lane ***
+
+  def _nudge_room(self) -> tuple[np.ndarray, np.ndarray]:
+    """How far (m, right positive) each point of the path may move and keep our body within its lane, CLAMP_MARGIN in
+    from its edges (_clamp's lane room, which the plan was kept to): (left bound, right bound), NaN where the lane is no
+    guide (lane changes, jogs, tapers, about turns) or the plan has none."""
+    n = len(self.path)
+    if self.lane_room is None:
+      return np.full(n, np.nan), np.full(n, np.nan)
+    grid, centre, left, right, _ = self.lane_room
+    g = np.round((self.route_s - grid[0]) / LANE_GRID).astype(int)
+    inside = (g >= 0) & (g < len(grid))
+    g = np.clip(g, 0, len(grid) - 1)
+    off = np.where(inside, self.route_r - centre[g], np.nan)
+    return -left[g] - off, right[g] - off
+
+  def _nudge(self, v: float, t: float):
+    """Each parked vehicle (no one at its wheel, standing) newly in the way along the path ahead: the path shifted past it
+    within our lane (_nudge_for, _nudge_add), else left for the lead to stop behind; a nudge event either way. Shifts and
+    vehicles passed are dropped."""
+    if not self.c["nudge"] or self.path0 is None:
+      return
+    for g in self.nudge_groups:
+      if self.s > g["end"]:
+        self.nudge_fixed = self.nudge_fixed + g["off"]  # behind the car: left as driven
+    self.nudge_groups = [g for g in self.nudge_groups if self.s <= g["end"]]
+    self.nudge_blocked = [b for b in self.nudge_blocked if self.s <= b["end"]]
+    for car in self.cars or []:
+      if car.get("ped") or car["driven"] or float(np.hypot(*car["vel"])) > LEAD_MOVING:
+        continue
+      c = car["c"].mean(axis=0)
+      seen = [e["c"] for g in self.nudge_groups for e in g["entries"]] + [b["c"] for b in self.nudge_blocked]
+      if any(float(np.hypot(*(x - c))) < NUDGE_SAME for x in seen):
+        continue
+      e = self._nudge_for(car, v)
+      if e is None:
+        continue
+      why = e.get("why") or self._nudge_add(e)
+      rec = {"ok": why is None, "pos": [round(float(c[0]), 1), round(float(c[1]), 1)], "at": e["at"], "right": e["right"],
+             "need": e["need"]}
+      if why is None:
+        rec.update(shift=round(e["shift"], 2), clear=round(e["clear"], 2), ease=[round(e["L_in"], 1), round(e["L_out"], 1)],
+                   v=round(e["v"], 1), v_ease=round(e["v_ease"], 1))
+      else:
+        rec["why"] = why
+        self.nudge_blocked.append({"c": c, "end": e["at"][1] + self.rear})
+      self.nudge_log.append({"t": round(t, 3), **rec})
+      self._event("nudge", t, **rec)
+
+  def _ease_v(self, length: float, shift: float) -> float:
+    """m/s an ease across `shift` m over `length` m is comfortable at."""
+    a = NUDGE_A_LAT * self.style["a_lat"]
+    return min(length / NUDGE_EASE_T, length * math.sqrt(a / (5.77 * max(abs(shift), 1e-3))))
+
+  def _nudge_for(self, car: dict, v: float) -> dict | None:
+    """The shift past a parked vehicle: m right (`shift`, from `need` at the least), held over path m h0 to h1 (points i0
+    to i1), eased in over L_in m and out over L_out (no faster than `v_ease` m/s), passed at `v` m/s at most with `clear`
+    m between our bodies; with a `why` where there's none. None where it leaves us nudge_clear already, or isn't all in
+    view ahead."""
+    # placed on a little further than the lead looks, so it's all in view once it's a lead
+    along, right = self._place(self._outline(car["c"]), LEAD_AHEAD + self.front + 2 * FRONT + 2.0, self.path0)
+    if np.isnan(along).any():
+      return None
+    hw = self.half_width
+    clear = max(float(self.c["nudge_clear"]), LEAD_SIDE + 0.05)
+    want = max(float(self.c["nudge_want"]), clear)
+    r0, r1, a0, a1 = float(right.min()), float(right.max()), float(along.min()), float(along.max())
+    if r0 > hw + clear or r1 < -(hw + clear) or a0 < self.s + self.front - LEAD_BESIDE:
+      return None  # clear of us, or beside us already
+    sp = self.s_path
+    h0, h1 = a0 - self.front - NUDGE_MARGIN, a1 + self.rear + NUDGE_MARGIN
+    i0 = int(np.searchsorted(sp, h0))
+    i1 = min(int(np.searchsorted(sp, h1, side="right")), len(sp) - 1)
+    e = {"c": car["c"].mean(axis=0), "at": [round(a0, 1), round(a1, 1)], "right": [round(r0, 2), round(r1, 2)], "need": None}
+    lo, hi = self.room_lo[i0:i1 + 1], self.room_hi[i0:i1 + 1]
+    if not len(lo) or np.isnan(lo).any():
+      return {**e, "why": "no lane"}
+    options = []  # (shift, need): past it on its left (moved no further right than need), or on its right
+    if r0 - hw - clear >= lo.max():
+      options.append((max(r0 - hw - want, float(lo.max())), r0 - hw - clear))
+    if r1 + hw + clear <= hi.min():
+      options.append((min(r1 + hw + want, float(hi.min())), r1 + hw + clear))
+    if not options:
+      need = r0 - hw - clear if abs(r0 - hw - clear) < abs(r1 + hw + clear) else r1 + hw + clear
+      return {**e, "need": round(need, 2), "why": "no room"}
+    shift, need = min(options, key=lambda o: abs(o[0]))
+    e.update(need=round(need, 2), shift=shift, clear=clear + abs(shift - need), h0=h0, h1=h1, i0=i0, i1=i1)
+    # eased in at the speed it's driven at there, slowing to pass it the tighter the pass
+    v_ref = max(float(np.interp(h0, sp, self.v_static)), 1.0)
+    a_lat = NUDGE_A_LAT * self.style["a_lat"]
+    length = max(NUDGE_EASE_MIN, v_ref * NUDGE_EASE_T, v_ref * math.sqrt(5.77 * abs(shift) / a_lat))
+    # eased in ahead of the car and out before the path leaves its lane's guide
+    gaps = np.flatnonzero(np.isnan(self.room_lo[:i0]))
+    lane0 = float(sp[gaps[-1] + 1] if len(gaps) else sp[0])
+    gaps = np.flatnonzero(np.isnan(self.room_lo[i1 + 1:]))
+    lane1 = float(sp[i1 + gaps[0]] if len(gaps) else sp[-1])
+    e["L_in"] = min(length, h0 - max(self.s + NUDGE_GUARD, lane0))
+    e["L_out"] = min(length, lane1 - h1)
+    if e["L_in"] < NUDGE_EASE_MIN:
+      return {**e, "why": "late" if h0 - self.s - NUDGE_GUARD < NUDGE_EASE_MIN else "no lane"}
+    if e["L_out"] < NUDGE_EASE_MIN:
+      return {**e, "why": "no lane"}
+    e["v"] = NUDGE_V[0] + NUDGE_V[1] * (e["clear"] - clear)
+    e["v_ease"] = min(self._ease_v(e["L_in"], shift), self._ease_v(e["L_out"], shift))
+    d = h0 - e["L_in"] - self.s - v * STOP_LAG
+    if math.sqrt(max(v * v - 2.0 * self.style["decel"] * max(d, 0.0), 0.0)) > NUDGE_LATE * e["v_ease"]:
+      return {**e, "why": "late"}
+    return e
+
+  def _group(self, entries: list[dict]) -> dict:
+    """Shifts one way whose eases overlap, as one: each held over its vehicle, the gap between two held at the lesser,
+    each step up eased in before where it's held (its L_in), each down after (L_out): {"off": m right at each path
+    point, "start", "end": path m it's under way over, "v": m/s its eases allow over it, "sign", "entries"}."""
+    sp = self.s_path
+    es = sorted(entries, key=lambda e: e["h0"])
+    sign = math.copysign(1.0, es[0]["shift"])
+    lev = np.zeros(len(sp))
+    for e in es:
+      lev[e["i0"]:e["i1"] + 1] = np.maximum(lev[e["i0"]:e["i1"] + 1], abs(e["shift"]))
+    reach, last = es[0]["i1"], es[0]
+    for e in es[1:]:
+      if e["i0"] > reach + 1:
+        lev[reach + 1:e["i0"]] = min(abs(last["shift"]), abs(e["shift"]))
+      if e["i1"] > reach:
+        reach, last = e["i1"], e
+    ins, outs = {e["i0"]: e for e in es}, {e["i1"]: e for e in es}
+    off = np.zeros(len(sp))
+    start, end, v = math.inf, -math.inf, min(e["v_ease"] for e in es)
+    for j in np.flatnonzero(np.diff(lev)):
+      a, b = lev[j], lev[j + 1]
+      if b > a:
+        length = ins[j + 1]["L_in"] if j + 1 in ins else min(e["L_in"] for e in es)
+        s0 = sp[j + 1] - length
+      else:
+        length = outs[j]["L_out"] if j in outs else min(e["L_out"] for e in es)
+        s0 = sp[j]
+      off += (b - a) * quintic((sp - s0) / length)
+      start, end = min(start, s0), max(end, s0 + length)
+      v = min(v, self._ease_v(length, b - a))
+    return {"off": sign * off, "start": float(start), "end": float(end), "v": float(v), "sign": sign, "entries": es}
+
+  def _nudge_add(self, e: dict) -> str | None:
+    """A shift into the plan: with the shifts one way it overlaps, else on its own; None, or why it can't be."""
+    sign = math.copysign(1.0, e["shift"])
+    e0, e1 = e["h0"] - e["L_in"], e["h1"] + e["L_out"]
+    tries = [self.nudge_groups[:k] + [self._group(g["entries"] + [e])] + self.nudge_groups[k + 1:]
+             for k, g in enumerate(self.nudge_groups) if g["sign"] == sign and e0 < g["end"] and g["start"] < e1]
+    tries.append(self.nudge_groups + [self._group([e])])
+    why = None
+    for groups in tries:
+      off = self.nudge_fixed + np.sum([g["off"] for g in groups], axis=0)
+      why = self._nudge_bad(groups, off)
+      if why is None:
+        self.nudge_groups = groups
+        self._nudge_apply(off)
+        return None
+    return why
+
+  def _nudge_bad(self, groups: list[dict], off: np.ndarray) -> str | None:
+    """Why the shifts `off` can't be driven: the path moved where the car is, outside the lane's room (or where it's no
+    guide), or short of a vehicle's need; else None."""
+    sp = self.s_path
+    near = sp <= self.s + NUDGE_GUARD
+    if np.abs(off[near] - self.nudge_off[near]).max(initial=0.0) > 0.01:
+      return "under way"
+    moved = np.abs(off) > 0.02
+    lo, hi = self.room_lo, self.room_hi
+    if (moved & np.isnan(lo)).any():
+      return "no lane"
+    m = moved & ~np.isnan(lo)
+    if (off[m] < lo[m] - 0.01).any() or (off[m] > hi[m] + 0.01).any():
+      return "no room"
+    for g in groups:
+      for e in g["entries"]:
+        held = off[e["i0"]:e["i1"] + 1]
+        if (held.max() > e["need"] + 0.01) if e["shift"] < 0 else (held.min() < e["need"] - 0.01):
+          return "conflict"
+    return None
+
+  def _nudge_apply(self, off: np.ndarray):
+    """The path moved `off` m right of path0, and its heading and curvature anew (its length along kept: the moves are
+    small and gentle)."""
+    self.nudge_off = off
+    th = headings(self.path0)
+    self.path = self.path0 + np.stack([np.sin(th), -np.cos(th)], axis=1) * off[:, None]
+    self.theta = headings(self.path)
+    self.kappa_path = smooth(np.gradient(self.theta, self.s_path), max(int(CURV_SMOOTH / STEP) | 1, 1))
+
   # *** each step ***
 
   def step(self, route, state: dict, t: float, collisions: int = 0) -> dict | None:
@@ -1672,6 +1904,7 @@ class MapDriver:
     self._checks(route, state, t, collisions, v)
     if self.phase == "abort":
       return self._abort_msg(v, t)
+    self._nudge(v, t)
     accel = self._longitudinal(state, v, t, dt)
     if self.phase == "abort":
       return self._abort_msg(v, t)
@@ -1807,6 +2040,13 @@ class MapDriver:
         self.finished = "arrived"
         self._event("mapdrive", t, phase="end", finished="arrived")
       return self._out_accel(HOLD_ACCEL, dt, hard=True)
+    # passing a parked vehicle: no faster than its shift's eases are comfortable at, nor its pass
+    for g in self.nudge_groups:
+      if s <= g["end"]:
+        for at, cap in [(g["start"], g["v"])] + [(e["h0"], e["v"]) for e in g["entries"] if s <= e["h1"]]:
+          cap = math.sqrt(cap * cap + 2 * b * 0.8 * max(at - s - look, 0.0))  # vp is the speed look m on
+          if cap < vp:
+            vp, reason = cap, "nudge"
     # vehicles: no faster than stops for one at the edge of what the plugin reports (but for range_share of the speed),
     # one about to cross our way, and the one in it
     detail: dict = {}

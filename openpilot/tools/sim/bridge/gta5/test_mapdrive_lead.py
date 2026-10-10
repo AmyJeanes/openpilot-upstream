@@ -24,13 +24,18 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LEAD_STOP, MAPX_COLUMNS, PARKED_WAIT, WAIT_MAX, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_WANT,
+                                                           PARKED_WAIT, WAIT_MAX, MapDriver)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
 
 def phases(trip, what: str) -> list[dict]:
   return [e for e in trip.events if e["event"] == "mapdrive" and e.get("phase") == what]
+
+
+def nudges(trip) -> list[dict]:
+  return [e for e in trip.events if e["event"] == "nudge"]
 
 
 def parked(route, lane: float, along: float, right: float = 0.0, turned: float = 0.0, **kw) -> ms.Vehicle:
@@ -76,13 +81,14 @@ def test_stopped_in_a_turn():
 def test_parked_partly_in_lane():
   r = ms.straight(600)
   # its near side 1.75 m into our 5.5 m lane, within LEAD_SIDE of our body (map1010b 016: a classic at the kerb, our right
-  # front into it)
-  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=2.0, driven=False)], reach=REACH, seconds=40)
+  # front into it): without the nudge, stopped behind
+  trip = ms.drive(r, {"seed": 2, "nudge": False}, lane=1, vehicles=[parked(r, 1, 200.0, right=2.0, driven=False)], reach=REACH, seconds=40)
   stopped_behind(trip)
-  # 1 m into it, or clear of it: driven past
+  # 1 m into it (NUDGE_CLEAR from our body, by the trip's bias: shifted to NUDGE_WANT), or clear of it: driven past
   for right in (2.75, 4.4):
     trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=right, driven=False)], reach=REACH, seconds=60)
     assert trip.finished == "arrived" and not phases(trip, "follow") and trip.col(13).min() > 0.3, (right, trip.finished, trip.col(13).min())
+    assert all(e["ok"] for e in nudges(trip)) and (right < 4.0 or not nudges(trip)), nudges(trip)
   # in the next lane: not ours
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 0, 200.0)], reach=REACH, seconds=60)
   assert trip.finished == "arrived" and not phases(trip, "follow"), trip.finished
@@ -113,7 +119,113 @@ def test_held_ends_the_trip():
   assert PARKED_WAIT < trip.md.aborts[0]["t"] - stopped < PARKED_WAIT + 3.0, (trip.md.aborts[0]["t"], stopped)
   follow = phases(trip, "follow")[0]
   assert follow["driven"] is False and abs(follow["right"]) < 0.1, follow
+  assert [e["why"] for e in nudges(trip)] == ["no room"], nudges(trip)  # in the middle of our lane: no passing it in the lane
   print("held ends the trip: ok")
+
+
+def passed(trip, clear_min: float | None = None):
+  """Arrived, the parked vehicles passed with the clearance each shift was made for (less the car's tracking), never
+  held behind one, the path back on the plan after."""
+  ok = [e for e in nudges(trip) if e["ok"]]
+  planned = min(e["clear"] for e in ok)
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and not phases(trip, "follow"), (trip.finished, phases(trip, "follow")[:2])
+  assert ok and planned >= NUDGE_CLEAR - 1e-6 and all(e["ok"] for e in nudges(trip)), nudges(trip)
+  assert trip.col(13).min() > (clear_min if clear_min is not None else planned - 0.1), (trip.col(13).min(), planned)
+  assert abs(np.interp(trip.md.s, trip.md.s_path, trip.md.nudge_off)) < 1e-3 and trip.md.info()["nudge"] is None
+  return ok
+
+
+def test_nudge_past_a_parked_car():
+  r = ms.straight(600)
+  free = ms.drive(r, {"seed": 2}, lane=1, reach=REACH, seconds=60)
+  # its near side 1.75 m into our 5.5 m lane, about 1 m from our path's middle (the leadRight of the live17 trips' parked
+  # cars), then 2.55 m in (0.2 m from it): shifted left within the lane, the tighter pass the slower
+  for right, want in ((2.0, NUDGE_WANT), (1.2, 0.6)):
+    trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=right, driven=False)], reach=REACH, seconds=60)
+    e = passed(trip)[0]
+    assert e["clear"] > want - 1e-6 and e["shift"] < -0.5 and e["v"] <= 12.0 + 1e-6, e
+    # our body CLAMP_MARGIN in from the lane's left edge (the lane line to the other lane, 5.5 m right of the route's line)
+    left = trip.col(10) - trip.md.half_width
+    assert left.min() > LANE_W + CLAMP_MARGIN - 0.1, left.min()
+    t, x, v = trip.col(0), trip.col(1), trip.col(4)
+    beside = np.abs(trip.col(2) - 200.0) < 3.0
+    assert v[beside].max() < e["v"] + 0.5 and x[beside].max() < x[0] - 0.5, (v[beside].max(), x[beside].max())
+    assert t[-1] < free.col(0)[-1] + 5.0, (t[-1], free.col(0)[-1])
+  # under way: the expert row's map dict carries it
+  md = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=2.0, driven=False)], reach=REACH, seconds=20).md
+  assert md.info()["nudge"]["off"] < -0.5 and md.info()["nudge"]["clear"] >= NUDGE_WANT - 1e-6, md.info()["nudge"]
+  assert md.summary()["nudges"][0]["ok"]
+  # on the left of the left lane, beside the centre line: shifted right
+  e = passed(ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=-2.0, driven=False)], reach=REACH, seconds=60))[0]
+  assert e["shift"] > 0.5, e
+  # driven (traffic): never passed, followed and held for
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=2.0)], reach=REACH, seconds=40)
+  assert not nudges(trip) and phases(trip, "follow") and trip.car.collisions == 0, nudges(trip)
+  print("nudge past a parked car: ok")
+
+
+def test_nudge_no_room():
+  # its near side 1.75 m into a 3.5 m lane: no room in the lane, stopped behind and the trip ends as before
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 1, w=3.5))
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=1.75, driven=False)], reach=REACH, seconds=80)
+  ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+  assert [e["why"] for e in nudges(trip)] == ["no room"] and not trip.md.nudge_off.any(), nudges(trip)
+  # 2.85 m into a 5.5 m lane beside the oncoming one: passing it would take us over the centre line, so neither
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 1))
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=0.9, driven=False)], reach=REACH, seconds=80)
+  ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+  assert [e["why"] for e in nudges(trip)] == ["no room"] and not trip.md.nudge_off.any(), nudges(trip)
+  assert (trip.col(10) - trip.md.half_width).min() > 0.0  # our left side never past the centre line
+  # nor into a lane beside going our way (no borrowing it)
+  r = ms.straight(600)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=0.9, driven=False)], reach=REACH, seconds=80)
+  ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+  print("nudge no room: ok")
+
+
+def test_nudge_two_in_a_row():
+  # parked along the kerb 7 m apart, the second further in, a third 20 m on: one shift held past them all, not back in between
+  r = ms.straight(600)
+  cars = [parked(r, 1, 200.0, right=2.0, driven=False), parked(r, 1, 212.0, right=1.6, driven=False),
+          parked(r, 1, 245.0, right=2.2, driven=False)]
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=cars, reach=REACH, seconds=60)
+  passed(trip)
+  y, x = trip.col(2), trip.col(1)
+  between = (y > 205.0) & (y < 240.0)
+  assert x[between].max() < x[0] - 0.5, x[between].max() - x[0]
+  assert len(nudges(trip)) == 3 and band_ok(trip), nudges(trip)
+  print("nudge two in a row: ok")
+
+
+def band_ok(trip) -> bool:
+  """No weave: the commanded curvature changes sign only a few times along the pass."""
+  k = trip.col(6)[trip.col(4) > 2.0]
+  return int(np.sum(np.diff(np.sign(k[np.abs(k) > 2e-4])) != 0)) <= 6
+
+
+def test_nudge_on_a_bend():
+  r = ms.curve(60.0, 90.0)
+  for right in (2.0, -2.0):  # on the bend's outside, then its inside
+    trip = ms.drive(r, {"seed": 3}, lane=1 if right > 0 else 0, vehicles=[parked(r, 1 if right > 0 else 0, 200.0, right=right, driven=False)],
+                    reach=REACH, seconds=80)
+    passed(trip)
+    assert trip.col(8).max() < 0.35, trip.col(8).max()
+  print("nudge on a bend: ok")
+
+
+def test_nudge_before_a_turn():
+  for side, lane in (("right", 1), ("left", 0)):
+    r = ms.junction_turn(side, stop=None)
+    right = 2.0 if side == "right" else -2.0
+    # 35 m before the turn: eased out before its corner (no faster than that allows), then the turn as ever
+    trip = ms.drive(r, {"seed": 3}, lane=lane, vehicles=[parked(r, lane, 165.0, right=right, driven=False)], reach=REACH, seconds=80)
+    e = passed(trip)[0]
+    assert e["v_ease"] < 8.0 and trip.col(8).max() < 0.35, (e, trip.col(8).max())
+    # 10 m before it, where the lane gives way to the turn: no shift, stopped behind it as before
+    trip = ms.drive(r, {"seed": 3}, lane=lane, vehicles=[parked(r, lane, 190.0, right=right, driven=False)], reach=REACH, seconds=80)
+    ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+    assert [e["why"] for e in nudges(trip)] == ["no lane"], nudges(trip)
+  print("nudge before a turn: ok")
 
 
 def test_queue_that_moves():
@@ -243,6 +355,11 @@ if __name__ == "__main__":
   test_parked_partly_in_lane()
   test_held_ends_the_trip()
   test_queue_that_moves()
+  test_nudge_past_a_parked_car()
+  test_nudge_no_room()
+  test_nudge_two_in_a_row()
+  test_nudge_on_a_bend()
+  test_nudge_before_a_turn()
   test_following()
   test_crossing()
   test_pedestrians()
