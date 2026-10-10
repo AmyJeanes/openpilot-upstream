@@ -8,7 +8,7 @@ from opendbc.car.structs import car
 from openpilot.cereal import messaging
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.controls.lib.longitudinal_planner import A_CRUISE_MIN, LongitudinalPlanner, get_nav_speed_cap
+from openpilot.selfdrive.controls.lib.longitudinal_planner import NAV_A_CRUISE_MIN, LongitudinalPlanner, get_nav_speed_cap
 from openpilot.selfdrive.navd.planner import slow_for
 
 SERVICES = ('carControl', 'carState', 'controlsState', 'vehicleParameters', 'radarState', 'modelV2', 'selfdriveState', 'navSpeed')
@@ -103,7 +103,7 @@ def test_cap_lowers_speed_within_cruise_limits():
     speeds.append(d.step())
     accels.append(d.planner.output_a_target)
   assert abs(speeds[-1] - 8.0) < 0.2
-  assert min(accels) >= A_CRUISE_MIN - 1e-3
+  assert min(accels) >= NAV_A_CRUISE_MIN - 1e-3
   assert np.max(np.abs(np.diff(accels))) / DT_MDL < 2.0  # jerk-limited, no step
 
 
@@ -124,7 +124,7 @@ def test_turn_approach_and_release():
   assert max(speeds) < 15.05
   before = np.array(speeds[:int(np.argmin(speeds))])
   assert np.all(np.diff(before) < 1e-3)  # slows without surging between
-  assert min(accels) >= A_CRUISE_MIN - 1e-3
+  assert min(accels) >= NAV_A_CRUISE_MIN - 1e-3
   assert speeds[-1] > 14.5  # released after the turn
 
 
