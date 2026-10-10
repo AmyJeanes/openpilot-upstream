@@ -255,12 +255,15 @@ def curve(radius: float, angle: float, ours: int = 2, back: int = 2, **kw) -> Ro
 
 
 def junction_turn(side: str = "left", lead: float = 200.0, tail: float = 150.0, ours: int = 2, back: int = 2,
-                  stop: str | None = "stop", stop_back: float = 12.0) -> Route:
-  """North `lead` m to a junction node, then a square turn and `tail` m on; a stop line `stop_back` m before it."""
-  pts = line((lead, 0.0), (tail, 90.0 if side == "left" else -90.0))
+                  stop: str | None = "stop", stop_back: float = 12.0, angle: float = 90.0, sec: Section | None = None,
+                  out: Section | None = None) -> Route:
+  """North `lead` m to a junction node, then a turn of `angle` deg (square by default) and `tail` m on; a stop line
+  `stop_back` m before it. The roads' cross-sections: `sec` in (ours and back lanes by default) and `out` out (as in)."""
+  pts = line((lead, 0.0), (tail, angle if side == "left" else -angle))
   corner = int(round(lead / 10.0))
-  return made_route(pts, section(ours, back), junctions=[corner], turns={corner: LEFT if side == "left" else RIGHT},
-                    stops=[(lead - stop_back, stop)] if stop else [])
+  sec = sec or section(ours, back)
+  return made_route(pts, [sec] * corner + [out or sec] * (len(pts) - 1 - corner), junctions=[corner],
+                    turns={corner: LEFT if side == "left" else RIGHT}, stops=[(lead - stop_back, stop)] if stop else [])
 
 
 def start_pose(route: Route, lane: float, along: float = 0.0) -> tuple[float, float, float]:
