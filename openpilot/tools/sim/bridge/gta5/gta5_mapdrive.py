@@ -25,16 +25,22 @@ curvature's envelope at the style's lateral acceleration and lateral jerk, nav's
 dwell), give way lines (slow, then on), traffic lights (no state to read: driven through and marked light_unknown +-5 s)
 and a gentle arrival stop_before m short of the end. Other vehicles: one whose body comes within LEAD_SIDE of ours along
 the path ahead (in a turn too) is followed (the intelligent driver model's braking, by the style's headway) or stopped
-behind, LEAD_STOP short; before a junction or turn the car waits while a moving one's way (straight on at its speed)
-crosses ours within CROSS_GAP s of when we'd be there; and it's no faster than stops for one at the edge of what the
+behind, LEAD_STOP short, but a driven one standing across our way (side or head on) is no lead: it's stopped for and
+waited for while it moves, the trip ending after DEADLOCK_WAIT s (it may be waiting for us, and the car can't back off);
+before a junction or turn the car waits while a moving one's way (straight on at its speed) crosses ours within
+CROSS_GAP s of when we'd be there, at the junction's signal or give way line where it can still stop there, else
+CROSS_STOP short of that way; stopped in a junction it's held where it is (not crept on into the lanes) for the nearest
+lane's crosser, one slowed or standing beside our way, and those up to CROSS_T_IN s off, a lapse in them kept
+CROSS_KEEP_IN s; and it's no faster than stops for one at the edge of what the
 plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Pedestrians
 (nearby's "p") likewise: one within PED_SIDE of our body along the path is stopped behind, and one walking across it
 (anywhere, PED_T s on) waited for, braking however late; where the plugin lists none, one it counts just ahead
 (traffic.peds) is braked to a stop for. Near a junction or turn one within PED_KERB of our body beside the path (waiting
 at the kerb, maybe for a light of theirs we can't see), or one anywhere heading for it, caps the speed at what could
 still stop short of where they'd step in (ped_kerb). Whether a stop can still be made is judged by what the game
-delivers (DECEL_REAL), not what's commanded (DECEL_MAX). A parked vehicle (no one at its wheel, standing) whose body
-comes within nudge_clear (0.5) m of ours along the path is passed within our own lane (_nudge): the path shifted away from it to
+delivers (DECEL_REAL), not what's commanded (DECEL_MAX). A parked vehicle (no one at its wheel, standing), or a driven
+one standing across our way, whose body comes within nudge_clear (0.5) m of ours along the path is passed within our own
+lane (_nudge): the path shifted away from it to
 nudge_want (0.8) m where the lane has room, at least nudge_clear, held from NUDGE_MARGIN before its body to after it and
 eased in and out (minimum jerk) over NUDGE_EASE_T s at the speed it's passed at, slower the tighter the pass; our body
 kept CLAMP_MARGIN in from the lane's edges (the plan clamp's lane room; where that's no guide, _fill_room's from the
@@ -42,7 +48,8 @@ road's sections or our lane's edges carried across a junction: never into a lane
 centre line, and none through a turn). Where there's no room for that, or
 it's seen too late to ease out, it's stopped behind as before. Each is a `nudge` event. Aborts (dev >
 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s, held by a vehicle for WAIT_MAX s
-with none moving (PARKED_WAIT s by a parked one), lateral acceleration over 4.5, the driver's input, a failed plan) brake
+with none moving (PARKED_WAIT s by a parked one, DEADLOCK_WAIT s by one across our way), lateral acceleration over 4.5,
+the driver's input, a failed plan) brake
 to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
 for the map-fix work: kerb_contact (past a road's kerbs, or into a turn's corner kerb, from its legs' cross-sections),
 gta_edge (the plan's lane near GTA's road edge where the map's road is wider), lane_disagree, tracking_saturated,
@@ -68,7 +75,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
-           "ped", "nudge", "ped_kerb")
+           "ped", "nudge", "ped_kerb", "blocked")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -131,6 +138,8 @@ RANGE_STOP = 1.0  # m short of a vehicle at the range's end the range cap stops 
 RANGE_BODY = 2.5  # m of its body before its middle (which the plugin's reach is to)
 WAIT_MAX = 60.0  # s held by a vehicle in the way (none moving) before the trip ends
 PARKED_WAIT = 10.0  # s, by a parked one (no one in its driver's seat)
+DEADLOCK_WAIT = 20.0  # s, by a driven one standing across our way (it may be waiting for us: we can't back off)
+ACROSS_ANGLE = 35.0  # deg off our way a standing vehicle's heading is, at least, for it to be across our way
 LEAD_MOVING = 0.5  # m/s: a vehicle in the way going faster is moving on
 CROSS_MOVING = 2.0  # m/s: a slower vehicle isn't crossing
 CROSS_T = 6.0  # s ahead a crossing vehicle's way is predicted (straight on at its speed)
@@ -139,6 +148,12 @@ CROSS_ANGLE = 25.0  # deg off our way at least, for a crossing
 CROSS_NEAR = 25.0  # m from a junction node or turn the crossing may be, to be held for
 CROSS_STOP = 2.0  # m short of its way we stop at
 CROSS_KEEP = 0.5  # s a hold is kept after the crossing last looked likely
+CROSS_KEEP_IN = 1.5  # s, stopped in a junction (a crosser flickering at the edge of what's looked at isn't a gap)
+CROSS_SLOW = 3.0  # m/s we're slower than, in a junction, for its crossing holds (_crossing)
+CROSS_T_IN = 10.0  # s ahead a crossing vehicle's way is predicted then: time to clear the junction from a standstill
+CROSS_BESIDE = 1.0  # m beside our body a slowed crosser may stand, in a junction, to be held for
+JUNCTION_IN = 25.0  # m past a stop line our front bumper is in its junction for
+JUNCTION_NODE = 10.0  # m from a junction node, likewise
 # pedestrians (the plugin's nearby "p": their places and velocities, a body PED_HALF m either way of each)
 PED_HALF = 0.3  # m
 PED_SIDE = 1.0  # m beside our body a pedestrian's may come before it's in the way (they step about)
@@ -1623,9 +1638,25 @@ class MapDriver:
       th = self.theta[j]
       v_along = max(float(car["vel"] @ np.array([math.cos(th), math.sin(th)])), 0.0)
       side = 0.0 if across else float(right[near][np.argmin(np.abs(right[near]))])
+      car["across_way"] = self._across(car, th)
+      car["crosswise"] = car["across_way"] and car["driven"] and float(np.hypot(*car["vel"])) <= LEAD_MOVING
       if best is None or gap < best[0]:
         best = (gap, v_along, car, side)
     return best
+
+  @staticmethod
+  def _across(car: dict, th: float) -> bool:
+    """Whether a vehicle's body heads across our way (side on or head on to the path's heading `th`), not along it."""
+    if car.get("ped"):
+      return False
+    fwd = car["c"][3] - car["c"][0]
+    return abs(wrap(math.degrees(math.atan2(fwd[1], fwd[0]) - th))) > ACROSS_ANGLE
+
+  def _crosswise(self, car: dict, th: float) -> bool:
+    """Whether a vehicle is a driven one standing still across our way (as one waiting at a crossing's line, or swinging
+    wide through a turn), not one going our way in our lane: an obstacle to pass or wait for while it moves, not a lead
+    to queue behind."""
+    return bool(car["driven"]) and float(np.hypot(*car["vel"])) <= LEAD_MOVING and self._across(car, th)
 
   def _visible(self) -> float:
     """m of path ahead of our front bumper inside the box the plugin reports vehicles within (reach ahead of our
@@ -1648,9 +1679,13 @@ class MapDriver:
   def _crossing(self, t: float, v: float) -> tuple[float, dict] | None:
     """A moving vehicle whose way (straight on at its speed, CROSS_T s) crosses ours near a junction or turn ahead
     within CROSS_GAP s of when we'd be there, or a walking pedestrian's (PED_T s, within PED_SIDE of our body) anywhere
-    along the path: (m from our front bumper to where we'd stop for it, details); None."""
+    along the path: (m from our front bumper to where we'd stop for it, details); None. In a junction, slow (_in_junction):
+    the nearest lane's crosser held for, not the farthest's: one whose way meets ours beside us held where we are, those
+    up to CROSS_T_IN s off (clearing the junction from a standstill takes longer than CROSS_T), and one slowed or stopped
+    beside our way (_slowed_across)."""
     if not self.cars:
       return None
+    inside = v < CROSS_SLOW and self._in_junction()
     # s for the car to go on from here: speeding up from v at the style's accel, no faster than the profile
     sp = self.s_path
     i0 = int(np.searchsorted(sp, self.s))
@@ -1666,8 +1701,12 @@ class MapDriver:
       ped = bool(car.get("ped"))
       speed = float(np.hypot(*car["vel"]))
       if speed < (PED_MOVING if ped else CROSS_MOVING):
+        if inside and not ped and car["driven"]:
+          slowed = self._slowed_across(car, t)
+          if slowed is not None and (best is None or slowed[0] < best[0]):
+            best = slowed
         continue
-      times = np.arange(0.0, (PED_T if ped else CROSS_T) + 1e-6, 0.25)
+      times = np.arange(0.0, (PED_T if ped else CROSS_T_IN if inside else CROSS_T) + 1e-6, 0.25)
       pts = self._outline(self._car_now(car, t))
       along, right = self._place(np.concatenate([pts + car["vel"] * dt for dt in times]), LEAD_AHEAD)
       side = self.half_width + (PED_SIDE if ped else LEAD_SIDE)
@@ -1677,8 +1716,12 @@ class MapDriver:
       if not hits:
         continue
       first = min(h[1] for h in hits)
-      if first < self.s + self.front - LEAD_BESIDE or not (ped or self._near_crossing(first)):
-        continue  # in our way already (a lead), or not where ways cross
+      if first < self.s + self.front - LEAD_BESIDE:
+        if not (inside and not ped and first > self.s - self.rear):
+          continue  # in our way already: a lead
+        # in a junction, its way meets ours beside us: held where we are, not crept on across its lane
+      elif not (ped or self._near_crossing(first)):
+        continue  # not where ways cross
       j = int(np.clip(np.searchsorted(self.s_path, first), 0, len(self.s_path) - 1))
       th = self.theta[j]
       angle = abs(wrap(math.degrees(math.atan2(car["vel"][1], car["vel"][0]) - th)))
@@ -1697,6 +1740,45 @@ class MapDriver:
         best = (d, {"at": round(first, 1), "in": round(t_in, 1), "out": round(t_out, 1), "us": round(us_in, 1),
                     "angle": round(angle), "speed": round(speed, 1), **({"ped": True} if ped else {})})
     return best
+
+  def _slowed_across(self, car: dict, t: float) -> tuple[float, dict] | None:
+    """A driven vehicle slowed below CROSS_MOVING (as GTA's AI does for our nose in its lane) side on to our way within
+    CROSS_BESIDE of our body ahead: (m from our front bumper to where we'd stop for it, details) as _crossing's; None."""
+    pts = self._outline(self._car_now(car, t))
+    along, right = self._place(pts, LEAD_AHEAD)
+    near = ~np.isnan(along) & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + CROSS_BESIDE)
+    if not near.any():
+      return None
+    first = float(np.min(along[near]))
+    if first < self.s - self.rear:
+      return None
+    j = int(np.clip(np.searchsorted(self.s_path, first), 0, len(self.s_path) - 1))
+    fwd = car["c"][3] - car["c"][0]
+    angle = abs(wrap(math.degrees(math.atan2(fwd[1], fwd[0]) - self.theta[j])))
+    if angle < CROSS_ANGLE or angle > 180.0 - CROSS_ANGLE:
+      return None  # along our way: a lead, or oncoming
+    return (first - self.s - self.front - CROSS_STOP,
+            {"at": round(first, 1), "angle": round(angle), "speed": round(float(np.hypot(*car["vel"])), 1), "slowed": True})
+
+  def _in_junction(self) -> bool:
+    """Whether our front bumper is in a junction: past a stop line within JUNCTION_IN, or within JUNCTION_NODE of a node."""
+    f = self.s + self.front
+    if any(x["done"] and 0.0 <= f - x["s"] <= JUNCTION_IN for x in self.stops):
+      return True
+    along = float(np.interp(f, self.s_path, self.route_s))
+    return any(abs(a - along) < JUNCTION_NODE for a in self.route.junctions)
+
+  def _line_short_of(self, at: float, v: float) -> float | None:
+    """m from our front bumper's place to where we'd stop for the signal or give way line not yet passed short of path m
+    `at`, at its junction (within JUNCTION_IN), if there's room to stop there; None. (A stop sign's line has its own full
+    stop.) Kept to the line, not the place, so a signal's state can drive it too."""
+    for x in self.stops:
+      if x["done"] or x["kind"] not in ("lights", "give_way") or not 0.0 <= at - x["s"] <= JUNCTION_IN:
+        continue
+      d = x["target"] - self.s
+      if d + 1.0 >= v * STOP_LAG + v * v / (2 * DECEL_REAL):
+        return d
+    return None
 
   def _ped_kerb(self, t: float, v: float, look: float) -> tuple[float, dict] | None:
     """The speed (m/s) from which the car could stop CROSS_STOP short of where a pedestrian beside the path ahead would
@@ -1830,9 +1912,9 @@ class MapDriver:
       self.room_tried[i0:i1 + 1] = True
 
   def _nudge(self, v: float, t: float):
-    """Each parked vehicle (no one at its wheel, standing) newly in the way along the path ahead: the path shifted past it
-    within our lane (_nudge_for, _nudge_add), else left for the lead to stop behind; a nudge event either way. Shifts and
-    vehicles passed are dropped."""
+    """Each parked vehicle (no one at its wheel, standing), or driven one standing across our way, newly in the way along
+    the path ahead: the path shifted past it within our lane (_nudge_for, _nudge_add), else left for the lead to stop
+    behind; a nudge event either way. Shifts and vehicles passed are dropped."""
     if not self.c["nudge"] or self.path0 is None:
       return
     for g in self.nudge_groups:
@@ -1841,9 +1923,14 @@ class MapDriver:
     self.nudge_groups = [g for g in self.nudge_groups if self.s <= g["end"]]
     self.nudge_blocked = [b for b in self.nudge_blocked if self.s <= b["end"]]
     for car in self.cars or []:
-      if car.get("ped") or car["driven"] or float(np.hypot(*car["vel"])) > LEAD_MOVING:
+      if car.get("ped") or float(np.hypot(*car["vel"])) > LEAD_MOVING:
         continue
       c = car["c"].mean(axis=0)
+      if car["driven"]:  # driven: passed only standing across our way, never one queued in our lane
+        along, _ = self._place(c[None], LEAD_AHEAD + self.front + 2 * FRONT + 2.0, self.path0)
+        j = int(np.clip(np.searchsorted(self.s_path, along[0]), 0, len(self.s_path) - 1)) if not np.isnan(along[0]) else None
+        if j is None or not self._crosswise(car, float(self.theta0[j])):
+          continue
       seen = [e["c"] for g in self.nudge_groups for e in g["entries"]] + [b["c"] for b in self.nudge_blocked]
       if any(float(np.hypot(*(x - c))) < NUDGE_SAME for x in seen):
         continue
@@ -1852,7 +1939,7 @@ class MapDriver:
         continue
       why = e.get("why") or self._nudge_add(e)
       rec = {"ok": why is None, "pos": [round(float(c[0]), 1), round(float(c[1]), 1)], "at": e["at"], "right": e["right"],
-             "need": e["need"]}
+             "need": e["need"], **({"driven": True} if car["driven"] else {})}
       if why is None:
         rec.update(shift=round(e["shift"], 2), clear=round(e["clear"], 2), ease=[round(e["L_in"], 1), round(e["L_out"], 1)],
                    v=round(e["v"], 1), v_ease=round(e["v_ease"], 1))
@@ -2193,12 +2280,21 @@ class MapDriver:
       if cap < vp:
         vp, reason = cap, "range"
       cross = self._crossing(t, v)
+      if cross is not None and not cross[1].get("ped"):
+        line = self._line_short_of(cross[1]["at"], v)  # held at the junction's line, not in the lanes before the crosser's
+        if line is not None and line < cross[0]:
+          cross = (line, {**cross[1], "line": True})
+      held_in = v < STOPPED and self._in_junction()  # stopped in a junction: held on longer, and where we are
+      keep = CROSS_KEEP_IN if held_in else CROSS_KEEP
       if cross is not None:
         self.cross_hold = (s + self.front + cross[0], t, cross[1])
-      elif self.cross_hold is not None and t - self.cross_hold[1] < CROSS_KEEP and s + self.front < self.cross_hold[0]:
+      elif self.cross_hold is not None and t - self.cross_hold[1] < keep and \
+           s + self.front < self.cross_hold[0] + (CROSS_STOP + 1.0 if held_in else 0.0):
         cross = (self.cross_hold[0] - s - self.front, self.cross_hold[2])  # held on through a moment's doubt
       if cross is not None:
         d, info = cross
+        if held_in:  # stopped in a junction: not crept on towards the crosser's lane, each hold a little further in
+          d = min(d, 0.0)
         cap = math.sqrt(2 * b * 0.8 * max(d - 0.3, 0.0))
         stop_d = min(stop_d, d)
         if cap < vp:
@@ -2216,11 +2312,15 @@ class MapDriver:
         gap, vl, car, side = lead
         self.lead_gap, self.lead_right, self.lead_driven = gap, side, car["driven"]
         a_lead = self._follow(gap, vl, v)
+        if held_in and car.get("across_way"):
+          a_lead = min(a_lead, HOLD_ACCEL)  # likewise for one across our way ahead: held where we are
         if a_lead < min(need, (vp * vp - v * v) / (2.0 * look)):
           cap = math.sqrt(vl * vl + 2 * b * max(gap - LEAD_STOP - st["headway"] * vl, 0.0))  # what it holds us to, for the record
-          vp, reason, phase, need = min(cap, vp), "ped" if car.get("ped") else "lead", "follow", a_lead
+          across = bool(car.get("crosswise"))  # standing across our way: waited for while it moves, not queued behind
+          vp, reason, phase, need = (min(cap, vp), "ped" if car.get("ped") else "blocked" if across else "lead",
+                                     "yield" if across else "follow", a_lead)
           detail = {"gap": round(gap, 1), "speed": round(vl, 1), "right": round(side, 2), "driven": car["driven"],
-                    **({"ped": True} if car.get("ped") else {})}
+                    **({"ped": True} if car.get("ped") else {}), **({"across": True} if across else {})}
           holder = car
       # a plugin whose nearby has no pedestrians still counts those just ahead (traffic.peds, PED_BOX): stop for them
       peds = int((state.get("traffic") or {}).get("peds") or 0)
@@ -2233,10 +2333,12 @@ class MapDriver:
     held = phase in ("follow", "yield") and v < STOPPED and not (phase == "follow" and float(np.hypot(*holder["vel"])) > LEAD_MOVING)
     self.held_since = (self.held_since if self.held_since is not None else t) if held else None
     parked = phase == "follow" and holder["driven"] is False
-    wait = PARKED_WAIT if parked else WAIT_MAX
+    # one standing across our way may be waiting for us to clear its way, which we can't (no reverse): a deadlock
+    blocked = phase == "yield" and (bool(holder.get("crosswise")) or bool(detail.get("slowed")))
+    wait = PARKED_WAIT if parked else DEADLOCK_WAIT if blocked else WAIT_MAX
     if self.held_since is not None and t - self.held_since > wait:
-      who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle"
-      self._abort(f"held {wait:.0f} s by a {who} in the way", t, state.get("pos"))
+      who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle standing across our way" if blocked else "vehicle"
+      self._abort(f"held {wait:.0f} s by a {who}" + (" (deadlock)" if blocked else " in the way"), t, state.get("pos"))
       return self.a
     self._set(phase, t, **detail)
     self.v_prof, self.reason = min(vp_here, vp), reason
