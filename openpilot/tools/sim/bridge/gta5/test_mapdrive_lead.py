@@ -6,7 +6,8 @@ car of mapdrive_sim.py: run as a script.
   touch, braking no harder than the style's decel where it was seen in time; lead_gap recorded
 - a vehicle parked partly in our lane: stopped behind it; one parked clear of the lane, or in the oncoming lane through a
   turn, driven past
-- held by a vehicle that stays in the way: the trip ends after WAIT_MAX s, and nothing leaves the abort
+- held by a vehicle that stays in the way: the trip ends after WAIT_MAX s (PARKED_WAIT s for a parked one), and nothing
+  leaves the abort; behind a queue that moves on now and then, however long it all takes, it's driven to arrival
 - a slower vehicle ahead: followed at its speed, LEAD_STOP + the style's headway behind, without hunting; one braking to
   a stop: stopped behind it
 - a vehicle crossing the junction ahead as we'd reach it: held for, then on; one that's through first, or comes long
@@ -19,7 +20,7 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LEAD_STOP, MAPX_COLUMNS, WAIT_MAX, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LEAD_STOP, MAPX_COLUMNS, PARKED_WAIT, WAIT_MAX, MapDriver
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -99,7 +100,29 @@ def test_held_ends_the_trip():
   r = ms.straight(600)
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 120.0)], reach=REACH, seconds=150)
   ended(trip, f"held {WAIT_MAX:.0f} s by a vehicle in the way")
+  assert trip.events[-1]["phase"] == "end" and trip.md.info()["leadDriven"] is True, trip.events[-1]
+  # parked (no one at its wheel, mdlead trips 2 and 3 by the camera): it won't move, so PARKED_WAIT s
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 120.0, driven=False)], reach=REACH, seconds=150)
+  ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+  t, v = trip.col(0), trip.col(4)
+  stopped = t[(t > 5.0) & (v < 0.25)][0]
+  assert PARKED_WAIT < trip.md.aborts[0]["t"] - stopped < PARKED_WAIT + 3.0, (trip.md.aborts[0]["t"], stopped)
+  follow = phases(trip, "follow")[0]
+  assert follow["driven"] is False and abs(follow["right"]) < 0.1, follow
   print("held ends the trip: ok")
+
+
+def test_queue_that_moves():
+  # the map driver can't see lights: behind a queue at one, it waits as long as the queue moves on now and then, each time
+  # less than WAIT_MAX s still but longer in all; the lead creeps on 0.3 m (too little for us to move), then 4 m, then goes
+  r = ms.straight(600)
+  lead = parked(r, 1, 120.0, start=45.0, accel=1.0, until=0.7,
+                later=((45.7, -2.0, 0.0), (95.0, 1.5, 2.5), (97.0, -2.0, 0.0), (140.0, 1.5, 12.0)))
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[lead], reach=REACH, seconds=240)
+  t, v = trip.col(0), trip.col(4)
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and not trip.md.aborts, (trip.finished, trip.md.aborts)
+  assert (v < 0.25)[(t > 20.0) & (t < 140.0)].mean() > 0.9, "held most of 2 min"
+  print("queue that moves: ok")
 
 
 def test_following():
@@ -168,6 +191,7 @@ if __name__ == "__main__":
   test_stopped_in_a_turn()
   test_parked_partly_in_lane()
   test_held_ends_the_trip()
+  test_queue_that_moves()
   test_following()
   test_crossing()
   test_range()

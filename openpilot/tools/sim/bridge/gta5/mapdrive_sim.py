@@ -26,8 +26,8 @@ NEARBY = {"side": 15.0, "behind": 45.0, "ahead": 15.0}  # m around the car the p
 @dataclass
 class Vehicle:
   """Another vehicle: its middle (x, y), game heading (deg counterclockwise from north) and speed along it (m/s),
-  which from `start` s changes at `accel` (m/s^2) until it reaches `until` m/s; its model's bounds and whether anyone
-  drives it."""
+  which from `start` s changes at `accel` (m/s^2) until it reaches `until` m/s, then by each of `later`'s (start,
+  accel, until) from its start; its model's bounds and whether anyone drives it."""
   x: float
   y: float
   heading: float
@@ -37,10 +37,15 @@ class Vehicle:
   start: float = 0.0
   dims: tuple = CAR_DIMS
   driven: bool = True
+  later: tuple = ()
 
   def advance(self, t: float, secs: float):
-    if t >= self.start and self.accel:
-      self.speed = max(self.speed + self.accel * secs, self.until) if self.accel < 0 else min(self.speed + self.accel * secs, self.until)
+    start, accel, until = self.start, self.accel, self.until
+    for change in self.later:
+      if t >= change[0]:
+        start, accel, until = change
+    if t >= start and accel:
+      self.speed = max(self.speed + accel * secs, until) if accel < 0 else min(self.speed + accel * secs, until)
     h = math.radians(self.heading)
     self.x += -math.sin(h) * self.speed * secs
     self.y += math.cos(h) * self.speed * secs
