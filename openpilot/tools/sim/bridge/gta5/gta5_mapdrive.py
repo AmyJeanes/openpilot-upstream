@@ -65,6 +65,7 @@ The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal",
 drive exactly on the line; rear_axle (m behind the car's position, default half the state's wheelBase) 0 steers from the
 car's middle; range_share 1 drops the range cap; nudge false stops behind every parked vehicle in the way."""
 import bisect
+import functools
 import hashlib
 import math
 import os
@@ -214,6 +215,8 @@ CORNER_NEAR = 20.0  # m from the turn's point the kerb lines' corner may be
 CORNER_INSIDE = 0.5  # m the plan keeps inside each leg's kerb line, or the line isn't the kerb
 CORNER_SPAN = 40.0  # m either side of a turn's point checked against its corner kerb
 KERB_RADIUS = 6.0  # m: a junction's corner kerbs taken as rounded this much (the map has no corner geometry)
+FAR_RADIUS = 0.5  # m a far-side corner taken as rounded: a road's far edge ends at whatever stands there (a parapet's end)
+BODY_STEP = 0.2  # m between the points along our body's sides tested against a corner kerb
 EDGE_WIDER = 0.75  # m the map's road edge may lie past GTA's before a lane near GTA's edge is suspect
 EDGE_CLEAR = 0.8  # m from the car's side to GTA's road edge (its link's lanes) below which the plan is too near it
 JUNCTION_CLEAR = 25.0  # m from a junction node, where cross-sections don't describe the road, kerbs aren't checked
@@ -416,6 +419,15 @@ def wander(s: np.ndarray, rng: random.Random, sigma: float, spacing: float) -> t
   e = t * t * (3 - 2 * t)
   kn = np.array(knots)
   return kn[k] + (kn[k + 1] - kn[k]) * e, [round(v, 3) for v in knots]
+
+
+@functools.lru_cache(maxsize=16)
+def _outline(front: float, rear: float, side: float) -> np.ndarray:
+  """Points round a body's outline (m forward of its origin, m left), its corners and at most BODY_STEP apart."""
+  xs = np.linspace(-rear, front, int(math.ceil((front + rear) / BODY_STEP)) + 1)
+  ys = np.linspace(-side, side, int(math.ceil(2 * side / BODY_STEP)) + 1)[1:-1]
+  return np.vstack([np.stack([xs, np.full_like(xs, side)], axis=1), np.stack([xs, np.full_like(xs, -side)], axis=1),
+                    np.stack([np.full_like(ys, front), ys], axis=1), np.stack([np.full_like(ys, -rear), ys], axis=1)])
 
 
 def soften(p: np.ndarray, kmax: float, iters: int = 400) -> tuple[np.ndarray, list[tuple[int, float]]]:
@@ -1378,12 +1390,13 @@ class MapDriver:
       self._anomaly("jog_change", t, route_point(route, s0), float(np.interp(s0, self.route_s, self.s_path)),
                     span=[round(s0, 1), round(s1, 1)])
     for c in self.corners:  # the plan cutting a junction's corner kerb
-      hits = [i for i in range(len(self.path)) if abs(self.route_s[i] - c["along"]) < CORNER_SPAN and
-              (self._corner_hit(c, self.path[i], float(self.theta[i]), self.body) or 0.0) > KERB_MARGIN]
-      if hits:
-        i = hits[len(hits) // 2]
+      near = np.flatnonzero(np.abs(np.asarray(self.route_s[:len(self.path)]) - c["along"]) < CORNER_SPAN)
+      depth = self._corner_hits(c, self.path[near], np.asarray(self.theta, float)[near], self.body)
+      hits = near[np.nan_to_num(depth) > KERB_MARGIN]
+      if len(hits):
+        i = int(hits[len(hits) // 2])
         self._anomaly("kerb_contact", t, self.path[i], float(self.s_path[i]), planned=True, corner=c["side"],
-                      depth=round(max(self._corner_hit(c, self.path[j], float(self.theta[j]), self.body) for j in hits), 2),
+                      depth=round(float(np.nanmax(depth)), 2),
                       corner_at=[round(float(v), 1) for v in c["corner"]])
     for st in self.stops:
       after = junctions[junctions > st["along"] - 1.0] if len(junctions) else junctions
@@ -1467,21 +1480,21 @@ class MapDriver:
 
   def _kerb(self, sec, side: str) -> tuple[float, float]:
     """m right of the line of a cross-section's kerb on `side`, and how rounded its corner is taken: the road's edge on
-    the near side; on the far side our own carriageway's edge where it's a median's (nothing coming the other way, or
-    MEDIAN_GAP between the directions), MEDIAN_RADIUS; where the other way's lanes run beside ours, the road's far edge,
-    KERB_RADIUS (crossing the oncoming lanes is the turn, cutting past the road's edge isn't)."""
+    the near side, KERB_RADIUS; on the far side our own carriageway's edge where MEDIAN_GAP lies between the directions,
+    MEDIAN_RADIUS; else the road's far edge (nothing coming the other way, or crossing the oncoming lanes is the turn,
+    cutting past the road's edge isn't), FAR_RADIUS."""
     near = side == ("right" if self.c["drive_on_right"] else "left")
     if near:
       return (sec.edges[1] if side == "right" else sec.edges[0]), KERB_RADIUS
     if not any(sp.heading == -1 for sp in sec.spans):
-      return (sec.edges[1] if side == "right" else sec.edges[0]), MEDIAN_RADIUS
+      return (sec.edges[1] if side == "right" else sec.edges[0]), FAR_RADIUS
     ours = sec.ours
     if side == "left" and sec.first > 0 and ours[0].left - sec.spans[sec.first - 1].right >= MEDIAN_GAP:
       return ours[0].left, MEDIAN_RADIUS
     beyond = sec.first + sec.lanes
     if side == "right" and beyond < len(sec.spans) and sec.spans[beyond].left - ours[-1].right >= MEDIAN_GAP:
       return ours[-1].right, MEDIAN_RADIUS
-    return (sec.edges[1] if side == "right" else sec.edges[0]), KERB_RADIUS
+    return (sec.edges[1] if side == "right" else sec.edges[0]), FAR_RADIUS
 
   def _road_in_block(self, route, a: float, b: float, ka, na, kb, nb, side: str) -> bool:
     """Whether the map's kerb on `side` between a and b m along (the route's cross-sections there, every 2 m) reaches
@@ -1506,24 +1519,22 @@ class MapDriver:
   def _corner_hit(c: dict, pos, theta: float, body: tuple[float, float, float] = (FRONT, FRONT, HALF_WIDTH)) -> float | None:
     """How deep (m) the car (its origin at pos, heading theta radians from east; body: m to its front, rear and side)
     reaches into a corner's kerb block, the block's corner rounded by its radius; None where it doesn't."""
-    f = np.array([math.cos(theta), math.sin(theta)])
-    lat = np.array([-f[1], f[0]])
+    d = MapDriver._corner_hits(c, np.asarray(pos, float)[None, :2], np.array([theta], float), body)[0]
+    return None if np.isnan(d) else float(d)
+
+  @staticmethod
+  def _corner_hits(c: dict, pos: np.ndarray, theta: np.ndarray, body: tuple[float, float, float]) -> np.ndarray:
+    """_corner_hit at each of n places (pos (n, 2), theta (n,)), nan where it doesn't reach in: by points round the
+    body's outline BODY_STEP apart, as the block's corner can stand beside its flank between its corners."""
+    out = _outline(*body)
+    f = np.stack([np.cos(theta), np.sin(theta)], axis=1)
+    lat = np.stack([-f[:, 1], f[:, 0]], axis=1)
+    q = pos[:, None, :] + f[:, None, :] * out[None, :, :1] + lat[:, None, :] * out[None, :, 1:]
+    d1, d2 = (q - c["ka"]) @ c["na"], (q - c["kb"]) @ c["nb"]
     r = c.get("radius", KERB_RADIUS)
-    deepest = None
-    for fx in (body[0], -body[1]):
-      for lx in (body[2], -body[2]):
-        q = np.asarray(pos, float) + f * fx + lat * lx
-        d1, d2 = float((q - c["ka"]) @ c["na"]), float((q - c["kb"]) @ c["nb"])
-        if d1 <= 0 or d2 <= 0:
-          continue
-        if d1 < r and d2 < r:
-          depth = r - math.hypot(r - d1, r - d2)  # into the rounded corner
-          if depth <= 0:
-            continue
-        else:
-          depth = min(d1, d2)
-        deepest = depth if deepest is None else max(deepest, depth)
-    return deepest
+    depth = np.where((d1 < r) & (d2 < r), r - np.hypot(r - d1, r - d2), np.minimum(d1, d2))  # into the rounded corner
+    depth = np.where((d1 > 0) & (d2 > 0) & (depth > 0), depth, -np.inf).max(axis=1)
+    return np.where(np.isfinite(depth), depth, np.nan)
 
   # *** the plan kept on its lane ***
 
@@ -1632,15 +1643,14 @@ class MapDriver:
     m = CLAMP_MARGIN
     for c in self._corners(route, line, along):
       # within its legs: beyond them the road may bend away from their kerb lines
-      for i in np.flatnonzero(np.abs(along - c["along"]) < c["leg"]):
-        d = self._corner_hit(c, line[i], float(th[i]), (front + m, rear + m, hw + m))
-        if d is not None and d > 0.05:
-          d = min(d, CLAMP_MAX)
-          if c["side"] == "right":
-            hi[i] = min(hi[i], -d)
-          else:
-            lo[i] = max(lo[i], d)
-          why[i] = "corner"
+      near = np.flatnonzero(np.abs(along - c["along"]) < c["leg"])
+      depth = np.minimum(np.nan_to_num(self._corner_hits(c, line[near], th[near], (front + m, rear + m, hw + m))), CLAMP_MAX)
+      for i, d in zip(near[depth > 0.05], depth[depth > 0.05], strict=True):
+        if c["side"] == "right":
+          hi[i] = min(hi[i], -d)
+        else:
+          lo[i] = max(lo[i], d)
+        why[i] = "corner"
     both = (lo > 0) & (hi < 0)  # pushed both ways: halfway
     need = np.where(both, (np.where(both, lo, 0.0) + np.where(both, hi, 0.0)) / 2, np.where(lo > 0, lo, np.where(hi < 0, hi, 0.0)))
     need[: int(10.0 / STEP)] = 0.0  # where the car joins its line

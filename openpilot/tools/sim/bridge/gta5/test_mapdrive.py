@@ -348,6 +348,60 @@ def test_clamp_corners():
   print("clamp corners: ok")
 
 
+def block_clear(md, c: dict, w: float, e: float) -> float:
+  """Least gap (m) between our planned body and a square block standing w m past a corner's leg-in kerb line and e m
+  past its leg-out one; negative: how deep it reaches in."""
+  front, rear, hw = md.body
+  loc = np.array([(x, y) for x in np.linspace(-rear, front, 40) for y in np.linspace(-hw, hw, 15)])
+  best = math.inf
+  for i in np.flatnonzero(np.abs(md.route_s[:len(md.path)] - c["along"]) < 20.0):
+    f = np.array([math.cos(md.theta[i]), math.sin(md.theta[i])])
+    q = md.path[i] + loc[:, :1] * f + loc[:, 1:] * np.array([-f[1], f[0]])
+    d1, d2 = (q - c["ka"]) @ c["na"] - w, (q - c["kb"]) @ c["nb"] - e
+    inside = (d1 >= 0) & (d2 >= 0)
+    gap = -np.minimum(d1, d2)[inside].max() if inside.any() else np.where(d1 < 0, np.where(d2 < 0, np.hypot(d1, d2), -d1), -d2).min()
+    best = min(best, float(gap))
+  return best
+
+
+def test_far_corner_beside_the_flank():
+  """map1010c 015 and mdplan trip 52: a 94 deg left turn off a two-way road onto a one-way one, where the bridge's
+  parapet ends in a square block 0.35 m past the corner of the two kerb lines. Its corner sat beside the car's flank,
+  between the four corners the block test measured, and the far-side corner taken as rounded 2 m left it 0.6 m
+  outside the arc: the plan's body reached 0.5 m into it. Now the test measures the body's whole outline and a
+  far-side corner is rounded FAR_RADIUS: the plan clears it, as comfortably as the style drives."""
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, Lane, Section, Span
+  # a square block's corner 0.3 m inside the car's left flank (heading east, its origin at 0, 0), midway along it: no
+  # corner of the car is in the block
+  tip = np.array([0.0, 0.7])
+  c = {"ka": tip, "na": np.array([-1.0, 1.0]) / math.sqrt(2), "kb": tip, "nb": np.array([1.0, 1.0]) / math.sqrt(2), "radius": 0.0}
+  side_hit = MapDriver._corner_hit(c, np.zeros(2), 0.0, (2.4, 2.4, 1.0))
+  out = Section([Span(Lane(FORWARD, 3.4), -3.4 + k * 3.4, k * 3.4, 1) for k in range(2)], (-3.4, 3.4))
+  r = ms.junction_turn("left", stop=None, angle=94.0, sec=ms.section(1, 1, 6.1), out=out)
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+
+  def plan(far: float, step: float):
+    real = g.FAR_RADIUS, g.BODY_STEP
+    g.FAR_RADIUS, g.BODY_STEP = far, step
+    g._outline.cache_clear()
+    try:
+      return ms.drive(r, cfg, lane=0, seconds=80.0), MapDriver._corner_hit(c, np.zeros(2), 0.0, (2.4, 2.4, 1.0))
+    finally:
+      g.FAR_RADIUS, g.BODY_STEP = real
+      g._outline.cache_clear()
+  before, corners_hit = plan(2.0, 100.0)  # rounded 2 m, the body's four corners only
+  assert corners_hit is None and side_hit > 0.15, (corners_hit, side_hit)
+  trip, _ = plan(g.FAR_RADIUS, g.BODY_STEP)
+  md = trip.md
+  was, now = block_clear(before.md, before.md.corners[0], 0.35, 0.0), block_clear(md, md.corners[0], 0.35, 0.0)
+  assert was < -0.2 and now > 0.1, (was, now)
+  v, yaw = trip.col(4), trip.col(5)
+  assert trip.finished == "arrived" and np.abs(yaw * v).max() < md.style["a_lat"] and np.abs(md.kappa_path).max() < 0.1
+  assert all(abs(cl["push"]) < g.CLAMP_MAX for cl in md.clamps) and not kinds(md, "sharp_corner") and not kinds(md, "kerb_contact")
+  print(f"far corner beside the flank: ok (the plan's body clear of the block by {now:+.2f} m, {was:+.2f} before)")
+
+
 def lane_offsets(md, route) -> np.ndarray:
   """The plan's intent: m right of its lane's centre at each point."""
   from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import along_route, lane_at, segment_of
@@ -782,6 +836,7 @@ if __name__ == "__main__":
   test_corner_kerb()
   test_body_from_dims()
   test_clamp_corners()
+  test_far_corner_beside_the_flank()
   test_clamp_lane_and_fork()
   test_clamp_across_a_junction()
   test_collision_routes()
