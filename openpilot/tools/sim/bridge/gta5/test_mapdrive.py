@@ -400,6 +400,33 @@ def test_clamp_lane_and_fork():
   print("clamp lane and fork: ok")
 
 
+def test_clamp_across_a_junction():
+  """A junction's own sections between its nodes say little of where our lane runs (mdnudge seed 43, Autopia Pkwy:
+  the plan followed them 1.7 m left, onto the double yellow): the lane room is carried across them along the route's
+  line from the lane either side, so the plan keeps our body in the lane."""
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, Lane, Section, Span
+  road = ms.section(1, 1)  # 5.5 m lanes either side of the line: ours centred 2.75 m right
+  link = Section([Span(Lane(FORWARD, 4.0), -2.0, 2.0, 1)], (-2.0, 2.0))  # the junction's link, centred on the line
+  r = ms.made_route(ms.line((600.0, 0.0)), [road] * 30 + [link] * 2 + [road] * 28, junctions=[30, 32])  # nodes 20 m apart
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+
+  def lowest() -> float:
+    md = ms.drive(r, cfg, lane=0, seconds=0.2).md
+    along, right = g.along_route(r, md.intent, 0.0)
+    return float(right[(along > 295.0) & (along < 345.0)].min())
+  real = g.CARRY_MAX
+  g.CARRY_MAX = 0.0
+  try:
+    before = lowest()
+  finally:
+    g.CARRY_MAX = real
+  after = lowest()
+  room = LANE_W / 2 - g.HALF_WIDTH - g.CLAMP_MARGIN
+  assert before < 1.0 and after > 2.75 - room - 0.05, (before, after)
+  print(f"clamp across a junction: ok (the plan at least {after:.2f} m right of the centre line, {before:.2f} before)")
+
+
 COLLISIONS = [  # map1010b's trips that hit the kerb or the gore: spec, map driver seed, where it first touched
   ("012", "883.2,-2077.8,29.5,96,0>-250.5,-1067.2", 165189838, (187.0, -1776.9)),
   ("014", "670.0,-2893.8,5.2,0,9>1358.8,-1110.4", 375068520, (561.3, -2547.6)),
@@ -729,6 +756,7 @@ if __name__ == "__main__":
   test_body_from_dims()
   test_clamp_corners()
   test_clamp_lane_and_fork()
+  test_clamp_across_a_junction()
   test_collision_routes()
   test_start_stub_and_join()
   test_follow_slots()

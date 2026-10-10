@@ -223,6 +223,7 @@ CORNER_ZONE = 15.0  # m either side of such a turn's point
 CLAMP_EASE = 15.0  # m a push eases in and out over
 LANE_GRID = 2.0  # m between the places the lane is read at
 CLAMP_MAX = 2.5  # m a push is at most
+CARRY_MAX = 50.0  # m without a guide of its own a lane is carried across, at most (_lane_room)
 FORK_BEFORE, FORK_AFTER = 20.0, 40.0  # m before and after a fork its gore side is kept to
 FORK_ROOM = 0.3  # m from the lane's centre towards the gore at most
 # road class speeds (m/s) where the map has no limit: 65, 55, 40, 35, 30, 25, 15 mph
@@ -1576,6 +1577,21 @@ class MapDriver:
     w = int(CORNER_ZONE / LANE_GRID)
     for j in np.flatnonzero((np.abs(np.diff(centre)) > 1.0) | (width[1:] < 2 * room0 + 0.2)):
       centre[max(j - w, 0):j + w] = np.nan
+    # but across a stretch without a guide between two with one, in the same lane with no change, step, turn or jog
+    # between (a junction's own sections, which say little of where our lane runs through it: seed 43 followed them
+    # onto the centre line), the lane carried across along the route's line, the lesser room
+    for a, b in _runs(np.isnan(centre)):
+      if a == 0 or b >= n or along[b] - along[a - 1] > CARRY_MAX:
+        continue
+      s0, s1 = float(along[a - 1]), float(along[b])
+      lane0 = lane_at(keys, s0)
+      if any(abs(lane_at(keys, float(x)) - lane0) > 0.02 for x in along[a - 1:b + 1]) or any(j0 < s1 and s0 < j1 for j0, j1 in jogs) or \
+         (len(turns) and ((turns > s0 - CORNER_ZONE) & (turns < s1 + CORNER_ZONE)).any()):
+        continue
+      f = (along[a:b] - s0) / (s1 - s0)
+      centre[a:b] = centre[a - 1] + (centre[b] - centre[a - 1]) * f
+      left[a:b], right[a:b] = min(left[a - 1], left[b]), min(right[a - 1], right[b])
+      why[a:b] = ["lane"] * (b - a)
     return along, centre, left, right, why
 
   def _strays(self, route, line: np.ndarray, lanes_):
