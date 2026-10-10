@@ -1542,6 +1542,13 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
 
 # minor roads the game may leave unpainted (not unclassified: Blaine's country roads, where the files may miss paint)
 UNPAINTED_CLASSES = {'residential', 'service', 'track'}
+TEXTURED = {'residential', 'unclassified'}  # classes whose painted edge lines say a centre the files miss is painted
+
+
+def unpainted(cls, samples, least=paint_survey.UNPAINTED_SAMPLES, edges_seen=True):
+  """paint_survey.unpainted, but for a road of the TEXTURED classes the files paint edge lines along
+  (paint_survey.edges_painted): its centre line is laid in the road's texture, not missing."""
+  return paint_survey.unpainted(samples, least, edges_seen) and not (cls in TEXTURED and paint_survey.edges_painted(samples))
 
 
 def painted_lines(tags, cls, two_way, samples, why, unmarked=False):
@@ -1553,7 +1560,7 @@ def painted_lines(tags, cls, two_way, samples, why, unmarked=False):
   road = WayLanes.from_tags(tags)
   if len(road.lanes) < 2:  # no lines to draw
     return tags
-  if unmarked or (cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples)):
+  if unmarked or (cls in UNPAINTED_CLASSES and unpainted(cls, samples)):
     why['unpainted'] += 1
     return {**{k: v for k, v in tags.items() if not k.startswith('divider')}, 'lane_markings': 'no'}
   out = dict(tags)
@@ -1641,8 +1648,8 @@ def unmarked_roads(nodes, rows, samples_of):
   for wid, a, b, *_ in minor.values():
     cls, offroad = minor[wid][4], minor[wid][6]
     samples, edges = samples_of(wid, a, b), cls in UNPAINTED_CLASSES and cls != 'track' and not offroad
-    state[wid] = 'bare' if paint_survey.unpainted(samples, edges_seen=edges) else \
-      'short' if not samples or paint_survey.unpainted(samples, 1, edges) else 'painted'
+    state[wid] = 'bare' if unpainted(cls, samples, edges_seen=edges) else \
+      'short' if not samples or unpainted(cls, samples, 1, edges) else 'painted'
 
   def heading(p, q):
     return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
@@ -1761,6 +1768,11 @@ def carried_edges(nodes, ways, unread):
 
 PAINT_END = 4.0  # m at each end of a link where paint across it (stop lines, crossings) is no centre line along it
 PAINT_ALONG = 2.0  # m of a link's line at least with paint on it: a centre line there
+
+
+def bare_centre(samples) -> bool:
+  """paint_survey.centre_bare, but not on a road the files paint edge lines along (unpainted's TEXTURED)."""
+  return paint_survey.centre_bare(samples) and not paint_survey.edges_painted(samples)
 
 
 def painted_along(paint, nodes, a, b) -> bool:
@@ -2646,7 +2658,7 @@ def main():
         tags['divider:colour'] = 'white'
       defaulted.discard(wid)
     if wid in defaulted and cls in UNPAINTED_CLASSES and centre_paint is not None and \
-        paint_survey.centre_bare(link_samples(wid, a, b)) and not painted_along(centre_paint, nodes, a, b):
+        bare_centre(link_samples(wid, a, b)) and not painted_along(centre_paint, nodes, a, b):
       tags['divider'] = 'no'  # the game files paint no centre line on it (Prosperity St's bridge)
       defaulted.discard(wid)
       lines_why['no centre painted'] += 1
@@ -2656,7 +2668,7 @@ def main():
     back_road = offroad or (cls == 'unclassified' and bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF))
     if fwd == back == 1 and back_road and not median and 'divider' not in tags and 'lane_markings' not in tags and \
         centre_paint is not None and not painted_along(centre_paint, nodes, a, b) and \
-        ((wid in drawn and offroad) or paint_survey.centre_bare(link_samples(wid, a, b))):
+        ((wid in drawn and offroad) or bare_centre(link_samples(wid, a, b))):
       tags['divider'] = 'no'
       lines_why['no centre painted on a back road'] += 1
     if median and (kinds := median_kinds.get(parent.get(wid, wid))) and 'lane_markings' not in tags:

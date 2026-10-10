@@ -6,7 +6,7 @@ import tempfile
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrow_marks, centre_bare, centre_kind, centre_line, correct, \
-  correct_oneway, disagree, edge_lines, lane_lines, line_kinds, load, median_edges, median_runs_in, offset_place, opening_taper, placed, sources, \
+  correct_oneway, disagree, edge_lines, edges_painted, lane_lines, line_kinds, load, median_edges, median_runs_in, offset_place, opening_taper, placed, sources, \
   strips, swing_taper, unpainted
 
 
@@ -369,6 +369,20 @@ def test_unpainted():
   assert unpainted([sample([mark(4.5, kind='double_dashed')] if s == 4 else [], s, src='gamefiles', kerbs=edges) for s in (1, 4, 7, 10)])
   gap = [sample([], s, src='gamefiles', kerbs={'left': None, 'right': None}) for s in (1, 4, 7)]
   assert unpainted(gap, edges_seen=False)  # a road the files draw no edges for
+
+
+def test_edges_painted():
+  # white edge lines both sides inside the asphalt (Sustancia Rd, its double yellow in the texture): a painted road
+  edges = {'left': -6.7, 'right': 6.7}
+  lined = [mark(-5.8, kind='edge_line'), mark(5.8, kind='edge_line')]
+  assert edges_painted([sample(lined, s, src='gamefiles', kerbs=edges) for s in (1, 4, 7)])
+  assert not edges_painted([sample(lined[1:], s, src='gamefiles', kerbs=edges) for s in (1, 4, 7)])  # one side only
+  gutters = [mark(-6.5, kind='solid'), mark(6.5, kind='solid')]
+  assert not edges_painted([sample(gutters, s, src='gamefiles', kerbs=edges) for s in (1, 4, 7)])  # a city street's gutters
+  assert not edges_painted([sample(lined, s, src='gamefiles', kerbs={'left': 6.0, 'right': 7.0}) for s in (1, 4, 7)])  # edges misread
+  assert not edges_painted([sample(lined, s, src='gamefiles', kerbs={'left': -9.0, 'right': 6.7}) for s in (1, 4, 7)])  # far in
+  assert not edges_painted([sample([mark(-1.0, kind='solid'), mark(1.0, kind='solid')], s, src='gamefiles', kerbs=edges)
+                            for s in (1, 4, 7)])  # lines near the middle
 
 
 def test_counts_from_paint_off_the_middle():

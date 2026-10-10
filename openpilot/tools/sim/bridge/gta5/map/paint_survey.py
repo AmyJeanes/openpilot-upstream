@@ -835,6 +835,21 @@ EDGE_BEYOND = 0.5  # m beyond the lanes' edge (or edge line) a painted line is s
 GUTTER = 0.5  # m: a solid line this near the asphalt's edge is the gutter's (city streets'), not an edge line
 
 
+def edges_painted(samples: list[dict]) -> bool:
+  """Whether the game files paint a white edge line along both sides of a link in half its samples or more: on each
+  side a solid one LANE_MIN or more out from its line, GUTTER to EDGE_REACH inside that side's asphalt edge (read on
+  its own side). A road painted so is painted where the files show no centre line too: GTA lays some roads' centre
+  lines in their texture, not as paint (Sustancia Rd's double yellow)."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+
+  def lined(d, sign, edge):
+    return edge is not None and edge * sign > 0 and any(
+      m['conf'] >= CONF and m['colour'] == 'white' and m['type'] in EDGE_LINES and m['offset'] * sign >= LANE_MIN and
+      GUTTER <= (edge - m['offset']) * sign <= EDGE_REACH for m in d['marks'])
+  seen = sum(all(lined(d, sign, (d.get('kerbs') or {}).get(side)) for side, sign in (('left', -1.0), ('right', 1.0))) for d in files)
+  return bool(files) and seen * 2 >= len(files)
+
+
 def road_edges(samples: list[dict], edges: tuple[float, float], inner: tuple[float, float]):
   """Where the game files paint a link's edge lines and where its asphalt ends, each side: [(edge line, its colour,
   asphalt's edge, clear)] left and right, m right of its line seen a -> b (None where not seen in half the samples).

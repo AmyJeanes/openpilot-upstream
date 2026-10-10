@@ -587,6 +587,13 @@ def test_unmarked_roads():
   rows = [(1, 'A', 'B', True, 'track', True, True), (2, 'B', 'C', True, 'unclassified', False, True),
           (3, 'C', 'D', True, 'residential', False, False)]
   assert unmarked_roads(nodes, rows, lambda w, a, b: dirt[w]) == {1, 2}
+  # white edge lines painted both sides: a residential road's centre is in its texture (Sustancia Rd), not unpainted;
+  # a service road's isn't (a runway's edges)
+  lined = [{'conf': 1.0, 'colour': 'white', 'type': 'edge_line', 'offset': v} for v in (-4.2, 4.2)]
+  samples = {w: [{'src': 'gamefiles', 'marks': lined, 'kerbs': edges}] * 4 for w in (1, 2, 3)}
+  rows = [(1, 'A', 'B', True, 'residential', False, False), (2, 'B', 'C', True, 'residential', False, False),
+          (3, 'C', 'D', True, 'service', False, False)]
+  assert unmarked_roads(nodes, rows, lambda w, a, b: samples[w]) == {3}
 
 
 def test_median_edge_kinds():
