@@ -690,6 +690,9 @@ class Run:
       if any("engage key" in why for why in stops):
         outcome = ("took_over", "the driver pressed the engage key")
         break
+      if stops and stops[-1].strip() == "arrived":  # the map driver stops itself at the destination
+        outcome = ("arrived", "")
+        break
       if stops:
         outcome = ("expert_stopped", stops[-1])
         break
