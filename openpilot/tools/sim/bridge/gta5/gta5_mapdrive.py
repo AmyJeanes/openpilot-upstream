@@ -37,7 +37,9 @@ CROSS_KEEP_IN s; and it's no faster than stops for one at the edge of what the
 plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Pedestrians
 (nearby's "p") likewise: one within PED_SIDE of our body along the path is stopped behind, and one walking across it
 (anywhere, PED_T s on) waited for, braking however late; where the plugin lists none, one it counts just ahead
-(traffic.peds) is braked to a stop for. Near a junction or turn one within PED_KERB of our body beside the path (waiting
+(traffic.peds) is braked to a stop for. Static things the plugin's probes hit ahead (nearby's "obst": the map's walls,
+kerbs, posts and props in the car's next 15 m) within OBST_SIDE of our body along the path are stopped behind as a
+stopped vehicle is, and end the trip after OBST_WAIT s: a plan led into them. Near a junction or turn one within PED_KERB of our body beside the path (waiting
 at the kerb, maybe for a light of theirs we can't see), or one anywhere heading for it, caps the speed at what could
 still stop short of where they'd step in (ped_kerb). Whether a stop can still be made is judged by what the game
 delivers (DECEL_REAL), not what's commanded (DECEL_MAX). A parked vehicle (no one at its wheel, standing), or a driven
@@ -77,7 +79,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
-           "ped", "nudge", "ped_kerb", "blocked")
+           "ped", "nudge", "ped_kerb", "blocked", "obstacle")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -133,6 +135,10 @@ LEAD_SIDE = 0.4  # m beside our body another's may come along the path before it
 LEAD_AHEAD = 80.0  # m of path looked along
 LEAD_OFF = 6.0  # m off the path at most a body's point is placed along it
 LEAD_STOP = 4.0  # m from our front bumper to a stopped vehicle we stop at
+# static things the plugin's probes hit (nearby's "obst": points, each taken as a body OBST_HALF m either way)
+OBST_SIDE = 0.25  # m beside our body one may be along the path before it's in the way (kerbs run alongside lanes)
+OBST_HALF = 0.1  # m
+OBST_WAIT = 3.0  # s stopped behind one before the trip ends
 LEAD_BESIDE = 1.0  # m behind our front bumper a body may start and still be ahead (not beside us)
 NEARBY_AHEAD = 15.0  # m ahead of our origin the plugin reports vehicles, where its nearby has no "ahead"
 NEARBY_SIDE = 15.0  # m either side, likewise ("side")
@@ -619,6 +625,8 @@ class MapDriver:
     self.nudge_blocked: list[dict] = []  # parked vehicles with no shift past them, until passed
     self.nudge_log: list[dict] = []  # each nudge event, for the summary
     self.kerb_logged = -math.inf  # when the pedestrian kerb cap last held the car back
+    self.obst: list[dict] = []  # static things ahead the plugin's probes hit, as bodies in the world (_obstacles)
+    self.obst_rows = None
 
   def _body(self, state: dict):
     """Our car's body from the plugin's nearby.dims (its model's bounds: min x, max x, min y, max y)."""
@@ -1723,21 +1731,36 @@ class MapDriver:
     """A body's corners and the middles of its sides and its middle: the points placed along the path."""
     return np.vstack([c, (c + np.roll(c, -1, axis=0)) / 2, c.mean(axis=0)[None]])
 
+  def _obstacles(self, state: dict, t: float):
+    """The static things the plugin's probes hit ahead (nearby's "obst", read every 0.1-0.2 s: points from the car where
+    it was then), each as a small body in the world, standing; none where the plugin doesn't probe."""
+    rows = (state.get("nearby") or {}).get("obst")
+    if rows == self.obst_rows:
+      return
+    self.obst_rows = rows
+    h = math.radians(float(state.get("heading") or 0.0))
+    right, fwd = np.array([math.cos(h), math.sin(h)]), np.array([-math.sin(h), math.cos(h)])
+    pos = np.asarray(state["pos"][:2], float)
+    body = np.array([(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]) * OBST_HALF
+    self.obst = [{"c": pos + right * float(r[0]) + fwd * float(r[1]) + body, "vel": np.zeros(2), "t": t, "driven": None, "obst": True}
+                 for r in rows or [] if len(r) >= 2]
+
   def _lead(self, t: float) -> tuple[float, float, dict, float] | None:
-    """The nearest vehicle or pedestrian in our way along the path ahead (its body within LEAD_SIDE of ours, PED_SIDE for
-    a pedestrian, or across the path):
+    """The nearest vehicle, pedestrian or static thing in our way along the path ahead (its body within LEAD_SIDE of
+    ours, PED_SIDE for a pedestrian, OBST_SIDE for a static thing, or across the path):
     (m from our front bumper to it, its speed along the path, it, m right of the path its body comes nearest); None."""
-    if not self.cars:
+    if not self.cars and not self.obst:
       return None
     best = None
     far = self.s + self.front + LEAD_AHEAD
-    for car in self.cars:
+    for car in (self.cars or []) + self.obst:
       pts = self._outline(self._car_now(car, t))
       along, right = self._place(pts, LEAD_AHEAD + self.front)
       ok = ~np.isnan(along)
       if not ok.any():
         continue
-      near = ok & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + (PED_SIDE if car.get("ped") else LEAD_SIDE))
+      side_m = PED_SIDE if car.get("ped") else OBST_SIDE if car.get("obst") else LEAD_SIDE
+      near = ok & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + side_m)
       across = ok.sum() >= 2 and np.nanmin(right) < 0.0 < np.nanmax(right) and np.nanmax(along) - np.nanmin(along) < 12.0
       if not near.any() and not across:
         continue
@@ -2233,6 +2256,7 @@ class MapDriver:
     if self.phase == "abort":
       return self._abort_msg(v, t)
     self._vehicles(state, t)
+    self._obstacles(state, t)
     self._checks(route, state, t, collisions, v)
     if self.phase == "abort":
       return self._abort_msg(v, t)
@@ -2432,10 +2456,11 @@ class MapDriver:
         if a_lead < min(need, (vp * vp - v * v) / (2.0 * look)):
           cap = math.sqrt(vl * vl + 2 * b * max(gap - LEAD_STOP - st["headway"] * vl, 0.0))  # what it holds us to, for the record
           across = bool(car.get("crosswise"))  # standing across our way: waited for while it moves, not queued behind
-          vp, reason, phase, need = (min(cap, vp), "ped" if car.get("ped") else "blocked" if across else "lead",
+          vp, reason, phase, need = (min(cap, vp), "ped" if car.get("ped") else "obstacle" if car.get("obst") else "blocked" if across else "lead",
                                      "yield" if across else "follow", a_lead)
           detail = {"gap": round(gap, 1), "speed": round(vl, 1), "right": round(side, 2), "driven": car["driven"],
-                    **({"ped": True} if car.get("ped") else {}), **({"across": True} if across else {})}
+                    **({"ped": True} if car.get("ped") else {}), **({"across": True} if across else {}),
+                    **({"obst": True} if car.get("obst") else {})}
           holder = car
       # a plugin whose nearby has no pedestrians still counts those just ahead (traffic.peds, PED_BOX): stop for them
       peds = int((state.get("traffic") or {}).get("peds") or 0)
@@ -2450,9 +2475,11 @@ class MapDriver:
     parked = phase == "follow" and holder["driven"] is False
     # one standing across our way may be waiting for us to clear its way, which we can't (no reverse): a deadlock
     blocked = phase == "yield" and (bool(holder.get("crosswise")) or bool(detail.get("slowed")))
-    wait = PARKED_WAIT if parked else DEADLOCK_WAIT if blocked else WAIT_MAX
+    obst = phase == "follow" and bool(holder.get("obst"))  # a static thing on the plan: it won't move
+    wait = PARKED_WAIT if parked else DEADLOCK_WAIT if blocked else OBST_WAIT if obst else WAIT_MAX
     if self.held_since is not None and t - self.held_since > wait:
-      who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle standing across our way" if blocked else "vehicle"
+      who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle standing across our way" if blocked else \
+            "static obstacle" if obst else "vehicle"
       self._abort(f"held {wait:.0f} s by a {who}" + (" (deadlock)" if blocked else " in the way"), t, state.get("pos"))
       return self.a
     self._set(phase, t, **detail)

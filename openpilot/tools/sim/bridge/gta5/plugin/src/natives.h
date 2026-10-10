@@ -56,6 +56,11 @@ inline Ped GET_PED_IN_VEHICLE_SEAT(Vehicle v, int seat, BOOL p2) { return Invoke
 inline int START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(float x1, float y1, float z1, float x2, float y2, float z2, int flags, Entity ignore, int p8) {
   return Invoke<int>(0x377906D8A31E5586, x1, y1, z1, x2, y2, z2, flags, ignore, p8);
 }
+// asynchronous: its result a frame or more later; flags: 1 the map's collision, 2 vehicles, 16 objects
+inline int START_SHAPE_TEST_LOS_PROBE(float x1, float y1, float z1, float x2, float y2, float z2, int flags, Entity ignore, int p8) {
+  return Invoke<int>(0x7EE9F5D83DD4F90E, x1, y1, z1, x2, y2, z2, flags, ignore, p8);
+}
+// 0 no such test, 1 not ready, 2 ready (read once)
 inline int GET_SHAPE_TEST_RESULT(int handle, BOOL *hit, Vector3 *end, Vector3 *normal, Entity *entity) {
   return Invoke<int>(0x3D87450E15D98694, handle, hit, end, normal, entity);
 }

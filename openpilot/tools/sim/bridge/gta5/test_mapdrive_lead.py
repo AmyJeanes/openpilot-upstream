@@ -8,6 +8,8 @@ car of mapdrive_sim.py: run as a script.
   turn, driven past
 - held by a vehicle that stays in the way: the trip ends after WAIT_MAX s (PARKED_WAIT s for a parked one), and nothing
   leaves the abort; behind a queue that moves on now and then, however long it all takes, it's driven to arrival
+- static things the plugin's probes hit on the path (nearby.obst): stopped short of, LEAD_STOP from it, and the trip ends
+  after OBST_WAIT s; walls along the road's edges are no obstacles
 - a slower vehicle ahead: followed at its speed, LEAD_STOP + the style's headway behind, without hunting; one braking to
   a stop: stopped behind it
 - a parked vehicle where the plan's lane room is no guide: at the end of a lane change into its lane, passed within the
@@ -31,7 +33,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, DEADLOCK_WAIT, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR,
-                                                           NUDGE_MARGIN, NUDGE_NODE, NUDGE_WANT, PARKED_WAIT, WAIT_MAX, MapDriver)
+                                                           NUDGE_MARGIN, NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDriver)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -108,6 +110,46 @@ def ended(trip, why: str):
   after = after[after.index("abort") + 1:]
   assert after == ["end"], after[:6]
   assert trip.car.v < 0.1 and trip.car.collisions == 0, (trip.car.v, trip.car.collisions)
+
+
+def kerbs(route, right: float) -> list[np.ndarray]:
+  """Walls along the route's line `right` m either side of it (kerbs, parapets)."""
+  pts = route.points[:, :2]
+  d = np.gradient(pts, axis=0)
+  d = d / np.hypot(*d.T)[:, None]
+  normal = np.stack([d[:, 1], -d[:, 0]], axis=1)
+  return [pts + normal * right, pts - normal * right]
+
+
+def test_static_obstacles():
+  """Static things the plugin's probes hit ahead (nearby.obst; map1010c 005, 015 and 017 hit a wall, a parapet's end and
+  a lamp post the plan led into, at 3-6 m/s, which nothing in the driver could see): one on the path is stopped short of
+  as a stopped vehicle is, LEAD_STOP from it, and the trip ends OBST_WAIT s on; without the probes, it's hit. Walls along
+  the road's edges, on a straight and round bends, are no obstacles."""
+  r = ms.straight(600)
+  x, y, _ = ms.start_pose(r, 1, 150.0)
+  post = [np.array([[x - 0.3, y], [x + 0.3, y]])]  # in the middle of our lane, as 017's lamp post
+  cfg = {"seed": 2, "speed": 6.0}  # the probes reach 15 m: a stop from city turning speeds, as there
+  trip = ms.drive(r, cfg, lane=1, walls=post, reach=REACH, seconds=60)
+  ended(trip, f"held {OBST_WAIT:.0f} s by a static obstacle in the way")
+  assert abs(y - trip.car.y - ms.CAR_DIMS[3] - LEAD_STOP) < 1.0, y - trip.car.y
+  assert phases(trip, "follow")[0].get("obst"), phases(trip, "follow")[:1]
+  trip = ms.drive(r, cfg, lane=1, walls=post, probe=False, reach=REACH, seconds=60)
+  assert trip.finished == "abort: collision", trip.finished
+  # the plan off its lane past the clamp's reach (005: 3 m right of it), into the wall along the road's edge
+  from openpilot.tools.sim.bridge.gta5.test_mapdrive import bumped
+  r = bumped(ms.straight(600), 120.0, 40.0, 5.0)
+  for probe in (True, False):
+    trip = ms.drive(r, cfg, lane=1, walls=kerbs(r, 11.0), probe=probe, reach=REACH, seconds=60)
+    if probe:
+      ended(trip, f"held {OBST_WAIT:.0f} s by a static obstacle in the way")
+    else:
+      assert trip.finished == "abort: collision", trip.finished
+  for name, route, edge in (("straight", ms.straight(600), 11.0), ("curve 60 m", ms.curve(60.0, 90.0), 11.0),
+                            ("curve 40 m, a lane each way", ms.curve(40.0, -70.0, ours=1, back=1), 5.5)):
+    trip = ms.drive(route, {"seed": 2}, lane=1 if edge > 6 else 0, walls=kerbs(route, edge), reach=REACH)
+    assert trip.finished == "arrived" and not phases(trip, "follow") and trip.car.collisions == 0, (name, trip.finished)
+  print("static obstacles: ok")
 
 
 def test_held_ends_the_trip():
@@ -478,6 +520,7 @@ if __name__ == "__main__":
   test_stopped_in_a_turn()
   test_parked_partly_in_lane()
   test_held_ends_the_trip()
+  test_static_obstacles()
   test_queue_that_moves()
   test_nudge_past_a_parked_car()
   test_nudge_no_room()
