@@ -5,6 +5,7 @@
 #include <Xinput.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -1874,8 +1875,26 @@ std::string Traffic(double now) {
 
 // m around the car (right, behind, ahead, up or down) that "nearby" reports vehicles within, for the bridge's blind-spot
 // monitor (gta5_blindspot.py) and the map driver (gta5_mapdrive.py: vehicles in its way, which it must see a stop's
-// length ahead, and crossing traffic, a few seconds' travel to either side ahead of the car)
-constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 60.0f, NEARBY_SIDE_AHEAD = 40.0f, NEARBY_LEVEL = 4.0f;
+// length ahead from freeway speed, and crossing or oncoming traffic, a few seconds' travel to either side ahead of the car);
+// up or down in the car's frame, so a whole grade's length ahead counts
+constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 120.0f, NEARBY_SIDE_AHEAD = 40.0f, NEARBY_LEVEL = 4.0f;
+
+// every vehicle in the game's pool, into handles
+using VehicleHandles = std::array<int, 1024>;
+int AllVehicles(VehicleHandles &handles) {
+  // ScriptHookV's pool walk sees every vehicle; the player's nearby vehicles are only those its ped has noticed
+  using GetAll = int (*)(int *, int);
+  static GetAll getAll = [] {
+    HMODULE shv = GetModuleHandleW(L"ScriptHookV.dll");
+    return shv ? reinterpret_cast<GetAll>(GetProcAddress(shv, "?worldGetAllVehicles@@YAHPEAHH@Z")) : nullptr;
+  }();
+  int size = static_cast<int>(handles.size());
+  if (getAll) return std::clamp(getAll(handles.data(), size), 0, size);
+  int slots[2 + 2 * 32] = {32};
+  int count = std::clamp(GET_PED_NEARBY_VEHICLES(PLAYER_PED_ID(), slots), 0, 32);
+  for (int i = 0; i < count; i++) handles[i] = slots[2 + 2 * i];
+  return count;
+}
 
 // the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
 // "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin
@@ -1886,21 +1905,8 @@ std::string Nearby(double now) {
   static double next = 0;
   if (now < next || !g_veh.handle) return out;
   next = now + 0.1;
-  // ScriptHookV's pool walk sees every vehicle; the player's nearby vehicles are only those its ped has noticed
-  using GetAll = int (*)(int *, int);
-  static GetAll getAll = [] {
-    HMODULE shv = GetModuleHandleW(L"ScriptHookV.dll");
-    return shv ? reinterpret_cast<GetAll>(GetProcAddress(shv, "?worldGetAllVehicles@@YAHPEAHH@Z")) : nullptr;
-  }();
-  static int handles[1024];
-  int count = 0;
-  if (getAll) {
-    count = std::min(getAll(handles, static_cast<int>(std::size(handles))), static_cast<int>(std::size(handles)));
-  } else {
-    int slots[2 + 2 * 32] = {32};
-    count = std::min(GET_PED_NEARBY_VEHICLES(PLAYER_PED_ID(), slots), 32);
-    for (int i = 0; i < count; i++) handles[i] = slots[2 + 2 * i];
-  }
+  static VehicleHandles handles;
+  int count = AllVehicles(handles);
   static std::unordered_map<Hash, std::pair<Vector3, Vector3>> bounds;
   auto boundsOf = [](Hash model) {
     auto it = bounds.find(model);
@@ -1926,9 +1932,11 @@ std::string Nearby(double now) {
     if (v == g_veh.handle || !DOES_ENTITY_EXIST(v)) continue;
     Vector3 q = GET_ENTITY_COORDS(v, TRUE);
     float dx = q.x - p.x, dy = q.y - p.y;
-    if (dx * dx + dy * dy > far2 || std::fabs(q.z - p.z) > NEARBY_LEVEL) continue;
+    if (dx * dx + dy * dy > far2) continue;
     Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
-    if (std::fabs(rel.x) > (rel.y > 0 ? NEARBY_SIDE_AHEAD : NEARBY_SIDE) || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD) continue;
+    if (std::fabs(rel.x) > (rel.y > 0 ? NEARBY_SIDE_AHEAD : NEARBY_SIDE) || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD ||
+        std::fabs(rel.z) > NEARBY_LEVEL)
+      continue;
     // headings are counterclockwise from north: right is (cos h, sin h), forward (-sin h, cos h)
     Vector3 vel = GET_ENTITY_VELOCITY(v);
     float vx = vel.x * std::cos(h) + vel.y * std::sin(h), vy = -vel.x * std::sin(h) + vel.y * std::cos(h);

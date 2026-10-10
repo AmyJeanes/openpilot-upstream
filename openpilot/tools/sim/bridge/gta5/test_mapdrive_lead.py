@@ -20,7 +20,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LEAD_STOP, MAPX_COLUMNS, MapDriver
 
-REACH = {"ahead": 60.0, "side": 40.0}  # the plugin's reach with nearby's "ahead" raised (core.cpp)
+REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
 
 def phases(trip, what: str) -> list[dict]:
@@ -137,7 +137,7 @@ def test_range():
   assert abs(slow - 0.75 * free) < 0.3, (slow, free)
   strict = ms.drive(r, {"seed": 2, "range_share": 0.0}, lane=1, vehicles=[], seconds=40).col(4).max()
   assert 5.0 < strict < 7.5, strict
-  # reaching 60 m: the city's speeds as they were
+  # reaching 120 m: the city's speeds as they were
   far = ms.drive(r, {"seed": 2}, lane=1, vehicles=[], reach=REACH, seconds=40).col(4).max()
   assert abs(far - free) < 0.1, (far, free)
   print(f"range: ok ({free:.1f} m/s free, {strict:.1f} stopping within 15 m, {slow:.1f} at range_share)")
