@@ -386,6 +386,18 @@ class Route:
     right = round(ours[i + 1].right - self.right, 2) if i + 1 < len(ours) else None
     return [left, right]
 
+  def beside_lanes(self) -> list[list[float] | None] | None:
+    """As beside(), each side's lane as [near, far]: m from the car's middle out to its near and far edges."""
+    sec = self._section_here()
+    if sec is None or self.misaligned > LANE_ALIGN:
+      return None
+    ours, i = sec.ours, sec.lane(self.right)
+    if not 0 <= i < len(ours):
+      return None
+    left = [round(self.right - ours[i - 1].right, 2), round(self.right - ours[i - 1].left, 2)] if i > 0 else None
+    right = [round(ours[i + 1].left - self.right, 2), round(ours[i + 1].right - self.right, 2)] if i + 1 < len(ours) else None
+    return [left, right]
+
   def two_way(self) -> bool | None:
     sec = self.section(self.seg)
     return None if sec is None else sec.two_way

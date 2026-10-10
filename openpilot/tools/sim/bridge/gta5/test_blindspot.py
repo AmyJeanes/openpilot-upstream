@@ -557,3 +557,16 @@ def test_a_car_behind_off_to_one_side_of_our_lane_doesnt_count():
   t = BlindSpotTune()
   t.trim = 0.0
   assert BlindSpot(t).update(state([hugging]), 10.0) == (False, True)
+
+
+def test_zone_is_the_lane_beside_from_the_map():
+  # wide 6.6 m freeway lanes: a fixed trim still reaches into our own lane, the map's lane beside doesn't
+  w = 6.6
+  lanes = {"beside": [1.5 * w, 1.5 * w], "besideLanes": [[w / 2, 1.5 * w], [w / 2, 1.5 * w]]}
+  hugging = car(w / 2 - 1.0, -6.0)  # behind us, its right side on our lane's edge
+  assert flags([hugging], **lanes) == (False, False)
+  assert flags([car(w / 2 + 1.0 + 0.1, -3.0)], **lanes) == (False, True)  # beside, near our side of its lane
+  assert flags([car(1.5 * w - 1.0 - 0.1, -3.0)], **lanes) == (False, True)  # beside, at the far side of its lane
+  assert flags([car(-(w + 0.5), 1.0)], **lanes) == (True, False)
+  assert flags([car(2 * w, -3.0)], **lanes) == (False, False)  # two lanes over
+  assert flags([hugging], beside=[1.5 * w, 1.5 * w]) == (False, True)  # the trimmed fixed zone alone catches it

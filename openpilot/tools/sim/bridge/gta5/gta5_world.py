@@ -550,7 +550,7 @@ class GTA5World(World):
     self._write_lane_slots(state, lane)
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None,
-            "beside": self.route.beside() if on else None}
+            "beside": self.route.beside() if on else None, "besideLanes": self.route.beside_lanes() if on else None}
 
   def _car_lane(self, lane: list[int] | None, frac: float | None, plugin: list[int] | None, map_lane: dict | None,
                 now: float) -> tuple[list[int] | None, float | None]:

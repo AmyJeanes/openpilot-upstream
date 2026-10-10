@@ -19,8 +19,11 @@ monitor off):
 - inner 1.0 m: where the zone starts out from our side, before the trim.
 - outer: the lane beside's far edge, from the map's lanes along our route (GTA's lanes are 5.5 m, a 7 m reach on a
   2 m car); a car two lanes over is then a lane's width away. 4.5 m without them, as a US lane beside a centred car.
-- trim 0.8 m: off both the inner and outer edges, keeping the zone's centre: our own lane leaves ~1.75 m beside a
-  centred car, so a car behind us off to one side of our lane would otherwise reach the zone's inner edge.
+- lane_margin 0.3 m: on our route the zone is the lane beside itself (the map's besideLanes, its near and far edges),
+  0.3 m in from each edge, so a car behind us off to one side of our own lane stays out whatever the lanes' width
+  (GTA's freeway lanes run 5.5-6.6 m), while a car anywhere in the lane beside counts.
+- trim 0.8 m: off the route, off both edges of the inner..outer span, keeping its centre: our own lane leaves ~1.75 m
+  beside a centred car on a 5.5 m lane, which an untrimmed zone from 1.0 m would reach into.
 - behind 8.0 m: about two car lengths; a car further back at our speed leaves a gap to merge into, and one closing
   on us is caught by the closing rule instead.
 - front 0.0 m: as far as our front bumper rather than the mirrors, as a car alongside our bonnet is still one the lane
@@ -48,7 +51,8 @@ class BlindSpotTune(Tune):
   DEFAULTS = {
     "inner": 1.0,  # m out from our side the zone starts
     "outer": 4.5,  # m out from our side it ends, where the lanes aren't known
-    "trim": 0.8,  # m off both its inner and outer edges, keeping its centre
+    "trim": 0.8,  # m off both its inner and outer edges, keeping its centre, where the lane beside isn't known
+    "lane_margin": 0.3,  # m in from both edges of the lane beside, where the map gives it
     "behind": 8.0,  # m behind our rear bumper it starts
     "front": 0.0,  # m ahead of our front bumper it ends (negative: behind it, as at the mirrors)
     "closing_behind": 30.0,  # m behind our rear bumper a vehicle closing on us counts from
@@ -114,9 +118,14 @@ class BlindSpot:
           self.zone_lost[side] = now
         self.zones[side] = None
         continue
-      lo, hi = sorted((edge + sign * t.inner, edge + sign * max(outer[side], t.inner + 1.0)))
-      trim = min(t.trim, max((hi - lo - 1.0) / 2, 0.0))  # narrowed about its centre, keeping it at least 1 m wide
-      lo, hi = lo + trim, hi - trim
+      lane = (state.get("besideLanes") or [None, None])[0 if side == "left" else 1]
+      if lane is not None:  # the lane beside itself, from the map: whatever its width, our own lane stays out
+        near, far = lane[0] + t.lane_margin, max(min(lane[1], MAX_OUTER + (mxx - mnx) / 2) - t.lane_margin, lane[0] + t.lane_margin + 1.0)
+        lo, hi = sorted((sign * near, sign * far))
+      else:
+        lo, hi = sorted((edge + sign * t.inner, edge + sign * max(outer[side], t.inner + 1.0)))
+        trim = min(t.trim, max((hi - lo - 1.0) / 2, 0.0))  # narrowed about its centre, keeping it at least 1 m wide
+        lo, hi = lo + trim, hi - trim
       self.zones[side] = (lo, hi, *along)
       hits = [v for v in nearby.get("v") or [] if self._occupies(v, lo, hi, along, mny, v_ego)]
       if hits:
