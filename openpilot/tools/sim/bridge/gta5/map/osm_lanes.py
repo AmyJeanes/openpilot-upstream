@@ -27,7 +27,9 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   Without placement the line is the middle of the lanes (and median) between the shoulders.
 - `divider`: the marking between the directions, or both edges of a median between them (each one solid line by
   default). `divider:forward` / `divider:backward`: a median's edge beside that direction's lanes, where its two edges
-  differ. `lane_markings=no`: no lines between lanes at all. These lines are yellow, or white with
+  differ. `lane_markings=no`: no lines between lanes at all. `divider:lanes` (ours, per lane like `change:lanes`):
+  `no` where no line is painted on that lane's right, seen travelling it, beside another lane its way, as where GTA
+  lays two lanes in one painted lane; the lanes and their `change:lanes` stay. These lines are yellow, or white with
   `divider:colour=white` (OSM has no key for it). On a one-way way, `divider:left` / `divider:right`: a line painted
   along that edge of its lanes, seen travelling them, as a carriageway's yellow edge beside a median (it is that edge's
   one edge line: a shoulder there has no other).
@@ -58,7 +60,7 @@ CHANGES = {'yes': (True, True), 'no': (False, False), 'not_left': (False, True),
            'only_left': (True, False), 'only_right': (False, True)}
 DIVIDERS = {'no': None, 'dashed_line': 'dashed', 'solid_line': 'solid', 'double_solid_line': 'double_solid',
             'solid_line;dashed_line': 'solid_dashed', 'dashed_line;solid_line': 'dashed_solid'}
-PER_LANE = ('turn', 'width', 'change', 'destination', 'destination:ref', 'access', 'motor_vehicle', 'vehicle', 'bus', 'psv')
+PER_LANE = ('turn', 'width', 'change', 'divider', 'destination', 'destination:ref', 'access', 'motor_vehicle', 'vehicle', 'bus', 'psv')
 SUFFIXES = ('', ':forward', ':backward', ':both_ways')
 PLACEMENT = re.compile(r'(left_of|middle_of|right_of):([1-9][0-9]*)')
 TRANSITION_MAX = 40.0  # m: placement=transition is for the short way where a line jumps across lanes
@@ -95,6 +97,7 @@ class Lane:
   change_right: bool = True
   access: bool = True  # open to cars (not a bus lane or access:lanes=no)
   destination: str | None = None
+  marked_right: bool = True  # a line painted on its right, seen travelling it, beside a lane its way (divider:lanes)
 
 
 class Span(NamedTuple):
@@ -279,14 +282,14 @@ class WayLanes:
     spare = width - lanes_w if width and width - lanes_w > EPS else 0.0
     width = lanes_w + spare + sum(parking) + sl + sr
     two_way = bool(fwd or both) and bool(back or both) and not (fwd == back == 0)
-    turns, changes, destinations = per_lane('turn'), per_lane('change'), per_lane('destination')
+    turns, changes, destinations, unmarked = per_lane('turn'), per_lane('change'), per_lane('destination'), per_lane('divider')
     closed = [any(v in ('no', 'private') for v in vs) for vs in zip(*(per_lane(k) for k in ('access', 'motor_vehicle', 'vehicle')), strict=True)]
     bus = [any(v == 'designated' for v in vs) for vs in zip(per_lane('bus'), per_lane('psv'), strict=True)]
     lanes = []
     for i, (d, _) in enumerate(order):
       left, right = CHANGES.get(changes[i] or 'yes', (True, True))
       lanes.append(Lane(d, widths[i], frozenset(t for t in (turns[i] or '').split(';') if t in TURNS and t != 'none'),
-                        left, right, not (closed[i] or bus[i]), destinations[i] or None))
+                        left, right, not (closed[i] or bus[i]), destinations[i] or None, unmarked[i] != 'no'))
     markings = tags.get('lane_markings') != 'no' and not (tags.get('lanes') is None and highway in UNMARKED)
     road = cls(lanes, width, spare if two_way else 0.0, 0.0 if two_way else spare / 2, markings, tags.get('divider'), parking,
                (sl, sr), (ll, lr))
@@ -417,7 +420,8 @@ class WayLanes:
           a_may = a.lane.change_right if a.heading == 1 else a.lane.change_left
           b_may = b.lane.change_left if b.heading == 1 else b.lane.change_right
           style = {(True, True): 'dashed', (False, False): 'solid', (True, False): 'dashed_solid', (False, True): 'solid_dashed'}[(a_may, b_may)]
-          out.append((('lane', i), Line(DIVIDER, a.right, style)))
+          if (a.lane.marked_right if a.heading == 1 else b.lane.marked_right):
+            out.append((('lane', i), Line(DIVIDER, a.right, style)))
         elif 0 in (a.heading, b.heading):  # a centre turn lane's edge: dashed on its side
           out.append((('lane', i), Line(CENTRE, a.right, 'dashed_solid' if a.heading == 0 else 'solid_dashed')))
         elif centre is None:

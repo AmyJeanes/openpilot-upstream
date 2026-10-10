@@ -54,6 +54,9 @@ def test_values():
   assert checks({**road, 'turn:lanes': 'left||'}) == {'count'}
   assert checks({**road, 'turn:lanes': 'left|'}) == set()  # an empty lane has no arrow
   assert checks({**road, 'change:lanes': 'yes|maybe'}) == {'change'}
+  assert checks({**road, 'divider:lanes': 'no|'}) == set()
+  assert checks({**road, 'divider:lanes': 'dashed_line|'}) == {'divider'}
+  assert checks({**road, 'divider:lanes': 'no'}) == {'count'}
   assert checks({**road, 'divider': 'painted'}) == {'divider'}
   assert checks({**road, 'divider': 'barrier'}) == set()
   assert checks({**road, 'width': 'wide'}) == {'width'}

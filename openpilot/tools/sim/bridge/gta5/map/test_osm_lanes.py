@@ -386,6 +386,56 @@ def test_edge_lines_without_shoulders():
   assert lines(WayLanes.from_tags({**tags, 'lane_markings': 'no', 'edge_line:left': 'white'})) == [(EDGE, -6.5, None), (EDGE, 6.5, None)]
 
 
+def test_lanes_without_a_line_between():
+  # divider:lanes=no: no line on that lane's right beside another lane its way; the lanes, their widths, centres and
+  # change:lanes stay (the lane matcher, blind spot lanes and the map driver read those, not the lines)
+  tags = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12', 'change:lanes': 'yes|not_right'}
+  plain, bare = WayLanes.from_tags(tags), WayLanes.from_tags({**tags, 'divider:lanes': 'no|'})
+  assert spans(bare) == spans(plain) == [(1, -6.0, 0.0), (1, 0.0, 6.0)]
+  assert [(ln.change_left, ln.change_right) for ln in bare.lanes] == [(ln.change_left, ln.change_right) for ln in plain.lanes]
+  assert lines(plain) == [(EDGE, -6.0, None), (DIVIDER, 0.0, 'dashed'), (EDGE, 6.0, None)]
+  assert lines(bare) == lines(bare, BACKWARD) == [(EDGE, -6.0, None), (EDGE, 6.0, None)]
+  three = {'highway': 'motorway', 'lanes': '3', 'oneway': 'yes', 'width': '16.5'}
+  assert lines(WayLanes.from_tags({**three, 'divider:lanes': '|no|'})) == [(EDGE, -8.25, None), (DIVIDER, -2.75, 'dashed'), (EDGE, 8.25, None)]
+  # a two-way way's: each direction's lanes left to right as seen travelling them; the centre line stays
+  two = {'highway': 'primary', 'lanes': '4', 'width': '22'}
+  road = WayLanes.from_tags({**two, 'divider:lanes:forward': 'no|', 'divider:lanes:backward': '|'})
+  assert lines(road) == [(EDGE, -11.0, None), (DIVIDER, -5.5, 'dashed'), (CENTRE, 0.0, 'double_solid'), (EDGE, 11.0, None)]
+  road = WayLanes.from_tags({**two, 'divider:lanes:backward': 'no|'})
+  assert lines(road) == [(EDGE, -11.0, None), (CENTRE, 0.0, 'double_solid'), (DIVIDER, 5.5, 'dashed'), (EDGE, 11.0, None)]
+
+
+def test_lane_lines_the_files_paint_none_of():
+  from collections import Counter
+
+  from openpilot.tools.sim.bridge.gta5.map.paint_survey import bare_lane_lines
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import short_unmarked, unmarked_lane_lines
+  why = Counter()
+  tags = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}
+  # Senora Fwy: the carriageway's yellow left edge and white edge line 12 m apart, nothing between GTA's two lanes in
+  # the files, nor in the captured images (the boundary's offset among those they show bare)
+  senora = game_files([(-5.9, 'yellow', 'solid'), (6.1, 'white', 'edge_line')])
+  assert unmarked_lane_lines(tags, senora, (0.2,), why) == {**tags, 'divider:lanes': 'no|'}
+  # the images showing a line there (or not seen), a lane line in the files, too few sections, or the edges not read
+  assert unmarked_lane_lines(tags, senora, (), why) == unmarked_lane_lines(tags, senora, (3.0,), why) == tags
+  assert unmarked_lane_lines(tags, game_files([(-5.9, 'yellow', 'solid'), (0.4, 'white', 'dashed'), (6.1, 'white', 'solid')]), (0.0,), why) == tags
+  assert unmarked_lane_lines(tags, senora[:2], (0.0,), why) == tags
+  assert unmarked_lane_lines(tags, game_files([(-5.9, 'yellow', 'solid')]), (0.0,), why) == tags
+  # each direction of a two-way way, left to right as seen travelling it
+  marks = [(-11.0, 'white', 'solid'), (-5.5, 'white', 'dashed'), (0.0, 'yellow', 'double_solid'), (11.0, 'white', 'solid')]
+  sec = [(-11.0, -5.5, -1), (-5.5, 0.0, -1), (0.0, 5.5, 1), (5.5, 11.0, 1)]
+  assert bare_lane_lines(game_files(marks), sec) == {'forward': [True]}
+  got = unmarked_lane_lines({'highway': 'primary', 'lanes': '4', 'width': '22'}, game_files(marks), (5.5,), why)
+  assert got['divider:lanes:forward'] == 'no|' and 'divider:lanes:backward' not in got
+  # a run of such ways under STRETCH_MIN keeps its lines: a gap in the files and the images more likely than paint
+  nodes = {k: {'x': x, 'y': 0.0} for k, x in (('a', 0.0), ('b', 40.0), ('c', 80.0), ('d', 200.0), ('e', 240.0))}
+  bare = {'divider:lanes': 'no|'}
+  written = [(1, 'a', 'b', bare), (2, 'b', 'c', bare), (3, 'c', 'd', {}), (4, 'd', 'e', bare)]
+  assert short_unmarked(nodes, written) == {4}
+  flipped = [(-o, c, k) for o, c, k in marks]
+  assert bare_lane_lines(game_files(flipped), [(-b, -a, -h) for a, b, h in sec]) == {'backward': [True]}
+
+
 def test_single_track_painted_as_two_lanes():
   from openpilot.tools.sim.bridge.gta5.map.paint_survey import painted_centre
   assert painted_centre(game_files([(0.2, 'yellow', 'dashed'), (4.1, 'yellow', 'solid')]))  # the port's yard roads

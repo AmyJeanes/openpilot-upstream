@@ -187,6 +187,13 @@ topcam poses) as tiles, so the check runs on them without the game.
     tagged, else a shoulder's (below; its `shoulder:<side>:markings` are dropped where the divider is tagged). The white
     line side_by_side would draw at a kerb on that side (a flush shoulder's, a gore's, or between ways side by side), or
     at the left edge of a way beside with its own left edge line, is left out (`osm_to_roads.lined_kerbs`).
+  - Where GTA lays two lanes in one painted lane (Senora Fwy: two 6 m lanes between the yellow and white edge lines,
+    AI cars driving two abreast) the lanes stay and no line is drawn between them: `divider:lanes` (ours; per lane as
+    `change:lanes`, `no` where nothing is painted on that lane's right beside a lane its way). Where the game files'
+    sections read both that direction's outer edge lines and no mark within 1.5 m of the boundary
+    (`paint_survey.bare_lane_lines`), the captured top-down images show none there either (`--lines-bare`, from
+    `imgcheck/lane_paint.py`: the files miss some freeways' lane lines, the Olympic Fwy's), and the ways so joined end
+    to end run 60 m or more (`short_unmarked`). Lanes, `change:lanes`, lane numbering and nav read nothing of it.
   - GTA lays a left-turn bay as a one-way link of its own (through its slip lane or left turn only nodes) from where
     it splits off its road to the junction ahead, over a two-way road's median or beside a one-way road's left lane.
     Real maps make it a lane of the road (osm_lanes.md P3), and so does ours (`detached_bays`): the bay's links are

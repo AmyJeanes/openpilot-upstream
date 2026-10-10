@@ -2,7 +2,8 @@
 """Checks the lane tags of an OSM file (osm_lanes.py's tags), ours or a real extract:
 - lanes: counts are counts, and lanes = lanes:forward + lanes:backward + lanes:both_ways;
 - count: every *:lanes value (turn, width, change, destination, access, ...) has as many lanes as the road that way;
-- turn / change / width / divider / lane_markings: values OSM knows; our edge_line:<side> a colour, its offset metres;
+- turn / change / width / divider / lane_markings: values OSM knows; our edge_line:<side> a colour, its offset metres,
+  our divider:lanes no or empty;
 - width: width:lanes fit in width (less its parking lanes);
 - parking: parking:left|right|both values OSM knows, their widths metres;
 - placement: well formed, its lane is on the road, and given both ways the two agree but for the median; our
@@ -92,6 +93,8 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
         out.append(('turn', f'{tag}: {", ".join(sorted(unknown))}'))
     elif key == 'change' and (unknown := {v for v in items if v and v not in CHANGES}):
       out.append(('change', f'{tag}: {", ".join(sorted(unknown))}'))
+    elif key == 'divider' and (unknown := {v for v in items if v not in ('', 'no')}):
+      out.append(('divider', f'{tag}: {", ".join(sorted(unknown))}'))
     elif key == 'width' and any(v and metres(v) is None for v in items):
       out.append(('width', f'{tag}={tags[tag]}'))
   if 'width' in tags and not metres(tags['width']):
