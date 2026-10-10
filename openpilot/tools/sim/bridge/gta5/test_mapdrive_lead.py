@@ -10,8 +10,13 @@ car of mapdrive_sim.py: run as a script.
   leaves the abort; behind a queue that moves on now and then, however long it all takes, it's driven to arrival
 - a slower vehicle ahead: followed at its speed, LEAD_STOP + the style's headway behind, without hunting; one braking to
   a stop: stopped behind it
+- a parked vehicle where the plan's lane room is no guide: at the end of a lane change into its lane, passed within the
+  change's lanes; past a junction whose sections are no guide, within our lane's edges carried across it
+- a driven vehicle standing across our way (side on or head on): no lead to queue behind; passed in our lane where it
+  pokes in, else stopped for, waited for while it moves, and a deadlock ends the trip after DEADLOCK_WAIT s
 - a vehicle crossing the junction ahead as we'd reach it: held for, then on; one that's through first, or comes long
-  after, not
+  after, not; held at the junction's line, not in the lanes short of the crosser's; stopped in a junction, held where we
+  are (no creeping on) while a crosser, or one slowed or standing beside our way, is about
 - pedestrians (the plugin's nearby "p"): one walking across the road we turn into as we'd reach it is waited for (mdlead
   traffic trip 1 hit one there at 5 m/s); without the list, braked for from the plugin's count of those just ahead, too
   late to miss it in the turn, but slower;
@@ -24,8 +29,9 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_WANT,
-                                                           PARKED_WAIT, WAIT_MAX, MapDriver)
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, DEADLOCK_WAIT, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR,
+                                                           NUDGE_MARGIN, NUDGE_NODE, NUDGE_WANT, PARKED_WAIT, WAIT_MAX, MapDriver)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -217,15 +223,57 @@ def test_nudge_before_a_turn():
   for side, lane in (("right", 1), ("left", 0)):
     r = ms.junction_turn(side, stop=None)
     right = 2.0 if side == "right" else -2.0
-    # 35 m before the turn: eased out before its corner (no faster than that allows), then the turn as ever
+    # 35 m before the turn: eased out before its corner (NUDGE_NODE short of its point, where the map's sections stop
+    # guiding it), then the turn as ever
     trip = ms.drive(r, {"seed": 3}, lane=lane, vehicles=[parked(r, lane, 165.0, right=right, driven=False)], reach=REACH, seconds=80)
     e = passed(trip)[0]
-    assert e["v_ease"] < 8.0 and trip.col(8).max() < 0.35, (e, trip.col(8).max())
+    out = e["at"][1] + trip.md.rear + NUDGE_MARGIN + e["ease"][1]
+    assert out < 200.0 - NUDGE_NODE + 0.5 and trip.col(8).max() < 0.35, (e, out, trip.col(8).max())
     # 10 m before it, where the lane gives way to the turn: no shift, stopped behind it as before
     trip = ms.drive(r, {"seed": 3}, lane=lane, vehicles=[parked(r, lane, 190.0, right=right, driven=False)], reach=REACH, seconds=80)
     ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
     assert [e["why"] for e in nudges(trip)] == ["no lane"], nudges(trip)
   print("nudge before a turn: ok")
+
+
+def test_nudge_where_the_lane_is_no_guide():
+  # mdnudge traffic trip 2: a car parked at the kerb of the lane a change ends in (refused "no lane", then held 10 s):
+  # passed within both lanes of the change, ours either way
+  r = ms.junction_turn("right", lead=400.0, stop=None)
+  s0, s1, _, _ = ms.drive(r, {"seed": 3}, lane=0, seconds=0.2).md.changes[0]
+  trip = ms.drive(r, {"seed": 3}, lane=0, vehicles=[parked(r, 1, s1 + 4.0, right=2.0, driven=False)], reach=REACH, seconds=90)
+  e = passed(trip)[0]
+  assert e["shift"] < -0.5 and (trip.col(10) - trip.md.half_width).min() > CLAMP_MARGIN - 0.1, e  # never over the centre line
+  # trip 3: one just past a junction whose sections (its middle, narrower than the car) leave the lane no guide: our
+  # lane's edges carried across it on the straight
+  pts = ms.line((600.0, 0.0), step=2.0)
+  narrow = Section([Span(Lane(BACKWARD, 5.5), -5.5, 0.0, -1), Span(Lane(FORWARD, 2.6), 1.45, 4.05, 1)], (-5.5, 5.5))
+  r = ms.made_route(pts, [narrow if 148 <= k < 152 else ms.section(1, 1) for k in range(len(pts) - 1)], junctions=[150])
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 312.0, right=2.0, driven=False)], reach=REACH, seconds=80)
+  passed(trip)
+  assert (trip.col(10) - trip.md.half_width).min() > CLAMP_MARGIN - 0.1
+  print("nudge where the lane is no guide: ok")
+
+
+def test_standing_across():
+  # mdnudge traffic trips 1 and 4: a driven vehicle standing across our way (a truck swung wide into our lane, a crossing
+  # car stopped at our nose) is no lead to queue behind: stopped for, waited for while it moves, and a deadlock (it may be
+  # waiting for us, and we can't back off) ends the trip after DEADLOCK_WAIT s, not WAIT_MAX
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30])
+  x, y, h = ms.start_pose(r, 1, 300.0)
+  for turned in (90.0, 180.0):  # side on, head on
+    trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[ms.Vehicle(x - 1.0, y, h + turned)], reach=REACH, seconds=120)
+    ended(trip, f"held {DEADLOCK_WAIT:.0f} s by a vehicle standing across our way (deadlock)")
+    assert not phases(trip, "follow") and phases(trip, "yield")[0].get("across"), trip.events[:4]
+  # it drives off after 40 s: on to arrival
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[ms.Vehicle(x - 1.0, y, h + 90.0, later=((40.0, 2.0, 8.0),))], reach=REACH, seconds=150)
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and not trip.md.aborts, trip.finished
+  # its nose 1.6 m into our lane from a driveway, seen far enough ahead: passed in our lane, as a parked one
+  r = ms.straight(600)
+  x, y, h = ms.start_pose(r, 1, 250.0)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[ms.Vehicle(x + LANE_W / 2 + 2.4 - 1.6, y, h + 90.0)], reach=REACH, seconds=80)
+  assert passed(trip)[0]["driven"]
+  print("standing across: ok")
 
 
 def test_queue_that_moves():
@@ -285,6 +333,42 @@ def test_crossing():
     trip = ms.drive(r, {"seed": 3}, lane=0, vehicles=[o], reach=REACH, seconds=90)
     assert trip.finished == "arrived" and trip.car.collisions == 0 and phases(trip, "yield"), (meet, trip.finished)
   print("crossing: ok")
+
+
+def test_crossing_at_the_line():
+  # mdnudge traffic trip 5: yields held 2 m short of the crosser's lane, past the junction's line; with a stream of cross
+  # traffic seen in time, now held at the line
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30], stops=[(288.0, "lights")])
+  base = ms.drive(r, {"seed": 2}, lane=1, seconds=60)
+  t_at = float(np.interp(297.25, base.col(2), base.col(0)))
+  x_us = ms.start_pose(r, 1, 300.0)[0]
+  for meet in (-1.0, 0.0):
+    stream = [ms.Vehicle(x_us - 10.0 * (t_at + meet + 1.5 * k), 297.25, 270.0, speed=10.0) for k in range(4)]
+    trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=stream, reach=REACH, seconds=90)
+    t, y, v = trip.col(0), trip.col(2), trip.col(4)
+    m = (t > 5.0) & (y < 400.0)
+    k = np.flatnonzero(m)[np.argmin(v[m])]
+    assert trip.finished == "arrived" and trip.car.collisions == 0 and v[k] < 0.5, (meet, trip.finished, v[k])
+    assert y[k] + trip.md.front < 288.0 and any(e.get("line") for e in phases(trip, "yield")), (meet, y[k] + trip.md.front)
+  print("crossing at the line: ok")
+
+
+def test_no_creep_in_a_junction():
+  # trip 5 again: stopped in the junction, released into a creep on each lapse of a yield; a crosser GTA's AI slowed for
+  # our nose dropped from the crossing check (under CROSS_MOVING) and squeezed it. Here, 4 m past the line, a stream on
+  # the far lane holds us while a car on the near lane slows and stands 0.75 m off our nose's corner for 7 s, then goes on
+  # across: held where we are until it's gone
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30], stops=[(288.0, "lights")])
+  x0, y0, h0 = ms.start_pose(r, 1, 292.0)
+  ystop, xs = y0 + 2.4 + 2.5, x0 - 1.0 - 0.75 - 2.4
+  slow = ms.Vehicle(x0 - 30.0, ystop, -90.0, speed=6.0, accel=-6.0 ** 2 / (2 * (xs - x0 + 30.0)), until=0.0, later=((16.0, 2.0, 10.0),))
+  far = [ms.Vehicle(x0 + 10.0 * (1.0 + 2.0 * k), ystop + 5.5, 90.0, speed=10.0) for k in range(5)]
+  trip = ms.drive(r, {"seed": 2}, pose=(x0, y0, h0), lane=1, vehicles=[slow] + far, reach=REACH, seconds=60)
+  t, y = trip.col(0), trip.col(2)
+  moved = t[np.argmax(y > y0 + 0.3)]
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and moved > 18.0 and trip.col(13).min() > 1.0, (moved, trip.col(13).min())
+  assert any(e.get("slowed") for e in phases(trip, "yield"))
+  print("no creep in a junction: ok")
 
 
 def test_pedestrians():
@@ -400,8 +484,12 @@ if __name__ == "__main__":
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()
+  test_nudge_where_the_lane_is_no_guide()
+  test_standing_across()
   test_following()
   test_crossing()
+  test_crossing_at_the_line()
+  test_no_creep_in_a_junction()
   test_pedestrians()
   test_pedestrian_at_the_kerb()
   test_range()
