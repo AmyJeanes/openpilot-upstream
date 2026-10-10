@@ -129,13 +129,16 @@ has the options).
   it stopped, rides out a bridge restart, and puts the topcam, overlay, time, weather and traffic back at the end.
 - `analyse` draws the overlay's own road marks (its cache, `gta5_overlay.road_marks`) into each tile by the topcam's
   projection (`imgcheck/frame.py`) and compares them with the paint found in the image (top-hat brightness, colour by
-  warmth over the road's, `imgcheck/paint.py`): paint with no map line within 0.4 m, map lines with no paint, the wrong
-  colour, kerbs over even road surface (painted medians, kerbs across lanes), stop lines off the painted bar, and
-  line-like paint inside junction areas (`imgcheck/compare.py`). Tiles whose ground under the camera is off the map's
-  road height (something over the road) are left out; service roads count a quarter. Where the map's roads are
-  stacked (a road surface more than 4 m over another, by roads.json's heights), a tile judges its road only where it
-  is the top layer: under a deck it's hidden, not missing. `plan --under` lays a second pass along the roads under
-  decks, the camera below the deck (topcam `abs=1`, 5 m above the road, a 90 degree field, a tile about every 10 m).
+  warmth over the road's, `imgcheck/paint.py`): paint with no map line within 0.4 m (white pieces under 6 m and a
+  metre or more from the map's lines only where they stand out of the road like the tile's own white lines, as the
+  game's asphalt carries faint old lane markings and cracks), map lines with no paint, the wrong colour, kerbs over
+  even road surface (painted medians, kerbs across lanes), stop lines off the painted bar, and line-like paint inside
+  junction areas (`imgcheck/compare.py`). Tiles whose ground under the camera is off the map's road height (something
+  over the road) are left out; service roads count a quarter. Where the map's roads are stacked (a road surface more
+  than 4 m over another, by roads.json's heights), a tile judges its road only where it is the top layer: under a deck
+  it's hidden, not missing; paint on another level's road beside it is that road's. `plan --under` lays a second pass
+  along the roads under decks, the camera below the deck (topcam `abs=1`, 5 m above the road, a 90 degree field, a
+  tile about every 10 m).
 - `trial.py` shoots chosen tiles under several lighting settings (hour, weather, the plugin's `shadows` command for
   the cascade shadow natives) and compares how much of the road is in shadow and how many of the map's lines have
   their paint seen.

@@ -76,9 +76,9 @@ def dashes(y, dash, period, skip=(), x0=-60.0, x1=60.0):
 def tile_map(c: Camera, marks: list[tuple[str, np.ndarray]], shapes=(), roads=None) -> TileMap:
   segs = np.concatenate([np.stack([p[:-1], p[1:]], axis=1) for _, p in marks]) if marks else np.zeros((0, 2, 3))
   kinds = np.concatenate([[k] * (len(p) - 1) for k, p in marks]) if marks else np.zeros(0, "<U1")
-  roads = roads or [((-60.0, 0.0), (60.0, 0.0), 16.0, 2)]  # (from, to, width, class)
-  a = np.array([[*r[0], GROUND] for r in roads])
-  b = np.array([[*r[1], GROUND] for r in roads])
+  roads = roads or [((-60.0, 0.0), (60.0, 0.0), 16.0, 2)]  # (from, to, width, class[, height])
+  a = np.array([[*r[0], r[4] if len(r) > 4 else GROUND] for r in roads])
+  b = np.array([[*r[1], r[4] if len(r) > 4 else GROUND] for r in roads])
   return TileMap(c, segs.astype(np.float32), kinds, list(shapes), a, b, np.array([r[2] for r in roads]), np.zeros(len(roads), int), [],
                  np.array([r[3] for r in roads]))
 
@@ -222,6 +222,41 @@ def test_strokes_and_dashes():
   tc = run(img, c, [("e", line(8.0)), ("e", line(-8.0))])
   miss = [i for i in tc.issues if i.kind == "missing"]
   assert miss and all(abs(i.y + 4.0) < 0.5 and i.x < 1.0 for i in miss), [(i.detail, round(i.x), round(i.y)) for i in tc.issues]
+
+
+def test_faint_marks():
+  c = cam()
+  # GTA's asphalt carries faint old lane markings in line at a dash period, standing about half as far out of the road
+  # as the painted lines: not paint missing from the map, though the same dashes painted are
+  edges = [(line(6.0), WHITE, 0.15), (line(-6.0), WHITE, 0.15)]
+  marks = [("w", line(6.0)), ("w", line(-6.0)), ("e", line(8.0)), ("e", line(-8.0))]
+  for colour, missing in (((150, 150, 150), False), (WHITE, True)):
+    img = road_image(c, edges + [(d, colour, 0.15) for d in dashes(2.0, 2.5, 6.0, x0=-30.0, x1=30.0)])
+    tc = run(img, c, marks)
+    assert ("missing" in kinds(tc)) == missing, (colour, [i.detail for i in tc.issues])
+    assert missing or any(why == "faint" for _, why in tc.dropped), tc.dropped
+  # beside a map line the same faint dashes are that line's, worn, and drawn off them
+  img = road_image(c, edges + [(d, (150, 150, 150), 0.15) for d in dashes(2.0, 2.5, 6.0, x0=-30.0, x1=30.0)])
+  tc = run(img, c, marks + [("d", line(2.7))])
+  assert "offset" in kinds(tc), [i.detail for i in tc.issues]
+
+
+def test_other_level_beside():
+  c = cam()
+  # a road 8 m below runs beside the tile's road, under the edge of its grown surface: its line is its own, which
+  # this level's marks can't explain
+  low = GROUND - 8.0
+  img = road_image(c, []).astype(np.float64)
+  xy = c.unproject(np.stack(np.meshgrid(np.arange(W), np.arange(H)), -1).reshape(-1, 2)).reshape(H, W, 2)
+  img[(xy[..., 1] > 8.0) & (xy[..., 1] < 14.0)] = 80.0
+  im = Image.fromarray(img.clip(0, 255).astype(np.uint8))
+  ImageDraw.Draw(im).line([tuple(p) for p in c.project(line(11.0, low))], fill=WHITE, width=max(1, int(0.15 / c.m_per_px)))
+  img = np.asarray(im)
+  marks = [("e", line(8.0)), ("e", line(-8.0)), ("w", line(11.0, low))]
+  road = ((-60.0, 0.0), (60.0, 0.0), 16.0, 2)
+  assert "missing" in kinds(run(img, c, marks, roads=[road]))
+  tc = run(img, c, marks, roads=[road, ((-60.0, 13.0), (60.0, 13.0), 8.0, 2, low)])
+  assert "missing" not in kinds(tc), [i.detail for i in tc.issues]
 
 
 def test_junction_paint():

@@ -4,7 +4,9 @@ Each tile is analysed at about 6 cm a pixel (the grab halved). Issues, each plac
 - missing: a run of paint (white or yellow, line-like: 2 m or longer, under 1 m wide, running along the road) on the
   map's road with no map line of this tile's level within TOL m, no kerb within KERB_TOL (edge lines, kerb faces), and no
   arrow or crossing where it is; a piece shorter than SHORT m counts only in line with another (a dashed line), not
-  alone (text, grit, a hatching stroke);
+  alone (text, grit, a hatching stroke), and white paint shorter than FAINT_LEN m away from the map's lines only
+  standing out of the road like the tile's own white lines (GTA's asphalt carries faint old lane markings, cracks and
+  wear); paint over another level's road (beside this one, higher or lower) is that road's;
 - offset: such paint up to OFFSET m beside a map line of its colour and running with it (the line drawn off the paint);
 - stray: a map line where the image shows the road but no paint within TOL m over two windows in a row (solid lines
   need a quarter of a window painted, dashed ones a few dashes in two of the freeway's dash periods, as the map has no
@@ -22,6 +24,7 @@ Each tile is analysed at about 6 cm a pixel (the grab halved). Issues, each plac
   the rest of a junction's paint (turn guides, chevrons, hatching) is the game's and isn't an issue.
 What a bridge above hides (the map's road surfaces more than ABOVE m over a point) and what isn't visibly road (trees,
 roofs) isn't judged."""
+import functools
 import math
 from dataclasses import asdict, dataclass
 
@@ -70,6 +73,9 @@ BG_M = 3.0  # m: the square that density is taken over
 NOISY = 0.12  # paint density around above which the image can't tell a line
 LIFT_MIN = 24.0  # brightness levels a stripe within TOL of a line stands over the road either side, averaged along it
 LIFT_ALONG = 1.0  # m: the average's length (grit and texture average out, a dash doesn't)
+FAINT_LEN = 6.0  # m: shorter white paint off the map counts only standing out like the tile's own painted white lines:
+FAINT_SHARE = 0.7  # this share of their lift at least (the texture's old lane markings stand about half as far out)
+FAINT_NEAR = 1.0  # m: paint this near a map line is judged whatever its lift (worn dashes of a line drawn off them)
 DASH_RUN = (1.5, 7.0)  # m: a dash's length under a solid map line
 DASH_GAP = 2.5  # m between dashes at least
 DASH_SHARE = 0.65  # share of a window dashes cover at most
@@ -206,10 +212,13 @@ class TileCheck:
     lvl = self.map.level
     with np.errstate(invalid="ignore"):
       self.hidden = (self.overhead - floor > ABOVE) & (np.abs(floor - lvl) < np.abs(self.overhead - lvl))
-    self.road = self.map.surface(self.size, grow=ROAD_GROW) & ~self.hidden
+    surface = self.map.surface(self.size)
+    # another level's road beside this one (below a cutting, a ramp climbing past) carries its own paint, which this
+    # tile's level can't explain
+    other = self.map.surface(self.size, level_only=False) & ~surface
+    self.road = self.map.surface(self.size, grow=ROAD_GROW) & ~self.hidden & ~other
     self.road_class = self.map.classes(self.size)
     self.sharp = self.paint.sharpness()
-    surface = self.map.surface(self.size)
     self.road_share = float(surface.mean())
     # the share of this level's road a deck above hides: judged from a shot under the deck, if there is one
     self.hidden_share = float((surface & self.hidden).sum() / max(surface.sum(), 1))
@@ -386,15 +395,17 @@ class TileCheck:
     every = self.pieces(PARTNER)
     pieces = [pc for pc in every if pc["length"] >= MIN_LINE]
     self.dropped = []  # pieces left out, why (for the pictures)
+    lines = {col: [(pts, k) for k, pts in self.map.lines(LINE_KINDS) if (k in YELLOW) == (col == "yellow")] for col in ("white", "yellow")}
     kept = []
     for pc in pieces:
       if not pc["junction"] and self.across_roads(pc):  # a junction's inside has no road direction
         self.dropped.append((pc, "across"))
       elif pc["length"] < SHORT and not any(q is not pc and self.in_line(pc, q) for q in every):
         self.dropped.append((pc, "alone"))
+      elif pc["colour"] == "white" and pc["length"] < FAINT_LEN and self.faint(pc, lines["white"] + lines["yellow"]):
+        self.dropped.append((pc, "faint"))
       else:
         kept.append(pc)
-    lines = {col: [(pts, k) for k, pts in self.map.lines(LINE_KINDS) if (k in YELLOW) == (col == "yellow")] for col in ("white", "yellow")}
     rays = self.line_ends()
     inside: dict[int, list] = {}
     for pc in kept:
@@ -419,6 +430,34 @@ class TileCheck:
       yellow = sum(p["length"] for p in found if p["colour"] == "yellow")
       detail = f"{total:.0f} m of paint in {len(found)} pieces inside a junction area on the run of a map line ending there ({yellow:.0f} m yellow)"
       self.add("junction", float(u), float(v), total, detail, "yellow" if yellow > total / 2 else "white")
+
+  def faint(self, pc: dict, lines: list) -> bool:
+    """Whether a piece of white paint more than FAINT_NEAR from the map's lines stands out of the road (its lift, along
+    its middle) less than FAINT_SHARE of the tile's painted white map lines do, or than LIFT_MIN. Yellow isn't judged
+    so: on pale concrete it stands little out by brightness, and the texture's old markings are white."""
+    if any(len(pts) >= 2 and nearest_on(pts[:-1, :2], pts[1:, :2], pc["xy"])[0].min() < FAINT_NEAR for pts, _ in lines):
+      return False
+    a, b = pc["ends"]
+    n = max(2, int(np.hypot(*(b - a)) / SAMPLE) + 1)
+    q = np.column_stack([a + (b - a) * np.linspace(0.0, 1.0, n)[:, None], np.full(n, self.map.level)])
+    lift = float(np.median(self.lift(q, np.repeat(pc["dir"][None], n, axis=0))))
+    ref = self.white_lift
+    return lift < max(LIFT_MIN, FAINT_SHARE * ref if ref is not None else 0.0)
+
+  @functools.cached_property
+  def white_lift(self) -> float | None:
+    """The median lift of this level's white map lines where white paint shows along them, if 5 m or more does."""
+    seen = dilate(self.paint.white & self.paint.strong, self.px(TOL))
+    lifts = []
+    for kind, pts in self.map.lines(LINE_KINDS):
+      if kind in YELLOW:
+        continue
+      q, t, uv, iu, iv, judged = self.samples(pts, SAMPLE)
+      ok = judged & seen[iv, iu]
+      if ok.sum() >= 4:
+        lifts.append(self.lift(q, t)[ok])
+    lifts = np.concatenate(lifts) if lifts else np.zeros(0)
+    return float(np.median(lifts)) if len(lifts) * SAMPLE >= 5.0 else None
 
   def line_ends(self) -> list[tuple[np.ndarray, np.ndarray]]:
     """Each end of the map's lines of this level not at a stop line (an arm with lights or a stop has no lines across
