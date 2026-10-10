@@ -2,10 +2,11 @@
 """Checks the lane tags of an OSM file (osm_lanes.py's tags), ours or a real extract:
 - lanes: counts are counts, and lanes = lanes:forward + lanes:backward + lanes:both_ways;
 - count: every *:lanes value (turn, width, change, destination, access, ...) has as many lanes as the road that way;
-- turn / change / width / divider / lane_markings: values OSM knows;
+- turn / change / width / divider / lane_markings: values OSM knows; our edge_line:<side> a colour, its offset metres;
 - width: width:lanes fit in width (less its parking lanes);
 - parking: parking:left|right|both values OSM knows, their widths metres;
-- placement: well formed, its lane is on the road, and given both ways the two agree but for the median;
+- placement: well formed, its lane is on the road, and given both ways the two agree but for the median; our
+  placement:offset metres;
 - transition: placement=transition only on ways up to TRANSITION_MAX long;
 - connectivity: type=connectivity relations have from, via and to, and their lanes are on those roads;
 - exit: every turn arrow has a way out that way at the junction ahead, that no restriction forbids.
@@ -21,7 +22,7 @@ from typing import NamedTuple
 import osmium
 
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CHANGES, DIVIDERS, PER_LANE, PLACEMENT, SUFFIXES, TRANSITION_MAX, \
-  TURNS, WayLanes, count, lane_counts, metres, oneway_of
+  TURNS, WayLanes, count, lane_counts, metres, oneway_of, signed_metres
 
 ROADS = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track',
          'living_street', 'road', 'busway', 'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'}
@@ -101,6 +102,11 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
       out.append(('divider', f"{key}={tags[key]}"))
   if tags.get('divider:colour', 'yellow') not in ('white', 'yellow'):
     out.append(('divider', f"divider:colour={tags['divider:colour']}"))
+  for side in ('left', 'right'):  # our edge lines no shoulder draws
+    if tags.get(f'edge_line:{side}', 'white') not in ('white', 'yellow'):
+      out.append(('divider', f"edge_line:{side}={tags[f'edge_line:{side}']}"))
+    if f'edge_line:{side}:offset' in tags and signed_metres(tags[f'edge_line:{side}:offset']) is None:
+      out.append(('divider', f"edge_line:{side}:offset={tags[f'edge_line:{side}:offset']}"))
   if tags.get('lane_markings', 'yes') not in ('yes', 'no'):
     out.append(('lane_markings', f"lane_markings={tags['lane_markings']}"))
   for side in ('left', 'right', 'both'):
@@ -127,6 +133,8 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
       out.append(('placement', f'{key}={v}'))
     elif int(m.group(2)) > n_lanes:
       out.append(('placement', f'{key}={v} but {n_lanes} lanes that way'))
+  if 'placement:offset' in tags and signed_metres(tags['placement:offset']) is None:
+    out.append(('placement', f"placement:offset={tags['placement:offset']}"))
   if len(road.placed) > 1:
     # apart by no more than the median, and where lanes widen along the way, the lanes either side of it (turn bays
     # opening in it: placed beyond them, the line doesn't move with them)

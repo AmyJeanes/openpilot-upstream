@@ -186,6 +186,41 @@ def test_blend_where_a_road_carries_on():
   assert lanes.section_at(110.0 + 1e-3, 1).edges[1] == 6.5 and lanes.section_at(150.0, 1).lanes == 1
 
 
+def test_placement_offset_runs_on():
+  # a freeway's two links end to end, the second's lanes painted 0.6 m right of its line (placement:offset): no step at
+  # the node; the lanes move across over BLEND_M either side of it, lines, kerbs and nav's lanes alike
+  nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (0.0, 100.0)}
+  tags = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '12'}
+  ways = {30: (tags, [1, 2]), 31: ({**tags, 'placement:offset': '0.6'}, [2, 3])}
+  ids = np.array(sorted(nodes), np.int64)
+  osm = OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {}),
+                 lambda lat, lon: (lon, lat))
+  a = {round(line.offset, 2): g for line, g in osm.line_geometry(30)}
+  b = {round(line.offset, 2): g for line, g in osm.line_geometry(31)}
+  assert sorted(a) == [-6.0, 0.0, 6.0] and sorted(b) == [-5.4, 0.6, 6.6]
+  for x, y in ((-6.0, -5.4), (0.0, 0.6), (6.0, 6.6)):
+    assert np.allclose(a[x][-1], b[y][0], atol=1e-6) and abs(a[x][-1][0] - (x + 0.3)) < 1e-6  # met halfway at the node
+    assert np.allclose(a[x][0], (x, -100.0)) and np.allclose(b[y][-1], (y, 100.0))  # each on its own paint beyond
+  assert osm.edges_at(30, 89.0) == (-6.0, 6.0) and osm.edges_at(31, 11.0) == (-5.4, 6.6)
+  pts = np.array([nodes[1], nodes[2], nodes[3]])
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  centre = [lanes.section_at(s, k).offset(0) for s, k in ((85.0, 0), (100.0 - 1e-6, 0), (100.0, 1), (115.0, 1))]
+  assert np.allclose(centre, [-3.0, -2.7, -2.7, -2.4], atol=1e-3), centre
+
+  def lines_with(extra):
+    nodes4 = {**nodes, 4: (30.0, 50.0), 5: (-30.0, -50.0)}
+    ids = np.array(sorted(nodes4), np.int64)
+    osm = OsmLanes(OsmData(ids, np.array([nodes4[i][1] for i in ids]), np.array([nodes4[i][0] for i in ids]), {}, {**ways, **extra}, {}),
+                   lambda lat, lon: (lon, lat))
+    return {round(line.offset, 2): g[-1] for line, g in osm.line_geometry(30)}
+  # a lane change leaving at the node (one-way, 31 degrees off): the freeway's links still run on into each other
+  lane_change = {32: ({**tags, 'lanes': '1', 'width': '6'}, [2, 4])}
+  assert all(np.allclose(lines_with(lane_change)[x], a[x][-1]) for x in a)
+  # a two-way road joining there is a junction: no blend
+  side = {33: ({'highway': 'primary', 'lanes': '2', 'width': '11'}, [5, 2])}
+  assert np.allclose(lines_with(side)[-6.0], (-6.0, 0.0))
+
+
 def test_route_lanes_bend_has_no_fillet():
   # a road bending through a node that isn't a junction keeps its own lane line
   osm = junction_map()

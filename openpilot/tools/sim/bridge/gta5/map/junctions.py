@@ -41,9 +41,10 @@ map as on our GTA V one.
   ways inside it it runs on along, as through a slip triangle) (a turn lane's line, which doesn't, is
   left out). One road per junction, the highest class, then the widest; none where another as important crosses it (a
   crossroads of equals). Where it's a priority road both sides (`priority_road=designated` / `yes_unposted`), or only
-  minor roads meet it (service roads, tracks, one-lane slips, narrower than MINOR_SHARE of it), its lines
-  are painted on across the junction (`Junction.carried`, with the ways after its first that the area still reaches
-  into), as a main road's centre line runs on past a side road. The
+  minor roads meet it (dirt roads, and service roads, tracks and one-lane slips narrower than MINOR_SHARE of it), its
+  lines are painted on across the junction (`Junction.carried`, with the ways after its first that the area still
+  reaches into), as a main road's centre line runs on past a side road; its edge lines too where they meet across
+  the node, on a side only dirt roads (or none) meet it from. The
   junction's area stays the whole of where its roads meet, the through road's lanes too: traffic turning out of a side
   road crosses them, and the moves, trims and stop lines are worked out over it.
 
@@ -55,7 +56,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, FORWARD, MEDIAN, OsmLanes, offset_line, oneway_of
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE_LINE, FORWARD, MEDIAN, OsmLanes, offset_line, \
+  oneway_of
 
 CLUSTER_LINK = 15.0  # m: junction nodes joined by a road this short (and shorter than their widest road is wide) are one junction
 MEDIAN_LINK = 25.0  # m: a two-way road this short across a divided road's median joins the junctions on its carriageways
@@ -98,6 +100,7 @@ CLASSES = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassifie
 PRIORITY = ('designated', 'yes_unposted')  # priority_road=*: a priority road, signed or not
 MINOR = ('service', 'track')  # roads whose junctions with a through road leave its lines painted on across
 MINOR_SHARE = 0.4  # of the through road's width a minor road meeting it is at most
+UNPAVED = ('unpaved', 'dirt', 'gravel', 'ground', 'sand')  # surface=*: a dirt road
 FLIPPED = {'dashed_solid': 'solid_dashed', 'solid_dashed': 'dashed_solid'}  # a line's halves seen from the other way
 STRAIGHT = 30.0  # deg: a move turning less than this goes through
 # the deg turned (left positive) along which each turn:lanes arrow points
@@ -461,6 +464,11 @@ def crossovers(osm: OsmLanes, ways: dict) -> set[int]:
     return out
 
 
+def dirt(tags: dict) -> bool:
+  """Whether a way is a dirt road: a track, or unpaved (GTA's off-road links)."""
+  return tags.get('highway') == 'track' or tags.get('surface') in UNPAVED
+
+
 def _faces(tags: dict, m: 'Member', k: int) -> bool:
   """Whether a stop line node, the member's k-th, is for traffic towards its junction by its direction tag (none: either)."""
   facing = tags.get('traffic_signals:direction') or tags.get('direction')
@@ -804,6 +812,8 @@ class Junctions:
       j.minor = self._minor_sides(j)
       if all(self.ways[w][0].get('priority_road') in PRIORITY for w in j.through) or j.minor:
         j.carried = self._carried_on(j)
+        for w, offsets in self._carried_edges(j).items():
+          j.carried[w] = j.carried.get(w, set()) | offsets
     self.osm.carry_across([tuple(j.through) for j in self.junctions if j.carried and len(j.through) == 2])
 
   def junction(self, nodes: list[int], caps: dict[tuple[int, int], float] | None = None) -> Junction | None:
@@ -1219,10 +1229,53 @@ class Junctions:
         if w in j.through:
           continue
         tags = self.ways[w][0]
+        if dirt(tags):  # a dirt road's mouth however wide its layout: the game's paint runs on past it
+          continue
         minor = tags.get('highway') in MINOR or (oneway_of(tags) and len(self.osm.lanes(w).lanes) == 1)
         if not minor or arm.width > MINOR_SHARE * width:
           return False
     return True
+
+  def _carried_edges(self, j: Junction) -> dict[int, set[float]]:
+    """The through road's edge lines painted on across a junction its lines are (_carried_on), on each side where its
+    ways either side have one meeting the other's at the node (MEET) and no road but dirt ones (whose mouths the game
+    paints the edge line across) meets it from that side: {way: {m right, to cm}}, those ways' and the ways after them
+    that still reach into its area."""
+    ends = [(arm, m) for arm in j.arms for m in arm.members if m.ways[0][0] in j.through]
+    if len(ends) != 2 or ends[0][1].start != ends[1][1].start:
+      return {}
+    (arm_a, ma), (arm_b, mb) = ends
+    p, u = self.osm.node_xy(ma.start), ma.line.tangent(0.0)
+    blocked = set()  # the sides of ma, looking out along it (1 left, -1 right), roads other than dirt ones meet it from
+    for arm in j.arms:
+      if arm is arm_a or arm is arm_b:
+        continue
+      for m in arm.members:
+        if not dirt(self.ways[m.ways[0][0]][0]):
+          blocked.add(1 if _cross(u, m.line.at(min(10.0, m.line.length)) - p) > 0 else -1)
+
+    def edge_lines(m, k=0):  # {side of m looking out along it: (offset along the way, where at the node, colour)}
+      w, fwd = m.ways[k]
+      road = self.osm.lanes(w)
+      right = -_left(m.line.tangent(0.0))
+      return {(1 if ln.offset < 0 else -1): (round(ln.offset if fwd else -ln.offset, 2), p + right * ln.offset, ln.white)
+              for ln in road.lines(FORWARD if fwd else BACKWARD) if ln.kind == EDGE_LINE}
+    a, b = edge_lines(ma), edge_lines(mb)
+    out: dict[int, set[float]] = {}
+    for side in (1, -1):  # ma's left is mb's right
+      if side in blocked or side not in a or -side not in b:
+        continue
+      (oa, qa, wa), (ob, qb, wb) = a[side], b[-side]
+      if wa != wb or np.hypot(*(qa - qb)) >= MEET:
+        continue
+      for m, s, off in ((ma, side, oa), (mb, -side, ob)):
+        out.setdefault(m.ways[0][0], set()).add(off)
+        for k in range(1, len(m.ways)):
+          if self._along(m, k) >= m.trim:
+            break
+          if (more := edge_lines(m, k).get(s)) is not None:
+            out.setdefault(m.ways[k][0], set()).add(more[0])
+    return out
 
   def _carried_on(self, j: Junction) -> dict[int, set[float]]:
     """The through road's lines painted on across the junction: its first way's either side, and the ways after them

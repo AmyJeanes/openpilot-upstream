@@ -35,7 +35,7 @@ KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way
          'guide_right', 'parking']
 PARKING_STRIP = 'parking_strip'  # a parking lane's middle, in a road's lines
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
-PAINTED = (DIVIDER, CENTRE, MEDIAN)  # the lines between lanes, which a road carried on through a junction keeps across it
+PAINTED = (DIVIDER, CENTRE, MEDIAN, EDGE_LINE)  # the lines a road carried on through a junction can keep across it
 CELL = 50.0  # m
 NODE_REACH = 2.0  # m out from a junction node along each road that where they start reaches (node_ends) ...
 NODE_PAD = 0.3  # m: ... and this much wider all round

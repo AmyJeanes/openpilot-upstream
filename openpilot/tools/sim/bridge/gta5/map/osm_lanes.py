@@ -12,6 +12,10 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   where the way's line runs, by that direction's lanes numbered from the left (backward ones as seen travelling
   backward). Without it the line is the middle of the road. Given both ways, it's midway between the two: they differ by
   the median between the directions.
+- `placement:offset` (not an OSM tag; ours): metres the whole cross-section (lanes, lines, kerbs) sits right of where
+  `placement` (or its default) puts it, seen along the way, negative to the left: for a way whose line can't be moved
+  to where the lanes are painted (our map's ways run along GTA's nodes) and isn't on a lane edge or middle placement can
+  name. Where the next way's lanes sit elsewhere, they move across to it as any two ways' do (BLEND_M).
 - `width`: kerb to kerb, metres, parking lanes and shoulders on the carriageway included. Without `width:lanes` it's
   shared out evenly; on a two-way way, what's left after `width:lanes` is a median centred between the directions.
 - `parking:left|right|both=lane` (with `parking:<side>:width`, else by `:orientation`): a parking lane on the
@@ -27,6 +31,10 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   `divider:colour=white` (OSM has no key for it). On a one-way way, `divider:left` / `divider:right`: a line painted
   along that edge of its lanes, seen travelling them, as a carriageway's yellow edge beside a median (it is that edge's
   one edge line: a shoulder there has no other).
+- `edge_line:<side>=white|yellow` (not an OSM tag; ours, with `edge_line:<side>:offset`): a solid line painted along
+  that side's lanes' edge, seen along the way, where no shoulder's edge line or `divider:<side>` draws one there (the
+  road beyond it isn't one a shoulder says, or the lanes don't run out to it): `offset` metres out from the lanes' edge
+  (negative in over the lanes), else on it.
 - Missing tags fall back to OSM's defaults, then to `Defaults` by road class: lanes 1 each way (2 on a one-way motorway
   or trunk), a single track on tracks, the line in the middle.
 
@@ -128,6 +136,13 @@ def metres(value: str | None) -> float | None:
   return None
 
 
+def signed_metres(value: str | None) -> float | None:
+  """metres(), negative with a leading minus."""
+  v = (value or '').strip()
+  m = metres(v.removeprefix('-'))
+  return None if m is None else -m if v.startswith('-') else m
+
+
 def oneway_of(tags: dict) -> int:
   """1 along the way, -1 against it, 0 both ways."""
   v = tags.get('oneway')
@@ -204,6 +219,7 @@ class WayLanes:
     self.median_edges: tuple[str | None, str | None] = (None, None)  # divider:forward, divider:backward
     self.divider_colour: str | None = None  # divider:colour
     self.edge_lines: tuple[str | None, str | None] = (None, None)  # a one-way way's divider:left, divider:right
+    self.edge_paint: tuple[tuple[str, float] | None, ...] = (None, None)  # edge_line:left / :right, (colour, m out)
     self.placed: dict[str, float] = {}  # where each placement tag puts the line, m from the left kerb
     self.tagged: tuple[float | None, float, int] = (None, 0.0, 0)  # width=*, the lanes' width:lanes total, lanes without
     self.single_track = all(lane.direction == BOTH_WAYS for lane in lanes)
@@ -278,6 +294,8 @@ class WayLanes:
     road.divider_colour = tags.get('divider:colour')
     if not two_way:
       road.edge_lines = (tags.get('divider:left'), tags.get('divider:right'))
+    road.edge_paint = tuple((c, signed_metres(tags.get(f'edge_line:{side}:offset')) or 0.0)
+                            if (c := tags.get(f'edge_line:{side}')) in ('white', 'yellow') else None for side in ('left', 'right'))
 
     def place(value, d):  # m from the left kerb
       m = PLACEMENT.fullmatch(value or '')
@@ -299,6 +317,7 @@ class WayLanes:
         road.placed[key] = at
     if road.placed:
       road.line = sum(road.placed.values()) / len(road.placed)
+    road.line -= signed_metres(tags.get('placement:offset')) or 0.0
     tagged = metres(tags.get('width'))
     road.tagged = (tagged - sum(parking) - sl - sr if tagged else None, known, unknown)  # width=* less parking and shoulders
     return road
@@ -348,21 +367,28 @@ class WayLanes:
   def edge_line_styles(self, direction: int = FORWARD) -> list[tuple[str, str] | None]:
     """The lines painted along the lanes' outer edges, left and right seen travelling `direction`: (style, colour), or
     None. One per edge: a one-way way's `divider:left` / `:right` (yellow) where tagged, else a shoulder's edge line
-    (solid; `shoulder:<side>:markings`, by default white, yellow on a one-way road's left; none for `no`)."""
+    (solid; `shoulder:<side>:markings`, by default white, yellow on a one-way road's left; none for `no`), else an
+    `edge_line:<side>` (solid, in its colour)."""
+    return [line and line[:2] for line in self._edge_lines(direction)]
+
+  def _edge_lines(self, direction: int) -> list[tuple[str, str, float] | None]:
+    """edge_line_styles, each with how far out from the lanes' edge it runs (m, an `edge_line:<side>:offset`)."""
     if not self.markings or not self.lanes:
       return [None, None]
     dirs = {lane.direction for lane in self.lanes}
     travel = (FORWARD if dirs == {FORWARD} else BACKWARD if dirs == {BACKWARD} else 0) * direction  # 1: one-way our way
     dividers = self.edge_lines if travel == 1 else self.edge_lines[::-1] if travel == -1 else (None, None)
     flip = slice(None) if direction == FORWARD else slice(None, None, -1)
-    shoulders, markings = self.shoulders[flip], self.shoulder_markings[flip]
+    shoulders, markings, painted = self.shoulders[flip], self.shoulder_markings[flip], self.edge_paint[flip]
     out = []
     for i in (0, 1):
       if dividers[i] and DIVIDERS.get(dividers[i]):
-        out.append((DIVIDERS[dividers[i]], 'yellow'))
+        out.append((DIVIDERS[dividers[i]], 'yellow', 0.0))
       elif shoulders[i] > EPS and markings[i] != 'no':
         left = travel == (1 if i == 0 else -1)
-        out.append(('solid', markings[i] if markings[i] in ('white', 'yellow') else 'yellow' if left else 'white'))
+        out.append(('solid', markings[i] if markings[i] in ('white', 'yellow') else 'yellow' if left else 'white', 0.0))
+      elif painted[i]:
+        out.append(('solid', *painted[i]))
       else:
         out.append(None)
     return out
@@ -376,9 +402,9 @@ class WayLanes:
     lo, hi = self.edges(direction)
     parking = self.parking_lanes(direction)
     out = [(('edge', 0), Line(EDGE, lo, None))] + [(('parking', 0), Line(PARKING, b, None)) for a, b in parking if a == lo]
-    edge_lines = self.edge_line_styles(direction)
+    edge_lines = self._edge_lines(direction)
     if edge_lines[0]:
-      out.append((('edge_line', 0), Line(EDGE_LINE, sec[0].left, *edge_lines[0])))
+      out.append((('edge_line', 0), Line(EDGE_LINE, sec[0].left - edge_lines[0][2], *edge_lines[0][:2])))
     if self.markings:
       wide = max(self.counts[:2]) >= 2
       centre = DIVIDERS.get(self.divider, 'solid') if self.divider else ('double_solid' if wide else 'dashed')
@@ -401,7 +427,7 @@ class WayLanes:
         else:
           out.append((('lane', i), Line(CENTRE, a.right, centre, colour)))
     if edge_lines[1]:
-      out.append((('edge_line', 1), Line(EDGE_LINE, sec[-1].right, *edge_lines[1])))
+      out.append((('edge_line', 1), Line(EDGE_LINE, sec[-1].right + edge_lines[1][2], *edge_lines[1][:2])))
     out += [(('parking', 1), Line(PARKING, a, None)) for a, b in parking if b == hi]
     out.append((('edge', 1), Line(EDGE, hi, None)))
     return out
@@ -462,7 +488,7 @@ ROADS = frozenset({'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unc
                    'living_street', 'track', 'road', 'motorway_link', 'trunk_link', 'primary_link', 'secondary_link',
                    'tertiary_link'})
 # tags that place lanes, beyond their counts: a map without any has no lane geometry to read
-GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward')
+GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward', 'placement:offset')
 TAPER_M = 30.0  # m: a lane begins (or ends) where a way's lane count changes, widening from (narrowing to) nothing over this
 CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m either side of a point has a corner there
 CORNER_CHORD = 10.0  # m
@@ -612,11 +638,46 @@ class OsmLanes:
     self._blends.clear()
 
   def _onto(self, way: int, node: int) -> tuple[int, int] | None:
-    """_other's way, or at a junction the way the road carried across it runs on to (carry_across)."""
+    """_other's way, or at a junction the way the road carried across it runs on to (carry_across), or among one-way
+    ways the one straight on (_straight_on)."""
     found = self._other(way, node)
     if found is None and (other := self._carried.get((way, node))) is not None:
       found = other, FORWARD if self.ways[other][1][-1] == node else BACKWARD
-    return found
+    return found if found is not None else self._straight_on(way, node)
+
+  def _travel(self, way: int, node: int) -> np.ndarray | None:
+    """A one-way way's heading where it ends at a node, as travelled (into the node or out of it); None on a two-way."""
+    oneway, refs = oneway_of(self.ways[way][0]), self.ways[way][1]
+    if not oneway or node not in (refs[0], refs[-1]):
+      return None
+    p = self.way_points(way)
+    u = (p[-1] - p[-2] if refs[-1] == node else p[1] - p[0]) * oneway
+    return u / max(float(np.hypot(*u)), 1e-9)
+
+  def _straight_on(self, way: int, node: int) -> tuple[int, int] | None:
+    """As _other where every way at the node is one-way and ends there (lanes merging, parting or changing across a
+    carriageway: no junction): the one way travelled on from this one (or into it) within RUN_ON_TURN of straight on,
+    where that way's one is this one too. GTA's lane changes and ramps join a freeway's links at their nodes."""
+    def into(w):
+      return (self.ways[w][1][-1] == node) == (oneway_of(self.ways[w][0]) == 1)
+
+    def one(w):
+      u, at = self._travel(w, node), self._ends_at(node)
+      if u is None or self.degree.get(node, 0) != len(at) or len(at) < 3:
+        return None
+      found = []
+      for o in at:
+        if o == w:
+          continue
+        if (v := self._travel(o, node)) is None:
+          return None  # a two-way road: a junction
+        if into(o) != into(w) and float(u @ v) >= math.cos(math.radians(RUN_ON_TURN)):
+          found.append(o)
+      return found[0] if len(found) == 1 else None
+    other = one(way)
+    if other is None or one(other) != way:
+      return None
+    return other, FORWARD if self.ways[other][1][-1] == node else BACKWARD
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
@@ -1967,6 +2028,7 @@ def _blend(few: Section, many: Section, t: float) -> Section:
   return Section(spans, edges)
 
 
+RUN_ON_TURN = 20.0  # deg: a one-way way runs on into another at a node with others (_straight_on) this near straight
 BLEND_M = 10.0  # m either side of a node the lanes move across over where a road carries on from one way to the next
 BLEND_KNOTS = 4  # straight pieces the smoothstep is drawn in on each side
 CARRIAGEWAY_TURN = 30.0  # deg: a two-way road going on this straight from a carriageway's end is the road it joins

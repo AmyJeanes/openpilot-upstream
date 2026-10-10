@@ -1480,7 +1480,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
   - Where the paint was surveyed (`painted`: paint_survey.correct's widths each way and median), its lanes take the
     measured widths, kerbs where the layout has them; the line is the middle of the road between them, or the centre's
     with more lanes one way (`source:width=survey`). A surveyed one-way link's painted lanes are centred on it, or
-    placed by `placement` where it is one of several links side by side making up a carriageway.
+    placed by `placement` where it is one of several links side by side making up a carriageway. Where the paint sits
+    off where placement can put the line (`painted['offset']`), `placement:offset` moves the lanes there.
   `lf` is the link's flags and `freeway` whether its nodes are a freeway's (a one-way freeway's lanes are wider);
   returns the tags."""
   w, offset = layout(lf, back, freeway)
@@ -1491,6 +1492,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
             'width:lanes': '|'.join(map(metres, painted['lanes'])), 'source:width': 'survey'}
     if 'placement' in painted:
       tags['placement'] = painted['placement']
+    if painted.get('offset'):
+      tags['placement:offset'] = metres(painted['offset'])
     if 'change' in painted:
       tags['change:lanes'] = '|'.join(painted['change'])
     return tags
@@ -1517,6 +1520,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
         tags[f'parking:{side}'], tags[f'parking:{side}:width'] = 'lane', metres(strip)
     if len(wf) != len(wb) and not painted.get('middle'):
       tags['placement:forward'] = tags['placement:backward'] = 'left_of:1'
+      if painted.get('offset'):
+        tags['placement:offset'] = metres(painted['offset'])
     return tags
   bay = 2 * offset / (bf + bb) if bf + bb else 0.0
   tags = {'lanes': str(fwd + back), 'lanes:forward': str(fwd), 'lanes:backward': str(back),
@@ -1537,6 +1542,13 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
 
 # minor roads the game may leave unpainted (not unclassified: Blaine's country roads, where the files may miss paint)
 UNPAINTED_CLASSES = {'residential', 'service', 'track'}
+TEXTURED = {'residential', 'unclassified'}  # classes whose painted edge lines say a centre the files miss is painted
+
+
+def unpainted(cls, samples, least=paint_survey.UNPAINTED_SAMPLES, edges_seen=True):
+  """paint_survey.unpainted, but for a road of the TEXTURED classes the files paint edge lines along
+  (paint_survey.edges_painted): its centre line is laid in the road's texture, not missing."""
+  return paint_survey.unpainted(samples, least, edges_seen) and not (cls in TEXTURED and paint_survey.edges_painted(samples))
 
 
 def painted_lines(tags, cls, two_way, samples, why, unmarked=False):
@@ -1548,7 +1560,7 @@ def painted_lines(tags, cls, two_way, samples, why, unmarked=False):
   road = WayLanes.from_tags(tags)
   if len(road.lanes) < 2:  # no lines to draw
     return tags
-  if unmarked or (cls in UNPAINTED_CLASSES and paint_survey.unpainted(samples)):
+  if unmarked or (cls in UNPAINTED_CLASSES and unpainted(cls, samples)):
     why['unpainted'] += 1
     return {**{k: v for k, v in tags.items() if not k.startswith('divider')}, 'lane_markings': 'no'}
   out = dict(tags)
@@ -1601,6 +1613,8 @@ def neighbours_paint(nodes, rows, painted, unsurveyed, unread=None):
             got.pop(k, None)
           if 'parking' in got:
             got['parking'] = got['parking'][::-1]
+          if 'offset' in got:
+            got['offset'] = -got['offset']
         found.append((length(o), n, got))
     counts = [f for f in found if (len(f[2]['forward']), len(f[2]['backward'])) == (fwd, back)] if wid in unsurveyed else []
     # or the road painted alike at both ends (a link between two the paint recounts, or whose own few sections the
@@ -1634,8 +1648,8 @@ def unmarked_roads(nodes, rows, samples_of):
   for wid, a, b, *_ in minor.values():
     cls, offroad = minor[wid][4], minor[wid][6]
     samples, edges = samples_of(wid, a, b), cls in UNPAINTED_CLASSES and cls != 'track' and not offroad
-    state[wid] = 'bare' if paint_survey.unpainted(samples, edges_seen=edges) else \
-      'short' if not samples or paint_survey.unpainted(samples, 1, edges) else 'painted'
+    state[wid] = 'bare' if unpainted(cls, samples, edges_seen=edges) else \
+      'short' if not samples or unpainted(cls, samples, 1, edges) else 'painted'
 
   def heading(p, q):
     return game_heading(nodes[q]['x'] - nodes[p]['x'], nodes[q]['y'] - nodes[p]['y'])
@@ -1701,8 +1715,9 @@ def edge_line_tags(tags, samples, why):
   left, right = paint_survey.edge_lines(samples, (sec[0].left, sec[-1].right))
   for side, kind in (('left', left), ('right', right)):
     if kind:
-      # one line per edge: it's the shoulder's edge line too (road_edges' markings for it go)
-      tags = {**{k: v for k, v in tags.items() if k != f'shoulder:{side}:markings'}, f'divider:{side}': kind}
+      # one line per edge: it's the shoulder's edge line too (road_edges' markings and edge line for it go)
+      gone = (f'shoulder:{side}:markings', f'edge_line:{side}', f'edge_line:{side}:offset')
+      tags = {**{k: v for k, v in tags.items() if k not in gone}, f'divider:{side}': kind}
       why[f'yellow {side} edge'] += 1
   return tags
 
@@ -1753,6 +1768,11 @@ def carried_edges(nodes, ways, unread):
 
 PAINT_END = 4.0  # m at each end of a link where paint across it (stop lines, crossings) is no centre line along it
 PAINT_ALONG = 2.0  # m of a link's line at least with paint on it: a centre line there
+
+
+def bare_centre(samples) -> bool:
+  """paint_survey.centre_bare, but not on a road the files paint edge lines along (unpainted's TEXTURED)."""
+  return paint_survey.centre_bare(samples) and not paint_survey.edges_painted(samples)
 
 
 def painted_along(paint, nodes, a, b) -> bool:
@@ -1829,6 +1849,7 @@ EDGE_SYMMETRY = 0.6  # m the two edge lines' distances from the way's line may d
 EDGE_ON = 0.3  # m between the lanes' edge and a painted edge line that is it
 ASPHALT_SLACK = 0.2  # m the lanes may reach past the asphalt's edge
 SHOULDER_MIN, SHOULDER_MAX = 0.3, 5.5  # m of road surface between the lanes' edge and the asphalt's: a shoulder
+EDGE_PLACED = 0.05  # m off the lanes' edge a painted edge line is drawn where it's painted rather than on the edge
 
 
 def road_edges(tags, samples, why):
@@ -1841,16 +1862,37 @@ def road_edges(tags, samples, why):
   surface between the lanes' edge and the asphalt's, with nothing else painted on it, is a shoulder
   (`shoulder:<side>:width`), its edge line painted where the lanes run to one (else `shoulder:<side>:markings=no`), in
   the files' colour (`shoulder:<side>:markings=white|yellow` where it isn't osm_lanes' default). Not on single tracks,
-  centre turn lanes, tapers, parking lanes or lanes with room between them and their kerbs."""
-  if any(k.endswith((':start', ':end')) or k.startswith(('parking', 'shoulder')) for k in tags):
+  centre turn lanes, tapers, parking lanes or lanes with room between them and their kerbs. A painted edge line no
+  shoulder draws (none read beyond it, or the lanes not run out to it) is `edge_line:<side>`, where it's painted (on
+  all those but single tracks, tapers and parking lanes too)."""
+  if any(k.endswith((':start', ':end')) or k.startswith(('parking', 'shoulder', 'edge_line')) for k in tags):
     return tags
   road = WayLanes.from_tags(tags)
   sec = road.section(FORWARD)
-  if not sec or road.margin > 0.01 or any(s.heading == 0 for s in sec):
+  if not sec or road.single_track:
     return tags
   one_way = all(s.heading == 1 for s in sec)
   edges = [sec[0].left, sec[-1].right]
   found = paint_survey.road_edges(samples, tuple(edges), (sec[0].right, sec[-1].left))
+  lines, colours = [f[0] for f in found], [f[1] for f in found]
+  out = dict(tags)
+  if road.margin <= 0.01 and not any(s.heading == 0 for s in sec):
+    out, edges = shoulders_out(tags, road, sec, one_way, found, why)
+  for i, side in enumerate(('left', 'right')):
+    if lines[i] is None or (out.get('shoulder') in (side, 'both') and out.get(f'shoulder:{side}:markings') != 'no'):
+      continue
+    if (asphalt := found[i][2]) is not None and abs(asphalt - lines[i]) < paint_survey.GUTTER:
+      continue  # a gutter's line along the kerb, drawn as the kerb
+    out[f'edge_line:{side}'] = colours[i] or ('yellow' if one_way and i == 0 else 'white')
+    if abs(off := (lines[i] - edges[i]) * (-1.0, 1.0)[i]) > EDGE_PLACED:
+      out[f'edge_line:{side}:offset'] = metres(off)
+    why['edge lines no shoulder draws' + (' (off the lanes)' if abs(off) > EDGE_PLACED else '')] += 1
+  return out
+
+
+def shoulders_out(tags, road, sec, one_way, found, why):
+  """road_edges' lanes out to the painted edge lines and its shoulders: (the tags, the lanes' edges m right of the line)."""
+  edges = [sec[0].left, sec[-1].right]
   lines, colours, asphalt, clear = ([f[k] for f in found] for k in range(4))
   sign = (-1.0, 1.0)
   out = dict(tags)
@@ -1904,7 +1946,7 @@ def road_edges(tags, samples, why):
   if any(shoulders):
     out['shoulder'] = 'both' if all(shoulders) else 'left' if shoulders[0] else 'right'
     out['width'] = metres(base + sum(shoulders))
-  return out
+  return out, edges
 
 
 def arrows(n, out):
@@ -2616,10 +2658,19 @@ def main():
         tags['divider:colour'] = 'white'
       defaulted.discard(wid)
     if wid in defaulted and cls in UNPAINTED_CLASSES and centre_paint is not None and \
-        paint_survey.centre_bare(link_samples(wid, a, b)) and not painted_along(centre_paint, nodes, a, b):
+        bare_centre(link_samples(wid, a, b)) and not painted_along(centre_paint, nodes, a, b):
       tags['divider'] = 'no'  # the game files paint no centre line on it (Prosperity St's bridge)
       defaulted.discard(wid)
       lines_why['no centre painted'] += 1
+    # a back road's (switched off or off-road) class default centre where the files paint none along it: none on a dirt
+    # road (Calafia Rd), and on a paved one where they show it bare too
+    offroad = bool((nodes[a]['f'][0] | nodes[b]['f'][0]) & OFFROAD)
+    back_road = offroad or (cls == 'unclassified' and bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF))
+    if fwd == back == 1 and back_road and not median and 'divider' not in tags and 'lane_markings' not in tags and \
+        centre_paint is not None and not painted_along(centre_paint, nodes, a, b) and \
+        ((wid in drawn and offroad) or bare_centre(link_samples(wid, a, b))):
+      tags['divider'] = 'no'
+      lines_why['no centre painted on a back road'] += 1
     if median and (kinds := median_kinds.get(parent.get(wid, wid))) and 'lane_markings' not in tags:
       left, right = kinds  # seen along the way: beside the backward lanes, beside the forward ones
       if left == right and left:

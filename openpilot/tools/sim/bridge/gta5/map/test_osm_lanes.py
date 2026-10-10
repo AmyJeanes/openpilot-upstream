@@ -177,6 +177,33 @@ def test_painted_layout():
   assert np.allclose(road.edges(), (-9.15, 9.15))
 
 
+def test_placement_offset():
+  # placement:offset moves the whole cross-section (lanes, lines, kerbs) right of where placement puts it
+  tags = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '12.2', 'width:lanes': '6.2|6', 'placement': 'right_of:1'}
+  base, moved = WayLanes.from_tags(tags), WayLanes.from_tags({**tags, 'placement:offset': '-0.6'})
+  assert spans(base) == [(1, -6.2, 0.0), (1, 0.0, 6.0)]
+  assert spans(moved) == [(1, -6.8, -0.6), (1, -0.6, 5.4)] and np.allclose(moved.edges(), (-6.8, 5.4))
+  assert np.allclose([o for _, o, _ in lines(moved)], [o - 0.6 for _, o, _ in lines(base)])
+  assert spans(moved, BACKWARD) == [(-1, -5.4, 0.6), (-1, 0.6, 6.8)]  # to the left seen the other way
+  # without placement, off the middle of the lanes; malformed, ignored
+  plain = {k: v for k, v in tags.items() if k != 'placement'}
+  assert spans(WayLanes.from_tags({**plain, 'placement:offset': '0.25'})) == [(1, -5.85, 0.35), (1, 0.35, 6.35)]
+  assert spans(WayLanes.from_tags({**plain, 'placement:offset': 'left'})) == spans(WayLanes.from_tags(plain))
+  # a two-way road placed by its centre, painted 1 m right of the line
+  two = WayLanes.from_tags({'highway': 'primary', 'lanes': '3', 'lanes:forward': '2', 'lanes:backward': '1', 'width': '16.5',
+                            'width:lanes:forward': '5.5|4.5', 'width:lanes:backward': '6.5', 'placement:forward': 'left_of:1',
+                            'placement:backward': 'left_of:1', 'placement:offset': '1'})
+  assert spans(two) == [(-1, -5.5, 1.0), (1, 1.0, 6.5), (1, 6.5, 11.0)]
+  # ynd_to_osm writes paint_survey's offsets so that osm_lanes reads the lanes back where they're painted
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_tags
+  road = WayLanes.from_tags({'highway': 'primary', **lane_tags(2, 0, flags(2, 0, 0, True),
+                                                               painted={'lanes': [5.4, 5.45], 'placement': 'right_of:1', 'offset': 0.35})})
+  assert spans(road) == [(1, -5.05, 0.35), (1, 0.35, 5.8)]
+  painted = {'forward': [5.5, 4.5], 'backward': [6.5], 'median': 0.0, 'middle': False, 'offset': 1.0}
+  road = WayLanes.from_tags({'highway': 'primary', **lane_tags(2, 1, flags(2, 1, 0, False), painted=painted)})
+  assert spans(road) == [(-1, -5.5, 1.0), (1, 1.0, 6.5), (1, 6.5, 11.0)]
+
+
 def test_parking_lane():
   road = WayLanes.from_tags({'highway': 'residential', 'lanes': '2', 'width': '13.3', 'parking:right': 'lane',
                              'parking:right:width': '2.3'})
@@ -311,12 +338,48 @@ def test_road_edges_from_the_game_files():
   tags = {'highway': 'residential', 'lanes': '2', 'width': '11'}
   got = road_edges(tags, game_files(marks, -5.6, 6.4), why)  # no room on the left: the lanes stay, the kerb moves out
   assert got == {**tags, 'width': '11.9', 'shoulder': 'right', 'shoulder:right:width': '0.9', 'shoulder:right:markings': 'no'}
+  # (the line 0.3 m in from the asphalt's edge is its gutter's; 0.6 m in, it's drawn where it's painted, on the shoulder)
+  got = road_edges(tags, game_files(marks, -5.6, 6.7), why)
+  assert got['edge_line:right'] == 'white' and got['edge_line:right:offset'] == '0.6', got
+  assert lines(WayLanes.from_tags(got))[-2:] == [(EDGE_LINE, 6.1, 'solid'), (EDGE, 6.7, None)]
   # kerbs out to the asphalt's edges where no line is painted, the lanes as they were
   got = road_edges({'highway': 'primary', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}, game_files([], -4.5, 4.6), why)
   assert np.allclose(WayLanes.from_tags(got).edges(), (-4.5, 4.6)) and spans(WayLanes.from_tags(got)) == [(1, -2.75, 2.75)]
   # but not over other lanes painted beyond
   beside = game_files([(2.75, 'white', 'dashed'), (8.25, 'white', 'solid')], None, 8.6)
   assert road_edges({'highway': 'motorway', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}, beside, why)['width'] == '5.5'
+
+
+def test_edge_lines_without_shoulders():
+  from collections import Counter
+
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import edge_line_tags, road_edges
+  why = Counter()
+  tags = {'highway': 'trunk', 'lanes': '2', 'lanes:forward': '1', 'lanes:backward': '1', 'width': '13'}
+  # painted edge lines on the lanes' edges with no asphalt's edge read beyond them, or too far out for a shoulder:
+  # the lines without shoulders, on the lanes' edges
+  marks = [(-6.5, 'white', 'solid'), (0.0, 'yellow', 'double_solid'), (6.5, 'white', 'solid')]
+  assert road_edges(tags, game_files(marks, -6.6, 6.6), why) == tags  # a city street's gutter lines: its kerbs
+  for asphalt in ((None, None), (-13.0, 13.0)):
+    got = road_edges(tags, game_files(marks, *asphalt), why)
+    assert got == {**tags, 'edge_line:left': 'white', 'edge_line:right': 'white'}, (asphalt, got)
+    assert lines(WayLanes.from_tags(got)) == [(EDGE, -6.5, None), (EDGE_LINE, -6.5, 'solid'), (CENTRE, 0.0, 'dashed'),
+                                              (EDGE_LINE, 6.5, 'solid'), (EDGE, 6.5, None)]
+  # the Great Ocean Hwy's median kerbs read as the asphalt's edges (the link's line runs between them), so the lanes
+  # can't run out to the edge lines past them: each line drawn on its paint, off the lanes' edge
+  median = game_files([(-9.7, 'white', 'solid'), (-3.0, 'yellow', 'double_solid'), (2.5, 'yellow', 'double_solid'),
+                       (9.3, 'white', 'solid')], -2.2, 1.6)
+  got = road_edges({**tags, 'width': '17.3', 'width:lanes:forward': '6.2', 'width:lanes:backward': '5.7'}, median, why)
+  road = WayLanes.from_tags(got)
+  assert np.allclose(road.edges(), (-8.65, 8.65)) and 'shoulder' not in got, got
+  assert got['edge_line:left:offset'] == '1.05' and got['edge_line:right:offset'] == '0.65', got
+  assert [o for k, o, _ in lines(road) if k == EDGE_LINE] == [-9.7, 9.3], got
+  # a one-way way's yellow left edge is its divider:left, that edge's one line
+  one = game_files([(-5.5, 'yellow', 'solid'), (0.0, 'white', 'dashed'), (5.5, 'white', 'solid')])
+  got = edge_line_tags(road_edges({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '11'}, one, why), one, why)
+  assert got['divider:left'] == 'solid_line' and 'edge_line:left' not in got and got['edge_line:right'] == 'white', got
+  # none where the road is unpainted
+  assert lines(WayLanes.from_tags({**tags, 'lane_markings': 'no', 'edge_line:left': 'white'})) == [(EDGE, -6.5, None), (EDGE, 6.5, None)]
 
 
 def test_single_track_painted_as_two_lanes():
@@ -524,6 +587,13 @@ def test_unmarked_roads():
   rows = [(1, 'A', 'B', True, 'track', True, True), (2, 'B', 'C', True, 'unclassified', False, True),
           (3, 'C', 'D', True, 'residential', False, False)]
   assert unmarked_roads(nodes, rows, lambda w, a, b: dirt[w]) == {1, 2}
+  # white edge lines painted both sides: a residential road's centre is in its texture (Sustancia Rd), not unpainted;
+  # a service road's isn't (a runway's edges)
+  lined = [{'conf': 1.0, 'colour': 'white', 'type': 'edge_line', 'offset': v} for v in (-4.2, 4.2)]
+  samples = {w: [{'src': 'gamefiles', 'marks': lined, 'kerbs': edges}] * 4 for w in (1, 2, 3)}
+  rows = [(1, 'A', 'B', True, 'residential', False, False), (2, 'B', 'C', True, 'residential', False, False),
+          (3, 'C', 'D', True, 'service', False, False)]
+  assert unmarked_roads(nodes, rows, lambda w, a, b: samples[w]) == {3}
 
 
 def test_median_edge_kinds():
