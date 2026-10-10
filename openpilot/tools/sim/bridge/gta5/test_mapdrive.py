@@ -423,6 +423,58 @@ def test_collision_routes():
   print(f"collision routes: ok ({', '.join(done)} m)" if done else "collision routes: skipped (no router)")
 
 
+def path_lane_offsets(md, route) -> np.ndarray:
+  """The driven path: m right of its lane's centre at each point."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import along_route, lane_at, segment_of
+  along, right = along_route(route, md.path, 0.0)
+  return np.array([r_ - route.section(segment_of(route, a)).offset(lane_at(md.keys, a)) for a, r_ in zip(along, right, strict=True)])
+
+
+def test_start_stub_and_join():
+  """map1010c 005: the route began with a 0.05 m link back down the road (the car's place just short of the router's
+  node), the lane line swept across it from 5 m left of its lane, and the start offset, measured against that sweep,
+  held the path 3 m right of the lane into a wall. The lane line now starts past such a stub (RouteLanes.start); the
+  start offset is the route's own where the car is on it, so a line swerving at its start is joined from the car, not
+  shifted; and a bend the car can't take where it pulls away fails the plan rather than being driven (with the stub
+  kept, 005's sweep is one)."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import headings
+  from openpilot.tools.sim.bridge.gta5.map import osm_lanes
+  pts = np.vstack([[[0.0, 0.0], [-0.03, -0.04]], ms.line((300.0, 0.0), start=(-0.03, -0.04))[1:]])
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+  r = ms.made_route(pts, ms.section(2, 2))
+  trip = ms.drive(r, cfg, pose=ms.start_pose(r, 1.0, 1.0), seconds=6.0)
+  assert not trip.md.aborts and np.abs(path_lane_offsets(trip.md, r)[:20]).max() < 0.1
+  real = osm_lanes.START_STUB
+  osm_lanes.START_STUB = 0.0
+  try:
+    r = ms.made_route(pts, ms.section(2, 2))
+    trip = ms.drive(r, cfg, pose=ms.start_pose(r, 1.0, 1.0), seconds=3.0)
+  finally:
+    osm_lanes.START_STUB = real
+  assert trip.finished is not None and "sharp corner" in trip.finished, trip.finished
+
+  def swerved(route):  # the lane line 2.5 m left of its lane where it starts, back in it 14 m on
+    real = route.lanes.lane_line
+
+    def line(at0, keys, step=2.0):
+      out = real(at0, keys, step)
+      s = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(out, axis=0).T))))
+      u = np.clip(1.0 - s / 14.0, 0.0, 1.0)
+      th = headings(out)
+      return out - np.stack([np.sin(th), -np.cos(th)], axis=1) * (2.5 * u * u * (3 - 2 * u))[:, None]
+    route.lanes.lane_line = line
+    return route
+  r = swerved(ms.straight(300))
+  off = path_lane_offsets(ms.drive(r, cfg, lane=1, seconds=0.2).md, r)[:15]
+  r.on_road = lambda *a, **k: False  # the start offset from the line itself, as where the car isn't on the route
+  before = path_lane_offsets(ms.drive(r, cfg, lane=1, seconds=0.2).md, r)[:15]
+  assert np.abs(off).max() < 0.5 and np.abs(before).max() > 1.0, (np.abs(off).max(), np.abs(before).max())
+  # 8 m from a square corner too near the start for a fillet
+  trip = ms.drive(ms.junction_turn("right", lead=8.0, stop=None), cfg, lane=1, seconds=3.0)
+  assert trip.finished is not None and "sharp corner" in trip.finished and trip.car.v < 0.3, trip.finished
+  print(f"start stub and join: ok (swerved line: path {np.abs(off).max():.2f} m off its lane, {np.abs(before).max():.1f} before)")
+
+
 def test_body_from_dims():
   """Our car's front, rear and half width from the plugin's nearby.dims (a van here), else the constants: the stop
   sign's mark is the van's front bumper margin short of the line."""
@@ -625,6 +677,7 @@ if __name__ == "__main__":
   test_clamp_corners()
   test_clamp_lane_and_fork()
   test_collision_routes()
+  test_start_stub_and_join()
   test_lane_change_kept_off_a_jog()
   test_arrival()
   test_aborts()

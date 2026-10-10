@@ -948,13 +948,23 @@ class MapDriver:
     n = min(len(off), len(room_l))
     off[:n] = np.clip(bias + off[:n], -room_l[:n], room_r[:n])  # no further than its lane leaves room for
     off = np.clip(off, -0.45, 0.45) * np.clip(s_path / 20.0, 0.0, 1.0) * self._fade(route, intent)
-    # from where the car is, across to the line as a lane change would (setup places it in a lane, a reroute may not)
-    e0 = self._offset_from(intent, np.asarray(state["pos"][:2], float))
+    # from where the car is, across to the line as a lane change would (setup places it in a lane, a reroute may not):
+    # by the route's own line where the car is on it (past a start stub, RouteLanes.start), as the line's start can
+    # swerve (a fillet, a clamp)
+    sec = lanes.section_at(at0, segment_of(route, at0))
+    if route.on_road() and not route.elsewhere and at0 >= lanes.start and sec is not None and sec.lanes:
+      e0 = float(route.right - sec.offset(lane_at(dense, at0)))
+    else:
+      e0 = self._offset_from(intent, np.asarray(state["pos"][:2], float))
     if abs(e0) > JOIN_MAX:
       self._abort(f"plan: the car is {e0:+.1f} m from its lane line", t, state.get("pos"))
       return None
     v0 = max(float(state.get("vEgo") or 0.0), 5.0)
     join = max(MIN_LC_M, lc_seconds(self.style, e0 / LANE_W) * v0) if abs(e0) > 0.5 else 15.0
+    near = [i * STEP for i, _ in sharp if i * STEP < join]
+    if near and not self.plans:  # a bend the car can't take where it pulls away: the line is wrong there
+      self._abort(f"plan: a sharp corner {near[0]:.0f} m on, where the car joins its line", t, state.get("pos"))
+      return None
     off = off + e0 * (1.0 - quintic(s_path / join))
     self.join_m = max(join, 30.0)
     self._derive(route, intent, off, t, start=(np.asarray(state["pos"][:2], float), float(state.get("heading") or 0.0), v0))

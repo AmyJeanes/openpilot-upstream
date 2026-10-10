@@ -494,6 +494,7 @@ CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m eithe
 CORNER_CHORD = 10.0  # m
 FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a fillet
 FILLET_MIN = 1.0  # m: a corner nearer the route's start or end than this has no room for a fillet
+START_STUB = 0.5  # m: a route's points nearer its start than this are left out of its lane line (RouteLanes._lead)
 CORNER_SHARP, SHARP_SHARE = 10.0, 0.6  # a turn through a junction turns this share of its angle within this many m
 FILLET_RADIUS = {'left': 20.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns
 MATCH_TOL = 0.5  # m between a route's shape point and a map node it is at
@@ -1263,6 +1264,12 @@ class RouteLanes:
     self.splits: dict[int, bool] = splits or {}
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
+    # the route's points less than START_STUB from its start: the node the router set off from, a few cm from the car's
+    # place it begins at (often behind it), whose link reads as a reversal there; the lane line and its corners from past it
+    self._lead = 0
+    while self._lead + 2 < len(self.points) and self.along[self._lead + 1] < START_STUB:
+      self._lead += 1
+    self.start = float(self.along[self._lead])  # m along where its lane line begins
     self._corners: list[tuple[float, float]] | None = None
     self._drops: list[tuple[float, tuple[int, int, int]]] | None = None
     self._openings: list[tuple[float, int]] | None = None
@@ -1332,7 +1339,7 @@ class RouteLanes:
     if self._corners is None:
       near = self.junctions
       self._corners = []
-      for sc, turned in corners(self.points, self.along):
+      for sc, turned in corners(self.points[self._lead:], self.along[self._lead:]):
         if not len(near) or np.abs(near - sc).min() > FILLET_REACH:
           continue
         p = [np.array([np.interp(v, self.along, self.points[:, 0]), np.interp(v, self.along, self.points[:, 1])])
@@ -1593,7 +1600,7 @@ class RouteLanes:
     side), as a car drives through a junction rather than along its ways to the node in the middle."""
     if not keys or at >= self.along[-1] - 1e-6:
       return None
-    back = max(at - 2 * FILLET_REACH - CORNER_CHORD, 0.0)  # from behind, so a corner the car is in keeps its fillet
+    back = max(at - 2 * FILLET_REACH - CORNER_CHORD, self.start)  # from behind, so a corner the car is in keeps its fillet
     kx = np.array([at + d for d, _ in keys], dtype=float)
     ky = np.array([lane for _, lane in keys], dtype=float)
     near = np.clip(np.searchsorted(self.along, kx), 1, len(self.along) - 1)
@@ -1650,7 +1657,7 @@ class RouteLanes:
       lo = cs[n - 1][0] if n else -np.inf
       hi = cs[n + 1][0] if n + 1 < len(cs) else np.inf
       # a corner near the route's start (where it was routed from the car) or its end has less room either side
-      start = s[0] <= self.along[0] + EPS
+      start = s[0] <= self.start + EPS
       a = sc - min(FILLET_REACH, (sc - lo) / 2, sc - s[0] - FILLET_MIN if start else np.inf)
       b = sc + min(FILLET_REACH, (hi - sc) / 2, s[-1] - sc - FILLET_MIN)
       if min(sc - a, b - sc) < FILLET_MIN or (not start and a - CORNER_CHORD < s[0]):
