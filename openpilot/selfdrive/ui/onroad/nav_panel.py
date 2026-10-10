@@ -6,19 +6,19 @@ toggle while a route is active, and slides left to end the route.
 The card opens by itself for a maneuver ahead, and by hand (a tap, or a drag down that follows the finger); a hand
 open or close lasts until nav would next change it, and a hand open lapses after OVERRIDE_OPEN_S. The map's own buttons
 (the layout pin) show while the card was opened by hand or the map is tapped, and fade after MAP_CONTROLS_S."""
-import math
 import time
 
 import pyray as rl
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
-from openpilot.selfdrive.ui.nav.draw import (clamp01, draw_car, draw_maneuver, draw_pin, draw_road_icon, ease, lane_arrow, lerp,
+from openpilot.selfdrive.ui.nav.draw import (Anim, clamp01, draw_car, draw_maneuver, draw_pin, draw_road_icon, lane_arrow, lerp,
                                              mask_corners, max_blend, maneuver_kind, mix, premul, smootherstep, smoothstep,
                                              split_arrow, with_alpha, xfade)
 from openpilot.selfdrive.ui.nav.nav_map import NavMap
-from openpilot.selfdrive.ui.nav.nav_state import (NavState, RouteStarts, card_lanes, format_arrival, format_distance, format_duration,
+from openpilot.selfdrive.ui.nav.nav_state import (NavState, card_lanes, format_arrival, format_distance, format_duration,
                                                   format_trip_distance, maneuver_phase)
+from openpilot.selfdrive.ui.nav.session import NavSession
 from openpilot.selfdrive.ui.nav.text import maneuver_road
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import FONT_SCALE, FontWeight, MouseEvent, gui_app
@@ -53,42 +53,14 @@ DRAG_SNAP = 0.06  # let go after dragging the card this much of the way and it s
 SLIDE_END = 0.75  # let go past this much of the track to end the route
 MAP_CONTROLS_S = 4.0  # the map's buttons fade away after this long untouched; a tap on the map brings them back
 EXPAND_S = 0.5  # the card's expand/collapse, the lanes' slide, the route's start and end and the layout switch
-NOO_HOLD_S = 2.0  # a tapped Navigate on openpilot shows as set while the param catches up
 LANES_H = 168.0
 NOWHERE = rl.Rectangle(0, 0, 0, 0)  # a hit area with nothing drawn
 TEXT_STEP = 8  # px: text is fitted to widths rounded down to this, so animations re-measure it only every few frames
-END_MOVED = 50.0  # m the destination moves for a route that was ended to count as a new one
 
 
 def fs(px: float) -> int:
   """A text size in screen px, as a size for draw_text_ex (which scales by FONT_SCALE)."""
   return int(round(px / FONT_SCALE))
-
-
-class Anim:
-  """A value easing towards its target over `dur` seconds."""
-  def __init__(self, v: float):
-    self.a = self.b = v
-    self.t0 = -1e9
-    self.dur = 0.7
-
-  def set(self, target: float, now: float, dur: float):
-    if target != self.b:
-      self.a, self.b, self.t0, self.dur = self.value(now), target, now, dur
-
-  def value(self, now: float) -> float:
-    return lerp(self.a, self.b, ease((now - self.t0) / self.dur))
-
-  def hold_at(self, v: float, now: float):
-    """Restart from v (where a drag left it) towards the current target."""
-    self.a, self.t0 = v, now
-
-  def linear(self, now: float) -> float:
-    """The move on plain time, not eased: for crossfades, which an ease-out would rush through in a frame or two."""
-    return lerp(self.a, self.b, clamp01((now - self.t0) / self.dur))
-
-  def fade(self, now: float) -> float:
-    return lerp(self.a, self.b, clamp01((now - self.t0) / (0.6 * self.dur)))
 
 
 def wrap(font: rl.Font, s: str, size: int, width: float, max_lines: int) -> list[str]:
@@ -126,11 +98,7 @@ class NavCard:
     self._exp_icon = gui_app.texture("icons/experimental.png", STOCK_ICON, STOCK_ICON)
 
     self.split_on = self._params.get_bool("NavSplitPinned")  # the layout pin: the always-on split, else the card over the camera
-    self.noo = False  # Navigate on openpilot, as shown
-    self._noo_set_t = -1e9
-    self.route_on = False  # a route to show: nav has one, and the driver hasn't ended it here
-    self._ended: tuple | None = None  # the route the driver slid to end, until nav drops it or has a new destination
-    self._starts = RouteStarts()
+    self.session = NavSession(nav, self._params)
     self.phase = "cruise"
     self.want_open = False
     # a hand open or close of the card overrides nav's own choice until nav would next change it
@@ -177,21 +145,14 @@ class NavCard:
     """The HUD's own experimental button: only with no route at all, the card has it otherwise."""
     return self.present.value(self._now) <= 0.001
 
-  def _route_key(self) -> tuple:
-    return self.nav.guidance.destination, self.nav.route_end
+  @property
+  def route_on(self) -> bool:
+    """A route to show: nav has one, and the driver hasn't ended it here."""
+    return self.session.route_on
 
-  def _new_destination(self, ended: tuple) -> bool:
-    (name, end), (name0, end0) = self._route_key(), ended
-    if name != name0 or (end is None) != (end0 is None):
-      return True
-    if end is None or end0 is None:
-      return False
-    dy, dx = (end[0] - end0[0]) * 111319.0, (end[1] - end0[1]) * 111319.0 * math.cos(math.radians(end[0]))
-    return math.hypot(dx, dy) > END_MOVED
-
-  def set_noo(self, on: bool):
-    self.noo, self._noo_set_t = on, time.monotonic()
-    self._params.put_bool("NavigateOnOpenpilot", on)
+  @property
+  def noo(self) -> bool:
+    return self.session.noo
 
   # *** input ***
 
@@ -215,7 +176,7 @@ class NavCard:
     now = time.monotonic()
     if self.on_button(x, y):
       if self.route_on:
-        self.set_noo(not self.noo)
+        self.session.set_noo(not self.noo)
     elif in_circle(self.hit_layout, x, y):
       self.map_poke_t = now
       leaving_split = self.split_on
@@ -272,11 +233,6 @@ class NavCard:
     self.hit_exp = self.hit_layout = (0.0, 0.0, 0.0)
     self.hit_card = self.hit_eta = self.hit_map = NOWHERE
 
-  def _end_route(self):
-    self._starts.forget()
-    self._ended = self._route_key()
-    self._params.remove("NavDestination")  # as a phone or the map would: navd drops the destination
-
   # *** state ***
 
   def _lanes(self):
@@ -315,18 +271,12 @@ class NavCard:
   def update(self, rect: rl.Rectangle):
     now = self._now = time.monotonic()
     self._rect = rect
-    if self._ended is not None and (not self.nav.active or self._new_destination(self._ended)):
-      self._ended = None
-    route_on = self.nav.active and self._ended is None
-    if self._starts.update(route_on, self.nav.route_end, now):  # a new destination, not a reroute: NoO from its setting
-      self.set_noo(self._params.get_bool("NavigateOnOpenpilotDefault"))
-    if route_on and not self.route_on:
+    was_on = self.route_on
+    self.session.update(now)
+    if self.route_on and not was_on:
       self.override = None
-    self.route_on = route_on
-    if now - self._noo_set_t > NOO_HOLD_S:
-      self.noo = ui_state.navigate_on_openpilot
     v = ui_state.sm["carState"].vEgo
-    self.phase = maneuver_phase(self.nav.guidance, v, self.phase != "cruise") if route_on else "cruise"
+    self.phase = maneuver_phase(self.nav.guidance, v, self.phase != "cruise") if self.route_on else "cruise"
 
     for ev in gui_app.mouse_events:
       if ev.slot == 0:
@@ -336,8 +286,7 @@ class NavCard:
     if self.confirm_t is not None:
       self.slide = min(self.slide_len, self.slide + max(30.0, (self.slide_len - self.slide) * 0.35))
       if now - self.confirm_t > 0.35:
-        self._end_route()
-        self.route_on = False
+        self.session.end()
         self.slide, self.slide_target, self.confirm_t = 0.0, 0.0, None
     elif self.press_x is None and self.slide > 0:  # let go short of the end: spring back
       self.slide = max(0.0, self.slide - max(30.0, self.slide * 0.25))

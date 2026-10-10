@@ -220,8 +220,7 @@ class Context:
 
   def end(self):
     def f(_):  # as the slide to end does once it lets go past the end
-      self.card._end_route()
-      self.card.route_on = False
+      self.card.session.end()
     return f
 
   def shot(self, name: str):
