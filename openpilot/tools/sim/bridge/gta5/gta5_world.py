@@ -23,7 +23,7 @@ from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
 from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
-from openpilot.tools.sim.bridge.gta5 import gta5_gnss
+from openpilot.tools.sim.bridge.gta5 import gta5_gnss, gta5_stacks
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
@@ -152,6 +152,7 @@ class GTA5World(World):
   sets_torque = True
   idle_since: float | None = None  # when the bridge last stopped driving (_idle_gc)
   next_full_gc = 0.0
+  stall: gta5_stacks.Stall | None = None  # the bridge loop's heartbeat (gta5_stacks.py)
 
   def __init__(self, simulator_state: SimulatorState, q: Queue, port: int):
     super().__init__(dual_camera=True)
@@ -185,7 +186,7 @@ class GTA5World(World):
     self.gnss = gta5_gnss.from_env()
     self.publishes_gps = self.gnss is not None
     self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
-    self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT) if MAP else None
+    self.map_view: MapView | None = None  # made once rx has forked: a socket it inherited would outlive this process
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
     self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
     self.junction_areas: JunctionAreas | None = None
@@ -197,8 +198,6 @@ class GTA5World(World):
     self.recorder = Recorder(RECORD, self) if RECORD else None
     self.overlay = OverlayProcess() if OVERLAY_PROCESS else Overlay()  # the plugin map debug overlay, while it asks for it
     self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
-    if self.map_view:
-      print(f"gta5: map view on http://localhost:{MAP_PORT}/")
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     self.rx_latest = multiprocessing.Value('q', -1, lock=False)  # the newest frame's seq that rx has written
@@ -214,6 +213,11 @@ class GTA5World(World):
     if error is not None:
       self.close("rx failed")
       raise RuntimeError(f"could not listen for the game on port {port}: {error}")
+    stacks = gta5_stacks.watch()
+    self.stall = gta5_stacks.Stall(stacks) if stacks is not None else None
+    if MAP:
+      self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, stacks=stacks)
+      print(f"gta5: map view on http://localhost:{MAP_PORT}/")
     self.frames = frames_recv
     threading.Thread(target=self._frame_reader, daemon=True).start()
     self.pinner = pin_ui()
@@ -348,6 +352,8 @@ class GTA5World(World):
     pass
 
   def read_sensors(self, simulator_state: SimulatorState):
+    if self.stall is not None:
+      self.stall.beat(time.monotonic())
     with self.lock:
       state = self.state
       fresh = time.monotonic() - self.last_frame_time < 0.5
@@ -772,6 +778,8 @@ class GTA5World(World):
     self._send({"type": "control", "active": False})
 
   def close(self, reason: str):
+    if self.stall is not None:
+      self.stall.stop()
     self._send({"type": "control", "active": False})
     if self.pinner is not None:
       self.pinner.terminate()

@@ -1,15 +1,18 @@
 import json
 import multiprocessing
+import os
+import signal
 import socket
 import struct
 import threading
+import time
 from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import debug_cmd, display_from_env
-from openpilot.tools.sim.bridge.gta5.gta5_rx import VIEWS, Receiver
+from openpilot.tools.sim.bridge.gta5.gta5_rx import VIEWS, Receiver, exit_with_parent
 from openpilot.tools.sim.lib.camerad import W, H
 
 
@@ -138,3 +141,31 @@ def test_takes_up_settings_from_before_the_bridge(receiver):
   assert debug == {"type": "debug", "on": 1, "layers": "ed", "width": 2.5, "force": False}
   assert gps == {"type": "gpsroute", "on": 1, "max": 80}
   plugin.close()
+
+
+def _bridge_killed(pid_out):
+  rx = multiprocessing.Process(target=exit_with_parent, args=(os.getpid(), 0.05))
+  rx.start()
+  pid_out.send(rx.pid)
+  os.kill(os.getpid(), signal.SIGKILL)
+
+
+def test_rx_ends_with_the_bridge_process():
+  # killed by a signal, the bridge's process would leave rx serving its ports, so the bridge looked alive
+  pid_in, pid_out = multiprocessing.Pipe(duplex=False)
+  bridge = multiprocessing.Process(target=_bridge_killed, args=(pid_out,))
+  bridge.start()
+  assert pid_in.poll(5)
+  rx = pid_in.recv()
+  bridge.join(5)
+  assert bridge.exitcode == -signal.SIGKILL
+  deadline = time.monotonic() + 5
+  while time.monotonic() < deadline:
+    try:
+      with open(f"/proc/{rx}/stat") as f:
+        if f.read().rsplit(")", 1)[1].split()[0] == "Z":  # exited, not yet reaped by whoever took it on
+          return
+    except FileNotFoundError:
+      return
+    time.sleep(0.05)
+  raise AssertionError("rx outlived the bridge process")

@@ -355,6 +355,12 @@ resuming after the game comes back. gta5-train's `scripts/juncrec_labels.sh` mak
   it has been idle for 2 s (no game frames, or on foot). Either stall stopped the camera and sensor threads long enough
   for modelV2 gaps of 400 ms and locationd errors. `stall_bench.py realtime <trips>` replays recorded trips (nav_replay's
   inputs) through the bridge's threads on the real clock and reports the main loop's, camera's and car thread's gaps.
+- For a hung bridge, `kill -USR1 <pid>` appends that process's thread stacks to `bridge_stacks.txt` beside `GTA5_LOG`
+  (`GTA5_STACKS` sets the file; the game connection's process writes `bridge_stacks_rx.txt`). It goes through
+  faulthandler, which needs no ptrace (py-spy can't attach under WSL without sudo) and works while a thread holds the
+  GIL. The bridge's process appends its stacks on its own when its loop stalls for 20 s, and prints them to its log if
+  it dies of a signal; the map view checks every 30 s that it still answers. Should the bridge's process die, the game
+  connection's process and `run_bridge.py` exit too, rather than leave the ports open with nothing behind them.
 - Control uses carControl's `curvature` and `accel`. The plugin steers with the game's steer bias, which sets a wheel
   angle and so a path curvature proportional to it. The game turns the wheels less as the speed rises (on the Model 3,
   3.4 1/m per unit bias up to 5 m/s, 2.2 at 11 m/s, 1.3 at 20 m/s, measured with `steertest`), and the low-speed gain

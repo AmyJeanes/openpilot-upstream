@@ -1,4 +1,7 @@
-from multiprocessing import Queue
+import os
+import signal
+import threading
+from multiprocessing import Process, Queue
 
 from openpilot.common.params import Params
 from openpilot.tools.sim.bridge.common import SimulatorBridge
@@ -24,3 +27,18 @@ class GTA5Bridge(SimulatorBridge):
 
   def spawn_world(self, q: Queue) -> World:
     return GTA5World(self.simulator_state, q, self.port)
+
+  def run(self, queue, retries=-1):
+    bridge_p = super().run(queue, retries)
+    threading.Thread(target=self._exit_with, args=(bridge_p,), daemon=True).start()
+    return bridge_p
+
+  def _exit_with(self, bridge_p: Process):
+    """Exits when the bridge's process dies unasked (a segfault): this one would go on waiting for keys, the bridge
+    seemingly up."""
+    bridge_p.join()
+    if self._keep_alive and bridge_p.exitcode:
+      code = bridge_p.exitcode
+      how = f"exit code {code}" if code > 0 else signal.strsignal(-code) or f"signal {-code}"
+      print(f"gta5: the bridge process died ({how}); exiting", flush=True)
+      os._exit(1)

@@ -5,15 +5,18 @@ The plugin sends raw NV12 frames for both cameras (about 140 MB/s), which would 
 messages: (slot, views, state). It also listens on localhost for debug commands (gta5_cmd.py), forwarded to the plugin,
 and sets the plugin's map debug overlay and GPS route again each time the game connects."""
 import json
+import os
 import socket
 import struct
 import threading
+import time
 from multiprocessing.connection import Connection
 from multiprocessing.shared_memory import SharedMemory
 
 import numpy as np
 
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+from openpilot.tools.sim.bridge.gta5 import gta5_stacks
 from openpilot.tools.sim.lib.camerad import W, H
 
 VIEWS = ("road", "wide")
@@ -273,8 +276,19 @@ class Receiver:
         print("gta5: game disconnected", flush=True)
 
 
+def exit_with_parent(parent: int, every: float = 1.0) -> None:
+  """Ends this process once the bridge's is gone: killed by a signal, it would leave this one serving the game and the
+  debug port, so the bridge looks alive."""
+  while os.getppid() == parent:
+    time.sleep(every)
+  print("gta5 rx: the bridge process is gone; exiting", flush=True)
+  os._exit(1)
+
+
 def rx_main(port: int, frames: Connection, controls: Connection, ready: Connection, shm_names: dict[str, str], latest=None,
             display: list[dict] | None = None) -> None:
+  gta5_stacks.watch("rx")
+  threading.Thread(target=exit_with_parent, args=(os.getppid(),), daemon=True).start()
   try:
     Receiver(frames, controls, shm_names, latest, display).serve(port, ready)
   except Exception as e:
