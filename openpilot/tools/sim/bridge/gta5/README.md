@@ -155,6 +155,21 @@ caps the speed for the road's bends up to the next turn and for its speed limits
 oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
 changes.
 
+### The comma four (mici) nav UI
+
+openpilot's PC UI is the comma four's (536x240) unless `BIG=1`, and with a route it shows the same messages as the 3X
+card: a turn card over the camera (a chip far off, the lanes near the turn, "Now", a pin; a lane request as mici's own
+alert), and a map page beside the driving view (swipe right, or tap the driving view) with the road button. Offline,
+`selfdrive/ui/tests/mici_nav_player.py` plays scripted scenarios to it (its docstring has the commands; frames and
+videos, touches, checks). With the game, either:
+
+- openpilot's own UI as the mici one: on a checkout with this UI, put `SCALE=2` (no `BIG=1`) in `~/gta5test/ui_env` and
+  restart openpilot (`svc.sh restart openpilot`); the bridge needs `GTA5_NAV_MSGS=1` (in `bridge_env`).
+- or a second window beside the 3X UI, which publishes nothing (a second publisher would take the running UI's
+  `uiDebug` and bookmark sockets away): `OPENPILOT_PREFIX=gta5 SCALE=2 python selfdrive/ui/tests/mici_nav_player.py
+  --watch` from the checkout with this UI. Its road button and slide to end act for real: they set
+  `NavigateOnOpenpilot` and remove `NavDestination` on the gta5 prefix, as the 3X button does.
+
 ### Blind-spot monitoring
 The car has a blind-spot monitor, as a Tesla's (`gta5_blindspot.py`): the plugin reports the vehicles around the car
 (`nearby`: each one's place, heading, velocity and model bounds), and the bridge flags a side while a vehicle going our
