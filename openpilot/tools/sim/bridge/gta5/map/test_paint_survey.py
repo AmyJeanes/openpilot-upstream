@@ -6,7 +6,8 @@ import tempfile
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.paint_survey import _clean, along, arrow_marks, centre_bare, centre_kind, centre_line, correct, \
-  correct_oneway, disagree, edge_lines, lane_lines, line_kinds, load, median_edges, median_runs_in, opening_taper, sources, strips, swing_taper, unpainted
+  correct_oneway, disagree, edge_lines, lane_lines, line_kinds, load, median_edges, median_runs_in, offset_place, opening_taper, placed, sources, \
+  strips, swing_taper, unpainted
 
 
 def mark(offset, colour='white', kind='dashed', conf=1.0, pair=None):
@@ -29,9 +30,12 @@ def test_centre_off_the_line():
   # a 1 + 1 road whose centre is 0.3 m right of the link: the lanes' widths say it, the kerbs stay
   got, _ = correct([sample([mark(0.3, 'yellow', 'double_solid')], s) for s in (2, 8)], 1, 1, (-5.5, 5.5))
   assert got == {'middle': True, 'forward': [5.2], 'backward': [5.8], 'median': 0.0}
-  # with more lanes one way the line is the centre's, so it must be on it
+  # with more lanes one way the line is the centre's: placement:offset says it's painted 1 m right of the line, the lanes
+  # and kerbs where they are
   got, why = correct([sample([mark(1.0, 'yellow'), mark(6.5), mark(-11.0, kind='edge_line')], s) for s in (2, 8)], 2, 1, (-5.5, 11.0))
-  assert got is None and why == 'centre off the line'
+  assert why is None and got == {'forward': [5.5, 4.5], 'backward': [6.5], 'median': 0.0, 'middle': False, 'offset': 1.0}, got
+  got, why = correct([sample([mark(2.0, 'yellow'), mark(7.5), mark(-11.0, kind='edge_line')], s) for s in (2, 8)], 2, 1, (-5.5, 12.0))
+  assert got is None and why == 'centre off the line'  # further than OFFSET_MAX
 
 
 def test_disagreements_change_nothing():
@@ -119,17 +123,51 @@ def test_more_lanes_one_way_between_kerbs_alike():
 
 
 def test_one_way_line_placed_moving_the_fewest_lines():
-  # yellow edges 12.9 m apart, 0.25 m left of the link's middle, the lane line between 0.45 m left of it: the lanes'
-  # middle stays the line, so only the edges move (0.25 m each): the lane line stays where painted
-  edges = [mark(-6.7, 'yellow', 'solid'), mark(6.2, 'yellow', 'solid')]
+  # yellow edges 12.9 m apart, 0.1 m left of the link's middle, the lane line between 0.45 m left of it: the lanes'
+  # middle stays the line, so only the edges move (0.1 m each): the lane line stays where painted
+  edges = [mark(-6.55, 'yellow', 'solid'), mark(6.35, 'yellow', 'solid')]
   files = [sample([*edges, mark(-0.45)], s, src='gamefiles') for s in (0, 3, 6)]
   assert correct_oneway(files, 2, (-6.4, 6.4))[0] == {'lanes': [6.0, 6.9]}
   # the lane line on the link's line: placed on it, the edges where painted
   files = [sample([*edges, mark(-0.05)], s, src='gamefiles') for s in (0, 3, 6)]
-  assert correct_oneway(files, 2, (-6.4, 6.4))[0] == {'lanes': [6.7, 6.2], 'placement': 'right_of:1'}
+  assert correct_oneway(files, 2, (-6.4, 6.4))[0] == {'lanes': [6.55, 6.35], 'placement': 'right_of:1'}
   # dashes 4 m in 12 cross one section in four, read as solid pieces: still the lane line, dashed
   dashes = [sample([*edges, *([mark(-0.45, kind='solid')] if s == 3 else [])], s, src='gamefiles') for s in (0, 3, 6, 9)]
   assert correct_oneway(dashes, 2, (-6.4, 6.4))[0] == {'lanes': [6.0, 6.9]}
+
+
+def test_one_way_lanes_off_what_placement_says():
+  # edges 0.25 m left of the link's middle, the lane line 0.45 m left of the line: placement alone moves the edges or
+  # the lane line more than OFFSET_MIN, so every line stays where painted, the lanes 0.25 m left of their middle
+  edges = [mark(-6.7, 'yellow', 'solid'), mark(6.2, 'yellow', 'solid')]
+  files = [sample([*edges, mark(-0.45)], s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(files, 2, (-6.4, 6.4))[0] == {'lanes': [6.25, 6.65], 'offset': -0.25}
+  # edges 0.25 m right of the middle and the lane line 0.2 m right of the line, nearer than the lanes' middle:
+  # right_of:1 and 0.2 m
+  wider = [sample([mark(-6.0, 'yellow', 'solid'), mark(0.2), mark(6.5, 'yellow', 'solid')], s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(wider, 2, (-6.4, 6.4))[0] == {'lanes': [6.2, 6.3], 'placement': 'right_of:1', 'offset': 0.2}
+  # the road 2 m right of the line: the line 1.2 m left of the left lane's middle
+  far = [sample([mark(-4.4, 'yellow', 'solid'), mark(2.0), mark(8.3, 'yellow', 'solid')], s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(far, 2, (-6.4, 6.4))[0] == {'lanes': [6.4, 6.3], 'placement': 'middle_of:1', 'offset': -1.2}
+  # the reference nearest the line; none further than OFFSET_MAX (a line outside the lanes)
+  assert offset_place([-6.0, 0.2, 6.5]) == ('right_of:1', 0.2)
+  assert offset_place([1.6, 7.6]) is None and offset_place([1.4, 7.4]) == ('left_of:1', 1.4)
+  assert offset_place([-6.0, 0.2, 6.5], lambda ws: max(ws) < 6.0) is None  # widths not ok
+  assert placed([-6.0, 0.1, 6.2], [1.0] * 3) == ('right_of:1', [-6.0, 0.0, 6.2], 0.0)  # placement alone, within OFFSET_MIN
+  # no lane line painted: GTA's lanes evenly between the edges, 0.25 m left of the line; not over CENTRE_TOL off it
+  bare = [sample(edges, s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(bare, 2, (-6.4, 6.4))[0] == {'lanes': [6.45, 6.45], 'offset': -0.25}
+  bare = [sample([mark(-5.0, 'yellow', 'solid'), mark(7.6, 'yellow', 'solid')], s, src='gamefiles') for s in (0, 3, 6)]
+  assert correct_oneway(bare, 2, (-6.4, 6.4)) == (None, 'one-way, off the line')
+
+
+def test_markers_beside_a_line():
+  # Roy Lowenstein Blvd: a yellow left edge, a solid lane line 0.35 m right of the link with raised markers 2 m and
+  # 1.65 m either side of it, the asphalt's edge 5.8 m right: two 5.4 m lanes, not markers as lane lines
+  marks = [mark(-5.05, 'yellow', 'solid'), mark(-1.65, kind='markers'), mark(0.35, kind='solid'), mark(2.0, kind='markers')]
+  files = [sample(marks, s, src='gamefiles', kerbs={'left': -5.1, 'right': 5.8}) for s in (1.5, 4.5, 7.5, 10.5)]
+  got, _ = correct_oneway(files, 2, (-4.4, 4.4))
+  assert got == {'lanes': [5.4, 5.45], 'placement': 'right_of:1', 'offset': 0.35, 'change': ['not_right', 'not_left']}, got
 
 
 def test_centre_kind_from_the_game_files():

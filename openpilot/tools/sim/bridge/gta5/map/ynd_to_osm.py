@@ -1480,7 +1480,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
   - Where the paint was surveyed (`painted`: paint_survey.correct's widths each way and median), its lanes take the
     measured widths, kerbs where the layout has them; the line is the middle of the road between them, or the centre's
     with more lanes one way (`source:width=survey`). A surveyed one-way link's painted lanes are centred on it, or
-    placed by `placement` where it is one of several links side by side making up a carriageway.
+    placed by `placement` where it is one of several links side by side making up a carriageway. Where the paint sits
+    off where placement can put the line (`painted['offset']`), `placement:offset` moves the lanes there.
   `lf` is the link's flags and `freeway` whether its nodes are a freeway's (a one-way freeway's lanes are wider);
   returns the tags."""
   w, offset = layout(lf, back, freeway)
@@ -1491,6 +1492,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
             'width:lanes': '|'.join(map(metres, painted['lanes'])), 'source:width': 'survey'}
     if 'placement' in painted:
       tags['placement'] = painted['placement']
+    if painted.get('offset'):
+      tags['placement:offset'] = metres(painted['offset'])
     if 'change' in painted:
       tags['change:lanes'] = '|'.join(painted['change'])
     return tags
@@ -1517,6 +1520,8 @@ def lane_tags(fwd, back, lf, freeway=False, bays=(False, False), painted=None):
         tags[f'parking:{side}'], tags[f'parking:{side}:width'] = 'lane', metres(strip)
     if len(wf) != len(wb) and not painted.get('middle'):
       tags['placement:forward'] = tags['placement:backward'] = 'left_of:1'
+      if painted.get('offset'):
+        tags['placement:offset'] = metres(painted['offset'])
     return tags
   bay = 2 * offset / (bf + bb) if bf + bb else 0.0
   tags = {'lanes': str(fwd + back), 'lanes:forward': str(fwd), 'lanes:backward': str(back),
@@ -1601,6 +1606,8 @@ def neighbours_paint(nodes, rows, painted, unsurveyed, unread=None):
             got.pop(k, None)
           if 'parking' in got:
             got['parking'] = got['parking'][::-1]
+          if 'offset' in got:
+            got['offset'] = -got['offset']
         found.append((length(o), n, got))
     counts = [f for f in found if (len(f[2]['forward']), len(f[2]['backward'])) == (fwd, back)] if wid in unsurveyed else []
     # or the road painted alike at both ends (a link between two the paint recounts, or whose own few sections the

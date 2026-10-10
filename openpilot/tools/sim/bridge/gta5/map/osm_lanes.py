@@ -12,6 +12,10 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   where the way's line runs, by that direction's lanes numbered from the left (backward ones as seen travelling
   backward). Without it the line is the middle of the road. Given both ways, it's midway between the two: they differ by
   the median between the directions.
+- `placement:offset` (not an OSM tag; ours): metres the whole cross-section (lanes, lines, kerbs) sits right of where
+  `placement` (or its default) puts it, seen along the way, negative to the left: for a way whose line can't be moved
+  to where the lanes are painted (our map's ways run along GTA's nodes) and isn't on a lane edge or middle placement can
+  name. Where the next way's lanes sit elsewhere, they move across to it as any two ways' do (BLEND_M).
 - `width`: kerb to kerb, metres, parking lanes and shoulders on the carriageway included. Without `width:lanes` it's
   shared out evenly; on a two-way way, what's left after `width:lanes` is a median centred between the directions.
 - `parking:left|right|both=lane` (with `parking:<side>:width`, else by `:orientation`): a parking lane on the
@@ -126,6 +130,13 @@ def metres(value: str | None) -> float | None:
   if m := re.fullmatch(r"(\d+)'(?:\s*(\d+(?:\.\d+)?)\")?", v):
     return int(m.group(1)) * 0.3048 + float(m.group(2) or 0) * 0.0254
   return None
+
+
+def signed_metres(value: str | None) -> float | None:
+  """metres(), negative with a leading minus."""
+  v = (value or '').strip()
+  m = metres(v.removeprefix('-'))
+  return None if m is None else -m if v.startswith('-') else m
 
 
 def oneway_of(tags: dict) -> int:
@@ -299,6 +310,7 @@ class WayLanes:
         road.placed[key] = at
     if road.placed:
       road.line = sum(road.placed.values()) / len(road.placed)
+    road.line -= signed_metres(tags.get('placement:offset')) or 0.0
     tagged = metres(tags.get('width'))
     road.tagged = (tagged - sum(parking) - sl - sr if tagged else None, known, unknown)  # width=* less parking and shoulders
     return road
@@ -462,7 +474,7 @@ ROADS = frozenset({'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unc
                    'living_street', 'track', 'road', 'motorway_link', 'trunk_link', 'primary_link', 'secondary_link',
                    'tertiary_link'})
 # tags that place lanes, beyond their counts: a map without any has no lane geometry to read
-GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward')
+GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward', 'placement:offset')
 TAPER_M = 30.0  # m: a lane begins (or ends) where a way's lane count changes, widening from (narrowing to) nothing over this
 CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m either side of a point has a corner there
 CORNER_CHORD = 10.0  # m
@@ -612,11 +624,46 @@ class OsmLanes:
     self._blends.clear()
 
   def _onto(self, way: int, node: int) -> tuple[int, int] | None:
-    """_other's way, or at a junction the way the road carried across it runs on to (carry_across)."""
+    """_other's way, or at a junction the way the road carried across it runs on to (carry_across), or among one-way
+    ways the one straight on (_straight_on)."""
     found = self._other(way, node)
     if found is None and (other := self._carried.get((way, node))) is not None:
       found = other, FORWARD if self.ways[other][1][-1] == node else BACKWARD
-    return found
+    return found if found is not None else self._straight_on(way, node)
+
+  def _travel(self, way: int, node: int) -> np.ndarray | None:
+    """A one-way way's heading where it ends at a node, as travelled (into the node or out of it); None on a two-way."""
+    oneway, refs = oneway_of(self.ways[way][0]), self.ways[way][1]
+    if not oneway or node not in (refs[0], refs[-1]):
+      return None
+    p = self.way_points(way)
+    u = (p[-1] - p[-2] if refs[-1] == node else p[1] - p[0]) * oneway
+    return u / max(float(np.hypot(*u)), 1e-9)
+
+  def _straight_on(self, way: int, node: int) -> tuple[int, int] | None:
+    """As _other where every way at the node is one-way and ends there (lanes merging, parting or changing across a
+    carriageway: no junction): the one way travelled on from this one (or into it) within RUN_ON_TURN of straight on,
+    where that way's one is this one too. GTA's lane changes and ramps join a freeway's links at their nodes."""
+    def into(w):
+      return (self.ways[w][1][-1] == node) == (oneway_of(self.ways[w][0]) == 1)
+
+    def one(w):
+      u, at = self._travel(w, node), self._ends_at(node)
+      if u is None or self.degree.get(node, 0) != len(at) or len(at) < 3:
+        return None
+      found = []
+      for o in at:
+        if o == w:
+          continue
+        if (v := self._travel(o, node)) is None:
+          return None  # a two-way road: a junction
+        if into(o) != into(w) and float(u @ v) >= math.cos(math.radians(RUN_ON_TURN)):
+          found.append(o)
+      return found[0] if len(found) == 1 else None
+    other = one(way)
+    if other is None or one(other) != way:
+      return None
+    return other, FORWARD if self.ways[other][1][-1] == node else BACKWARD
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
@@ -1967,6 +2014,7 @@ def _blend(few: Section, many: Section, t: float) -> Section:
   return Section(spans, edges)
 
 
+RUN_ON_TURN = 20.0  # deg: a one-way way runs on into another at a node with others (_straight_on) this near straight
 BLEND_M = 10.0  # m either side of a node the lanes move across over where a road carries on from one way to the next
 BLEND_KNOTS = 4  # straight pieces the smoothstep is drawn in on each side
 CARRIAGEWAY_TURN = 30.0  # deg: a two-way road going on this straight from a carriageway's end is the road it joins

@@ -157,7 +157,11 @@ topcam poses) as tiles, so the check runs on them without the game.
     measured in the game: 5.5 m, 4.4 m on narrow links, 6.1 m on one-way freeway links of two lanes or more.
     CodeWalker's 4 m narrow lanes (`paths.Link`) are where the game's cars drive, not the paint. The way's line is the
     boundary between the directions, the middle of the road unless the counts differ (`placement:forward` /
-    `placement:backward=left_of:1`); a one-way link's lanes are centred on it.
+    `placement:backward=left_of:1`); a one-way link's lanes are centred on it. Our ways' lines are GTA's links, which
+    often don't run on a lane edge or middle as painted: `placement:offset=<m>` (ours, no OSM tag says it) moves the
+    whole cross-section, lanes, lines and kerbs, that far right of where `placement` (or its default) puts it, seen
+    along the way (negative: left). Where the next way's lanes sit elsewhere they move across to it over 10 m either
+    side of the node, as any two ways' do (below).
   - GTA's offset between the directions of a two-way link is a painted median, 0.9 m a step whatever the lanes'
     width (5.2-5.5 m at 6 steps on narrow and normal links): `width` includes it, `width:lanes:forward` / `:backward`
     give the lanes, and what's left is centred between them. Its edges are the kinds the game files paint there
@@ -206,7 +210,9 @@ topcam poses) as tiles, so the check runs on them without the game.
     width at that node, not widening over the first link: Eclipse Blvd's left lane runs on through its junctions from
     the median's end). Elsewhere
     osm_lanes tapers a lane that appears or ends over 30 m (`TAPER_M`).
-  - Where a road carries on from one way to the next (two ways meeting end to end, no junction) with the same lanes
+  - Where a road carries on from one way to the next (two ways meeting end to end, no junction; or at a node where
+    every way is one-way, the one way within 20 degrees of straight on, as where GTA's lane changes and ramps join a
+    freeway's links, `_straight_on`) with the same lanes
     sitting elsewhere (other widths or line, as where the survey measured one link and not the next), osm_lanes moves
     them across on a smoothstep over up to 10 m either side of the node (`BLEND_M`, half of a shorter way; a tapered
     way keeps its taper and the next way takes it all), and mitres each way's lines into the next's: kerbs, lines,
@@ -260,10 +266,14 @@ topcam poses) as tiles, so the check runs on them without the game.
     `change:lanes` from the white line painted at their outer edge, the line between it and the next link
     (`paint_survey.outer_lines`). A white line crossing fewer than half a link's sections (freeway dashes are 4 m in 12)
     still counts where a lane line is missing, dashed (`paint_survey.dashes`). A one-way link's line stays on GTA's nodes
-    and `placement` only says a lane's edge or middle, so the fewest painted lines move to put it there
-    (`paint_survey.place`): the lanes' outer edges centred on it (no tag), a lane's two edges (`middle_of`) or one line
-    onto it (`left_of` / `right_of`), whichever moves the lines least, each at most 1 m; the others stay where painted
-    (lane lines rather than the edges where the edges are only the asphalt's). Turn bays folded into a two-way road are
+    and `placement` only says a lane's edge or middle (`paint_survey.place`): the lanes' outer edges centred on it (no
+    tag), a lane's two edges (`middle_of`) or one line onto it (`left_of` / `right_of`), whichever moves the painted
+    lines least. Where that would move one more than 0.15 m (`OFFSET_MIN`; freeway links run up to a metre off their
+    paint), every line stays where painted and `placement:offset` moves the lanes off the edge or middle nearest the line,
+    up to 1.5 m (`paint_survey.placed`). Raised markers alongside
+    another line aren't lane lines (Roy Lowenstein Blvd's either side of its solid lane line). A two-way link with more
+    lanes one way is placed by its centre, `placement:offset` saying how far off the line it's painted (up to 1.5 m).
+    Turn bays folded into a two-way road are
     corrected too where their lane is painted open (with GTA's counts), and the links the turn lanes' tapers split or
     give a lane, but for those it widens on, from their own sections. Links to a node `split_shared` made take their GTA
     link's sections, moved onto them (`paint_survey.rebase`). With

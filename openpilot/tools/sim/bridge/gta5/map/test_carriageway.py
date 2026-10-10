@@ -27,18 +27,22 @@ CARRIAGEWAY = [mark(-12.9, 'yellow', 'solid'), mark(-8.2, kind='markers'), mark(
 
 def test_lanes_in_their_carriageway():
   samples = [sample(CARRIAGEWAY, s) for s in (2.0, 5.0, 8.0)]
-  # the two lanes about the line, which goes on the line between them (0.6 m off): only that line moves
+  # the two lanes about the line, the line between them 0.6 m left of it: every line stays where painted, the lanes
+  # 0.6 m left of where right_of:1 puts them
   got, why = correct_carriageway(samples, 2)
-  assert why is None and got == {'lanes': [6.8, 5.4], 'placement': 'right_of:1', 'change': ['yes', 'not_right']}, got
-  assert correct_oneway(samples, 2, (-6.1, 6.1))[0] == {'lanes': [6.8, 5.4], 'placement': 'right_of:1'}
-  # a link of one lane about the line: on its middle (0.2 m off), the lane moved with it
+  assert why is None and got == {'lanes': [6.2, 6.0], 'placement': 'right_of:1', 'offset': -0.6, 'change': ['yes', 'not_right']}, got
+  assert correct_oneway(samples, 2, (-6.1, 6.1))[0] == {'lanes': [6.2, 6.0], 'placement': 'right_of:1', 'offset': -0.6}
+  # a link of one lane about the line: its middle 0.1 m off, placed there (the lane moved); 0.2 m off, an offset
+  near = [sample([{**m, 'offset': m['offset'] - 2.3} for m in CARRIAGEWAY], s) for s in (2.0, 5.0)]
+  got, why = correct_carriageway(near, 1)
+  assert why is None and got['lanes'] == [6.0] and 'placement' not in got and 'offset' not in got, got
   shifted = [sample([{**m, 'offset': m['offset'] - 2.2} for m in CARRIAGEWAY], s) for s in (2.0, 5.0)]
   got, why = correct_carriageway(shifted, 1)
-  assert why is None and got['lanes'] == [6.0] and 'placement' not in got, got
+  assert why is None and got['lanes'] == [6.0] and 'placement' not in got and got['offset'] == 0.2, got
   # the lane line between two links' lanes missing from most sections (dashes 4 m in 12): a lane twice as wide split
   dashed = [sample([m for m in CARRIAGEWAY if m['offset'] != -0.6 or s == 5.0], s) for s in (2.0, 5.0, 8.0, 11.0)]
   got, why = correct_carriageway(dashed, 2)
-  assert why is None and got['lanes'] == [6.8, 5.4] and got['placement'] == 'right_of:1', (got, why)
+  assert why is None and got['lanes'] == [6.2, 6.0] and got['placement'] == 'right_of:1' and got['offset'] == -0.6, (got, why)
   # nothing painted near enough the line to place it
   assert correct_carriageway([sample([mark(-12.3, 'yellow', 'solid'), mark(-6.2)], s) for s in (2.0, 5.0)], 2)[0] is None
   assert correct_carriageway(samples[:1], 2) == (None, 'carriageway, no game files')

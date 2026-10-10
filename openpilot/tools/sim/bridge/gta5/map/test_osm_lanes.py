@@ -177,6 +177,33 @@ def test_painted_layout():
   assert np.allclose(road.edges(), (-9.15, 9.15))
 
 
+def test_placement_offset():
+  # placement:offset moves the whole cross-section (lanes, lines, kerbs) right of where placement puts it
+  tags = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '12.2', 'width:lanes': '6.2|6', 'placement': 'right_of:1'}
+  base, moved = WayLanes.from_tags(tags), WayLanes.from_tags({**tags, 'placement:offset': '-0.6'})
+  assert spans(base) == [(1, -6.2, 0.0), (1, 0.0, 6.0)]
+  assert spans(moved) == [(1, -6.8, -0.6), (1, -0.6, 5.4)] and np.allclose(moved.edges(), (-6.8, 5.4))
+  assert np.allclose([o for _, o, _ in lines(moved)], [o - 0.6 for _, o, _ in lines(base)])
+  assert spans(moved, BACKWARD) == [(-1, -5.4, 0.6), (-1, 0.6, 6.8)]  # to the left seen the other way
+  # without placement, off the middle of the lanes; malformed, ignored
+  plain = {k: v for k, v in tags.items() if k != 'placement'}
+  assert spans(WayLanes.from_tags({**plain, 'placement:offset': '0.25'})) == [(1, -5.85, 0.35), (1, 0.35, 6.35)]
+  assert spans(WayLanes.from_tags({**plain, 'placement:offset': 'left'})) == spans(WayLanes.from_tags(plain))
+  # a two-way road placed by its centre, painted 1 m right of the line
+  two = WayLanes.from_tags({'highway': 'primary', 'lanes': '3', 'lanes:forward': '2', 'lanes:backward': '1', 'width': '16.5',
+                            'width:lanes:forward': '5.5|4.5', 'width:lanes:backward': '6.5', 'placement:forward': 'left_of:1',
+                            'placement:backward': 'left_of:1', 'placement:offset': '1'})
+  assert spans(two) == [(-1, -5.5, 1.0), (1, 1.0, 6.5), (1, 6.5, 11.0)]
+  # ynd_to_osm writes paint_survey's offsets so that osm_lanes reads the lanes back where they're painted
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import lane_tags
+  road = WayLanes.from_tags({'highway': 'primary', **lane_tags(2, 0, flags(2, 0, 0, True),
+                                                               painted={'lanes': [5.4, 5.45], 'placement': 'right_of:1', 'offset': 0.35})})
+  assert spans(road) == [(1, -5.05, 0.35), (1, 0.35, 5.8)]
+  painted = {'forward': [5.5, 4.5], 'backward': [6.5], 'median': 0.0, 'middle': False, 'offset': 1.0}
+  road = WayLanes.from_tags({'highway': 'primary', **lane_tags(2, 1, flags(2, 1, 0, False), painted=painted)})
+  assert spans(road) == [(-1, -5.5, 1.0), (1, 1.0, 6.5), (1, 6.5, 11.0)]
+
+
 def test_parking_lane():
   road = WayLanes.from_tags({'highway': 'residential', 'lanes': '2', 'width': '13.3', 'parking:right': 'lane',
                              'parking:right:width': '2.3'})
