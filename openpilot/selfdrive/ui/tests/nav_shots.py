@@ -98,7 +98,6 @@ class Context:
     self.params.put("HasAcceptedTerms", terms_version)
     self.params.put("CompletedTrainingVersion", training_version)
     self.params.put_bool("IsMetric", False)
-    self.params.put_bool("ExperimentalModeConfirmed", True)
     self.params.put_bool("NavigateOnOpenpilot", False)
     self.params.put_bool("NavSplitPinned", False)
     self.params.put_bool("NavShowLanesAlways", False)
