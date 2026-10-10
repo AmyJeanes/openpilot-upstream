@@ -480,6 +480,54 @@ def test_start_stub_and_join():
   print(f"start stub and join: ok (swerved line: path {np.abs(off).max():.2f} m off its lane, {np.abs(before).max():.1f} before)")
 
 
+class FakeSlots:
+  """Lane slots with these moves (along, turn, need) and no targets to read lanes from: follow_slots takes each
+  mismatch's own want."""
+  def __init__(self, *moves):
+    from types import SimpleNamespace
+    self.moves = [SimpleNamespace(along=a, turn=turn, need=True) for a, turn in moves]
+
+  def target(self, s, v=0.0):
+    return None, None
+
+
+def test_follow_slots():
+  """plan_check=fix's lane changes for the slots. map1010c 021: into the left-turn lane of two before a left turn onto a
+  road with one lane each way, the turn's renumbering step (nav's lane 1 of 2 out as lane 0 of 1) carried the change's
+  shift too, to lane -1, the oncoming lane, for 10 s on Heritage Way. mdnudge seed 46: a through junction wanting the
+  right lane 41 m before a turn wanting the left, the second fix started before the first move, undoing it, and the
+  third held lane 0.877 for 300 m. Now: a turn's renumbering step is nav's, a lane the road hasn't is no fix (nor a
+  plan), a fix doesn't start before the move before it, and finishes late rather than not at all, MIN_LC_M long."""
+  md = MapDriver({"seed": 3})
+  r = ms.junction_turn("left", stop=None, out=ms.section(1, 1))  # north 200 m, two lanes each way; left onto one each way
+  keys = [(0.0, 1.0), (200.0, 1.0), (200.0, 0.0)]
+  for turn in (True, False):
+    out = md.follow_slots(r, keys, [{"s": 170.0, "move": 200.0, "end": 170.0, "want": [0]}], FakeSlots((200.0, turn)))
+    assert lane_at(out, 175.0) == 0.0 and lane_at(out, 199.0) == 0.0 and min(lane for _, lane in out) == 0.0, (turn, out)
+    assert MapDriver._outside_lanes(r, out) is None
+  assert MapDriver._outside_lanes(r, keys[:2] + [(200.0, -1.0), (300.0, -1.0)]) == {"s": 200.0, "lane": -1.0, "lanes": 1}
+  r = ms.straight(600)
+  slots = FakeSlots((321.8, False), (363.0, True))
+  nav = [(0.0, 0.0), (90.0, 0.0), (218.0, 1.0), (309.0, 0.0), (600.0, 0.0)]
+  first = md.follow_slots(r, nav, [{"s": 291.8, "move": 321.8, "end": 291.8, "want": [1]}], slots)
+  out = md.follow_slots(r, first, [{"s": 333.0, "move": 363.0, "end": 333.0, "want": [0]}], slots)
+  assert lane_at(out, 291.8) == 1.0 and lane_at(out, 321.8) == 1.0 and lane_at(out, 362.9) == 0.0, out
+  change = [(out[a][0], out[b][0]) for a, b in chains(out) if 321.8 < out[b][0] <= 363.0]
+  assert len(change) == 1 and change[0][0] >= 321.8 + 5.0 - 1e-6 and change[0][1] - change[0][0] >= 20.0, (change, out)
+  assert all(abs(lane - round(lane)) < 1e-6 for s, lane in out if s >= 362.0), out
+  print(f"follow slots: ok (seed 46's change into the left lane {change[0][0]:.1f}-{change[0][1]:.1f} m)")
+
+
+def test_oncoming_abort():
+  """In the oncoming lanes by the bridge's lane matching (laneMap kind "oncoming") for ONCOMING_S away from a junction:
+  the trip ends (map1010c 021 drove 10 s there until record_run stopped it)."""
+  trip = ms.drive(ms.straight(800), {"seed": 3}, lane=1, seconds=40.0,
+                  lane_map=lambda route, st: {"kind": "oncoming" if st["t"] >= 10 else "own", "lane": None, "lanes": 2})
+  assert trip.finished is not None and "oncoming" in trip.finished, trip.finished
+  assert 10.9 < trip.md.aborts[0]["t"] < 11.6 and trip.car.v < 0.3, trip.md.aborts
+  print("oncoming abort: ok")
+
+
 def test_body_from_dims():
   """Our car's front, rear and half width from the plugin's nearby.dims (a van here), else the constants: the stop
   sign's mark is the van's front bumper margin short of the line."""
@@ -683,6 +731,8 @@ if __name__ == "__main__":
   test_clamp_lane_and_fork()
   test_collision_routes()
   test_start_stub_and_join()
+  test_follow_slots()
+  test_oncoming_abort()
   test_lane_change_kept_off_a_jog()
   test_arrival()
   test_aborts()

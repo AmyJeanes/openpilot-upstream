@@ -15,8 +15,9 @@ gore. That line is the intent, recorded as the path labels; the car aims for it 
 wander (never periodic, faded out through turns, junctions and forks, and within its lane), joining it from where the
 car is (on the trip's first plan, a bend it can't take there fails the plan). The plan is
 checked against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another
-lane, plan_check=fix (the default) changes into it by the target's end, event only logs it, abort ends the trip; each
-is a plan_slot_mismatch anomaly.
+lane, plan_check=fix (the default) changes into it by the target's end (else as soon after as MIN_LC_M allows, short of
+its move), event only logs it, abort ends the trip; each is a plan_slot_mismatch anomaly. A fix into a lane the road
+hasn't is left out, and a plan keyed there fails (plan_lane_range).
 
 Each game frame: pure pursuit (lookahead clamp(5, 0.6 v + 3, 25) m) from the rear axle (the game's position is the
 car's middle, which moves inwards of its heading in a bend), predicted `latency` (0.1) s on, plus the path's curvature
@@ -50,11 +51,11 @@ centre line, and none through a turn). Where there's no room for that, or
 it's seen too late to ease out, it's stopped behind as before. Each is a `nudge` event. Aborts (dev >
 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s, held by a vehicle for WAIT_MAX s
 with none moving (PARKED_WAIT s by a parked one, DEADLOCK_WAIT s by one across our way), lateral acceleration over 4.5,
-the driver's input, a failed plan) brake
-to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
+ONCOMING_S in the oncoming lanes away from a junction (the bridge's lane matching), the driver's input, a failed plan)
+brake to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
 for the map-fix work: kerb_contact (past a road's kerbs, or into a turn's corner kerb, from its legs' cross-sections),
 gta_edge (the plan's lane near GTA's road edge where the map's road is wider), lane_disagree, tracking_saturated,
-gta_link_offset, stop_line_far, plan_slot_mismatch, sharp_corner, jog_change, plan_clamp.
+gta_link_offset, stop_line_far, plan_slot_mismatch, plan_lane_range, sharp_corner, jog_change, plan_clamp.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
@@ -125,6 +126,7 @@ BEND_DEG = 20.0  # deg a route point turns that makes its road beside it unclear
 KAPPA_DRIVABLE = 0.1  # 1/m: a tighter bend in the lane line (a jog, a corner without a fillet) is eased out
 LC_DONE = 0.8  # share of a lane change after which its signal goes off
 CROSSING_CLEAR = 5.0  # m past a stop line or junction node a city lane change may start
+LANE_RANGE_AHEAD = 60.0  # m on from a key the road's most lanes are the lanes it may number (_lanes_about)
 TURN_SPAN = 10.0  # m either side of a turn's point held to its turn speed
 # vehicles (the plugin's nearby: their bodies in our frame, read every 0.1 s)
 LEAD_SIDE = 0.4  # m beside our body another's may come along the path before it's in the way
@@ -188,6 +190,7 @@ DEV_ABORT, DEV_ABORT_S = 1.5, 1.0
 HEADING_ABORT, HEADING_ABORT_S = 30.0, 0.5
 NO_PROGRESS_S = 20.0
 A_LAT_ABORT_S = 0.5
+ONCOMING_S = 1.0  # s in the oncoming lanes (state.laneMap), away from a junction
 OFF_ROAD = 1.0  # m past the kerb
 OFF_ROAD_DEV = 0.75  # m off the path as well, for an off-road abort
 USER_STEER = 0.02
@@ -717,8 +720,8 @@ class MapDriver:
     keys = list(keys)
     crossings = sorted(route.stops + route.junctions)
     for a, b in chains(keys):
-      if b != a + 1:
-        continue  # renumbering inside it: left as nav has it
+      if b != a + 1 or (a > 0 and keys[a][0] - keys[a - 1][0] <= EPS):
+        continue  # renumbering inside it or where it starts: left as nav has it
       (s0, la), (s1, lb) = keys[a], keys[b]
       v = self._speed_at(route, s0)
       length = max(lc_seconds(self.style, lb - la) * v, MIN_LC_M * max(abs(lb - la), 1.0))
@@ -811,51 +814,106 @@ class MapDriver:
 
   def follow_slots(self, route, keys: list[tuple[float, float]], mismatches: list[dict], slots) -> list[tuple[float, float]]:
     """The keys with a lane change into the slots' nearest target lane for each mismatch, done by its target's end
-    (from a lane change's length before, not over the plan's change before), then in that lane to its move: the plan's
-    own changes there dropped, its renumbering steps (lanes beginning or ending) kept."""
+    (from a lane change's length before, not over the plan's change before nor before the move before, whose target the
+    plan keeps through it), else as soon after as MIN_LC_M allows, short of its move; then in that lane to its move:
+    the plan's own changes there dropped, its renumbering steps (lanes beginning or ending) kept. Past the move, the plan
+    on from the lane it's then in (a change of its own under way there counted from where it began), but from a turn's
+    own renumbering step there as nav has it, as that says which lane the turn comes out in."""
     keys = list(keys)
+    moves = slots.moves if slots is not None else []
     for bad in sorted(mismatches, key=lambda b: b["s"]):
-      end, move = min(bad["end"], bad["s"]), bad["move"]
+      end = min(bad["end"], bad["s"])
+      move = next((m.along for m in moves if abs(m.along - bad["move"]) < 0.11), bad["move"])  # not slot_check's rounding
       v = self._speed_at(route, end)
       good, _ = self._slot_lanes(route, slots, end + 0.1, v)
       want = sorted(good) if good else bad["want"]
       p = round(lane_at(keys, end + 0.1))
       w = min(want, key=lambda x: abs(x - p))
       delta = w - p
-      if delta == 0:
-        continue
+      if delta == 0 or abs(lane_at(keys, move - 0.5) - w) < 0.02:
+        continue  # in it by the move already: a change a fix before finished after the target's end
       length = max(lc_seconds(self.style, delta) * v, MIN_LC_M * abs(delta))
       changes = [keys[b][0] for a, b in chains(keys) if keys[b][0] <= end]
-      start = max(end - length, max(changes, default=keys[0][0]), keys[0][0])
+      before = [m.along + CROSSING_CLEAR for m in moves if m.need and m.along < end - EPS]
+      # nor before the lane it's into has opened
+      shut = [x for x in np.arange(move - 1.0, end - length - LANE_GRID, -LANE_GRID)
+              if (sec := route.lanes.opened_at(float(x))) is not None and sec.lanes and w >= sec.lanes]
+      start = max(end - length, max(changes + before + [x + LANE_GRID for x in shut[:1]], default=keys[0][0]), keys[0][0])
       if end - start < 0.4 * length:
-        continue  # no room: left as it is (still a mismatch)
-      out = [k for k in keys if k[0] <= start] + [(start, lane_at(keys, start)), (end, float(w))]
+        end = min(start + 0.4 * length, move - 1.0)
+        if end - start < MIN_LC_M * abs(delta):
+          continue  # no room: left as it is (still a mismatch)
+      out = [k for k in keys if k[0] <= start]
+      out += [(start, out[-1][1] if out else lane_at(keys, start)), (end, float(w))]  # a change under way there dropped
       lane, i = float(w), 0
       inside = [k for k in keys if end < k[0] < move - EPS]
       while i < len(inside):
         s, a = inside[i]
-        if i + 1 < len(inside) and inside[i + 1][0] - s <= EPS:  # a renumbering step: carried
-          b = inside[i + 1][1]
+        j = i
+        while j + 1 < len(inside) and inside[j + 1][0] - s <= EPS:
+          j += 1
+        if j > i:  # keys at one place: a renumbering step, carried
+          b = inside[j][1]
           out += [(s, lane), (s, lane + (b - a))]
           lane += b - a
-          i += 2
-          continue
-        i += 1  # a point of the plan's own change or hold: the lane stays
+        i = j + 1  # else a point of the plan's own change or hold: the lane stays
       # past the move, the plan on from the lane it's now in: its own changes towards that lane already made (the gap
       # taken up by them), renumbering steps carried
       rest = [k for k in keys if k[0] >= move - EPS]
       pv = lane_at(keys, move - 0.01)
+      if abs(pv - round(pv)) > 0.02:  # a change of the plan's own under way at the move: from the lane it began in
+        on = next((val for s, val in rest if s > move + EPS), pv)
+        pv = float(math.ceil(pv) if on < pv else math.floor(pv))
       gap = lane - pv
+      turn = any(m.turn and abs(m.along - move) < 1.0 for m in moves)
+      at = len(out)
       out.append((move, lane))
       for n, (s, val) in enumerate(rest):
         step = n > 0 and s - rest[n - 1][0] <= EPS and abs(val - rest[n - 1][1]) > EPS
+        if step and turn and s < move + 1.0:
+          gap = 0.0
         dv = val - pv
         if not step and abs(gap) > EPS and dv * gap > 0:
           gap -= math.copysign(min(abs(dv), abs(gap)), gap)
+        lanes = self._lanes_about(route, rest, n)
+        if lanes and not -0.5 < val + gap < lanes - 0.5:  # our lane ends there (the road narrows): in the nearest
+          gap = min(max(val + gap, 0.0), lanes - 1.0) - val
         out.append((s, val + gap))
         pv = val
+      # the rest of a change of its own that began before the move: no shorter than MIN_LC_M
+      a = next((a for a, b in chains(out) if a == at and b == a + 1), None)
+      least = MIN_LC_M * max(abs(out[a + 1][1] - out[a][1]), 1.0) if a is not None else 0.0
+      if a is not None and out[a + 1][0] - out[a][0] < least:
+        room = out[a + 2][0] - 1.0 if a + 2 < len(out) else math.inf
+        out[a + 1] = (max(out[a + 1][0], min(out[a][0] + least, room)), out[a + 1][1])
       keys = out
     return keys
+
+  @staticmethod
+  def _outside_lanes(route, keys: list[tuple[float, float]]) -> dict | None:
+    """The first key whose lane lies outside the lanes the road has for it (_lanes_about): {"s", "lane", "lanes"};
+    None where all are inside."""
+    for i, (s, lane) in enumerate(keys):
+      lanes = MapDriver._lanes_about(route, keys, i)
+      if lanes and not -0.5 < lane < lanes - 0.5:
+        return {"s": round(s, 1), "lane": round(lane, 2), "lanes": lanes}
+    return None
+
+  @staticmethod
+  def _lanes_about(route, keys: list[tuple[float, float]], i: int) -> int:
+    """How many lanes the plan's key i may number: the road's most within LANE_RANGE_AHEAD m on (nav numbers a lane
+    about to open as it will be), from just before a renumbering step for the key before it, just after for the key
+    after; 0 where the road's lanes are unknown."""
+    s = keys[i][0]
+    if i + 1 < len(keys) and keys[i + 1][0] - s <= EPS:
+      s -= 0.05
+    elif i > 0 and s - keys[i - 1][0] <= EPS:
+      s += 0.05
+    sec = route.lanes.section_at(s, segment_of(route, s))
+    if sec is None or not sec.lanes:
+      return 0
+    ahead = [route.lanes.section_at(x, segment_of(route, x)) for x in s + np.arange(10.0, LANE_RANGE_AHEAD + 1.0, 10.0)]
+    return max([sec.lanes] + [a.lanes for a in ahead if a is not None])
 
   def _make_plan(self, route, state: dict, t: float) -> bool:
     lanes = route.lanes
@@ -885,9 +943,21 @@ class MapDriver:
     for _ in range(4 if self.c["plan_check"] == "fix" else 0):  # a fix can leave the next move wanting another lane
       if not check["mismatches"]:
         break
+      tried = self.follow_slots(route, keys, check["mismatches"], slots)
+      if tried == keys:
+        break  # no room for any of them
+      outside = self._outside_lanes(route, tried)
+      if outside is not None:  # a fix into a lane the road hasn't (the oncoming one): the plan as it was
+        self._anomaly("plan_lane_range", t, route_point(route, outside["s"]), outside["s"], fix=True, **outside)
+        break
       fixed += check["mismatches"]
-      keys = self.follow_slots(route, keys, check["mismatches"], slots)
+      keys = tried
       check = {**self.slot_check(route, keys, slots), "fixed": fixed}
+    outside = self._outside_lanes(route, keys)
+    if outside is not None:
+      self._anomaly("plan_lane_range", t, route_point(route, outside["s"]), outside["s"], fix=False, **outside)
+      self._abort(f"plan: lane {outside['lane']} {outside['s']} m along, where the road has {outside['lanes']}", t, state.get("pos"))
+      return False
     for bad in fixed:
       self._anomaly("plan_slot_mismatch", t, route_point(route, bad["s"]), bad["s"], fixed=True, **bad)
     for bad in check["mismatches"]:
@@ -2196,6 +2266,10 @@ class MapDriver:
     a_lat = abs(v * float(state.get("yawRate") or 0.0))
     if self.phase != "abort" and held("a_lat", a_lat > A_LAT_MAX, A_LAT_ABORT_S):
       self._abort(f"lateral acceleration {a_lat:.1f} m/s^2", t, pos)
+    # the lane matcher's oncoming lanes away from a junction: a plan gone wrong, whatever its keys say
+    oncoming = (state.get("laneMap") or {}).get("kind") == "oncoming" and not self._unclear(route.at)
+    if self.phase != "abort" and held("oncoming", oncoming, ONCOMING_S):
+      self._abort("in the oncoming lanes", t, pos)
     if self.s > self.progress[0] + 1.0:
       self.progress = (self.s, t)
     waiting = self.phase in ("stop", "arrive", "follow", "yield") or self.stopped_at is not None
