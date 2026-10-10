@@ -10,6 +10,8 @@ car of mapdrive_sim.py: run as a script.
   leaves the abort; behind a queue that moves on now and then, however long it all takes, it's driven to arrival
 - a slower vehicle ahead: followed at its speed, LEAD_STOP + the style's headway behind, without hunting; one braking to
   a stop: stopped behind it
+- a parked vehicle where the plan's lane room is no guide: at the end of a lane change into its lane, passed within the
+  change's lanes; past a junction whose sections are no guide, within our lane's edges carried across it
 - a vehicle crossing the junction ahead as we'd reach it: held for, then on; one that's through first, or comes long
   after, not
 - pedestrians (the plugin's nearby "p"): one walking across the road we turn into as we'd reach it is waited for (mdlead
@@ -24,8 +26,9 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_WANT,
-                                                           PARKED_WAIT, WAIT_MAX, MapDriver)
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_MARGIN,
+                                                           NUDGE_NODE, NUDGE_WANT, PARKED_WAIT, WAIT_MAX, MapDriver)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -217,15 +220,36 @@ def test_nudge_before_a_turn():
   for side, lane in (("right", 1), ("left", 0)):
     r = ms.junction_turn(side, stop=None)
     right = 2.0 if side == "right" else -2.0
-    # 35 m before the turn: eased out before its corner (no faster than that allows), then the turn as ever
+    # 35 m before the turn: eased out before its corner (NUDGE_NODE short of its point, where the map's sections stop
+    # guiding it), then the turn as ever
     trip = ms.drive(r, {"seed": 3}, lane=lane, vehicles=[parked(r, lane, 165.0, right=right, driven=False)], reach=REACH, seconds=80)
     e = passed(trip)[0]
-    assert e["v_ease"] < 8.0 and trip.col(8).max() < 0.35, (e, trip.col(8).max())
+    out = e["at"][1] + trip.md.rear + NUDGE_MARGIN + e["ease"][1]
+    assert out < 200.0 - NUDGE_NODE + 0.5 and trip.col(8).max() < 0.35, (e, out, trip.col(8).max())
     # 10 m before it, where the lane gives way to the turn: no shift, stopped behind it as before
     trip = ms.drive(r, {"seed": 3}, lane=lane, vehicles=[parked(r, lane, 190.0, right=right, driven=False)], reach=REACH, seconds=80)
     ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
     assert [e["why"] for e in nudges(trip)] == ["no lane"], nudges(trip)
   print("nudge before a turn: ok")
+
+
+def test_nudge_where_the_lane_is_no_guide():
+  # mdnudge traffic trip 2: a car parked at the kerb of the lane a change ends in (refused "no lane", then held 10 s):
+  # passed within both lanes of the change, ours either way
+  r = ms.junction_turn("right", lead=400.0, stop=None)
+  s0, s1, _, _ = ms.drive(r, {"seed": 3}, lane=0, seconds=0.2).md.changes[0]
+  trip = ms.drive(r, {"seed": 3}, lane=0, vehicles=[parked(r, 1, s1 + 4.0, right=2.0, driven=False)], reach=REACH, seconds=90)
+  e = passed(trip)[0]
+  assert e["shift"] < -0.5 and (trip.col(10) - trip.md.half_width).min() > CLAMP_MARGIN - 0.1, e  # never over the centre line
+  # trip 3: one just past a junction whose sections (its middle, narrower than the car) leave the lane no guide: our
+  # lane's edges carried across it on the straight
+  pts = ms.line((600.0, 0.0), step=2.0)
+  narrow = Section([Span(Lane(BACKWARD, 5.5), -5.5, 0.0, -1), Span(Lane(FORWARD, 2.6), 1.45, 4.05, 1)], (-5.5, 5.5))
+  r = ms.made_route(pts, [narrow if 148 <= k < 152 else ms.section(1, 1) for k in range(len(pts) - 1)], junctions=[150])
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 312.0, right=2.0, driven=False)], reach=REACH, seconds=80)
+  passed(trip)
+  assert (trip.col(10) - trip.md.half_width).min() > CLAMP_MARGIN - 0.1
+  print("nudge where the lane is no guide: ok")
 
 
 def test_queue_that_moves():
@@ -400,6 +424,7 @@ if __name__ == "__main__":
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()
+  test_nudge_where_the_lane_is_no_guide()
   test_following()
   test_crossing()
   test_pedestrians()

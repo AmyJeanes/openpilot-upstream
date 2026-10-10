@@ -37,8 +37,9 @@ delivers (DECEL_REAL), not what's commanded (DECEL_MAX). A parked vehicle (no on
 comes within nudge_clear (0.5) m of ours along the path is passed within our own lane (_nudge): the path shifted away from it to
 nudge_want (0.8) m where the lane has room, at least nudge_clear, held from NUDGE_MARGIN before its body to after it and
 eased in and out (minimum jerk) over NUDGE_EASE_T s at the speed it's passed at, slower the tighter the pass; our body
-kept CLAMP_MARGIN in from the lane's edges (the plan clamp's lane room: never into the next lane or across the centre
-line, and none where the lane is no guide, as about turns and through lane changes). Where there's no room for that, or
+kept CLAMP_MARGIN in from the lane's edges (the plan clamp's lane room; where that's no guide, _fill_room's from the
+road's sections or our lane's edges carried across a junction: never into a lane the path doesn't take or across the
+centre line, and none through a turn). Where there's no room for that, or
 it's seen too late to ease out, it's stopped behind as before. Each is a `nudge` event. Aborts (dev >
 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s, held by a vehicle for WAIT_MAX s
 with none moving (PARKED_WAIT s by a parked one), lateral acceleration over 4.5, the driver's input, a failed plan) brake
@@ -159,6 +160,13 @@ NUDGE_V = (6.0, 20.0)  # m/s passing at NUDGE_CLEAR, and more for each m clearer
 NUDGE_LATE = 1.3  # x the speed an ease is made for the car may still be doing where it starts, braking from now
 NUDGE_GUARD = 1.0  # m ahead of the car within which the path is never moved
 NUDGE_SAME = 1.0  # m between a parked vehicle's readings that are one
+NUDGE_NODE = 12.0  # m from a junction node, or short of a turn's point, within which the map's sections don't guide a nudge
+NUDGE_ALIGN = 10.0  # deg off its road's line the path may head where the road's section guides a nudge
+NUDGE_SPAN = (2.6, 7.5)  # m a lane's width is within where it guides a nudge
+NUDGE_BRIDGE = 50.0  # m of road without a guide a nudge's room is carried across, on a straight
+NUDGE_BRIDGE_DEG = 40.0  # deg the path may bend across it (less than a turn)
+NUDGE_FILL = 60.0  # m either side of a shift's hold its room is filled in over
+NUDGE_ACROSS = 40  # m of path either side the lanes it moves across between are taken as ours
 # aborts
 DEV_ABORT, DEV_ABORT_S = 1.5, 1.0
 HEADING_ABORT, HEADING_ABORT_S = 30.0, 0.5
@@ -1124,8 +1132,12 @@ class MapDriver:
     self.route_s, self.route_r = along_route(route, target, route.at - 5.0)
     self.route = route
     self.path0, self.nudge_off, self.nudge_fixed = target, np.zeros(len(target)), np.zeros(len(target))
+    self.theta0 = self.theta
     self.nudge_groups, self.nudge_blocked = [], []
     self.room_lo, self.room_hi = self._nudge_room()
+    self.room_tried = np.zeros(len(target), bool)
+    self._turn_alongs = [tr.dist for tr in (getattr(route, "_turns", None) or []) if abs(tr.angle) >= CLAMP_TURN] + \
+                        [sc for sc, turned in route.lanes.corners if abs(turned) >= CLAMP_TURN]
     # where the route's own line says little about the road beside it: junction nodes, and its points where it bends
     # sharply (a lane line or the car cuts inside such a corner, past the segment's own kerbs)
     d = np.diff(route.points[:, :2], axis=0)
@@ -1742,6 +1754,81 @@ class MapDriver:
     off = np.where(inside, self.route_r - centre[g], np.nan)
     return -left[g] - off, right[g] - off
 
+  def _fill_room(self, a: int, b: int):
+    """The nudge's room (room_lo, room_hi) filled in over path points a to b, kept for the trip, where the plan's lane
+    room has none (lane changes, jogs, tapers, a fractional lane, about junctions): from the road's cross-section where
+    the path runs along its line, NUDGE_NODE from junction nodes and short of turns (where the map's sections describe
+    the junction, not our lane), our body CLAMP_MARGIN within our lane and the road's edges, or within the lanes the path
+    moves across (ours either way: a change's two, a jog's into the lane carrying on); across a stretch still without
+    (NUDGE_BRIDGE, no turn in it), the lane's edges either side carried across. Never into a lane the path doesn't take,
+    nor where a turn's path leaves the road's line."""
+    a, b = max(a, 0), min(b, len(self.path0) - 1)
+    todo = [i for i in range(a, b + 1) if not self.room_tried[i]]
+    if not todo:
+      return
+    route, lanes = self.route, self.route.lanes
+    nodes = np.asarray(route.junctions, float)
+    turns = np.asarray(self._turn_alongs, float)
+    forks = [(f.along, f.side) for f in route.forks if f.keep]
+    room0 = self.half_width + CLAMP_MARGIN
+    for i in todo:
+      self.room_tried[i] = True
+      rs, r = float(self.route_s[i]), float(self.route_r[i])
+      near = self.route_r[max(i - NUDGE_ACROSS, 0):i + NUDGE_ACROSS + 1]
+      across = float(near.max() - near.min()) > 1.0
+      if not (across or np.isnan(self.room_lo[i])):
+        continue
+      if len(nodes) and np.abs(nodes - rs).min() < NUDGE_NODE:
+        continue
+      close = turns[np.abs(turns - rs) < CORNER_ZONE] if len(turns) else turns
+      if len(close) and (close - rs).min() < NUDGE_NODE:
+        continue  # past a turn's point, or about to reach it
+      k = segment_of(route, rs)
+      d = route.points[k + 1, :2] - route.points[k, :2]
+      sec = lanes.section_at(rs, k)
+      if sec is None or not sec.lanes:
+        continue
+      if abs(wrap(math.degrees(self.theta0[i] - math.atan2(d[1], d[0])))) > NUDGE_ALIGN * (2.0 if across else 1.0):
+        continue
+      # the lane the path is in, or those it moves across between
+      r0, r1 = (float(near.min()), float(near.max())) if across else (r, r)
+      hit = [sp for sp in sec.ours if sp.left < r1 + self.half_width and sp.right > r0 - self.half_width]
+      if not across:
+        hit = [sp for sp in hit if sp.left <= r <= sp.right] if len(hit) > 1 else hit
+      if not hit or any(not NUDGE_SPAN[0] <= sp.right - sp.left <= NUDGE_SPAN[1] for sp in hit) or \
+         any(abs(b_.left - a_.right) > 0.1 for a_, b_ in zip(hit, hit[1:], strict=False)):
+        continue
+      left, right = hit[0].left, hit[-1].right
+      if not left <= r <= right:
+        continue
+      lo, hi = max(left, sec.edges[0]) + room0 - r, min(right, sec.edges[1]) - room0 - r
+      own = next((sp for sp in hit if sp.left <= r <= sp.right), hit[0])
+      gore = next((side for fa, side in forks if -FORK_BEFORE < rs - fa < FORK_AFTER), None)
+      if gore == "right":  # the branch taken is the right one: no nearer the gore on our left than its _lane_room allows
+        lo = max(lo, own.centre - FORK_ROOM - r)
+      elif gore == "left":
+        hi = min(hi, own.centre + FORK_ROOM - r)
+      if lo < hi and np.isnan(self.room_lo[i]):
+        self.room_lo[i], self.room_hi[i] = lo, hi
+      elif lo < hi:  # the plan's own lane, widened to the lanes it moves across
+        self.room_lo[i], self.room_hi[i] = min(lo, self.room_lo[i]), max(hi, self.room_hi[i])
+    # a stretch still without, between two with, no turn in it
+    sp, lo_, hi_ = self.s_path, self.room_lo, self.room_hi
+    for g0, g1 in _runs(np.isnan(lo_[a:b + 1])):
+      i0, i1 = a + g0, a + g1 - 1
+      if i0 == 0 or i1 + 1 >= len(sp) or np.isnan(lo_[i0 - 1]) or np.isnan(lo_[i1 + 1]):
+        continue
+      if sp[i1 + 1] - sp[i0 - 1] > NUDGE_BRIDGE or abs(wrap(math.degrees(self.theta0[i1 + 1] - self.theta0[i0 - 1]))) > NUDGE_BRIDGE_DEG:
+        continue
+      if len(turns) and ((turns > self.route_s[i0 - 1]) & (turns < self.route_s[i1 + 1])).any():
+        continue
+      # the lanes' edges carried straight across (m right of the road's line), so a path that wanders off them there
+      # (the map's sections in a junction) has the less room for it
+      r_ = self.route_r
+      lo_[i0:i1 + 1] = max(lo_[i0 - 1] + r_[i0 - 1], lo_[i1 + 1] + r_[i1 + 1]) - r_[i0:i1 + 1]
+      hi_[i0:i1 + 1] = min(hi_[i0 - 1] + r_[i0 - 1], hi_[i1 + 1] + r_[i1 + 1]) - r_[i0:i1 + 1]
+      self.room_tried[i0:i1 + 1] = True
+
   def _nudge(self, v: float, t: float):
     """Each parked vehicle (no one at its wheel, standing) newly in the way along the path ahead: the path shifted past it
     within our lane (_nudge_for, _nudge_add), else left for the lead to stop behind; a nudge event either way. Shifts and
@@ -1800,6 +1887,7 @@ class MapDriver:
     i0 = int(np.searchsorted(sp, h0))
     i1 = min(int(np.searchsorted(sp, h1, side="right")), len(sp) - 1)
     e = {"c": car["c"].mean(axis=0), "at": [round(a0, 1), round(a1, 1)], "right": [round(r0, 2), round(r1, 2)], "need": None}
+    self._fill_room(int(np.searchsorted(sp, h0 - NUDGE_FILL)), int(np.searchsorted(sp, h1 + NUDGE_FILL)))
     lo, hi = self.room_lo[i0:i1 + 1], self.room_hi[i0:i1 + 1]
     if not len(lo) or np.isnan(lo).any():
       return {**e, "why": "no lane"}
