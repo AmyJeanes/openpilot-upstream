@@ -1913,11 +1913,73 @@ int AllPeds(VehicleHandles &handles) {
   return count;
 }
 
+// Static things in the way of the car's next OBST_AHEAD m, for the map driver (gta5_mapdrive.py), whose plan can lead
+// into what its map doesn't show: rays from the front bumper along the arc the car is turning on, at either side of its
+// body (OBST_WIDEN out) and its middle, OBST_LOW m above its bottom (a kerb taller than about 0.2 m) and OBST_HIGH,
+// against the map's collision and objects (props, posts), not vehicles or peds. A hit counts only on a surface facing
+// the car (its normal within asin(OBST_FACE) of level): a road rising ahead, a ramp or a speed bump faces up.
+// Asynchronous probes, a batch at most every OBST_EVERY s, read once all are done: "x,y" m right and forward of the
+// car's origin for each hit, comma separated pairs in brackets.
+constexpr float OBST_AHEAD = 15.0f, OBST_SEG = 5.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
+constexpr double OBST_EVERY = 0.15;
+constexpr int OBST_FLAGS = 1 | 16;
+
+std::string Obstacles(double now) {
+  constexpr int SIDES = 3, HEIGHTS = 2, SEGS = static_cast<int>(OBST_AHEAD / OBST_SEG);
+  static std::array<int, SIDES * HEIGHTS * SEGS> tests{};
+  static bool pending = false;
+  static double next = 0;
+  static std::string list, fresh;
+  Vehicle v = g_veh.handle;
+  if (pending) {
+    bool waiting = false;
+    for (int &test : tests) {
+      if (!test) continue;
+      BOOL hit = FALSE;
+      Vector3 end{}, normal{};
+      Entity e = 0;
+      int result = GET_SHAPE_TEST_RESULT(test, &hit, &end, &normal, &e);
+      if (result == 1) {
+        waiting = true;
+        continue;
+      }
+      test = 0;
+      if (result != 2 || !hit || std::fabs(normal.z) > OBST_FACE || !v) continue;
+      Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, end.x, end.y, end.z);
+      char buf[48];
+      snprintf(buf, sizeof(buf), "%s[%.1f,%.1f]", fresh.empty() ? "" : ",", rel.x, rel.y);
+      fresh += buf;
+    }
+    if (waiting) return list;
+    list.swap(fresh);
+    fresh.clear();
+    pending = false;
+  }
+  if (now < next || !v || !DOES_ENTITY_EXIST(v)) return list;
+  next = now + OBST_EVERY;
+  Vector3 mn{}, mx{};
+  GET_MODEL_DIMENSIONS(g_veh.model, &mn, &mx);
+  float k = g_m.v > 1.0f ? std::clamp(g_m.yawRate / g_m.v, -0.2f, 0.2f) : 0.0f;  // 1/m, left positive
+  auto at = [&](float d, float side, float z) {  // d m along the arc from the front bumper, side m right of it
+    float th = k * d, x = std::fabs(k) > 1e-4f ? -(1.0f - std::cos(th)) / k : 0.0f, y = std::fabs(k) > 1e-4f ? std::sin(th) / k : d;
+    return GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(v, x + side * std::cos(th), mx.y + y + side * std::sin(th), z);
+  };
+  int n = 0;
+  for (float side : {mn.x - OBST_WIDEN, 0.0f, mx.x + OBST_WIDEN})
+    for (float z : {mn.z + OBST_LOW, mn.z + OBST_HIGH})
+      for (int i = 0; i < SEGS; i++) {
+        Vector3 a = at(i * OBST_SEG, side, z), b = at((i + 1) * OBST_SEG, side, z);
+        tests[n++] = START_SHAPE_TEST_LOS_PROBE(a.x, a.y, a.z, b.x, b.y, b.z, OBST_FLAGS, v, 7);
+      }
+  pending = true;
+  return list;
+}
+
 // the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
 // "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...], "p":[[x, y, vx, vy],
 // ...]}: each vehicle's origin (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward,
 // in our frame), its model's bounds (m, in its own frame) and whether anyone is in its driver's seat; each pedestrian on
-// foot's place and velocity, within NEARBY_PED_*
+// foot's place and velocity, within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits
 std::string Nearby(double now) {
   static std::string out;
   static double next = 0;
@@ -1985,7 +2047,8 @@ std::string Nearby(double now) {
     pedList += "[" + num(rel.x) + "," + num(rel.y) + "," + num(vx) + "," + num(vy) + "]";
   }
   out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
-        num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "],\"p\":[" + pedList + "]}";
+        num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "],\"p\":[" + pedList + "],\"obst\":[" +
+        Obstacles(now) + "],\"obstAhead\":" + num(OBST_AHEAD) + "}";
   return out;
 }
 

@@ -23,6 +23,7 @@ CAR_DIMS = (-1.0, 1.0, -2.4, 2.4)  # m: a car's model bounds, as the plugin repo
 NEARBY = {"side": 15.0, "behind": 45.0, "ahead": 15.0}  # m around the car the plugin reports vehicles within (core.cpp)
 PED_NEARBY = {"side": 25.0, "behind": 5.0, "ahead": 60.0}  # and pedestrians (NEARBY_PED_*)
 PED_DIMS = (-0.3, 0.3, -0.3, 0.3)  # m: a pedestrian's body
+OBST_AHEAD, OBST_SEG, OBST_WIDEN = 15.0, 5.0, 0.2  # m: the plugin's probes for static things ahead (core.cpp Obstacles)
 
 
 @dataclass
@@ -97,15 +98,19 @@ class LagCar:
   `dims` (its model's bounds: min x, max x, min y, max y) reach the state as the plugin's nearby.dims; `vehicles` around
   it as nearby.v, read every 0.1 s within `reach` (NEARBY's; with an "ahead" key it's in nearby, as a plugin that reports
   its reach), each one touched a collision; `peds` (pedestrian()s) likewise as nearby.p within PED_NEARBY, or with
-  `ped_list` False (a plugin before it listed them) only as state.traffic.peds, those just ahead (PED_BOX). `brake`: the
-  deceleration (m/s^2) it delivers at most, as the game short of the plugin's -4.0."""
+  `ped_list` False (a plugin before it listed them) only as state.traffic.peds, those just ahead (PED_BOX). `walls`:
+  static polylines, each touched a collision, and with `probe` the plugin's probes ahead (Obstacles) as nearby.obst.
+  `brake`: the deceleration (m/s^2) it delivers at most, as the game short of the plugin's -4.0."""
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
                delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8,
                dims: tuple[float, float, float, float] | None = None, vehicles: list[Vehicle] | None = None,
                reach: dict | None = None, peds: list[Vehicle] | None = None, ped_list: bool = True,
-               brake: float | None = None):
+               brake: float | None = None, walls: list | None = None, probe: bool = True):
     self.x, self.y, self.h, self.v = x, y, heading, v
     self.brake = brake
+    self.walls = [np.asarray(w, float) for w in walls] if walls is not None else None
+    self.probe = probe
+    self.wall_touch: set[tuple[int, int]] = set()
     self.wheel_base = wheel_base
     self.dims = dims
     self.vehicles = vehicles
@@ -133,7 +138,7 @@ class LagCar:
            "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
            "t": int(self.t), "wheelBase": self.wheel_base, "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
            "ai": {"on": False}}
-    if self.dims is not None or self.vehicles is not None or self.peds is not None:
+    if self.dims is not None or self.vehicles is not None or self.peds is not None or self.walls is not None:
       if self.t >= self.nearby_t + 0.1 - 1e-9:
         self.nearby, self.nearby_t = self._nearby(), self.t
       out["nearby"] = self.nearby
@@ -174,6 +179,39 @@ class LagCar:
         out["p"].append([round(v, 1) for v in (x, y, vel @ right, vel @ fwd)])
     if self.report_reach:
       out["ahead"] = self.reach["ahead"]
+    if self.walls is not None and self.probe:
+      out["obst"], out["obstAhead"] = self._probe(), OBST_AHEAD
+    return out
+
+  def _probe(self) -> list[list[float]]:
+    """The plugin's Obstacles: rays from the front bumper along the arc the car turns on, at its sides (OBST_WIDEN out)
+    and middle, OBST_SEG m each, against the walls: each ray's first hit, m right and forward of the car's middle."""
+    h = math.radians(self.h)
+    right, fwd = np.array([math.cos(h), math.sin(h)]), np.array([-math.sin(h), math.cos(h)])
+    mnx, mxx, _, mxy = self.dims or CAR_DIMS
+    k = float(np.clip(self.k, -0.2, 0.2))
+
+    def at(d, side):  # in the car's frame
+      th = k * d
+      x, y = (-(1 - math.cos(th)) / k, math.sin(th) / k) if abs(k) > 1e-4 else (0.0, d)
+      return np.array([x + side * math.cos(th), mxy + y + side * math.sin(th)])
+    segs = [(w[i], w[i + 1]) for w in self.walls for i in range(len(w) - 1)]
+    out = []
+    for side in (mnx - OBST_WIDEN, 0.0, mxx + OBST_WIDEN):
+      for i in range(int(OBST_AHEAD / OBST_SEG)):
+        a, b = (at(d, side) for d in (i * OBST_SEG, (i + 1) * OBST_SEG))
+        a, b = np.array([self.x, self.y]) + right * a[0] + fwd * a[1], np.array([self.x, self.y]) + right * b[0] + fwd * b[1]
+        best = None
+        for p, q in segs:
+          m = np.array([b - a, p - q]).T
+          if abs(np.linalg.det(m)) < 1e-9:
+            continue
+          u, w = np.linalg.solve(m, p - a)
+          if 0.0 <= u <= 1.0 and 0.0 <= w <= 1.0 and (best is None or u < best):
+            best = u
+        if best is not None:
+          hit = a + (b - a) * best - np.array([self.x, self.y])
+          out.append([round(float(hit @ right), 1), round(float(hit @ fwd), 1)])
     return out
 
   def body(self) -> np.ndarray:
@@ -221,6 +259,11 @@ class LagCar:
       now = {k for k, o in enumerate(self.others) if overlap(ours, o.corners())}
       self.collisions += len(now - self.touching)
       self.touching = now
+    if self.walls:
+      ours = self.body()
+      now = {(n, i) for n, w in enumerate(self.walls) for i in range(len(w) - 1) if overlap(ours, w[i:i + 2])}
+      self.collisions += int(bool(now - self.wall_touch))
+      self.wall_touch = now
 
   @property
   def others(self) -> list[Vehicle]:
@@ -424,7 +467,8 @@ COLS = ("t", "x", "y", "heading", "v", "yaw", "kappa", "accel", "dev", "s", "lan
 def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None = None, v0: float = 0.0, seconds: float = 120.0,
           tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None,
           gain: float = 1.0, noise: float = 0.0, dims=None, vehicles: list[Vehicle] | None = None, reach: dict | None = None,
-          peds: list[Vehicle] | None = None, ped_list: bool = True, brake: float | None = None) -> Trip:
+          peds: list[Vehicle] | None = None, ped_list: bool = True, brake: float | None = None, walls: list | None = None,
+          probe: bool = True) -> Trip:
   """Drives a route with the map driver on the lagged car. faults: {"collision": t, "push": (t, m right),
   "steer": t, "block": t, "surge": (path m, m/s more over 0.4 s)}. lane_map(route, state) gives the state's laneMap (None: none)."""
   import time
@@ -432,7 +476,7 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
     route.at, route.seg = 0.0, 0  # a route driven before starts again at its start
     pose = start_pose(route, lane if lane is not None else 0.0, 0.0)
   car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise, dims=dims, vehicles=vehicles, reach=reach,
-               peds=peds, ped_list=ped_list, brake=brake)
+               peds=peds, ped_list=ped_list, brake=brake, walls=walls, probe=probe)
   route.at, route.seg = 0.0, 0
   route.locate(np.array(pose[:2], float), None, pose[2], search=route.length)
   md = MapDriver({"seed": 1, **(cfg or {})})

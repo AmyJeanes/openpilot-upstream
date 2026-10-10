@@ -325,10 +325,15 @@ def kinds(md, kind: str) -> list[dict]:
 def test_clamp_corners():
   """The lane line's fillet cutting a turn's inside corner kerb: the plan pushed out of it, a plan_clamp anomaly, not a
   kerb_contact. A far-side turn's inside is a kerb where it's a median: one-way legs (map1010b 012, a left turn past a
-  tram median's nose) or a median between the directions; a near-side turn's into a narrow street."""
+  tram median's nose) or a median between the directions, else the road's far edge (map1010c 015, a left turn off a
+  two-way road, its front corner past the edge into a bridge parapet's end); a near-side turn's into a narrow street."""
   one_way = ms.section(2, 0, 4.4)
   cases = [("left 60, one-way legs", ms.junction_turn("left", stop=None, angle=60.0, sec=one_way), 0, 0.5),
            ("left 60, a 4 m median", ms.junction_turn("left", stop=None, angle=60.0, sec=ms.section(2, 2, median=4.0)), 0, 0.05),
+           ("left 90, two-way 3 m lanes", ms.junction_turn("left", stop=None, sec=ms.section(1, 1, 3.0)), 0, 0.2),
+           # 015's side road bends away past its first metres: the corner from shorter legs, not taken for a bend
+           ("left 90 onto a road bending away", ms.made_route(ms.line((200.0, 0.0), (10.0, 90.0), *[(10.0, 4.0)] * 6, (100.0, 0.0)),
+                                                             ms.section(1, 1, 3.0), junctions=[20], turns={20: ms.LEFT}), 0, 0.5),
            ("right 90 into 3.5 m lanes", ms.junction_turn("right", stop=None, out=ms.section(1, 1, 3.5)), 1, None)]
   for name, r, lane, cut in cases:
     cfg = {"seed": 3, "bias_max": 0, "wander": 0}
@@ -395,6 +400,33 @@ def test_clamp_lane_and_fork():
   print("clamp lane and fork: ok")
 
 
+def test_clamp_across_a_junction():
+  """A junction's own sections between its nodes say little of where our lane runs (mdnudge seed 43, Autopia Pkwy:
+  the plan followed them 1.7 m left, onto the double yellow): the lane room is carried across them along the route's
+  line from the lane either side, so the plan keeps our body in the lane."""
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, Lane, Section, Span
+  road = ms.section(1, 1)  # 5.5 m lanes either side of the line: ours centred 2.75 m right
+  link = Section([Span(Lane(FORWARD, 4.0), -2.0, 2.0, 1)], (-2.0, 2.0))  # the junction's link, centred on the line
+  r = ms.made_route(ms.line((600.0, 0.0)), [road] * 30 + [link] * 2 + [road] * 28, junctions=[30, 32])  # nodes 20 m apart
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+
+  def lowest() -> float:
+    md = ms.drive(r, cfg, lane=0, seconds=0.2).md
+    along, right = g.along_route(r, md.intent, 0.0)
+    return float(right[(along > 295.0) & (along < 345.0)].min())
+  real = g.CARRY_MAX
+  g.CARRY_MAX = 0.0
+  try:
+    before = lowest()
+  finally:
+    g.CARRY_MAX = real
+  after = lowest()
+  room = LANE_W / 2 - g.HALF_WIDTH - g.CLAMP_MARGIN
+  assert before < 1.0 and after > 2.75 - room - 0.05, (before, after)
+  print(f"clamp across a junction: ok (the plan at least {after:.2f} m right of the centre line, {before:.2f} before)")
+
+
 COLLISIONS = [  # map1010b's trips that hit the kerb or the gore: spec, map driver seed, where it first touched
   ("012", "883.2,-2077.8,29.5,96,0>-250.5,-1067.2", 165189838, (187.0, -1776.9)),
   ("014", "670.0,-2893.8,5.2,0,9>1358.8,-1110.4", 375068520, (561.3, -2547.6)),
@@ -421,6 +453,106 @@ def test_collision_routes():
     assert abs(off) < 0.6 and md.clamps, (name, off)
     done.append(f"{name} {off:+.2f}")
   print(f"collision routes: ok ({', '.join(done)} m)" if done else "collision routes: skipped (no router)")
+
+
+def path_lane_offsets(md, route) -> np.ndarray:
+  """The driven path: m right of its lane's centre at each point."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import along_route, lane_at, segment_of
+  along, right = along_route(route, md.path, 0.0)
+  return np.array([r_ - route.section(segment_of(route, a)).offset(lane_at(md.keys, a)) for a, r_ in zip(along, right, strict=True)])
+
+
+def test_start_stub_and_join():
+  """map1010c 005: the route began with a 0.05 m link back down the road (the car's place just short of the router's
+  node), the lane line swept across it from 5 m left of its lane, and the start offset, measured against that sweep,
+  held the path 3 m right of the lane into a wall. The lane line now starts past such a stub (RouteLanes.start); the
+  start offset is the route's own where the car is on it, so a line swerving at its start is joined from the car, not
+  shifted; and a bend the car can't take where it pulls away fails the plan rather than being driven (with the stub
+  kept, 005's sweep is one)."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import headings
+  from openpilot.tools.sim.bridge.gta5.map import osm_lanes
+  pts = np.vstack([[[0.0, 0.0], [-0.03, -0.04]], ms.line((300.0, 0.0), start=(-0.03, -0.04))[1:]])
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+  r = ms.made_route(pts, ms.section(2, 2))
+  trip = ms.drive(r, cfg, pose=ms.start_pose(r, 1.0, 1.0), seconds=6.0)
+  assert not trip.md.aborts and np.abs(path_lane_offsets(trip.md, r)[:20]).max() < 0.1
+  real = osm_lanes.START_STUB
+  osm_lanes.START_STUB = 0.0
+  try:
+    r = ms.made_route(pts, ms.section(2, 2))
+    trip = ms.drive(r, cfg, pose=ms.start_pose(r, 1.0, 1.0), seconds=3.0)
+  finally:
+    osm_lanes.START_STUB = real
+  assert trip.finished is not None and "sharp corner" in trip.finished, trip.finished
+
+  def swerved(route):  # the lane line 2.5 m left of its lane where it starts, back in it 14 m on
+    real = route.lanes.lane_line
+
+    def line(at0, keys, step=2.0):
+      out = real(at0, keys, step)
+      s = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(out, axis=0).T))))
+      u = np.clip(1.0 - s / 14.0, 0.0, 1.0)
+      th = headings(out)
+      return out - np.stack([np.sin(th), -np.cos(th)], axis=1) * (2.5 * u * u * (3 - 2 * u))[:, None]
+    route.lanes.lane_line = line
+    return route
+  r = swerved(ms.straight(300))
+  off = path_lane_offsets(ms.drive(r, cfg, lane=1, seconds=0.2).md, r)[:15]
+  r.on_road = lambda *a, **k: False  # the start offset from the line itself, as where the car isn't on the route
+  before = path_lane_offsets(ms.drive(r, cfg, lane=1, seconds=0.2).md, r)[:15]
+  assert np.abs(off).max() < 0.5 and np.abs(before).max() > 1.0, (np.abs(off).max(), np.abs(before).max())
+  # 8 m from a square corner too near the start for a fillet
+  trip = ms.drive(ms.junction_turn("right", lead=8.0, stop=None), cfg, lane=1, seconds=3.0)
+  assert trip.finished is not None and "sharp corner" in trip.finished and trip.car.v < 0.3, trip.finished
+  print(f"start stub and join: ok (swerved line: path {np.abs(off).max():.2f} m off its lane, {np.abs(before).max():.1f} before)")
+
+
+class FakeSlots:
+  """Lane slots with these moves (along, turn, need) and no targets to read lanes from: follow_slots takes each
+  mismatch's own want."""
+  def __init__(self, *moves):
+    from types import SimpleNamespace
+    self.moves = [SimpleNamespace(along=a, turn=turn, need=True) for a, turn in moves]
+
+  def target(self, s, v=0.0):
+    return None, None
+
+
+def test_follow_slots():
+  """plan_check=fix's lane changes for the slots. map1010c 021: into the left-turn lane of two before a left turn onto a
+  road with one lane each way, the turn's renumbering step (nav's lane 1 of 2 out as lane 0 of 1) carried the change's
+  shift too, to lane -1, the oncoming lane, for 10 s on Heritage Way. mdnudge seed 46: a through junction wanting the
+  right lane 41 m before a turn wanting the left, the second fix started before the first move, undoing it, and the
+  third held lane 0.877 for 300 m. Now: a turn's renumbering step is nav's, a lane the road hasn't is no fix (nor a
+  plan), a fix doesn't start before the move before it, and finishes late rather than not at all, MIN_LC_M long."""
+  md = MapDriver({"seed": 3})
+  r = ms.junction_turn("left", stop=None, out=ms.section(1, 1))  # north 200 m, two lanes each way; left onto one each way
+  keys = [(0.0, 1.0), (200.0, 1.0), (200.0, 0.0)]
+  for turn in (True, False):
+    out = md.follow_slots(r, keys, [{"s": 170.0, "move": 200.0, "end": 170.0, "want": [0]}], FakeSlots((200.0, turn)))
+    assert lane_at(out, 175.0) == 0.0 and lane_at(out, 199.0) == 0.0 and min(lane for _, lane in out) == 0.0, (turn, out)
+    assert MapDriver._outside_lanes(r, out) is None
+  assert MapDriver._outside_lanes(r, keys[:2] + [(200.0, -1.0), (300.0, -1.0)]) == {"s": 200.0, "lane": -1.0, "lanes": 1}
+  r = ms.straight(600)
+  slots = FakeSlots((321.8, False), (363.0, True))
+  nav = [(0.0, 0.0), (90.0, 0.0), (218.0, 1.0), (309.0, 0.0), (600.0, 0.0)]
+  first = md.follow_slots(r, nav, [{"s": 291.8, "move": 321.8, "end": 291.8, "want": [1]}], slots)
+  out = md.follow_slots(r, first, [{"s": 333.0, "move": 363.0, "end": 333.0, "want": [0]}], slots)
+  assert lane_at(out, 291.8) == 1.0 and lane_at(out, 321.8) == 1.0 and lane_at(out, 362.9) == 0.0, out
+  change = [(out[a][0], out[b][0]) for a, b in chains(out) if 321.8 < out[b][0] <= 363.0]
+  assert len(change) == 1 and change[0][0] >= 321.8 + 5.0 - 1e-6 and change[0][1] - change[0][0] >= 20.0, (change, out)
+  assert all(abs(lane - round(lane)) < 1e-6 for s, lane in out if s >= 362.0), out
+  print(f"follow slots: ok (seed 46's change into the left lane {change[0][0]:.1f}-{change[0][1]:.1f} m)")
+
+
+def test_oncoming_abort():
+  """In the oncoming lanes by the bridge's lane matching (laneMap kind "oncoming") for ONCOMING_S away from a junction:
+  the trip ends (map1010c 021 drove 10 s there until record_run stopped it)."""
+  trip = ms.drive(ms.straight(800), {"seed": 3}, lane=1, seconds=40.0,
+                  lane_map=lambda route, st: {"kind": "oncoming" if st["t"] >= 10 else "own", "lane": None, "lanes": 2})
+  assert trip.finished is not None and "oncoming" in trip.finished, trip.finished
+  assert 10.9 < trip.md.aborts[0]["t"] < 11.6 and trip.car.v < 0.3, trip.md.aborts
+  print("oncoming abort: ok")
 
 
 def test_body_from_dims():
@@ -624,7 +756,11 @@ if __name__ == "__main__":
   test_body_from_dims()
   test_clamp_corners()
   test_clamp_lane_and_fork()
+  test_clamp_across_a_junction()
   test_collision_routes()
+  test_start_stub_and_join()
+  test_follow_slots()
+  test_oncoming_abort()
   test_lane_change_kept_off_a_jog()
   test_arrival()
   test_aborts()
