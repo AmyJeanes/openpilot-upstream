@@ -26,11 +26,14 @@ class LagCar:
   acting `delay` s after they're sent; a stop is held (the plugin's handbrake). Game heading: deg counterclockwise
   from north. Imperfections for robustness checks: `gain` scales the curvature the car takes (the plugin's adaptive
   steering gain off), `noise` the pose's (m and deg, normal) and the yaw rate's (rad/s) noise, seeded. Its position
-  (x, y) is its middle, `wheel_base` / 2 ahead of the rear axle, which moves along its heading, as the game reports it."""
+  (x, y) is its middle, `wheel_base` / 2 ahead of the rear axle, which moves along its heading, as the game reports it.
+  `dims` (its model's bounds: min x, max x, min y, max y) reach the state as the plugin's nearby.dims."""
   def __init__(self, x: float, y: float, heading: float, v: float = 0.0, tau_k: float = 0.22, tau_a: float = 0.22,
-               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8):
+               delay: float = 0.05, gain: float = 1.0, noise: float = 0.0, seed: int = 0, wheel_base: float = 2.8,
+               dims: tuple[float, float, float, float] | None = None):
     self.x, self.y, self.h, self.v = x, y, heading, v
     self.wheel_base = wheel_base
+    self.dims = dims
     self.k = self.a = self.lat_i = 0.0
     self.tau_k, self.tau_a, self.delay = tau_k, tau_a, delay
     self.gain, self.noise = gain, noise
@@ -44,10 +47,13 @@ class LagCar:
 
   def state(self) -> dict:
     n = self.rng.normal(0.0, self.noise, 4) if self.noise else np.zeros(4)
-    return {"pos": [self.x + n[0], self.y + n[1], 0.0], "vEgo": self.v, "heading": self.h + 5 * n[2],
-            "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
-            "t": int(self.t), "wheelBase": self.wheel_base, "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
-            "ai": {"on": False}}
+    out = {"pos": [self.x + n[0], self.y + n[1], 0.0], "vEgo": self.v, "heading": self.h + 5 * n[2],
+           "yawRate": self.k * self.v + 0.1 * n[3], "aMeas": self.a,
+           "t": int(self.t), "wheelBase": self.wheel_base, "collisions": self.collisions, "user": dict(self.user), "engagePresses": 0, "inVehicle": True,
+           "ai": {"on": False}}
+    if self.dims is not None:
+      out["nearby"] = {"dims": list(self.dims), "v": []}
+    return out
 
   def control(self, msg: dict | None):
     if msg is not None and msg.get("type") == "control" and msg.get("active"):
@@ -277,14 +283,14 @@ COLS = ("t", "x", "y", "heading", "v", "yaw", "kappa", "accel", "dev", "s", "lan
 
 def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None = None, v0: float = 0.0, seconds: float = 120.0,
           tau: float = 0.22, delay: float = 0.05, faults: dict | None = None, until_done: bool = True, lane_map=None,
-          gain: float = 1.0, noise: float = 0.0) -> Trip:
+          gain: float = 1.0, noise: float = 0.0, dims=None) -> Trip:
   """Drives a route with the map driver on the lagged car. faults: {"collision": t, "push": (t, m right),
   "steer": t, "block": t, "surge": (path m, m/s more over 0.4 s)}. lane_map(route, state) gives the state's laneMap (None: none)."""
   import time
   if pose is None:
     route.at, route.seg = 0.0, 0  # a route driven before starts again at its start
     pose = start_pose(route, lane if lane is not None else 0.0, 0.0)
-  car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise)
+  car = LagCar(*pose, v=v0, tau_k=tau, tau_a=tau, delay=delay, gain=gain, noise=noise, dims=dims)
   route.at, route.seg = 0.0, 0
   route.locate(np.array(pose[:2], float), None, pose[2], search=route.length)
   md = MapDriver({"seed": 1, **(cfg or {})})

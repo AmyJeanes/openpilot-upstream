@@ -53,9 +53,9 @@ SOURCES = ("none", "ai", "map", "ai_fallback")  # gta5.npz expert_src codes
 
 STEP = 1.0  # m between the path's points
 LANE_W = 5.5  # m, GTA's lanes
-FRONT = 2.4  # m from the car's origin to its front bumper
+FRONT = 2.4  # m from the car's origin to its front bumper (and its rear), where the plugin's nearby.dims has none
 WHEEL_BASE = 2.8  # m, where the plugin's state has none: the rear axle half of it behind the car's origin
-HALF_WIDTH = 1.0  # m
+HALF_WIDTH = 1.0  # m, likewise
 LATENCY = 0.1  # s from the game's frame to the plugin acting on the control (the pose is predicted this far)
 FF_PREVIEW = 0.32  # s ahead the path's curvature is fed forward: the car's curvature lag (about 0.2 s in game) and the delay
 LOOKAHEAD = (5.0, 0.6, 3.0, 25.0)  # m: min, s of speed, plus, max
@@ -489,6 +489,17 @@ class MapDriver:
     self.corners: list[dict] = []
     self.jog_changes: list[tuple[float, float]] = []  # lane changes left across a jog, with no room off it
     self.unclear = np.zeros(0)
+    self.front, self.rear, self.half_width = FRONT, FRONT, HALF_WIDTH  # our car's body from its origin (_body)
+
+  def _body(self, state: dict):
+    """Our car's body from the plugin's nearby.dims (its model's bounds: min x, max x, min y, max y)."""
+    dims = (state.get("nearby") or {}).get("dims")
+    if dims and len(dims) == 4 and dims[3] > 0.5 and dims[2] < -0.5 and dims[1] - dims[0] > 0.5:
+      self.front, self.rear, self.half_width = float(dims[3]), float(-dims[2]), float(max(-dims[0], dims[1]))
+
+  @property
+  def body(self) -> tuple[float, float, float]:
+    return self.front, self.rear, self.half_width
 
   # *** what expert mode and recordings read ***
 
@@ -1007,7 +1018,7 @@ class MapDriver:
         continue
       s_line = float(np.interp(along, self.route_s, self.s_path))
       self.stops.append({"along": float(along), "kind": kind, "s": s_line, "done": False, "t_stop": None,
-                         "target": s_line - FRONT - self.style["stop_margin"]})
+                         "target": s_line - self.front - self.style["stop_margin"]})
     arrive_along = route.length - float(self.c["stop_before"])
     self.s_arrive = float(np.interp(max(arrive_along, route.at + 5.0), self.route_s, self.s_path))
     # the static speed profile: the road's speed, the curvature, nav's turn speeds, the arrival
@@ -1076,7 +1087,7 @@ class MapDriver:
       if sec is None or not sec.lanes:
         continue
       lo, hi = sec.edges
-      if rr - HALF_WIDTH < lo - KERB_MARGIN or rr + HALF_WIDTH > hi + KERB_MARGIN:
+      if rr - self.half_width < lo - KERB_MARGIN or rr + self.half_width > hi + KERB_MARGIN:
         found.setdefault(("kerb_contact", ""), []).append((i, {"right": round(float(rr), 2), "edges": [round(lo, 2), round(hi, 2)]}))
       link = route.links[k] if k < len(route.links) else None
       if link is not None and link.lanes:
@@ -1088,7 +1099,7 @@ class MapDriver:
           found.setdefault(("gta_link_offset", "lane counts"), []).append((i, {"map": [sec.lanes, back], "gta": [link.lanes, link.back]}))
           continue
         gta_lo, gta_hi = link.inner - link.back * link.width, link.inner + link.lanes * link.width
-        room = min(rr - gta_lo, gta_hi - rr) - HALF_WIDTH
+        room = min(rr - gta_lo, gta_hi - rr) - self.half_width
         # the map's lanes wider than GTA's on the near side (a lane placed out towards GTA's barrier or kerb; a shoulder
         # beyond them is no lane)
         lanes_lo, lanes_hi = sec.spans[0].left, sec.spans[-1].right
@@ -1118,11 +1129,11 @@ class MapDriver:
                     span=[round(s0, 1), round(s1, 1)])
     for c in self.corners:  # the plan cutting a junction's corner kerb
       hits = [i for i in range(len(self.path)) if abs(self.route_s[i] - c["along"]) < CORNER_SPAN and
-              (self._corner_hit(c, self.path[i], float(self.theta[i])) or 0.0) > KERB_MARGIN]
+              (self._corner_hit(c, self.path[i], float(self.theta[i]), self.body) or 0.0) > KERB_MARGIN]
       if hits:
         i = hits[len(hits) // 2]
         self._anomaly("kerb_contact", t, self.path[i], float(self.s_path[i]), planned=True, corner=c["side"],
-                      depth=round(max(self._corner_hit(c, self.path[j], float(self.theta[j])) for j in hits), 2),
+                      depth=round(max(self._corner_hit(c, self.path[j], float(self.theta[j]), self.body) for j in hits), 2),
                       corner_at=[round(float(v), 1) for v in c["corner"]])
     for st in self.stops:
       after = junctions[junctions > st["along"] - 1.0] if len(junctions) else junctions
@@ -1193,15 +1204,15 @@ class MapDriver:
     return False
 
   @staticmethod
-  def _corner_hit(c: dict, pos, theta: float) -> float | None:
-    """How deep (m) the car (its middle at pos, heading theta radians from east) reaches into a corner's kerb block,
-    the block's corner rounded KERB_RADIUS; None where it doesn't."""
+  def _corner_hit(c: dict, pos, theta: float, body: tuple[float, float, float] = (FRONT, FRONT, HALF_WIDTH)) -> float | None:
+    """How deep (m) the car (its origin at pos, heading theta radians from east; body: m to its front, rear and side)
+    reaches into a corner's kerb block, the block's corner rounded KERB_RADIUS; None where it doesn't."""
     f = np.array([math.cos(theta), math.sin(theta)])
     lat = np.array([-f[1], f[0]])
     r = KERB_RADIUS
     deepest = None
-    for fx in (FRONT, -FRONT):
-      for lx in (HALF_WIDTH, -HALF_WIDTH):
+    for fx in (body[0], -body[1]):
+      for lx in (body[2], -body[2]):
         q = np.asarray(pos, float) + f * fx + lat * lx
         d1, d2 = float((q - c["ka"]) @ c["na"]), float((q - c["kb"]) @ c["nb"])
         if d1 <= 0 or d2 <= 0:
@@ -1250,7 +1261,8 @@ class MapDriver:
     v = float(state.get("vEgo") or 0.0)
     if pos is None:
       return self.msg
-    key = (round(pos[0], 3), round(pos[1], 3), round(float(state.get("heading") or 0.0), 3), round(v, 3))
+    self._body(state)
+    key =(round(pos[0], 3), round(pos[1], 3), round(float(state.get("heading") or 0.0), 3), round(v, 3))
     if key == self.last_key and self.msg is not None and self.last_t is not None and t - self.last_t < COMPUTE_EVERY:
       return self.msg  # the same game frame: the control again, as the plugin drops one older than 0.3 s
     dt = min(max(t - self.last_t, 0.02), 0.2) if self.last_t is not None else 0.05
@@ -1352,7 +1364,7 @@ class MapDriver:
       if x["done"]:
         continue
       if x["kind"] == "lights":
-        if s + FRONT >= x["s"]:
+        if s + self.front >= x["s"]:
           x["done"] = True
           mark = {"t": round(t, 3), "s": round(x["s"], 1), "along": round(x["along"], 1), "from": round(t - LIGHT_MARK, 3), "to": round(t + LIGHT_MARK, 3)}
           self.lights.append(mark)
@@ -1360,7 +1372,7 @@ class MapDriver:
         continue
       d = x["target"] - s
       if x["kind"] == "give_way":
-        if s + FRONT >= x["s"]:
+        if s + self.front >= x["s"]:
           x["done"] = True
           continue
         cap = math.sqrt((GIVE_WAY_SPEED * st["speed"]) ** 2 + 2 * b * 0.8 * max(d, 0.0))
@@ -1506,14 +1518,14 @@ class MapDriver:
     pos = state["pos"]
     for c in self.corners:
       if abs(route.at - c["along"]) < CORNER_SPAN:
-        depth = self._corner_hit(c, pos[:2], math.radians(float(state.get("heading") or 0.0) + 90.0))
+        depth = self._corner_hit(c, pos[:2], math.radians(float(state.get("heading") or 0.0) + 90.0), self.body)
         if depth is not None and depth > KERB_MARGIN:
           self._anomaly("kerb_contact", t, pos, self.s, planned=False, corner=c["side"], depth=round(depth, 2),
                         corner_at=[round(float(v), 1) for v in c["corner"]])
     near_j = self._unclear(route.at)
     if route.off < 30.0 and not route.elsewhere and not near_j and self.s >= self.join_m:
       sec = route.section(route.seg)
-      if sec is not None and sec.lanes and (route.right - HALF_WIDTH < sec.edges[0] - KERB_MARGIN or route.right + HALF_WIDTH > sec.edges[1] + KERB_MARGIN):
+      if sec is not None and sec.lanes and (route.right - self.half_width < sec.edges[0] - KERB_MARGIN or route.right + self.half_width > sec.edges[1] + KERB_MARGIN):
         self._anomaly("kerb_contact", t, pos, self.s, planned=False, right=round(route.right, 2), edges=[round(e, 2) for e in sec.edges])
     m = state.get("laneMap") or {}
     changing = not math.isnan(self.lc_tau)

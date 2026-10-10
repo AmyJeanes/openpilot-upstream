@@ -296,6 +296,23 @@ def test_corner_kerb():
   print("corner kerb: ok")
 
 
+def test_body_from_dims():
+  """Our car's front, rear and half width from the plugin's nearby.dims (a van here), else the constants: the stop
+  sign's mark is the van's front bumper margin short of the line."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import FRONT, HALF_WIDTH
+  md = MapDriver()
+  assert md.body == (FRONT, FRONT, HALF_WIDTH)
+  md._body({"nearby": {"dims": [-1.25, 1.2, -2.9, 3.1], "v": []}})
+  assert md.body == (3.1, 2.9, 1.25)
+  md._body({"nearby": {"dims": [0.0, 0.0, 0.0, 0.0]}})  # a model without bounds: kept
+  assert md.body == (3.1, 2.9, 1.25)
+  r = ms.junction_turn("right")
+  trip = ms.drive(r, {"seed": 3}, lane=1, seconds=1.0, dims=(-1.25, 1.2, -2.9, 3.1))
+  st = trip.md.stops[0]
+  assert abs(st["s"] - st["target"] - 3.1 - trip.md.style["stop_margin"]) < 1e-6
+  print("body from dims: ok")
+
+
 def test_arrival():
   r = ms.straight(400)
   trip = ms.drive(r, {"seed": 5, "stop_before": 15.0}, lane=1)
@@ -477,6 +494,7 @@ if __name__ == "__main__":
   test_turns_from_the_rear_axle()
   test_bias_fades_in_turns_and_soften_holds_outside()
   test_corner_kerb()
+  test_body_from_dims()
   test_lane_change_kept_off_a_jog()
   test_arrival()
   test_aborts()
