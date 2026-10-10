@@ -546,3 +546,14 @@ def test_nav_merge_still_held_after_a_moments_gap():
   d, trace = merge(lambda t, y: not 20.0 <= t < 20.06, until=399.0)
   assert d.nav.changing == "left" and not d.nav.change_went and [m["type"] for m in d.sent] == ["setIndicator"]
   assert max(s[2] for s in trace if s[1] > 400.0 - nav_mod.MERGE_STOP_BEFORE) < 1.0
+
+
+def test_a_car_behind_off_to_one_side_of_our_lane_doesnt_count():
+  # our lane leaves ~1.75 m beside us: a car behind hugging its edge reaches 1.75 m out from our side, inside the
+  # untrimmed zone (from 1.0 m) but not the trimmed one (from 1.8 m); a car in the lane beside still counts
+  hugging = car(LANE / 2 - 1.0, -6.0)  # its right side on our lane's edge
+  assert flags([hugging]) == (False, False)
+  assert flags([car(LANE, -3.0)]) == (False, True)
+  t = BlindSpotTune()
+  t.trim = 0.0
+  assert BlindSpot(t).update(state([hugging]), 10.0) == (False, True)

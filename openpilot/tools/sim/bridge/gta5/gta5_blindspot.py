@@ -16,9 +16,11 @@ count.
 
 Defaults (GTA5_BLINDSPOT_TUNE, a JSON file of any of them, read again whenever it changes; GTA5_BLINDSPOT=0 turns the
 monitor off):
-- inner 1.0 m: a car behind in our own lane, even off to one side of it, stays inside it; a car beside us doesn't.
+- inner 1.0 m: where the zone starts out from our side, before the trim.
 - outer: the lane beside's far edge, from the map's lanes along our route (GTA's lanes are 5.5 m, a 7 m reach on a
   2 m car); a car two lanes over is then a lane's width away. 4.5 m without them, as a US lane beside a centred car.
+- trim 0.8 m: off both the inner and outer edges, keeping the zone's centre: our own lane leaves ~1.75 m beside a
+  centred car, so a car behind us off to one side of our lane would otherwise reach the zone's inner edge.
 - behind 8.0 m: about two car lengths; a car further back at our speed leaves a gap to merge into, and one closing
   on us is caught by the closing rule instead.
 - front 0.0 m: as far as our front bumper rather than the mirrors, as a car alongside our bonnet is still one the lane
@@ -46,6 +48,7 @@ class BlindSpotTune(Tune):
   DEFAULTS = {
     "inner": 1.0,  # m out from our side the zone starts
     "outer": 4.5,  # m out from our side it ends, where the lanes aren't known
+    "trim": 0.8,  # m off both its inner and outer edges, keeping its centre
     "behind": 8.0,  # m behind our rear bumper it starts
     "front": 0.0,  # m ahead of our front bumper it ends (negative: behind it, as at the mirrors)
     "closing_behind": 30.0,  # m behind our rear bumper a vehicle closing on us counts from
@@ -112,6 +115,8 @@ class BlindSpot:
         self.zones[side] = None
         continue
       lo, hi = sorted((edge + sign * t.inner, edge + sign * max(outer[side], t.inner + 1.0)))
+      trim = min(t.trim, max((hi - lo - 1.0) / 2, 0.0))  # narrowed about its centre, keeping it at least 1 m wide
+      lo, hi = lo + trim, hi - trim
       self.zones[side] = (lo, hi, *along)
       hits = [v for v in nearby.get("v") or [] if self._occupies(v, lo, hi, along, mny, v_ego)]
       if hits:
