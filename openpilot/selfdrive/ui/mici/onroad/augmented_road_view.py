@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
+from openpilot.selfdrive.ui.mici.onroad.nav_card import NavTurnCard
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent, TextAlignment, TextAlignmentVertical
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
@@ -18,6 +19,7 @@ from openpilot.common.filter_simple import BounceFilter
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 from enum import IntEnum
+import time
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.ExtrinsicsCalibration.Status.calibrated
@@ -130,8 +132,10 @@ class BookmarkIcon(Widget):
 
 
 class AugmentedRoadView(CameraView):
-  def __init__(self, bookmark_callback=None, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_NARROW_ROAD):
+  def __init__(self, bookmark_callback=None, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_NARROW_ROAD,
+               nav_card: NavTurnCard | None = None):
     super().__init__("camerad", stream_type)
+    self._nav_card = nav_card
     self._bookmark_callback = bookmark_callback
     self._set_placeholder_color(rl.BLACK)
 
@@ -150,6 +154,8 @@ class AugmentedRoadView(CameraView):
     self._model_renderer = ModelRenderer()
     self._hud_renderer = HudRenderer()
     self._alert_renderer = AlertRenderer()
+    if nav_card is not None:
+      self._alert_renderer.set_fallback_alert(nav_card.request_alert)
     self._driver_state_renderer = DriverStateRenderer()
     self._confidence_ball = ConfidenceBall()
     self._offroad_label = UnifiedLabel("start the car to\nuse openpilot", 54, FontWeight.DISPLAY,
@@ -173,6 +179,9 @@ class AugmentedRoadView(CameraView):
       self._offroad_label.set_text("openpilot can't start\ncheck alerts")
     else:
       self._offroad_label.set_text("start the car to\nuse openpilot")
+
+    if self._nav_card is not None and ui_state.started:
+      self._nav_card.update(time.monotonic())
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
     # Don't trigger click callback if bookmark was triggered
@@ -219,8 +228,9 @@ class AugmentedRoadView(CameraView):
 
     alert_to_render, not_animating_out = self._alert_renderer.will_render()
 
-    # Hide DMoji when disengaged unless AlwaysOnDM is enabled
-    should_draw_dmoji = (not self._hud_renderer.drawing_top_icons() and
+    # Hide DMoji when disengaged unless AlwaysOnDM is enabled, and under navigation's lane request as under alerts
+    nav_alert = self._nav_card is not None and self._nav_card.request_alert() is not None
+    should_draw_dmoji = (not self._hud_renderer.drawing_top_icons() and not nav_alert and
                          (ui_state.status != UIStatus.DISENGAGED or ui_state.always_on_dm))
     self._driver_state_renderer.set_should_draw(should_draw_dmoji)
     self._driver_state_renderer.set_position(self._rect.x + 16, self._rect.y + 10)
@@ -229,6 +239,10 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer.set_can_draw_top_icons(alert_to_render is None)
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
+    if self._nav_card is not None:  # under the alerts, which always win
+      self._nav_card.render(self._content_rect, alert_to_render)
+      rl.begin_scissor_mode(int(self._content_rect.x), int(self._content_rect.y), int(self._content_rect.width),
+                            int(self._content_rect.height))
     self._alert_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
 

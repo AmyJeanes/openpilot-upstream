@@ -130,6 +130,14 @@ class _Scroller(Widget):
     else:
       self.scroll_panel.set_offset(scroll_offset)
 
+  def shift_offset(self, delta: float) -> None:
+    """Moves the content by delta, and any scroll under way with it: keeps the view still as an item before it appears or goes."""
+    self.scroll_panel.set_offset(self.scroll_panel.get_offset() + delta)
+    target, block_interrupt, block_widget_interaction = self._scrolling_to
+    if target is not None:
+      self._scrolling_to = target + delta, block_interrupt, block_widget_interaction
+      self._scrolling_to_filter.x += delta
+
   @property
   def is_auto_scrolling(self) -> bool:
     return self._scrolling_to[0] is not None

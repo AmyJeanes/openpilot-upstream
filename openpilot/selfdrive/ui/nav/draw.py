@@ -135,6 +135,32 @@ def smootherstep(t: float) -> float:
   return t * t * t * (t * (6 * t - 15) + 10)
 
 
+class Anim:
+  """A value easing towards its target over `dur` seconds."""
+  def __init__(self, v: float):
+    self.a = self.b = v
+    self.t0 = -1e9
+    self.dur = 0.7
+
+  def set(self, target: float, now: float, dur: float):
+    if target != self.b:
+      self.a, self.b, self.t0, self.dur = self.value(now), target, now, dur
+
+  def value(self, now: float) -> float:
+    return lerp(self.a, self.b, ease((now - self.t0) / self.dur))
+
+  def hold_at(self, v: float, now: float):
+    """Restart from v (where a drag left it) towards the current target."""
+    self.a, self.t0 = v, now
+
+  def linear(self, now: float) -> float:
+    """The move on plain time, not eased: for crossfades, which an ease-out would rush through in a frame or two."""
+    return lerp(self.a, self.b, clamp01((now - self.t0) / self.dur))
+
+  def fade(self, now: float) -> float:
+    return lerp(self.a, self.b, clamp01((now - self.t0) / (0.6 * self.dur)))
+
+
 def xfade(t: float) -> tuple[float, float]:
   """(outgoing, incoming) alphas for swapping one icon for another over t 0..1: the old one is mostly gone before the
   new one shows, so they never sit half on top of each other."""
