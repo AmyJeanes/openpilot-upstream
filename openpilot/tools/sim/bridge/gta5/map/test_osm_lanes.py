@@ -366,18 +366,18 @@ def test_edge_lines_without_shoulders():
     assert lines(WayLanes.from_tags(got)) == [(EDGE, -6.5, None), (EDGE_LINE, -6.5, 'solid'), (CENTRE, 0.0, 'dashed'),
                                               (EDGE_LINE, 6.5, 'solid'), (EDGE, 6.5, None)]
   # the Great Ocean Hwy's median kerbs, read either side of the link's line, aren't the asphalt's edges: the lanes run out
-  # to the edge lines past them, alike either side of the line (the lines off them drawn where painted)
+  # to the edge lines past them, each to its own (placement:offset keeps the median where it was), the lines on their edges
   median = game_files([(-9.7, 'white', 'solid'), (-3.0, 'yellow', 'double_solid'), (2.5, 'yellow', 'double_solid'),
                        (9.3, 'white', 'solid')], -2.2, 1.6)
   got = road_edges({**tags, 'width': '17.3', 'width:lanes:forward': '6.2', 'width:lanes:backward': '5.7'}, median, why)
   road = WayLanes.from_tags(got)
-  assert spans(road) == [(-1, -9.5, -2.95), (1, 2.45, 9.5)] and 'shoulder' not in got, got
-  assert got['edge_line:left:offset'] == '0.2' and got['edge_line:right:offset'] == '-0.2', got
+  assert spans(road) == [(-1, -9.7, -2.95), (1, 2.45, 9.3)] and got['placement:offset'] == '-0.2', got
+  assert 'shoulder' not in got and not any(k.endswith(':offset') and k.startswith('edge_line') for k in got), got
   assert [o for k, o, _ in lines(road) if k == EDGE_LINE] == [-9.7, 9.3], got
   # with the real asphalt's edges read beyond in the other samples, shoulders out to them
   beyond = [dict(d, kerbs={'left': -12.2, 'right': 11.3}) if k else d for k, d in enumerate(median + median[:1])]
   road = WayLanes.from_tags(road_edges({**tags, 'width': '17.3', 'width:lanes:forward': '6.2', 'width:lanes:backward': '5.7'}, beyond, why))
-  assert np.allclose(road.edges(), (-12.2, 11.3)) and road.shoulders == (2.7, 1.8), road.edges()
+  assert np.allclose(road.edges(), (-12.2, 11.3)) and road.shoulders == (2.5, 2.0), road.edges()
   # a one-way way's yellow left edge is its divider:left, that edge's one line
   one = game_files([(-5.5, 'yellow', 'solid'), (0.0, 'white', 'dashed'), (5.5, 'white', 'solid')])
   got = edge_line_tags(road_edges({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '11'}, one, why), one, why)

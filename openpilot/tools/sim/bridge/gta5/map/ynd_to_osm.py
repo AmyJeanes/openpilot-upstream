@@ -14,7 +14,7 @@ import osmium
 
 from openpilot.tools.sim.bridge.gta5.map import paint_survey, traps
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes, signed_metres
 from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
   wrap
 
@@ -1857,7 +1857,8 @@ def road_edges(tags, samples, why):
   ends (paint_survey.road_edges): GTA paints many roads' edges as a solid line with a shoulder of road beyond it (the
   Great Ocean Hwy's 4 m), and the class layout's (or the survey's) kerbs fell inside the asphalt, on or short of the
   line. The outer lanes widen (or narrow) to the edge lines, leaving every other line where it was: each to its own
-  where placement keeps the line on the lanes in between, else alike (the line the middle of the lanes) to both where
+  where placement keeps the line on the lanes in between or, with both lines painted, placement:offset moves the lanes
+  across to keep them there, else alike (the line the middle of the lanes) to both where
   they're about as far either side of it, or to the one painted where the other side's asphalt has room. The road
   surface between the lanes' edge and the asphalt's, with nothing else painted on it, is a shoulder
   (`shoulder:<side>:width`), its edge line painted where the lanes run to one (else `shoulder:<side>:markings=no`), in
@@ -1897,7 +1898,8 @@ def shoulders_out(tags, road, sec, one_way, found, why):
   sign = (-1.0, 1.0)
   out = dict(tags)
 
-  def laid_out(to):  # the tags with the outer lanes out to `to` (left, right), if that leaves every other line in place
+  def laid_out(to, shift=False):  # the tags with the outer lanes out to `to` (left, right), if that leaves every other
+    # line in place; `shift`: placement:offset may move the lanes across to keep them there
     move = [(edges[0] - to[0]), (to[1] - edges[1])]
     widths = [s.right - s.left for s in sec]
     widths[0] += move[0]
@@ -1913,6 +1915,14 @@ def shoulders_out(tags, road, sec, one_way, found, why):
       new['width:lanes:forward'] = '|'.join(metres(w) for w, s in zip(widths, sec, strict=True) if s.heading == 1)
       new['width:lanes:backward'] = '|'.join([metres(w) for w, s in zip(widths, sec, strict=True) if s.heading == -1][::-1])
     got = WayLanes.from_tags(new).section(FORWARD)
+    if shift and got and abs(across := to[0] - got[0].left) > 0.02:
+      offset = (signed_metres(tags.get('placement:offset')) or 0.0) + across
+      if abs(offset) > paint_survey.OFFSET_MAX:
+        return None
+      new['placement:offset'] = metres(offset)
+      if new['placement:offset'] in ('0', '-0'):
+        del new['placement:offset']
+      got = WayLanes.from_tags(new).section(FORWARD)
     before = [v for s in sec for v in (s.left, s.right)][1:-1]
     after = [v for s in got for v in (s.left, s.right)][1:-1]
     moved = [abs(got[0].left - to[0]), abs(got[-1].right - to[1]), *(abs(a - b) for a, b in zip(before, after, strict=False))]
@@ -1928,7 +1938,7 @@ def shoulders_out(tags, road, sec, one_way, found, why):
   for to in tries:
     if max(abs(t - e) for t, e in zip(to, edges, strict=True)) <= 0.05:
       break
-    if (new := laid_out(to)) is not None:
+    if (new := laid_out(to, to is tries[0] and None not in lines)) is not None:
       out, edges = new, to
       why['lanes out to the painted edge lines'] += 1
       break

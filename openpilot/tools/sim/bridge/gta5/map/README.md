@@ -313,10 +313,10 @@ topcam poses) as tiles, so the check runs on them without the game.
     freeways), where the class layout's (or the survey's) kerbs fell on or inside the line. A way's outer lanes widen
     (or narrow) to the edge lines its sections paint (the outermost solid line within 2.5 m of the lanes' edge, a lane
     or more out from the lane's other edge, in half the sections), every other line staying put: each side to its own
-    where placement keeps the way's line on the lanes between, else both alike (the line the middle of the lanes) where
-    they're within 0.3 m of as far out, or to the one painted where the other side's asphalt has room. An asphalt
-    edge the files read in past the outer lane's inner edge is a median's kerb the link runs beside, not the road's.
-    The asphalt
+    where placement keeps the way's line on the lanes between (with both lines painted, `placement:offset` moving the
+    lanes across to keep the lines between put), else both alike (the line the middle of the lanes) where they're
+    within 0.3 m of as far out, or to the one painted where the other side's asphalt has room. An asphalt edge the
+    files read in past the outer lane's inner edge is a median's kerb the link runs beside, not the road's. The asphalt
     beyond, out to the files' edge of it with nothing else painted on it, is a shoulder (`shoulder=left|right|both`,
     `shoulder:<side>:width`, part of `width`): `osm_lanes.py` puts the kerb at its outer edge and draws the edge line
     where the lanes run to one (white, yellow on a one-way road's left, or `shoulder:<side>:markings` from the files'
