@@ -13,7 +13,7 @@ kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner
 edge, else the road's far edge), within its lane outside lane changes and turns' corners, and past a fork off its
 gore. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
 wander (never periodic, faded out through turns, junctions and forks, and within its lane), joining it from where the
-car is (on the trip's first plan, a bend it can't take there fails the plan). The plan is
+car is (on the trip's first plan, a bend it can't take there where the route doubles back fails the plan). The plan is
 checked against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another
 lane, plan_check=fix (the default) changes into it by the target's end (else as soon after as MIN_LC_M allows, short of
 its move), event only logs it, abort ends the trip; each is a plan_slot_mismatch anomaly. A fix into a lane the road
@@ -1043,13 +1043,23 @@ class MapDriver:
     v0 = max(float(state.get("vEgo") or 0.0), 5.0)
     join = max(MIN_LC_M, lc_seconds(self.style, e0 / LANE_W) * v0) if abs(e0) > 0.5 else 15.0
     near = [i * STEP for i, _ in sharp if i * STEP < join]
-    if near and not self.plans:  # a bend the car can't take where it pulls away: the line is wrong there
+    # a bend where it pulls away that the route's own line doubles back into (a link back down the road from the car's
+    # place): the lane line is wrong there; a junction's corner near the start is a real bend, driven eased
+    if near and not self.plans and self._reverses(route, at0 + near[-1] + 5.0):
       self._abort(f"plan: a sharp corner {near[0]:.0f} m on, where the car joins its line", t, state.get("pos"))
       return None
     off = off + e0 * (1.0 - quintic(s_path / join))
     self.join_m = max(join, 30.0)
     self._derive(route, intent, off, t, start=(np.asarray(state["pos"][:2], float), float(state.get("heading") or 0.0), v0))
     return intent, sharp, knots, bias
+
+  @staticmethod
+  def _reverses(route, upto: float) -> bool:
+    """Whether the route's line turns back on itself (more than 90 deg between two links) within `upto` m along."""
+    k = int(np.searchsorted(route.along, upto, side="right")) + 1
+    d = np.diff(route.points[:k, :2], axis=0)
+    d = d[np.hypot(*d.T) > 1e-3]
+    return bool(len(d) > 1 and ((d[:-1] * d[1:]).sum(axis=1) < 0).any())
 
   def _fade(self, route, intent: np.ndarray) -> np.ndarray:
     """1 along the line, easing to 0 within FADE_NEAR m of the route's turns, junction nodes, forks and sharp bends,

@@ -455,6 +455,14 @@ def test_collision_routes():
   print(f"collision routes: ok ({', '.join(done)} m)" if done else "collision routes: skipped (no router)")
 
 
+LIVE_STARTS = [  # mdplan trials, from the live car's place: name, 'x,y,z,heading>dx,dy', map driver seed
+  ("SL2b", "-226.699,79.3001,67.3524,351.426>-348.2,244.0", 2),
+  ("SL5", "-76.781,-572.507,36.7532,160.713>-12.5,-759.2", 5),
+  ("SR1", "-650.27,-313.539,34.7015,210.802>-749.8,-474.8", 7),
+  ("FX 799,-1752", "798.994,-1752.53,28.8702,264.206>814.2,41.7", 14),
+]
+
+
 def path_lane_offsets(md, route) -> np.ndarray:
   """The driven path: m right of its lane's centre at each point."""
   from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import along_route, lane_at, segment_of
@@ -467,8 +475,8 @@ def test_start_stub_and_join():
   node), the lane line swept across it from 5 m left of its lane, and the start offset, measured against that sweep,
   held the path 3 m right of the lane into a wall. The lane line now starts past such a stub (RouteLanes.start); the
   start offset is the route's own where the car is on it, so a line swerving at its start is joined from the car, not
-  shifted; and a bend the car can't take where it pulls away fails the plan rather than being driven (with the stub
-  kept, 005's sweep is one)."""
+  shifted; and a bend the car can't take where it pulls away fails the plan where the route doubles back there (with
+  the stub kept, 005's sweep is one), not where it's a real bend."""
   from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import headings
   from openpilot.tools.sim.bridge.gta5.map import osm_lanes
   pts = np.vstack([[[0.0, 0.0], [-0.03, -0.04]], ms.line((300.0, 0.0), start=(-0.03, -0.04))[1:]])
@@ -501,10 +509,29 @@ def test_start_stub_and_join():
   r.on_road = lambda *a, **k: False  # the start offset from the line itself, as where the car isn't on the route
   before = path_lane_offsets(ms.drive(r, cfg, lane=1, seconds=0.2).md, r)[:15]
   assert np.abs(off).max() < 0.5 and np.abs(before).max() > 1.0, (np.abs(off).max(), np.abs(before).max())
-  # 8 m from a square corner too near the start for a fillet
-  trip = ms.drive(ms.junction_turn("right", lead=8.0, stop=None), cfg, lane=1, seconds=3.0)
-  assert trip.finished is not None and "sharp corner" in trip.finished and trip.car.v < 0.3, trip.finished
+  # a real corner where it pulls away is a bend, driven eased: 12 m from a square corner too near for a full fillet
+  trip = ms.drive(ms.junction_turn("right", lead=12.0, stop=None), cfg, lane=1, seconds=60.0)
+  assert kinds(trip.md, "sharp_corner") and trip.finished == "arrived", trip.finished
   print(f"start stub and join: ok (swerved line: path {np.abs(off).max():.2f} m off its lane, {np.abs(before).max():.1f} before)")
+
+
+def test_live_starts():
+  """mdplan trials whose first plan failed, replanned from where the live car stood when routed: turn trips whose lane
+  line bends sharply in its first metres without the route doubling back (SL2b, SL5, SR1: a sharp corner where the car
+  joins its line), and a freeway trip where nav's change for a left fork began before a lane ending and so keyed lane
+  -1 past it (plan_lane_range). Each plans, keyed within the road's lanes."""
+  live = 0
+  for name, spec, seed in LIVE_STARTS:
+    got = ms.trip_route(spec, at_pose=True)
+    if got is None:
+      continue
+    route, pose = got
+    md = ms.drive(route, {"seed": seed}, pose=pose, seconds=3.0).md
+    assert not md.aborts and md.plans and min(lane for _, lane in md.keys) >= 0, (name, md.aborts)
+    assert MapDriver._outside_lanes(route, md.keys) is None and not kinds(md, "plan_lane_range"), (name, md.keys)
+    assert name.startswith("FX") or kinds(md, "sharp_corner"), name
+    live += 1
+  print(f"live starts: ok ({live} replanned)" if live else "live starts: skipped (no live map or router)")
 
 
 class FakeSlots:
@@ -759,6 +786,7 @@ if __name__ == "__main__":
   test_clamp_across_a_junction()
   test_collision_routes()
   test_start_stub_and_join()
+  test_live_starts()
   test_follow_slots()
   test_oncoming_abort()
   test_lane_change_kept_off_a_jog()

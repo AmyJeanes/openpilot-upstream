@@ -933,8 +933,11 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune,
       while s < m.dist - last:
         x = along(cur, pos, s)
         y = x + d
-        n_s = count_at(s)
-        if n_s > 0 and not 0 <= y < n_s:  # the lane it moves into only begins further on (a lane opening)
+        n_s, e = count_at(s), min(s + length, m.dist - last)
+        n_e = count_at(e)
+        # the lane it moves into only begins further on (a lane opening), or ends before the change does (a lane
+        # ending on the way renumbers ours into the edge lane)
+        if (n_s > 0 and not 0 <= y < n_s) or (n_e > 0 and not 0 <= along(cur, pos, e) + d < n_e):
           nxt = upto(s)
           s = todo[nxt][0] + 2 * MAP_AT if nxt < len(todo) and todo[nxt][0] < m.dist else math.inf
           continue

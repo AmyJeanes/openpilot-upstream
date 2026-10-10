@@ -405,10 +405,11 @@ def recorded_route(segment: str, index: int = 0) -> tuple[Route, tuple[float, fl
 TRIP_CACHE = os.getenv("GTA5_TRIP_ROUTES", "/mnt/e/gta5_audit/mapdrive_trials/routes_cache.json")
 
 
-def trip_route(spec: str, router_url: str = "http://127.0.0.1:8002") -> tuple[Route, tuple[float, float, float]] | None:
+def trip_route(spec: str, router_url: str = "http://127.0.0.1:8002", at_pose: bool = False) -> tuple[Route, tuple[float, float, float]] | None:
   """An e2e trip ('x,y,z,heading,lane>dx,dy') routed on the live map as the bridge routes it (points, maneuvers and
   speed limits kept in TRIP_CACHE, so it's asked of the router once), and the car's pose in its start lane (9: the
-  rightmost); None without the map, or the router for a trip not yet cached."""
+  rightmost), or with at_pose the spec's own (where a live car stood when it was routed); None without the map, or the
+  router for a trip not yet cached."""
   m = live_map()
   if m is None:
     return None
@@ -428,6 +429,8 @@ def trip_route(spec: str, router_url: str = "http://127.0.0.1:8002") -> tuple[Ro
     json.dump(cache, open(TRIP_CACHE, "w"))
   c = cache[spec]
   route = Route(np.array(c["points"], float), c["maneuvers"], m["paths"], np.array(c["limits"], float), m["osm"], m["stops"])
+  if at_pose:
+    return route, (x, y, heading)
   # where setup puts the car: in its lane where the spec's point is on the route's road, past the route's first jog
   route.locate(np.array([x, y]), None, heading, search=200.0)
   at = max(route.at, min(10.0, route.length / 4))
