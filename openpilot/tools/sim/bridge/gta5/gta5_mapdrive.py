@@ -581,7 +581,7 @@ class MapDriver:
     self.events.append({"event": what, "t": round(when, 3), **kw})
 
   def _set(self, phase: str, t: float, **kw):
-    if phase != self.phase:
+    if phase != self.phase and self.phase != "abort":  # an abort ends the trip: nothing leaves it
       self.phase = phase
       self._event("mapdrive", t, phase=phase, **kw)
 
@@ -1645,6 +1645,8 @@ class MapDriver:
     if self.phase == "abort":
       return self._abort_msg(v, t)
     accel = self._longitudinal(state, v, t, dt)
+    if self.phase == "abort":
+      return self._abort_msg(v, t)
     curvature = self._lateral(state, v, t, dt)
     self._labels(route, state, v, t)
     self._watch(route, state, v, t)
@@ -1813,6 +1815,7 @@ class MapDriver:
     self.held_since = (self.held_since if self.held_since is not None else t) if held else None
     if self.held_since is not None and t - self.held_since > WAIT_MAX:
       self._abort(f"held {WAIT_MAX:.0f} s by a vehicle in the way", t, state.get("pos"))
+      return self.a
     self._set(phase, t, **detail)
     self.v_prof, self.reason = min(vp_here, vp), reason
     if v < 0.5 and vp > 0.5 and reason not in ("stop", "arrive"):

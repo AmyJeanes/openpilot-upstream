@@ -6,6 +6,7 @@ car of mapdrive_sim.py: run as a script.
   touch, braking no harder than the style's decel where it was seen in time; lead_gap recorded
 - a vehicle parked partly in our lane: stopped behind it; one parked clear of the lane, or in the oncoming lane through a
   turn, driven past
+- held by a vehicle that stays in the way: the trip ends after WAIT_MAX s, and nothing leaves the abort
 - a slower vehicle ahead: followed at its speed, LEAD_STOP + the style's headway behind, without hunting; one braking to
   a stop: stopped behind it
 - a vehicle crossing the junction ahead as we'd reach it: held for, then on; one that's through first, or comes long
@@ -18,7 +19,7 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LEAD_STOP, MAPX_COLUMNS, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LEAD_STOP, MAPX_COLUMNS, WAIT_MAX, MapDriver
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -81,6 +82,24 @@ def test_parked_partly_in_lane():
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 0, 200.0)], reach=REACH, seconds=60)
   assert trip.finished == "arrived" and not phases(trip, "follow"), trip.finished
   print("parked partly in lane: ok")
+
+
+def ended(trip, why: str):
+  """The trip ended on one abort, for `why`, and nothing came after it but its end (an abort is terminal)."""
+  assert trip.finished == f"abort: {why}" and len(trip.md.aborts) == 1, (trip.finished, trip.md.aborts[:3])
+  after = [e.get("phase") for e in trip.events if e["event"] == "mapdrive"]
+  after = after[after.index("abort") + 1:]
+  assert after == ["end"], after[:6]
+  assert trip.car.v < 0.1 and trip.car.collisions == 0, (trip.car.v, trip.car.collisions)
+
+
+def test_held_ends_the_trip():
+  # a driven vehicle stopped in our lane for good: WAIT_MAX s behind it, then the trip ends (mdlead traffic trips 2 and 3
+  # left the abort for follow again each step, for ever)
+  r = ms.straight(600)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 120.0)], reach=REACH, seconds=150)
+  ended(trip, f"held {WAIT_MAX:.0f} s by a vehicle in the way")
+  print("held ends the trip: ok")
 
 
 def test_following():
@@ -148,6 +167,7 @@ if __name__ == "__main__":
   test_stopped_ahead()
   test_stopped_in_a_turn()
   test_parked_partly_in_lane()
+  test_held_ends_the_trip()
   test_following()
   test_crossing()
   test_range()
