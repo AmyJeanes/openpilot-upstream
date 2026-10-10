@@ -143,6 +143,27 @@ inline void SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0
 inline void SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0xEAE6DCC7EEE3DB1D, m); }
 inline void SET_PED_DENSITY_MULTIPLIER_THIS_FRAME(float m) { Invoke(0x95E3D6257B166CF2, m); }
 inline void SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME(float a, float b) { Invoke(0x7A556143A1C03898, a, b); }
+// the other sources of traffic, held until set again: generators place cars (parked ones and ones that pull out),
+// scenarios put drivers and trucks at their points; the budget is 0 (none) to 3 (the game's)
+inline void SET_ALL_VEHICLE_GENERATORS_ACTIVE_IN_AREA(float x1, float y1, float z1, float x2, float y2, float z2, BOOL on, BOOL p7) {
+  Invoke(0xC12321827687FE4D, x1, y1, z1, x2, y2, z2, on, p7);
+}
+inline void SET_ALL_VEHICLE_GENERATORS_ACTIVE() { Invoke(0x34AD89078831A4BC); }
+inline void SET_ALL_LOW_PRIORITY_VEHICLE_GENERATORS_ACTIVE(BOOL on) { Invoke(0x608207E7A8FB787C, on); }
+inline void SET_SCENARIO_TYPE_ENABLED(const char *type, BOOL on) { Invoke(0xEB47EC4E34FB7EE1, type, on); }
+inline void RESET_SCENARIO_TYPES_ENABLED() { Invoke(0x0D40EE2A7F2B2D6D); }
+inline void SET_GARBAGE_TRUCKS(BOOL on) { Invoke(0x2AFD795EEAC8D30D, on); }
+inline void SET_RANDOM_BOATS(BOOL on) { Invoke(0x84436EC293B1415F, on); }
+inline void SET_CREATE_RANDOM_COPS(BOOL on) { Invoke(0x102E68B2024D536D, on); }
+inline void SET_CREATE_RANDOM_COPS_NOT_ON_SCENARIOS(BOOL on) { Invoke(0x8A4986851C4EF6E7, on); }
+inline void SET_CREATE_RANDOM_COPS_ON_SCENARIOS(BOOL on) { Invoke(0x444CB7D7DBE6973D, on); }
+inline void SET_VEHICLE_POPULATION_BUDGET(int budget) { Invoke(0xCB9E1EB3BE2AF4E9, budget); }
+// ePopulationType: 1-5 the game's own (2 parked), 6 permanent (the player's), 7 mission (script-made, ours too)
+inline int GET_ENTITY_POPULATION_TYPE(Entity e) { return Invoke<int>(0xF6F5161F4534EDFF, e); }
+inline BOOL IS_ENTITY_ON_SCREEN(Entity e) { return Invoke<BOOL>(0xE659E47AF827484B, e); }
+inline BOOL IS_PED_A_PLAYER(Ped p) { return Invoke<BOOL>(0x12534C348C6CB68B, p); }
+inline int GET_VEHICLE_MAX_NUMBER_OF_PASSENGERS(Vehicle v) { return Invoke<int>(0xA7C4F2C6E744A550, v); }
+inline BOOL IS_THIS_MODEL_A_TRAIN(Hash m) { return Invoke<BOOL>(0xAB935175B22E822B, m); }
 inline void SET_CLOCK_TIME(int h, int m, int s) { Invoke(0x47C3B5848C3E45D8, h, m, s); }
 inline void SET_WEATHER_TYPE_NOW_PERSIST(const char *w) { Invoke(0xED712CA327900C8A, w); }
 inline void SET_OVERRIDE_WEATHER(const char *w) { Invoke(0xA43D5C6FE51ADBEF, w); }
