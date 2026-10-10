@@ -2,7 +2,7 @@
 """Checks the lane tags of an OSM file (osm_lanes.py's tags), ours or a real extract:
 - lanes: counts are counts, and lanes = lanes:forward + lanes:backward + lanes:both_ways;
 - count: every *:lanes value (turn, width, change, destination, access, ...) has as many lanes as the road that way;
-- turn / change / width / divider / lane_markings: values OSM knows;
+- turn / change / width / divider / lane_markings: values OSM knows; our edge_line:<side> a colour, its offset metres;
 - width: width:lanes fit in width (less its parking lanes);
 - parking: parking:left|right|both values OSM knows, their widths metres;
 - placement: well formed, its lane is on the road, and given both ways the two agree but for the median; our
@@ -102,6 +102,11 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
       out.append(('divider', f"{key}={tags[key]}"))
   if tags.get('divider:colour', 'yellow') not in ('white', 'yellow'):
     out.append(('divider', f"divider:colour={tags['divider:colour']}"))
+  for side in ('left', 'right'):  # our edge lines no shoulder draws
+    if tags.get(f'edge_line:{side}', 'white') not in ('white', 'yellow'):
+      out.append(('divider', f"edge_line:{side}={tags[f'edge_line:{side}']}"))
+    if f'edge_line:{side}:offset' in tags and signed_metres(tags[f'edge_line:{side}:offset']) is None:
+      out.append(('divider', f"edge_line:{side}:offset={tags[f'edge_line:{side}:offset']}"))
   if tags.get('lane_markings', 'yes') not in ('yes', 'no'):
     out.append(('lane_markings', f"lane_markings={tags['lane_markings']}"))
   for side in ('left', 'right', 'both'):

@@ -832,6 +832,7 @@ def unpainted(samples: list[dict], least: int = UNPAINTED_SAMPLES, edges_seen: b
 EDGE_LINES = ('solid', 'double_solid', 'edge_line')  # the kinds of a painted edge line (a dashed one is a lane line)
 EDGE_SPREAD = 1.0  # m between the asphalt's edges read along a link, at most, to take them as its edge
 EDGE_BEYOND = 0.5  # m beyond the lanes' edge (or edge line) a painted line is something past it: other lanes, a bay
+GUTTER = 0.5  # m: a solid line this near the asphalt's edge is the gutter's (city streets'), not an edge line
 
 
 def road_edges(samples: list[dict], edges: tuple[float, float], inner: tuple[float, float]):

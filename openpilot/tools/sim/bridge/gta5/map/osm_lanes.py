@@ -31,6 +31,10 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   `divider:colour=white` (OSM has no key for it). On a one-way way, `divider:left` / `divider:right`: a line painted
   along that edge of its lanes, seen travelling them, as a carriageway's yellow edge beside a median (it is that edge's
   one edge line: a shoulder there has no other).
+- `edge_line:<side>=white|yellow` (not an OSM tag; ours, with `edge_line:<side>:offset`): a solid line painted along
+  that side's lanes' edge, seen along the way, where no shoulder's edge line or `divider:<side>` draws one there (the
+  road beyond it isn't one a shoulder says, or the lanes don't run out to it): `offset` metres out from the lanes' edge
+  (negative in over the lanes), else on it.
 - Missing tags fall back to OSM's defaults, then to `Defaults` by road class: lanes 1 each way (2 on a one-way motorway
   or trunk), a single track on tracks, the line in the middle.
 
@@ -215,6 +219,7 @@ class WayLanes:
     self.median_edges: tuple[str | None, str | None] = (None, None)  # divider:forward, divider:backward
     self.divider_colour: str | None = None  # divider:colour
     self.edge_lines: tuple[str | None, str | None] = (None, None)  # a one-way way's divider:left, divider:right
+    self.edge_paint: tuple[tuple[str, float] | None, ...] = (None, None)  # edge_line:left / :right, (colour, m out)
     self.placed: dict[str, float] = {}  # where each placement tag puts the line, m from the left kerb
     self.tagged: tuple[float | None, float, int] = (None, 0.0, 0)  # width=*, the lanes' width:lanes total, lanes without
     self.single_track = all(lane.direction == BOTH_WAYS for lane in lanes)
@@ -289,6 +294,8 @@ class WayLanes:
     road.divider_colour = tags.get('divider:colour')
     if not two_way:
       road.edge_lines = (tags.get('divider:left'), tags.get('divider:right'))
+    road.edge_paint = tuple((c, signed_metres(tags.get(f'edge_line:{side}:offset')) or 0.0)
+                            if (c := tags.get(f'edge_line:{side}')) in ('white', 'yellow') else None for side in ('left', 'right'))
 
     def place(value, d):  # m from the left kerb
       m = PLACEMENT.fullmatch(value or '')
@@ -360,21 +367,28 @@ class WayLanes:
   def edge_line_styles(self, direction: int = FORWARD) -> list[tuple[str, str] | None]:
     """The lines painted along the lanes' outer edges, left and right seen travelling `direction`: (style, colour), or
     None. One per edge: a one-way way's `divider:left` / `:right` (yellow) where tagged, else a shoulder's edge line
-    (solid; `shoulder:<side>:markings`, by default white, yellow on a one-way road's left; none for `no`)."""
+    (solid; `shoulder:<side>:markings`, by default white, yellow on a one-way road's left; none for `no`), else an
+    `edge_line:<side>` (solid, in its colour)."""
+    return [line and line[:2] for line in self._edge_lines(direction)]
+
+  def _edge_lines(self, direction: int) -> list[tuple[str, str, float] | None]:
+    """edge_line_styles, each with how far out from the lanes' edge it runs (m, an `edge_line:<side>:offset`)."""
     if not self.markings or not self.lanes:
       return [None, None]
     dirs = {lane.direction for lane in self.lanes}
     travel = (FORWARD if dirs == {FORWARD} else BACKWARD if dirs == {BACKWARD} else 0) * direction  # 1: one-way our way
     dividers = self.edge_lines if travel == 1 else self.edge_lines[::-1] if travel == -1 else (None, None)
     flip = slice(None) if direction == FORWARD else slice(None, None, -1)
-    shoulders, markings = self.shoulders[flip], self.shoulder_markings[flip]
+    shoulders, markings, painted = self.shoulders[flip], self.shoulder_markings[flip], self.edge_paint[flip]
     out = []
     for i in (0, 1):
       if dividers[i] and DIVIDERS.get(dividers[i]):
-        out.append((DIVIDERS[dividers[i]], 'yellow'))
+        out.append((DIVIDERS[dividers[i]], 'yellow', 0.0))
       elif shoulders[i] > EPS and markings[i] != 'no':
         left = travel == (1 if i == 0 else -1)
-        out.append(('solid', markings[i] if markings[i] in ('white', 'yellow') else 'yellow' if left else 'white'))
+        out.append(('solid', markings[i] if markings[i] in ('white', 'yellow') else 'yellow' if left else 'white', 0.0))
+      elif painted[i]:
+        out.append(('solid', *painted[i]))
       else:
         out.append(None)
     return out
@@ -388,9 +402,9 @@ class WayLanes:
     lo, hi = self.edges(direction)
     parking = self.parking_lanes(direction)
     out = [(('edge', 0), Line(EDGE, lo, None))] + [(('parking', 0), Line(PARKING, b, None)) for a, b in parking if a == lo]
-    edge_lines = self.edge_line_styles(direction)
+    edge_lines = self._edge_lines(direction)
     if edge_lines[0]:
-      out.append((('edge_line', 0), Line(EDGE_LINE, sec[0].left, *edge_lines[0])))
+      out.append((('edge_line', 0), Line(EDGE_LINE, sec[0].left - edge_lines[0][2], *edge_lines[0][:2])))
     if self.markings:
       wide = max(self.counts[:2]) >= 2
       centre = DIVIDERS.get(self.divider, 'solid') if self.divider else ('double_solid' if wide else 'dashed')
@@ -413,7 +427,7 @@ class WayLanes:
         else:
           out.append((('lane', i), Line(CENTRE, a.right, centre, colour)))
     if edge_lines[1]:
-      out.append((('edge_line', 1), Line(EDGE_LINE, sec[-1].right, *edge_lines[1])))
+      out.append((('edge_line', 1), Line(EDGE_LINE, sec[-1].right + edge_lines[1][2], *edge_lines[1][:2])))
     out += [(('parking', 1), Line(PARKING, a, None)) for a, b in parking if b == hi]
     out.append((('edge', 1), Line(EDGE, hi, None)))
     return out

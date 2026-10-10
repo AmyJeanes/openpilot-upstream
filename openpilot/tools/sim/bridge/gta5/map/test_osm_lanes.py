@@ -338,12 +338,48 @@ def test_road_edges_from_the_game_files():
   tags = {'highway': 'residential', 'lanes': '2', 'width': '11'}
   got = road_edges(tags, game_files(marks, -5.6, 6.4), why)  # no room on the left: the lanes stay, the kerb moves out
   assert got == {**tags, 'width': '11.9', 'shoulder': 'right', 'shoulder:right:width': '0.9', 'shoulder:right:markings': 'no'}
+  # (the line 0.3 m in from the asphalt's edge is its gutter's; 0.6 m in, it's drawn where it's painted, on the shoulder)
+  got = road_edges(tags, game_files(marks, -5.6, 6.7), why)
+  assert got['edge_line:right'] == 'white' and got['edge_line:right:offset'] == '0.6', got
+  assert lines(WayLanes.from_tags(got))[-2:] == [(EDGE_LINE, 6.1, 'solid'), (EDGE, 6.7, None)]
   # kerbs out to the asphalt's edges where no line is painted, the lanes as they were
   got = road_edges({'highway': 'primary', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}, game_files([], -4.5, 4.6), why)
   assert np.allclose(WayLanes.from_tags(got).edges(), (-4.5, 4.6)) and spans(WayLanes.from_tags(got)) == [(1, -2.75, 2.75)]
   # but not over other lanes painted beyond
   beside = game_files([(2.75, 'white', 'dashed'), (8.25, 'white', 'solid')], None, 8.6)
   assert road_edges({'highway': 'motorway', 'lanes': '1', 'oneway': 'yes', 'width': '5.5'}, beside, why)['width'] == '5.5'
+
+
+def test_edge_lines_without_shoulders():
+  from collections import Counter
+
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import edge_line_tags, road_edges
+  why = Counter()
+  tags = {'highway': 'trunk', 'lanes': '2', 'lanes:forward': '1', 'lanes:backward': '1', 'width': '13'}
+  # painted edge lines on the lanes' edges with no asphalt's edge read beyond them, or too far out for a shoulder:
+  # the lines without shoulders, on the lanes' edges
+  marks = [(-6.5, 'white', 'solid'), (0.0, 'yellow', 'double_solid'), (6.5, 'white', 'solid')]
+  assert road_edges(tags, game_files(marks, -6.6, 6.6), why) == tags  # a city street's gutter lines: its kerbs
+  for asphalt in ((None, None), (-13.0, 13.0)):
+    got = road_edges(tags, game_files(marks, *asphalt), why)
+    assert got == {**tags, 'edge_line:left': 'white', 'edge_line:right': 'white'}, (asphalt, got)
+    assert lines(WayLanes.from_tags(got)) == [(EDGE, -6.5, None), (EDGE_LINE, -6.5, 'solid'), (CENTRE, 0.0, 'dashed'),
+                                              (EDGE_LINE, 6.5, 'solid'), (EDGE, 6.5, None)]
+  # the Great Ocean Hwy's median kerbs read as the asphalt's edges (the link's line runs between them), so the lanes
+  # can't run out to the edge lines past them: each line drawn on its paint, off the lanes' edge
+  median = game_files([(-9.7, 'white', 'solid'), (-3.0, 'yellow', 'double_solid'), (2.5, 'yellow', 'double_solid'),
+                       (9.3, 'white', 'solid')], -2.2, 1.6)
+  got = road_edges({**tags, 'width': '17.3', 'width:lanes:forward': '6.2', 'width:lanes:backward': '5.7'}, median, why)
+  road = WayLanes.from_tags(got)
+  assert np.allclose(road.edges(), (-8.65, 8.65)) and 'shoulder' not in got, got
+  assert got['edge_line:left:offset'] == '1.05' and got['edge_line:right:offset'] == '0.65', got
+  assert [o for k, o, _ in lines(road) if k == EDGE_LINE] == [-9.7, 9.3], got
+  # a one-way way's yellow left edge is its divider:left, that edge's one line
+  one = game_files([(-5.5, 'yellow', 'solid'), (0.0, 'white', 'dashed'), (5.5, 'white', 'solid')])
+  got = edge_line_tags(road_edges({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '11'}, one, why), one, why)
+  assert got['divider:left'] == 'solid_line' and 'edge_line:left' not in got and got['edge_line:right'] == 'white', got
+  # none where the road is unpainted
+  assert lines(WayLanes.from_tags({**tags, 'lane_markings': 'no', 'edge_line:left': 'white'})) == [(EDGE, -6.5, None), (EDGE, 6.5, None)]
 
 
 def test_single_track_painted_as_two_lanes():
