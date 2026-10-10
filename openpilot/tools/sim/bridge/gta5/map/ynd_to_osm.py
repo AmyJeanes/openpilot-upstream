@@ -2650,6 +2650,15 @@ def main():
       tags['divider'] = 'no'  # the game files paint no centre line on it (Prosperity St's bridge)
       defaulted.discard(wid)
       lines_why['no centre painted'] += 1
+    # a back road's (switched off or off-road) class default centre where the files paint none along it: none on a dirt
+    # road (Calafia Rd), and on a paved one where they show it bare too
+    offroad = bool((nodes[a]['f'][0] | nodes[b]['f'][0]) & OFFROAD)
+    back_road = offroad or (cls == 'unclassified' and bool((nodes[a]['f'][2] | nodes[b]['f'][2]) & SWITCHED_OFF))
+    if fwd == back == 1 and back_road and not median and 'divider' not in tags and 'lane_markings' not in tags and \
+        centre_paint is not None and not painted_along(centre_paint, nodes, a, b) and \
+        ((wid in drawn and offroad) or paint_survey.centre_bare(link_samples(wid, a, b))):
+      tags['divider'] = 'no'
+      lines_why['no centre painted on a back road'] += 1
     if median and (kinds := median_kinds.get(parent.get(wid, wid))) and 'lane_markings' not in tags:
       left, right = kinds  # seen along the way: beside the backward lanes, beside the forward ones
       if left == right and left:
