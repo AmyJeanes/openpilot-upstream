@@ -1873,13 +1873,14 @@ std::string Traffic(double now) {
 }
 
 // m around the car (right, behind, ahead, up or down) that "nearby" reports vehicles within, for the bridge's blind-spot
-// monitor (gta5_blindspot.py)
-constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 15.0f, NEARBY_LEVEL = 4.0f;
+// monitor (gta5_blindspot.py) and the map driver (gta5_mapdrive.py: vehicles in its way, which it must see a stop's
+// length ahead, and crossing traffic, a few seconds' travel to either side ahead of the car)
+constexpr float NEARBY_SIDE = 15.0f, NEARBY_BEHIND = 45.0f, NEARBY_AHEAD = 60.0f, NEARBY_SIDE_AHEAD = 40.0f, NEARBY_LEVEL = 4.0f;
 
-// the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "v":[[x, y, heading,
-// vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin (m right and forward of ours), heading (deg left
-// of ours), velocity (m/s right and forward, in our frame), its model's bounds (m, in its own frame) and whether anyone
-// is in its driver's seat
+// the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
+// "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...]}: each one's origin
+// (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward, in our frame), its model's
+// bounds (m, in its own frame) and whether anyone is in its driver's seat
 std::string Nearby(double now) {
   static std::string out;
   static double next = 0;
@@ -1917,7 +1918,7 @@ std::string Nearby(double now) {
   };
   Vector3 p = GET_ENTITY_COORDS(g_veh.handle, TRUE);
   float heading = GET_ENTITY_HEADING(g_veh.handle), h = heading * DEG;
-  float far2 = NEARBY_BEHIND * NEARBY_BEHIND + NEARBY_SIDE * NEARBY_SIDE;
+  float far2 = std::max(NEARBY_BEHIND * NEARBY_BEHIND + NEARBY_SIDE * NEARBY_SIDE, NEARBY_AHEAD * NEARBY_AHEAD + NEARBY_SIDE_AHEAD * NEARBY_SIDE_AHEAD);
   auto [ownMin, ownMax] = boundsOf(g_veh.model);
   std::string list;
   for (int i = 0; i < count; i++) {
@@ -1927,7 +1928,7 @@ std::string Nearby(double now) {
     float dx = q.x - p.x, dy = q.y - p.y;
     if (dx * dx + dy * dy > far2 || std::fabs(q.z - p.z) > NEARBY_LEVEL) continue;
     Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(g_veh.handle, q.x, q.y, q.z);
-    if (std::fabs(rel.x) > NEARBY_SIDE || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD) continue;
+    if (std::fabs(rel.x) > (rel.y > 0 ? NEARBY_SIDE_AHEAD : NEARBY_SIDE) || rel.y < -NEARBY_BEHIND || rel.y > NEARBY_AHEAD) continue;
     // headings are counterclockwise from north: right is (cos h, sin h), forward (-sin h, cos h)
     Vector3 vel = GET_ENTITY_VELOCITY(v);
     float vx = vel.x * std::cos(h) + vel.y * std::sin(h), vy = -vel.x * std::sin(h) + vel.y * std::cos(h);
@@ -1938,7 +1939,8 @@ std::string Nearby(double now) {
     list += "[" + num(rel.x) + "," + num(rel.y) + "," + num(WrapDeg(GET_ENTITY_HEADING(v) - heading)) + "," + num(vx) + "," + num(vy) + "," +
             num(mn.x) + "," + num(mx.x) + "," + num(mn.y) + "," + num(mx.y) + "," + (driven ? "1" : "0") + "]";
   }
-  out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"v\":[" + list + "]}";
+  out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
+        num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "]}";
   return out;
 }
 
