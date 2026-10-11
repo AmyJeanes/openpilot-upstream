@@ -426,7 +426,10 @@ topcam poses) as tiles, so the check runs on them without the game.
   A stop line painted level with the road it meets, nearer the junction's node than the class layout's kerbs meet,
   is drawn where it's painted, along that road's edge (between where the kerbs meet it: square across GTA's link it
   lay askew at a skewed T, Vinewood Park Dr), inside the junction's area, which is shaped as without it: cut back to
-  it, the road's kerbs ran out across the other road's lanes (junctions.py).
+  it, the road's kerbs ran out across the other road's lanes (junctions.py). It lies as the paint does (the node's
+  `stop_line:bearing`, ours, the painted line's direction): along the road it meets only where that is within 10
+  degrees of the paint (a tram crossing's line is painted along the tracks, a line at a skewed junction often square
+  to its own road; 19 lines were turned 25-40 degrees off the paint).
 - Painted islands and flush edges (`painted_islands.py`), from roadpaint's height-layered tiles beside its polylines
   (road, kerb, pavement or gutter at each height; a raised island reads pavement or kerb). Painted islands, flat
   painted areas with road all round them: areas outlined in white or yellow (the painted triangle where Mt Haan Dr's

@@ -32,7 +32,8 @@ map as on our GTA V one.
   already placed on another junction's approach (GTA's light where a slip parts, for the junction ahead). A stop line surveyed where it's painted
   (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that; one nearer
   than where its kerbs meet the next roads' (painted level with the road it meets) is inside the junction's area,
-  shaped as without it, and lies along that road's edge.
+  shaped as without it, and lies as painted (its node's `stop_line:bearing`, ours), along that road's edge where that
+  is within PAINT_AGREE of the paint or no bearing is tagged.
 - Kerbs aren't drawn within ISLAND_REACH of a painted island (`traffic_calming=painted_island`) or a road surface
   area (`area:highway`) at their height (off_islands): not of a road above or below (a ramp over a motorway).
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
@@ -74,6 +75,8 @@ MEDIAN_REACH = 25.0  # m apart at most: a divided road's carriageways out of a j
 STOP_REACH = 40.0  # m beyond a junction's mouth its stop lines can be
 STOP_SETBACK = 0.5  # m: a stop line at the mouth is this far out from it
 STOP_SKEW = 40.0  # deg off square across its road a stop line along the road it meets may be
+STOP_BEARING = 'stop_line:bearing'  # (ours) a surveyed stop line's painted direction, deg clockwise from north
+PAINT_AGREE = 10.0  # deg: the road it meets laid along only where it's this near the painted line
 MERGE_GAP = 2.0  # m: junctions whose trimmed ends come closer than this along the road between them ...
 MERGE_LINK = 20.0  # m: ... are one where that road is shorter than this; else both are trimmed less
 MAX_SPAN = 60.0  # m across a junction's nodes, at most, from merging
@@ -290,6 +293,18 @@ def _unit(v) -> np.ndarray:
 
 def _left(u) -> np.ndarray:
   return np.array([-u[1], u[0]])
+
+
+def _painted_direction(bearing: str | None, right: np.ndarray) -> np.ndarray | None:
+  """A stop line's painted direction (its node's STOP_BEARING) as a unit vector pointing `right`, None where it isn't
+  tagged or lies more than STOP_SKEW off square across the road."""
+  try:
+    b = math.radians(float(bearing))
+  except (TypeError, ValueError):
+    return None
+  e = np.array([math.sin(b), math.cos(b)])  # x east, y north
+  e = e if float(e @ right) >= 0.0 else -e
+  return e if float(e @ right) > math.cos(math.radians(STOP_SKEW)) else None
 
 
 def _cross(a, b) -> float:
@@ -1178,10 +1193,16 @@ class Junctions:
     lo, hi = min(sp.left for sp in spans), max(sp.right for sp in spans)
     line = np.array([p + right * hi, p + right * lo])
     arm = next((a for a in j.arms if any(x is m for x in a.members)), None)
-    if surveyed and s < m.trim and arm is not None and all(x is not None for x in arm.meets):
-      # inside the area, level with the road it meets: along that road's edge, between where this road's kerbs meet it
-      e = _unit(arm.meets[1] - arm.meets[0])
-      if (c := float(e @ right)) > math.cos(math.radians(STOP_SKEW)):
+    if surveyed and s < m.trim:
+      # inside the area, level with the road it meets: along the painted line where the node says how it lies, along
+      # that road's edge (between where this road's kerbs meet it) where that agrees with the paint or nothing says
+      painted = _painted_direction(self.osm.data.node_tags[node].get(STOP_BEARING), right)
+      met = _unit(arm.meets[1] - arm.meets[0]) if arm is not None and all(x is not None for x in arm.meets) else None
+      if met is not None and float(met @ right) <= math.cos(math.radians(STOP_SKEW)):
+        met = None
+      e = painted if painted is not None and (met is None or float(met @ painted) < math.cos(math.radians(PAINT_AGREE))) else met
+      if e is not None:
+        c = float(e @ right)
         line = np.array([p + e * hi / c, p + e * lo / c])
     e_lo, e_hi = m.edges  # looking out: its right kerb is on the left arriving
     q = m.line.at(m.trim)
