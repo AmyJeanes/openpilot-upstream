@@ -481,6 +481,52 @@ def test_clamp_across_a_junction():
   print(f"clamp across a junction: ok (the plan at least {after:.2f} m right of the centre line, {before:.2f} before)")
 
 
+def island_keep(island=(-2.75, -12.0)):
+  """A two-lane one-way road north 400 m into a junction, bearing slight right through it (a keep either lane may take),
+  with a raised island 3 m square at `island` (None: none): over our left lane, centred 2.75 m left of the route's line,
+  just before the node (map1010c 017's tram crossing)."""
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+  from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
+  from openpilot.tools.sim.bridge.gta5.map.router import Route
+  nodes = {1: (0.0, -400.0), 2: (0.0, 0.0), 3: (60.0, 140.0), 4: (-150.0, 0.0)}
+  road = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}
+  ways = {1: (road, [1, 2]), 2: (road, [2, 3]), 3: ({'highway': 'residential', 'lanes': '2', 'width': '8'}, [2, 4])}
+  if island is not None:
+    x, y = island
+    nodes |= {21: (x - 1.5, y - 1.5), 22: (x + 1.5, y - 1.5), 23: (x + 1.5, y + 1.5), 24: (x - 1.5, y + 1.5)}
+    ways[20] = ({'area': 'yes', 'traffic_calming': 'island'}, [21, 22, 23, 24, 21])
+  ids = np.array(sorted(nodes), np.int64)
+  osm = OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {}),
+                 lambda lat, lon: (np.asarray(lon, float), np.asarray(lat, float)))
+  mans = [{"type": ms.START, "begin_shape_index": 0}, {"type": 9, "begin_shape_index": 1}, {"type": ms.DEST, "begin_shape_index": 2}]
+  return Route(np.array([nodes[i] for i in (1, 2, 3)], float), mans, osm=osm)
+
+
+def test_island():
+  """A raised island over the left lane before a junction (map1010c 017): the plan changes into the right lane for it
+  (the lane slots' target, plan_check=fix); with the plan left in the left lane (plan_check=event) the clamp pushes our
+  body clear of it (a plan_clamp "island"), no island_contact. Without the island nothing changes."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import HALF_WIDTH
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+  plain = ms.drive(island_keep(None), {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert plain.plan["keys"] == [(0.0, 0.0)] and not plain.clamps and not plain.anomalies, (plain.plan["keys"], plain.anomalies)
+  r = island_keep()
+  fixed = ms.drive(r, cfg, lane=0, seconds=0.2).md
+  assert fixed.plan["keys"][-1][1] == 1.0 and fixed.plan["slot_check"]["fixed"], fixed.plan
+  assert not np.abs(fixed._island_push(fixed.path, fixed.theta, r.lanes.islands)[0]).any()
+  # the plan left in the left lane, the island right over it: no push mends that (ISLAND_MAX), it's an island_contact
+  middle = ms.drive(island_keep(), {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert not [c for c in middle.clamps if c["why"] == "island"] and kinds(middle, "island_contact"), middle.clamps
+  # an island clipping the left lane's left side: the clamp pushes our body clear of it
+  r2 = island_keep((-5.0, -12.0))
+  left = ms.drive(r2, {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert left.plan["keys"] == [(0.0, 0.0)] and [c for c in left.clamps if c["why"] == "island"], left.clamps
+  assert np.abs(left._island_push(left.path, left.theta, r2.lanes.islands)[0]).max() < 1e-6 and not kinds(left, "island_contact")
+  i = int(np.argmin(np.abs(left.route_s - 388.0)))
+  assert left.route_r[i] > -3.5 + HALF_WIDTH, left.route_r[i]  # past the island's right side (-3.5 m) by our half width
+  print("island: ok")
+
+
 COLLISIONS = [  # map1010b's trips that hit the kerb or the gore: spec, map driver seed, where it first touched
   ("012", "883.2,-2077.8,29.5,96,0>-250.5,-1067.2", 165189838, (187.0, -1776.9)),
   ("014", "670.0,-2893.8,5.2,0,9>1358.8,-1110.4", 375068520, (561.3, -2547.6)),
@@ -838,6 +884,7 @@ if __name__ == "__main__":
   test_clamp_corners()
   test_far_corner_beside_the_flank()
   test_clamp_lane_and_fork()
+  test_island()
   test_clamp_across_a_junction()
   test_collision_routes()
   test_start_stub_and_join()

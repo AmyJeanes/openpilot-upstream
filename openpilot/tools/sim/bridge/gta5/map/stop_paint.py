@@ -27,7 +27,8 @@ added on approaches with a painted stop line and none in the map.
 - The node goes on the approach's way where the line crosses its line: a new node splitting the way (ids from
   `node_ids`, as for tapers) unless one of its nodes is within SNAP. The pieces keep the way's tags, a widening
   lane's start and end widths taken at the cut, and turning back at the new node on a two-way way is forbidden, as
-  GTA's links allow none part way along.
+  GTA's links allow none part way along. The node's `stop_line:bearing` (ours) is the painted line's direction, which
+  junctions.py lays a line inside a junction's area along.
 """
 import json
 import math
@@ -37,7 +38,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.map.junctions import FREEWAY, STOP_REACH, Junctions, _left, in_fan
+from openpilot.tools.sim.bridge.gta5.map.junctions import FREEWAY, STOP_BEARING, STOP_REACH, Junctions, _left, in_fan
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, oneway_of
 
 MIN_WIDTH = 0.15  # m: stop lines are painted this thick at least (the decals' measured widths run 0.16-0.3)
@@ -59,7 +60,14 @@ MOUTH_TIE = 0.5  # m: that area about this much further from the line than this 
 CROSSING_AHEAD = 6.0  # m: a painted crossing this near ahead of a line makes it the crossing's edge, not a new stop line
 MERGE_ALONG, MERGE_GAP = 0.6, 1.5  # m: painted pieces this near along the road, and end to end, are one line
 SNAP = 0.5  # m: a stop line this near a node of its way goes on that node
+BEARING = STOP_BEARING  # the painted line's direction, 0-180
 CELL = 25.0  # m
+
+
+def bearing(pts: np.ndarray) -> float:
+  """A line's direction between its ends, deg clockwise from north, 0-180: a line has no way along it."""
+  d = pts[-1, :2] - pts[0, :2]
+  return math.degrees(math.atan2(d[0], d[1])) % 180.0
 
 
 @dataclass
@@ -444,7 +452,7 @@ class StopPaint:
             continue
           direction = 'forward' if not outward else 'backward'  # the way runs out of the junction: traffic in goes backward
           tags = {'highway': highway, 'traffic_signals:direction' if highway == 'traffic_signals' else 'direction': direction,
-                  'source:position': 'survey'}
+                  'source:position': 'survey', BEARING: f'{bearing(line.pts):.0f}'}
           for n in moved:
             replaced[n] += 1
           z = self._z(m, s)
@@ -512,7 +520,7 @@ def rewrite(path: str, placed: list[Placed], new_node_id, to_lat_lon, remap_rest
   node_tags = {n[0]: n[3] for n in nodes}
   for p in placed:
     for n in p.moved_from:
-      for key in ('highway', 'traffic_signals:direction', 'direction', 'source:position'):
+      for key in ('highway', 'traffic_signals:direction', 'direction', 'source:position', BEARING):
         node_tags[n].pop(key, None)
   cuts = defaultdict(list)
   new_nodes = {}

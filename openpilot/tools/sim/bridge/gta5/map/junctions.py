@@ -32,7 +32,9 @@ map as on our GTA V one.
   already placed on another junction's approach (GTA's light where a slip parts, for the junction ahead). A stop line surveyed where it's painted
   (`source:position=survey`) is drawn at its node, and its road is trimmed back no further than that; one nearer
   than where its kerbs meet the next roads' (painted level with the road it meets) is inside the junction's area,
-  shaped as without it, and lies along that road's edge.
+  shaped as without it, and lies as painted (its node's `stop_line:bearing`, ours), along that road's edge where that
+  is within PAINT_AGREE of the paint or no bearing is tagged.
+- A raised island (`traffic_calming=island`, raised_islands.py) is a kerb round its outline (`Junctions.raised`).
 - Kerbs aren't drawn within ISLAND_REACH of a painted island (`traffic_calming=painted_island`) or a road surface
   area (`area:highway`) at their height (off_islands): not of a road above or below (a ramp over a motorway).
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
@@ -74,6 +76,8 @@ MEDIAN_REACH = 25.0  # m apart at most: a divided road's carriageways out of a j
 STOP_REACH = 40.0  # m beyond a junction's mouth its stop lines can be
 STOP_SETBACK = 0.5  # m: a stop line at the mouth is this far out from it
 STOP_SKEW = 40.0  # deg off square across its road a stop line along the road it meets may be
+STOP_BEARING = 'stop_line:bearing'  # (ours) a surveyed stop line's painted direction, deg clockwise from north
+PAINT_AGREE = 10.0  # deg: the road it meets laid along only where it's this near the painted line
 MERGE_GAP = 2.0  # m: junctions whose trimmed ends come closer than this along the road between them ...
 MERGE_LINK = 20.0  # m: ... are one where that road is shorter than this; else both are trimmed less
 MAX_SPAN = 60.0  # m across a junction's nodes, at most, from merging
@@ -290,6 +294,18 @@ def _unit(v) -> np.ndarray:
 
 def _left(u) -> np.ndarray:
   return np.array([-u[1], u[0]])
+
+
+def _painted_direction(bearing: str | None, right: np.ndarray) -> np.ndarray | None:
+  """A stop line's painted direction (its node's STOP_BEARING) as a unit vector pointing `right`, None where it isn't
+  tagged or lies more than STOP_SKEW off square across the road."""
+  try:
+    b = math.radians(float(bearing))
+  except (TypeError, ValueError):
+    return None
+  e = np.array([math.sin(b), math.cos(b)])  # x east, y north
+  e = e if float(e @ right) >= 0.0 else -e
+  return e if float(e @ right) > math.cos(math.radians(STOP_SKEW)) else None
 
 
 def _cross(a, b) -> float:
@@ -584,6 +600,9 @@ class Junctions:
     self.islands = Islands(self.painted_islands + [osm.xy[osm.data.index(refs)] for refs in surfaces],  # road surface: no kerb in it
                            [height(refs) for refs in island_refs + surfaces])
     self.island_outlines = [(xy, colour) for xy, colour in painted if colour in ('white', 'yellow')]  # drawn as painted
+    # raised islands (traffic_calming=island): kerbed, drawn as kerbs round them; [(outline [K, 2], height)]
+    self.raised = [(osm.xy[osm.data.index(refs[:-1])], height(refs)) for tags, refs in osm.data.ways.values()
+                   if tags.get('traffic_calming') == 'island' and len(refs) >= 4]
     self.crossings = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values()
                       if tags.get('footway') == 'crossing' and len(refs) >= 2]
     self._crossing_cells = self._cells(self.crossings)
@@ -1152,10 +1171,19 @@ class Junctions:
     pts = m.line.p[1:-1]
     return float(np.hypot(*np.diff(pts[:k + 1], axis=0).T).sum()) if k else 0.0
 
+  def _lanes_at(self, m: Member, s: float, towards: bool) -> list:
+    """The lanes of a road's first way, s m out from its junction node, running towards it or away: where they move
+    across along the way (placement:offset:start / :end), as they lie there."""
+    w, fwd = m.ways[0]
+    d = (BACKWARD if fwd else FORWARD) if towards else (FORWARD if fwd else BACKWARD)
+    if not self.osm.moves_across(w):
+      return self.osm.lanes(w).ours(d)
+    length = self.osm.length(w)
+    return self.osm.section_along(w, s if fwd else length - s, d).ours
+
   def _add_stop(self, j: Junction, m: Member, kind: str, along: float, signal: bool = False, node: int | None = None):
     w, fwd = m.ways[0]
-    spans = self.osm.lanes(w).ours(BACKWARD if fwd else FORWARD)  # the lanes towards the junction
-    if not spans:
+    if not self.osm.lanes(w).ours(BACKWARD if fwd else FORWARD):  # the lanes towards the junction
       return
     surveyed = node is not None and self.osm.data.node_tags.get(node, {}).get('source:position') == 'survey'
     s = along if surveyed else max(along, m.trim + STOP_SETBACK)  # surveyed: where painted, even inside the area
@@ -1163,15 +1191,22 @@ class Junctions:
       hit = crossing(Poly(c, 0.0, 0.0), m.line, math.inf, max(s, m.trim + CROSSING_REACH) + CROSSING_WIDTH)
       if hit is not None and hit[1] > m.trim - CROSSING_WIDTH:
         s = max(s, hit[1] + CROSSING_WIDTH / 2 + STOP_SETBACK)
+    spans = self._lanes_at(m, s, True)
     p, u = m.line.at(s), m.line.tangent(s)
     right = _left(u)  # right of the direction of travel into the junction
     lo, hi = min(sp.left for sp in spans), max(sp.right for sp in spans)
     line = np.array([p + right * hi, p + right * lo])
     arm = next((a for a in j.arms if any(x is m for x in a.members)), None)
-    if surveyed and s < m.trim and arm is not None and all(x is not None for x in arm.meets):
-      # inside the area, level with the road it meets: along that road's edge, between where this road's kerbs meet it
-      e = _unit(arm.meets[1] - arm.meets[0])
-      if (c := float(e @ right)) > math.cos(math.radians(STOP_SKEW)):
+    if surveyed and s < m.trim:
+      # inside the area, level with the road it meets: along the painted line where the node says how it lies, along
+      # that road's edge (between where this road's kerbs meet it) where that agrees with the paint or nothing says
+      painted = _painted_direction(self.osm.data.node_tags[node].get(STOP_BEARING), right)
+      met = _unit(arm.meets[1] - arm.meets[0]) if arm is not None and all(x is not None for x in arm.meets) else None
+      if met is not None and float(met @ right) <= math.cos(math.radians(STOP_SKEW)):
+        met = None
+      e = painted if painted is not None and (met is None or float(met @ painted) < math.cos(math.radians(PAINT_AGREE))) else met
+      if e is not None:
+        c = float(e @ right)
         line = np.array([p + e * hi / c, p + e * lo / c])
     e_lo, e_hi = m.edges  # looking out: its right kerb is on the left arriving
     q = m.line.at(m.trim)
@@ -1394,11 +1429,14 @@ class Junctions:
         continue
       pairs = lane_moves([s.lane.turns for s in lanes_in], [(t, len(lo)) for t, _, lo in exits])
       ways_in = {w for w, _ in m_in.ways}
-      for k, (turned, m_out, lanes_out) in enumerate(exits):
+      s_in = stop_at.get(id(m_in), m_in.trim)
+      placed_in = self._lanes_at(m_in, s_in, True)  # where they lie at the stop line, moving across along the way
+      for k, (turned, m_out, _) in enumerate(exits):
         given = next((c for f, t, c in connects if f in ways_in and t == m_out.ways[0][0]), None)
+        placed_out = self._lanes_at(m_out, m_out.trim, False)
         for a, b in (given if given is not None else pairs[k]):
-          if a < len(lanes_in) and b < len(lanes_out):
-            out.append(self._movement(m_in, a, lanes_in[a], stop_at.get(id(m_in), m_in.trim), m_out, b, lanes_out[b], turned))
+          if a < len(placed_in) and b < len(placed_out):
+            out.append(self._movement(m_in, a, placed_in[a], s_in, m_out, b, placed_out[b], turned))
     return out
 
   def _reachable(self, j: Junction, node: int) -> set[int]:

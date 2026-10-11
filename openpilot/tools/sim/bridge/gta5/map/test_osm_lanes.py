@@ -365,21 +365,78 @@ def test_edge_lines_without_shoulders():
     assert got == {**tags, 'edge_line:left': 'white', 'edge_line:right': 'white'}, (asphalt, got)
     assert lines(WayLanes.from_tags(got)) == [(EDGE, -6.5, None), (EDGE_LINE, -6.5, 'solid'), (CENTRE, 0.0, 'dashed'),
                                               (EDGE_LINE, 6.5, 'solid'), (EDGE, 6.5, None)]
-  # the Great Ocean Hwy's median kerbs read as the asphalt's edges (the link's line runs between them), so the lanes
-  # can't run out to the edge lines past them: each line drawn on its paint, off the lanes' edge
+  # the Great Ocean Hwy's median kerbs, read either side of the link's line, aren't the asphalt's edges: the lanes run out
+  # to the edge lines past them, each to its own (placement:offset keeps the median where it was), the lines on their edges
   median = game_files([(-9.7, 'white', 'solid'), (-3.0, 'yellow', 'double_solid'), (2.5, 'yellow', 'double_solid'),
                        (9.3, 'white', 'solid')], -2.2, 1.6)
   got = road_edges({**tags, 'width': '17.3', 'width:lanes:forward': '6.2', 'width:lanes:backward': '5.7'}, median, why)
   road = WayLanes.from_tags(got)
-  assert np.allclose(road.edges(), (-8.65, 8.65)) and 'shoulder' not in got, got
-  assert got['edge_line:left:offset'] == '1.05' and got['edge_line:right:offset'] == '0.65', got
+  assert spans(road) == [(-1, -9.7, -2.95), (1, 2.45, 9.3)] and got['placement:offset'] == '-0.2', got
+  assert 'shoulder' not in got and not any(k.endswith(':offset') and k.startswith('edge_line') for k in got), got
   assert [o for k, o, _ in lines(road) if k == EDGE_LINE] == [-9.7, 9.3], got
+  # with the real asphalt's edges read beyond in the other samples, shoulders out to them
+  beyond = [dict(d, kerbs={'left': -12.2, 'right': 11.3}) if k else d for k, d in enumerate(median + median[:1])]
+  road = WayLanes.from_tags(road_edges({**tags, 'width': '17.3', 'width:lanes:forward': '6.2', 'width:lanes:backward': '5.7'}, beyond, why))
+  assert np.allclose(road.edges(), (-12.2, 11.3)) and road.shoulders == (2.5, 2.0), road.edges()
   # a one-way way's yellow left edge is its divider:left, that edge's one line
   one = game_files([(-5.5, 'yellow', 'solid'), (0.0, 'white', 'dashed'), (5.5, 'white', 'solid')])
   got = edge_line_tags(road_edges({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '11'}, one, why), one, why)
   assert got['divider:left'] == 'solid_line' and 'edge_line:left' not in got and got['edge_line:right'] == 'white', got
   # none where the road is unpainted
   assert lines(WayLanes.from_tags({**tags, 'lane_markings': 'no', 'edge_line:left': 'white'})) == [(EDGE, -6.5, None), (EDGE, 6.5, None)]
+
+
+def test_lanes_without_a_line_between():
+  # divider:lanes=no: no line on that lane's right beside another lane its way; the lanes, their widths, centres and
+  # change:lanes stay (the lane matcher, blind spot lanes and the map driver read those, not the lines)
+  tags = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12', 'change:lanes': 'yes|not_right'}
+  plain, bare = WayLanes.from_tags(tags), WayLanes.from_tags({**tags, 'divider:lanes': 'no|'})
+  assert spans(bare) == spans(plain) == [(1, -6.0, 0.0), (1, 0.0, 6.0)]
+  assert [(ln.change_left, ln.change_right) for ln in bare.lanes] == [(ln.change_left, ln.change_right) for ln in plain.lanes]
+  assert lines(plain) == [(EDGE, -6.0, None), (DIVIDER, 0.0, 'dashed'), (EDGE, 6.0, None)]
+  assert lines(bare) == lines(bare, BACKWARD) == [(EDGE, -6.0, None), (EDGE, 6.0, None)]
+  three = {'highway': 'motorway', 'lanes': '3', 'oneway': 'yes', 'width': '16.5'}
+  assert lines(WayLanes.from_tags({**three, 'divider:lanes': '|no|'})) == [(EDGE, -8.25, None), (DIVIDER, -2.75, 'dashed'), (EDGE, 8.25, None)]
+  # a two-way way's: each direction's lanes left to right as seen travelling them; the centre line stays
+  two = {'highway': 'primary', 'lanes': '4', 'width': '22'}
+  road = WayLanes.from_tags({**two, 'divider:lanes:forward': 'no|', 'divider:lanes:backward': '|'})
+  assert lines(road) == [(EDGE, -11.0, None), (DIVIDER, -5.5, 'dashed'), (CENTRE, 0.0, 'double_solid'), (EDGE, 11.0, None)]
+  road = WayLanes.from_tags({**two, 'divider:lanes:backward': 'no|'})
+  assert lines(road) == [(EDGE, -11.0, None), (CENTRE, 0.0, 'double_solid'), (DIVIDER, 5.5, 'dashed'), (EDGE, 11.0, None)]
+
+
+def test_lane_lines_the_files_paint_none_of():
+  from collections import Counter
+
+  from openpilot.tools.sim.bridge.gta5.map.paint_survey import bare_lane_lines
+  from openpilot.tools.sim.bridge.gta5.map.ynd_to_osm import short_unmarked, unmarked_lane_lines
+  why = Counter()
+  tags = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}
+  # Senora Fwy: the carriageway's yellow left edge and white edge line 12 m apart, nothing between GTA's two lanes in
+  # the files, nor in the captured images (the boundary's offset among those they show bare)
+  senora = game_files([(-5.9, 'yellow', 'solid'), (6.1, 'white', 'edge_line')])
+  assert unmarked_lane_lines(tags, senora, (0.2,), why) == {**tags, 'divider:lanes': 'no|'}
+  # the images showing a line there (or not seen), a lane line in the files, too few sections, or the edges not read
+  assert unmarked_lane_lines(tags, senora, (), why) == unmarked_lane_lines(tags, senora, (3.0,), why) == tags
+  assert unmarked_lane_lines(tags, game_files([(-5.9, 'yellow', 'solid'), (0.4, 'white', 'dashed'), (6.1, 'white', 'solid')]), (0.0,), why) == tags
+  assert unmarked_lane_lines(tags, senora[:2], (0.0,), why) == tags
+  assert unmarked_lane_lines(tags, game_files([(-5.9, 'yellow', 'solid')]), (0.0,), why) == tags
+  # a way the images carry such a bare stretch on onto, whatever its files read
+  assert unmarked_lane_lines(tags, [], (), why, (0.1,)) == {**tags, 'divider:lanes': 'no|'}
+  assert unmarked_lane_lines(tags, senora[:2], (), why, (3.0,)) == tags
+  # each direction of a two-way way, left to right as seen travelling it
+  marks = [(-11.0, 'white', 'solid'), (-5.5, 'white', 'dashed'), (0.0, 'yellow', 'double_solid'), (11.0, 'white', 'solid')]
+  sec = [(-11.0, -5.5, -1), (-5.5, 0.0, -1), (0.0, 5.5, 1), (5.5, 11.0, 1)]
+  assert bare_lane_lines(game_files(marks), sec) == {'forward': [True]}
+  got = unmarked_lane_lines({'highway': 'primary', 'lanes': '4', 'width': '22'}, game_files(marks), (5.5,), why)
+  assert got['divider:lanes:forward'] == 'no|' and 'divider:lanes:backward' not in got
+  # a run of such ways under STRETCH_MIN keeps its lines: a gap in the files and the images more likely than paint
+  nodes = {k: {'x': x, 'y': 0.0} for k, x in (('a', 0.0), ('b', 40.0), ('c', 80.0), ('d', 200.0), ('e', 240.0))}
+  bare = {'divider:lanes': 'no|'}
+  written = [(1, 'a', 'b', bare), (2, 'b', 'c', bare), (3, 'c', 'd', {}), (4, 'd', 'e', bare)]
+  assert short_unmarked(nodes, written) == {4}
+  flipped = [(-o, c, k) for o, c, k in marks]
+  assert bare_lane_lines(game_files(flipped), [(-b, -a, -h) for a, b, h in sec]) == {'backward': [True]}
 
 
 def test_single_track_painted_as_two_lanes():

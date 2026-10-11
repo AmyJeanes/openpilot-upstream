@@ -1,13 +1,14 @@
 """stop_paint.py's stop lines from painted lines, on small maps made here. No pytest needed: `python test_stop_paint.py`
 runs them all (the rewrite test needs pyosmium, as ynd_to_osm does)."""
 import json
+import math
 import os
 import tempfile
 
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions
-from openpilot.tools.sim.bridge.gta5.map.stop_paint import WRAPPED_ID, Line, StopPaint, _interpolate, painted_lines, \
+from openpilot.tools.sim.bridge.gta5.map.stop_paint import WRAPPED_ID, Line, StopPaint, _interpolate, bearing, painted_lines, \
   straight_ends, wrapped_lines
 from openpilot.tools.sim.bridge.gta5.map.test_junctions import TWO_WAY, make
 
@@ -31,8 +32,18 @@ def test_moved_to_the_paint():
   assert counts.get('moved to the paint') == 1 and len(placed) == 1
   p = placed[0]
   assert p.way == 2 and abs(p.t - 0.25) < 1e-6 and p.node is None and p.moved_from == [2] and p.line == 7
-  assert p.tags == {'highway': 'traffic_signals', 'traffic_signals:direction': 'forward', 'source:position': 'survey'}
+  assert p.tags == {'highway': 'traffic_signals', 'traffic_signals:direction': 'forward', 'source:position': 'survey',
+                    'stop_line:bearing': '90'}  # along x: east-west
   assert np.allclose(p.xy, [0.0, -15.0])
+
+
+def test_painted_bearing():
+  # a line painted 15 degrees off square (along a tram's tracks): its node says how it lies, 0-180 clockwise from north
+  d = 2.5 * np.array([math.cos(math.radians(15.0)), -math.sin(math.radians(15.0))])
+  slanted = Line(7, np.array([[2.75, -15.0] - d, [2.75, -15.0] + d]), 0.0)
+  placed, _ = place([slanted], SIGNALS)
+  assert len(placed) == 1 and placed[0].tags['stop_line:bearing'] == '105'
+  assert abs(bearing(slanted.pts[::-1]) - bearing(slanted.pts)) < 1e-9
 
 
 def test_paint_for_the_other_way():
@@ -90,7 +101,7 @@ def test_new_stop_lines():
   # no stop line in the map: one added where the paint covers only the lanes into the junction
   placed, counts = place([line(7, 0.3, 5.2, -15.0)])
   assert counts.get('new (stop)') == 1 and len(placed) == 1 and placed[0].moved_from == []
-  assert placed[0].tags == {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey'}
+  assert placed[0].tags == {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey', 'stop_line:bearing': '90'}
   # not from a line across the whole road (a crossing's edge), nor from one with a painted crossing just ahead of it
   _, counts = place([line(7, -5.2, 5.2, -15.0)])
   assert counts.get('new: line across the whole road') == 1 and 'new (stop)' not in counts
@@ -161,7 +172,8 @@ def test_stop_line_for_the_other_way():
   placed, counts = StopPaint(js, [line(7, 0.3, 5.2, -13.0)]).place()
   assert counts.get('moved to the paint the other way') == 1 and len(placed) == 1
   p = placed[0]
-  assert p.moved_from == [2] and p.tags == {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey'}
+  assert p.moved_from == [2] and p.tags == {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey',
+                                            'stop_line:bearing': '90'}
   assert np.allclose(p.xy, [0.0, -13.0])
 
 
