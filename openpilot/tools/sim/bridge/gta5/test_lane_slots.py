@@ -268,6 +268,42 @@ def test_exit_narrowed_by_next_turn():
   assert rows(slots, 225.0) == ('aaT.....', 'aT......', 0.0, 15.0)  # then here, and the next turn's road out
 
 
+SLIGHT_RIGHT = 9
+
+
+def island_keep(island=(-2.75, -12.0), arrows: str | None = None) -> ls.LaneSlots:
+  """A two-lane one-way road north into a junction, bearing slight right through it (a keep), with a raised island 3 m
+  square at `island` (None: none): over our left lane (centred 2.75 m left of the road's line) just before the node."""
+  nodes = {1: (0.0, -400.0), 2: (0.0, 0.0), 3: (60.0, 140.0), 4: (-150.0, 0.0)}
+  into = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'} | ({'turn:lanes': arrows} if arrows else {})
+  ways = {1: (into, [1, 2]), 2: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}, [2, 3]),
+          3: ({'highway': 'residential', 'lanes': '2', 'width': '8'}, [2, 4])}
+  if island is not None:
+    x, y = island
+    nodes |= {21: (x - 1.5, y - 1.5), 22: (x + 1.5, y - 1.5), 23: (x + 1.5, y + 1.5), 24: (x - 1.5, y + 1.5)}
+    ways[20] = ({'area': 'yes', 'traffic_calming': 'island'}, [21, 22, 23, 24, 21])
+  return ls.LaneSlots(route(osm_map(nodes, ways), nodes, [1, 2, 3], {1: SLIGHT_RIGHT}))
+
+
+def test_island_keeps_the_move_out_of_its_lane():
+  # nav's keep may be taken from either lane; an island over the left one just before the junction leaves the right
+  plain = island_keep(None)
+  assert plain.moves[0].targets == set() and not plain.moves[0].need
+  slots = island_keep()
+  assert slots.lanes.blocked and slots.moves[0].blocked == {0} and slots.moves[0].targets == {1}
+  assert rows(slots, 380.0)[0] == 'Ta......'  # the kerb lane, first
+  # an island on the road out, past the junction: so too
+  assert island_keep((60.0 / 140.0 * 15.0 - 2.75, 15.0)).moves[0].targets == {1}
+  # too far before it (BLOCK_BEFORE): no say
+  far = island_keep((-2.75, -100.0))
+  assert far.lanes.blocked and far.moves[0].targets == set()
+  # every lane the move may take blocked: left as it was
+  sec = slots.section_here(399.0, False)
+  boxed = ls.Move(400.0, slots.moves[0].nav, sec, True, {0, 1})
+  assert boxed.blocked_all and boxed.targets == set()
+  assert ls.Move(400.0, slots.moves[0].nav, sec, True).targets == set()
+
+
 def test_no_lanes_and_preview():
   assert not ls.preview(None, 0.0, 0.0).any() and ls.preview(None, 0.0, 0.0).shape == (ls.PREVIEW_LEN,)
   osm, nodes = fixture('two_way.osm')
