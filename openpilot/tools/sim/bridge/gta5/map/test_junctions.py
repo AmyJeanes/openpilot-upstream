@@ -274,6 +274,20 @@ def test_surveyed_stop_line_level_with_the_road_it_meets():
   assert abs(d[1]) < 0.02 * abs(d[0]), stop.line  # along the main road
   assert np.allclose(np.mean(stop.line, axis=0)[1], -4.0 * math.cos(math.radians(20.0)), atol=0.05)  # at the paint
 
+  def laid(bearing):  # the stop line with the paint's bearing tagged, and its direction (unit, towards +x)
+    tags = {'highway': 'stop', 'direction': 'forward', 'source:position': 'survey', 'stop_line:bearing': bearing}
+    line = only(Junctions(make(nodes, ways, {7: tags}))).stops[0].line
+    d = line[1] - line[0]
+    return line, d / np.hypot(*d) * np.sign(d[0])
+  # painted square across the side road (20 degrees off the main road's edge): laid as painted, its ends still on the
+  # lanes' edges
+  line, d = laid('110')
+  assert np.allclose(d, [math.sin(math.radians(110.0)), math.cos(math.radians(110.0))], atol=1e-6)
+  ends = (line - np.array(nodes[7])) @ np.array([math.cos(math.radians(20.0)), -math.sin(math.radians(20.0))])
+  assert np.allclose(sorted(ends), [0.0, 5.5], atol=1e-6), ends
+  # painted within 10 degrees of the main road's edge: along that edge, as with no bearing
+  assert np.allclose(laid('95')[1], [1.0, 0.0], atol=1e-6) and np.allclose(laid('275')[1], [1.0, 0.0], atol=1e-6)
+
 
 def test_directed_signal_on_a_junction_node_is_one_approach_s():
   # GTA's light for the road from the south sits on the node where a slip parts from it, a junction of its own: that

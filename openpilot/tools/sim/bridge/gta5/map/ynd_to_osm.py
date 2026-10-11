@@ -14,7 +14,7 @@ import osmium
 
 from openpilot.tools.sim.bridge.gta5.map import paint_survey, traps
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, WayLanes, signed_metres
 from openpilot.tools.sim.bridge.gta5.map.paths import heading as game_heading, junction_scores, roads_cross, toward_junction, \
   wrap
 
@@ -1706,6 +1706,59 @@ def outer_changes(tags, samples, why):
   return out
 
 
+def unmarked_lane_lines(tags, samples, bare, why, carried=()):
+  """A way's tags with `divider:lanes` (`:forward` / `:backward` on a two-way way) `no` on each lane with no line
+  painted on its right beside another lane its way: GTA's two lanes in one painted lane, Senora Fwy's. The lanes stay
+  as they are. Where the game files paint no line there (paint_survey.bare_lane_lines) and the captured game images
+  show none either, `bare`: offsets m right of the way's line (imgcheck.lane_paint): the files miss some freeways'.
+  `carried`: offsets the images carry such a bare stretch on onto past the ways the files read bare (lane_paint)."""
+  sec = WayLanes.from_tags(tags).section(FORWARD)
+  found = paint_survey.bare_lane_lines(samples, [(s.left, s.right, s.heading) for s in sec]) if bare else {}
+  two_way = {s.heading for s in sec} >= {1, -1}
+  out = dict(tags)
+  for key, heading in (('forward', 1), ('backward', -1)):
+    bounds = [b for _, b in sorted((s.left, s.right) for s in sec if s.heading == heading)[:-1]]
+    if not bounds or not (key in found or carried):
+      continue
+    order = 1 if heading == 1 else -1
+    seen = [any(abs(o - v) <= paint_survey.BARE_REACH for o in bare) for v in bounds][::order]
+    runs_on = [any(abs(o - v) <= paint_survey.BARE_REACH for o in carried) for v in bounds][::order]
+    flags = [(f and s) or c for f, s, c in zip(found.get(key, [False] * len(bounds)), seen, runs_on, strict=True)]
+    if any(flags):
+      out[f'divider:lanes:{key}' if two_way else 'divider:lanes'] = '|'.join(['no' if f else '' for f in flags] + [''])
+      why['lane lines painted nowhere'] += sum(flags)
+  return out
+
+
+STRETCH_MIN = 60.0  # m of road at least a run of lanes with no line between them covers, else its lines stay
+
+
+def short_unmarked(nodes, written):
+  """The ways (ids) whose `divider:lanes` stretch, the ways with one joined end to end, is under STRETCH_MIN long: a
+  lone link the files and images read bare is more likely a gap in both than GTA's one wide lane."""
+  marked = {wid: (a, b) for wid, a, b, tags in written if any(k.startswith('divider:lanes') for k in tags)}
+  at = defaultdict(list)
+  for wid, (a, b) in marked.items():
+    at[a].append(wid)
+    at[b].append(wid)
+  out, done = set(), set()
+  for wid in marked:
+    if wid in done:
+      continue
+    group, todo = set(), [wid]
+    while todo:
+      w = todo.pop()
+      if w in group:
+        continue
+      group.add(w)
+      todo += [o for n in marked[w] for o in at[n] if o not in group]
+    done |= group
+    length = sum(math.hypot(nodes[b]['x'] - nodes[a]['x'], nodes[b]['y'] - nodes[a]['y']) for a, b in (marked[w] for w in group))
+    if length < STRETCH_MIN:
+      out |= group
+  return out
+
+
 def edge_line_tags(tags, samples, why):
   """A one-way way's tags with `divider:left` / `divider:right` where the game files paint a yellow line along that edge
   of its lanes (paint_survey.edge_lines): a carriageway's edge beside a median, a barrier or the other direction."""
@@ -1857,7 +1910,8 @@ def road_edges(tags, samples, why):
   ends (paint_survey.road_edges): GTA paints many roads' edges as a solid line with a shoulder of road beyond it (the
   Great Ocean Hwy's 4 m), and the class layout's (or the survey's) kerbs fell inside the asphalt, on or short of the
   line. The outer lanes widen (or narrow) to the edge lines, leaving every other line where it was: each to its own
-  where placement keeps the line on the lanes in between, else alike (the line the middle of the lanes) to both where
+  where placement keeps the line on the lanes in between or, with both lines painted, placement:offset moves the lanes
+  across to keep them there, else alike (the line the middle of the lanes) to both where
   they're about as far either side of it, or to the one painted where the other side's asphalt has room. The road
   surface between the lanes' edge and the asphalt's, with nothing else painted on it, is a shoulder
   (`shoulder:<side>:width`), its edge line painted where the lanes run to one (else `shoulder:<side>:markings=no`), in
@@ -1897,7 +1951,8 @@ def shoulders_out(tags, road, sec, one_way, found, why):
   sign = (-1.0, 1.0)
   out = dict(tags)
 
-  def laid_out(to):  # the tags with the outer lanes out to `to` (left, right), if that leaves every other line in place
+  def laid_out(to, shift=False):  # the tags with the outer lanes out to `to` (left, right), if that leaves every other
+    # line in place; `shift`: placement:offset may move the lanes across to keep them there
     move = [(edges[0] - to[0]), (to[1] - edges[1])]
     widths = [s.right - s.left for s in sec]
     widths[0] += move[0]
@@ -1913,6 +1968,14 @@ def shoulders_out(tags, road, sec, one_way, found, why):
       new['width:lanes:forward'] = '|'.join(metres(w) for w, s in zip(widths, sec, strict=True) if s.heading == 1)
       new['width:lanes:backward'] = '|'.join([metres(w) for w, s in zip(widths, sec, strict=True) if s.heading == -1][::-1])
     got = WayLanes.from_tags(new).section(FORWARD)
+    if shift and got and abs(across := to[0] - got[0].left) > 0.02:
+      offset = (signed_metres(tags.get('placement:offset')) or 0.0) + across
+      if abs(offset) > paint_survey.OFFSET_MAX:
+        return None
+      new['placement:offset'] = metres(offset)
+      if new['placement:offset'] in ('0', '-0'):
+        del new['placement:offset']
+      got = WayLanes.from_tags(new).section(FORWARD)
     before = [v for s in sec for v in (s.left, s.right)][1:-1]
     after = [v for s in got for v in (s.left, s.right)][1:-1]
     moved = [abs(got[0].left - to[0]), abs(got[-1].right - to[1]), *(abs(a - b) for a, b in zip(before, after, strict=False))]
@@ -1928,7 +1991,7 @@ def shoulders_out(tags, road, sec, one_way, found, why):
   for to in tries:
     if max(abs(t - e) for t, e in zip(to, edges, strict=True)) <= 0.05:
       break
-    if (new := laid_out(to)) is not None:
+    if (new := laid_out(to, to is tries[0] and None not in lines)) is not None:
       out, edges = new, to
       why['lanes out to the painted edge lines'] += 1
       break
@@ -2244,6 +2307,9 @@ def main():
                  "whole length, for the survey's sections, the stop lines where painted, and roads painted across junctions")
   p.add_argument('--survey-features', help="the game files' painted features (features.jsonl): crossings, for the stop "
                  "lines added where the map has none, and turn arrows, for the lanes' turn:lanes")
+  p.add_argument('--lines-bare', help="lane boundaries the game files paint no line on that captured game images show "
+                 "none on either (imgcheck.lane_paint's JSON: \"bare\": {\"<a>|<b>\": [m right of a -> b]}): no line drawn; nor on "
+                 "those its \"carried\" says such a stretch carries on onto")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -2615,6 +2681,15 @@ def main():
     w.add_node(osmium.osm.mutable.Node(id=node_id(k), version=1, location=(lon, lat), tags={**tags, 'ele': f"{n['z']:.1f}"}))
   written, defaulted = [], set()  # the ways (id, a, b, tags); those whose centre is the class default
   unread_edges = set()  # one-way ways the game files have too few sections of to read their edges
+  lines_json = json.load(open(args.lines_bare)) if args.lines_bare else {}
+  bare_at = {'bare': {}, 'carried': {}}
+  for kind, at in bare_at.items():
+    for k, offsets in lines_json.get(kind, {}).items():
+      a, b = (tuple(int(v) for v in end.split(':')) for end in k.split('|'))
+      at[(a, b)], at[(b, a)] = offsets, [-v for v in offsets]
+
+  def lines_bare(a, b, kind='bare'):
+    return bare_at[kind].get((a, b), ())
   for wid, a, b, fwd, back, cls, limit, name, lf in info:
     if wid in crossings:
       written.append((wid, a, b, {'highway': 'footway', 'footway': 'crossing', 'crossing': 'marked'}))
@@ -2686,6 +2761,8 @@ def main():
       tags = road_edges(tags, samples, edges_why)
     if survey and not back and 'lane_markings' not in tags and (samples := link_samples(wid, a, b)):
       tags = edge_line_tags(tags, samples, lines_why)  # at the lanes' edges road_edges left them
+    if survey and 'lane_markings' not in tags and ((samples := link_samples(wid, a, b)) or lines_bare(a, b, 'carried')):
+      tags = unmarked_lane_lines(tags, samples or [], lines_bare(a, b), lines_why, lines_bare(a, b, 'carried'))
     if survey and not back and sum(d.get('src') == paint_survey.GAMEFILES for d in link_samples(wid, a, b)) < paint_survey.MIN_SAMPLES:
       unread_edges.add(wid)
     if name and not cls.endswith("_link"):  # a ramp named for its freeway reads as staying on it
@@ -2703,6 +2780,11 @@ def main():
     if lf[2] & 1:
       tags['gta:no_nav'] = 'yes'
     written.append((wid, a, b, tags))
+  short = short_unmarked(nodes, written)
+  written = [(wid, a, b, {k: v for k, v in tags.items() if not k.startswith('divider:lanes')} if wid in short else tags)
+             for wid, a, b, tags in written]
+  print(f"lanes with no line between them: {sum(any(k.startswith('divider:lanes') for k in t) for *_, t in written)} ways, "
+        f"{len(short)} on stretches under {STRETCH_MIN:.0f} m left lined")
   carried = street_centres(nodes, written, defaulted) if survey else {}
   edges_on = carried_edges(nodes, written, unread_edges) if survey else {}
   for wid, a, b, tags in written:
@@ -2730,14 +2812,21 @@ def main():
     print("roads carried through junctions: " + ', '.join(f'{n} {k}' for k, n in counts.items()))
     tiles = os.path.join(os.path.dirname(args.survey_lines), 'tiles')  # roadpaint's, beside its polylines
     if os.path.isdir(tiles):
-      from openpilot.tools.sim.bridge.gta5.map import painted_islands
+      from openpilot.tools.sim.bridge.gta5.map import junction_lanes, painted_islands, raised_islands
       from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
       from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+      moved, bends = junction_lanes.placed(OsmLanes.load(args.out, to_game), args.survey_lines, tiles)
+      junction_lanes.add(args.out, moved)
+      print(f"junction links bent off their road's line to its node: {len(bends)} bends, the lanes moved back onto the line at " +
+            f"{sum(b['ok'] for b in bends)} where the game files' paint shows them there ({len(moved)} ways)")
       osm = OsmLanes.load(args.out, to_game)
       found = painted_islands.islands(args.survey_lines, tiles, osm)
       strips = painted_islands.flush_strips(osm, tiles)
-      painted_islands.add(args.out, found, to_lat_lon, strips)
+      raised = raised_islands.islands(osm, tiles, stats=(why := {}))
+      painted_islands.add(args.out, found, to_lat_lon, strips, raised_islands.areas(raised))
       print(f"{len(found)} painted islands (traffic_calming=painted_island), {len(strips)} flush edges' road surface (area:highway)")
+      print(f"{len(raised)} raised islands (traffic_calming=island, {sum(f.centre_hit for f in raised)} under a lane's centre); " +
+            "of the lanes' runs over kerb: " + ', '.join(f'{n} {k}' for k, n in why.items()))
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")

@@ -10,8 +10,9 @@ kept, moved off jogs in the route's line (route_jogs, where the lane line swerve
 room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
 and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in, and
 kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner kerb (a far-side turn's a median's
-edge, else the road's far edge), within its lane outside lane changes and turns' corners, and past a fork off its
-gore. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
+edge, else the road's far edge), within its lane outside lane changes and turns' corners, past a fork off its
+gore, and off the map's raised islands (traffic_calming=island: a tram crossing's D islands), our body CLAMP_MARGIN
+clear of each. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
 wander (never periodic, faded out through turns, junctions and forks, and within its lane), joining it from where the
 car is (on the trip's first plan, a bend it can't take there where the route doubles back fails the plan). The plan is
 checked against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another
@@ -57,7 +58,8 @@ ONCOMING_S in the oncoming lanes away from a junction (the bridge's lane matchin
 brake to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
 for the map-fix work: kerb_contact (past a road's kerbs, or into a turn's corner kerb, from its legs' cross-sections),
 gta_edge (the plan's lane near GTA's road edge where the map's road is wider), lane_disagree, tracking_saturated,
-gta_link_offset, stop_line_far, plan_slot_mismatch, plan_lane_range, sharp_corner, jog_change, plan_clamp.
+gta_link_offset, stop_line_far, plan_slot_mismatch, plan_lane_range, sharp_corner, jog_change, plan_clamp,
+island_contact.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
@@ -232,6 +234,11 @@ CORNER_ZONE = 15.0  # m either side of such a turn's point
 CLAMP_EASE = 15.0  # m a push eases in and out over
 LANE_GRID = 2.0  # m between the places the lane is read at
 CLAMP_MAX = 2.5  # m a push is at most
+# m a raised island pushes the plan at most: a plan clipping one. One needing more runs through its middle (a route
+# across a median, a lane laid over it that nav didn't move from), which a push only bends into a sharper S over it:
+# that island is left to the island_contact anomaly and the plugin's obstacle probes
+ISLAND_MAX = 2.5
+ISLAND_ROOM = 1.0  # m beside our body (and CLAMP_MARGIN) an island keeps the lane clamp from pulling the plan back over it
 CARRY_MAX = 50.0  # m without a guide of its own a lane is carried across, at most (_lane_room)
 FORK_BEFORE, FORK_AFTER = 20.0, 40.0  # m before and after a fork its gore side is kept to
 FORK_ROOM = 0.3  # m from the lane's centre towards the gore at most
@@ -1398,6 +1405,13 @@ class MapDriver:
         self._anomaly("kerb_contact", t, self.path[i], float(self.s_path[i]), planned=True, corner=c["side"],
                       depth=round(float(np.nanmax(depth)), 2),
                       corner_at=[round(float(v), 1) for v in c["corner"]])
+    islands = getattr(lanes, "islands", None) or []
+    if islands and len(self.path) >= 2:
+      push, _ = self._island_push(self.path, self.theta, islands, cap=None)
+      hits = np.flatnonzero((np.abs(push) > KERB_MARGIN) & (self.s_path >= self.join_m))
+      if len(hits):
+        i = int(hits[np.argmax(np.abs(push[hits]))])
+        self._anomaly("island_contact", t, self.path[i], float(self.s_path[i]), planned=True, depth=round(float(abs(push[i])), 2))
     for st in self.stops:
       after = junctions[junctions > st["along"] - 1.0] if len(junctions) else junctions
       gap = float(after[0] - st["along"]) if len(after) else math.inf
@@ -1542,8 +1556,9 @@ class MapDriver:
     """The intent moved back where it strays (the lane line's fillets and eased corners cut across what's beside the
     lane): our body out of each turn's inside corner kerb (_corners) by CLAMP_MARGIN; outside lane changes and the
     corners of turns of CLAMP_TURN or more (but bends), our body within its lane, CLAMP_MARGIN in from its edges, and
-    near a fork within FORK_ROOM of the lane's centre on the gore's side. Each push eased in and out over CLAMP_EASE m,
-    at most CLAMP_MAX. Also how far (m) the line may then move left and right in its lane (for the in-lane bias and
+    near a fork within FORK_ROOM of the lane's centre on the gore's side; our body CLAMP_MARGIN clear of the raised
+    islands (_island_push, up to ISLAND_MAX), the lane's own limits let go beside one. Each push eased in and out over
+    CLAMP_EASE m, at most CLAMP_MAX. Also how far (m) the line may then move left and right in its lane (for the in-lane bias and
     wander): (intent, left, right). The pushes are kept in `clamps`, plan_clamp anomalies."""
     self.clamps = []
     along, _ = along_route(route, intent, route.at - 5.0)
@@ -1641,6 +1656,20 @@ class MapDriver:
     th = headings(line)
     front, rear, hw = self.body
     m = CLAMP_MARGIN
+    islands = getattr(route.lanes, "islands", None) or []
+    if islands:
+      push, near = self._island_push(line, th, islands)
+      if near.any():  # by an island the lane is no guide: the island's push holds the plan off it, the lane's doesn't pull it back
+        w = int(CLAMP_EASE / STEP)
+        zone = np.convolve(near.astype(float), np.ones(2 * w + 1), mode="same") > 0.5
+        lo[zone], hi[zone] = -np.inf, np.inf
+        room_l[zone], room_r[zone] = 0.0, 0.0
+        for i in np.flatnonzero(np.abs(push) > 0.05):
+          if push[i] > 0:
+            lo[i] = min(float(push[i]), ISLAND_MAX)
+          else:
+            hi[i] = max(float(push[i]), -ISLAND_MAX)
+          why[i] = "island"
     for c in self._corners(route, line, along):
       # within its legs: beyond them the road may bend away from their kerb lines
       near = np.flatnonzero(np.abs(along - c["along"]) < c["leg"])
@@ -1655,6 +1684,44 @@ class MapDriver:
     need = np.where(both, (np.where(both, lo, 0.0) + np.where(both, hi, 0.0)) / 2, np.where(lo > 0, lo, np.where(hi < 0, hi, 0.0)))
     need[: int(10.0 / STEP)] = 0.0  # where the car joins its line
     return need, why, room_l, room_r
+
+  def _island_push(self, line: np.ndarray, th: np.ndarray, islands: list[np.ndarray],
+                   cap: float | None = ISLAND_MAX) -> tuple[np.ndarray, np.ndarray]:
+    """For each point of a line (headings th): how far (m, right positive) it must move for our body, CLAMP_MARGIN
+    round it, to clear the raised islands (outlines [K, 2]), the shorter way round each, 0 where it's clear; and whether
+    an island is within ISLAND_ROOM beside that body. Each island is passed on one side all along (the side it takes
+    less pushing to), so a line through its middle isn't pushed both ways in turn. An island needing more than `cap` is
+    left out (None: none is)."""
+    from openpilot.tools.sim.bridge.gta5.map.junctions import densify
+    need, near = np.zeros(len(line)), np.zeros(len(line), bool)
+    front, rear, hw = self.body
+    m = CLAMP_MARGIN
+    half = hw + m
+    for ring in islands:
+      pts = densify(np.vstack([ring, ring[:1]]), 0.25)
+      c = ring.mean(0)
+      reach = float(np.hypot(*(ring - c).T).max()) + max(front, rear) + half + ISLAND_ROOM
+      hits, close = [], []  # (point, push right that clears it, push left that does); points it's beside
+      for i in np.flatnonzero(np.hypot(*(line - c).T) < reach):
+        f = np.array([math.cos(th[i]), math.sin(th[i])])
+        rel = pts - line[i]
+        x, y = rel @ f, rel @ np.array([-f[1], f[0]])  # along, left of the line
+        ys = y[(x >= -(rear + m)) & (x <= front + m)]
+        if not len(ys) or ys.min() >= half + ISLAND_ROOM or ys.max() <= -(half + ISLAND_ROOM):
+          continue
+        close.append(i)
+        if ys.min() < half and ys.max() > -half:
+          hits.append((i, half - float(ys.min()), half + float(ys.max())))
+      go_right = sum(h[1] for h in hits) <= sum(h[2] for h in hits)
+      if cap is not None and hits and max(h[1] if go_right else h[2] for h in hits) > cap:
+        continue  # through its middle: no push mends that
+      near[close] = True
+      if hits:
+        for i, right, left in hits:
+          d = right if go_right else -left
+          if abs(d) > abs(need[i]):
+            need[i] = d
+    return need, near
 
   def _splice(self, route, state: dict, t: float):
     """A new route under way: the old path kept past the lane change under way and 3 s on, then the new plan's."""

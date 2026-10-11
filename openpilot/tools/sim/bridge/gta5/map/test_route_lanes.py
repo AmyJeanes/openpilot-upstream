@@ -221,6 +221,46 @@ def test_placement_offset_runs_on():
   assert np.allclose(lines_with(side)[-6.0], (-6.0, 0.0))
 
 
+def test_lanes_moved_back_onto_a_bent_junctions_road():
+  # a one-way road north whose links bend 8 m left to a junction node and back (junction_lanes): the links' lanes
+  # moved back onto the road's line (placement:offset:start / :end), so nav's lane line runs straight through
+  from openpilot.tools.sim.bridge.gta5.map import junction_lanes
+  nodes = {1: (0.0, -100.0), 2: (0.0, -25.0), 3: (-8.0, 0.0), 4: (0.0, 25.0), 5: (0.0, 100.0), 6: (-100.0, 0.0), 7: (-8.0, -100.0)}
+  tags = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}
+  two_way = {'highway': 'primary', 'lanes': '2', 'width': '11'}
+  ways = {40: (tags, [1, 2]), 41: (tags, [2, 3]), 42: (tags, [3, 4]), 43: (tags, [4, 5]), 44: (two_way, [3, 6]), 45: (two_way, [7, 3])}
+  ids = np.array(sorted(nodes), np.int64)
+
+  def build(ws):
+    return OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ws, {}),
+                    lambda lat, lon: (lon, lat))
+  osm = build(ways)
+  found = junction_lanes.bends(osm)
+  assert len(found) == 1 and found[0].node == 3 and found[0].ins == [41] and found[0].outs == [42], found
+  assert abs(found[0].off + 8.0) < 1e-6
+  moved = junction_lanes.shifts(osm, found)
+  at_node = 8.0 / np.cos(np.arctan2(8.0, 25.0))  # square across the links, which run 17.7 degrees off the road
+  assert np.allclose(moved[41], (0.0, at_node), atol=0.01) and np.allclose(moved[42], (at_node, 0.0), atol=0.01), moved
+  tagged = junction_lanes.tags_for(osm, moved)
+  assert tagged[41]['placement:offset:start'] == '0' and tagged[41]['placement:offset:end'] == f'{round(at_node, 2):g}'
+  osm = build({**ways, **{w: ({**ways[w][0], **t}, ways[w][1]) for w, t in tagged.items()}})
+  assert osm.has_ends(41) and osm.moves_across(41) and not osm.moves_across(40)
+  # the lanes square across each link land on the road's lanes, x = -2.75 and 2.75 (narrowed by the links' slant)
+  for w, s in ((41, 0.0), (41, osm.length(41)), (42, 0.0), (42, osm.length(42) / 2)):
+    p, q = osm.way_points(w)
+    u = (q - p) / np.hypot(*(q - p))
+    for sp, x in zip(osm.section_along(w, s).ours, (-2.75, 2.75), strict=True):
+      lane = p + u * s + np.array([u[1], -u[0]]) * sp.centre
+      assert abs(lane[0] - x) < 0.15, (w, s, lane)
+  pts = np.array([nodes[n] for n in (1, 2, 3, 4, 5)])
+  line = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm).lane_line(0.0, [(0.0, 0), (200.0, 0)])
+  near = line[np.abs(line[:, 1]) < 30.0]
+  assert np.abs(near[:, 0] + 2.75).max() < 0.6, near  # straight on, no fillet round the links' corner at the node
+  plain = build(ways)  # as GTA laid them, the lane line bent across towards the node
+  bent = RouteLanes.from_osm(pts, ways_from_nodes(pts, plain), plain).lane_line(0.0, [(0.0, 0), (200.0, 0)])
+  assert bent[np.abs(bent[:, 1]) < 30.0][:, 0].min() < -6.0
+
+
 def test_route_lanes_bend_has_no_fillet():
   # a road bending through a node that isn't a junction keeps its own lane line
   osm = junction_map()
@@ -417,6 +457,41 @@ def pbf_bytes() -> bytes:
     head = ld(1, kind) + vi(3, len(blob))
     out += struct.pack('>I', len(head)) + head + blob
   return out
+
+
+def island_map(island_z: float = 10.0, centre=(0.0, 2.75)) -> OsmLanes:
+  """A one-way road east, two lanes 5.5 m wide (lane 0, on the left, centred 2.75 m north of its line), with a raised
+  island 3 m square at `centre` (traffic_calming=island)."""
+  cx, cy = centre
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0),
+           21: (cx - 1.5, cy - 1.5), 22: (cx + 1.5, cy - 1.5), 23: (cx + 1.5, cy + 1.5), 24: (cx - 1.5, cy + 1.5)}
+  ways = {10: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}, [1, 2]),
+          11: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}, [2, 3]),
+          20: ({'area': 'yes', 'traffic_calming': 'island'}, [21, 22, 23, 24, 21])}
+  tags = {n: {'ele': '10.0'} for n in (1, 2, 3)} | {n: {'ele': str(island_z)} for n in (21, 22, 23, 24)}
+  ids = np.array(sorted(nodes), np.int64)
+  data = OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), tags, ways, {})
+  return OsmLanes(data, lambda lat, lon: (lon, lat))
+
+
+def test_lanes_blocked_by_a_raised_island():
+  osm = island_map()
+  assert len(osm.islands) == 1 and osm.islands[0][0].shape == (4, 2) and osm.islands[0][1] == 10.0
+  pts = np.array([(-100.0, 0.0), (0.0, 0.0), (100.0, 0.0)])
+  rl = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert len(rl.islands) == 1
+  blocked = rl.blocked
+  assert [(lane, n) for _, _, lane, n in blocked] == [(0, 2)]  # the left lane only
+  a0, a1 = blocked[0][:2]
+  assert abs(a0 - 98.5) <= 0.5 and abs(a1 - 101.5) <= 0.5  # along the island's 3 m
+  # on the lane line between them it cuts neither lane's body band (2.75 m +- 0.9 m either side)
+  between = island_map(centre=(0.0, 0.0))
+  assert RouteLanes.from_osm(pts, ways_from_nodes(pts, between), between).blocked == []
+  high = island_map(island_z=20.0)  # another level's
+  rl = RouteLanes.from_osm(pts, ways_from_nodes(pts, high), high)
+  assert rl.islands == [] and rl.blocked == []
+  plain = junction_map()  # no islands
+  assert RouteLanes.from_osm(left_turn_route(), ways_from_nodes(left_turn_route(), plain), plain).blocked == []
 
 
 def test_pbf():
