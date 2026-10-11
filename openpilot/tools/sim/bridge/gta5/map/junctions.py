@@ -34,6 +34,7 @@ map as on our GTA V one.
   than where its kerbs meet the next roads' (painted level with the road it meets) is inside the junction's area,
   shaped as without it, and lies as painted (its node's `stop_line:bearing`, ours), along that road's edge where that
   is within PAINT_AGREE of the paint or no bearing is tagged.
+- A raised island (`traffic_calming=island`, raised_islands.py) is a kerb round its outline (`Junctions.raised`).
 - Kerbs aren't drawn within ISLAND_REACH of a painted island (`traffic_calming=painted_island`) or a road surface
   area (`area:highway`) at their height (off_islands): not of a road above or below (a ramp over a motorway).
 - A road carried straight on through a junction (`Junction.through`): where the junction has no traffic signals, the
@@ -599,6 +600,9 @@ class Junctions:
     self.islands = Islands(self.painted_islands + [osm.xy[osm.data.index(refs)] for refs in surfaces],  # road surface: no kerb in it
                            [height(refs) for refs in island_refs + surfaces])
     self.island_outlines = [(xy, colour) for xy, colour in painted if colour in ('white', 'yellow')]  # drawn as painted
+    # raised islands (traffic_calming=island): kerbed, drawn as kerbs round them; [(outline [K, 2], height)]
+    self.raised = [(osm.xy[osm.data.index(refs[:-1])], height(refs)) for tags, refs in osm.data.ways.values()
+                   if tags.get('traffic_calming') == 'island' and len(refs) >= 4]
     self.crossings = [osm.xy[osm.data.index(refs)] for tags, refs in osm.data.ways.values()
                       if tags.get('footway') == 'crossing' and len(refs) >= 2]
     self._crossing_cells = self._cells(self.crossings)

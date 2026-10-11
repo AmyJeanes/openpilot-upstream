@@ -446,6 +446,14 @@ topcam poses) as tiles, so the check runs on them without the game.
   map view and the overlay draw an island's outline in its colour, and a junction's corner ends at a painted
   island's tip, square, rather than trimming back over a painted gore (Vinewood Blvd's hatched median beside the
   left-turn lane, hidden under a junction area trimmed 40 m back).
+- Raised islands (`raised_islands.py`), from the same tiles: kerbed islands a little above the road with road all round
+  them, where a road's lanes run over them (the D-shaped islands with a lamp post on a tram crossing's centre line,
+  where GTA lays every link to one junction node; slip, corner and pork-chop islands; median noses), each a closed way
+  `area=yes` + `traffic_calming=island` (no highway tag: the router reads past it), outlined as a kerb in the map view
+  and the overlay (`Junctions.raised`). Read along each road's lanes and a car's width either side, kept where the
+  surface is real kerb standing 5-40 cm up, closed (not a pavement or a long median), ringed by road, and under a road
+  other than a service road (a driveway cuts a pavement into closed pieces): 20 from the 19293 lanes' runs over kerb or
+  pavement, most of which are concrete roads and yards the tiles call pavement.
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /

@@ -619,6 +619,11 @@ def road_marks(paths, osm) -> dict:
     if g is not None:
       for piece in apart(ring, drawn_segs[colour]):
         add("c" if colour == "yellow" else "w", np.column_stack([piece, np.full(len(piece), paths.z[g])]), (g, g))
+  for xy, _ in junctions.raised:  # raised islands' kerbs
+    ring = np.vstack([xy, xy[:1]])
+    g = near_node(paths, ring.mean(0))
+    if g is not None:
+      add("e", np.column_stack([ring, np.full(len(ring), paths.z[g])]), (g, g))
   for c in junctions.crossing_lines():
     g = near_node(paths, c.mean(0))
     if g is not None:
