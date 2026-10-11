@@ -428,11 +428,16 @@ def test_island():
   fixed = ms.drive(r, cfg, lane=0, seconds=0.2).md
   assert fixed.plan["keys"][-1][1] == 1.0 and fixed.plan["slot_check"]["fixed"], fixed.plan
   assert not np.abs(fixed._island_push(fixed.path, fixed.theta, r.lanes.islands)[0]).any()
-  left = ms.drive(island_keep(), {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  # the plan left in the left lane, the island right over it: no push mends that (ISLAND_MAX), it's an island_contact
+  middle = ms.drive(island_keep(), {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert not [c for c in middle.clamps if c["why"] == "island"] and kinds(middle, "island_contact"), middle.clamps
+  # an island clipping the left lane's left side: the clamp pushes our body clear of it
+  r2 = island_keep((-5.0, -12.0))
+  left = ms.drive(r2, {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
   assert left.plan["keys"] == [(0.0, 0.0)] and [c for c in left.clamps if c["why"] == "island"], left.clamps
-  assert not np.abs(left._island_push(left.path, left.theta, r.lanes.islands)[0]).any() and not kinds(left, "island_contact")
+  assert np.abs(left._island_push(left.path, left.theta, r2.lanes.islands)[0]).max() < 1e-6 and not kinds(left, "island_contact")
   i = int(np.argmin(np.abs(left.route_s - 388.0)))
-  assert left.route_r[i] > -1.25 + HALF_WIDTH, left.route_r[i]  # past the island's right side (-1.25 m) by our half width
+  assert left.route_r[i] > -3.5 + HALF_WIDTH, left.route_r[i]  # past the island's right side (-3.5 m) by our half width
   print("island: ok")
 
 

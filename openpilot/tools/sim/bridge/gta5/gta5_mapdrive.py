@@ -155,7 +155,10 @@ CORNER_ZONE = 15.0  # m either side of such a turn's point
 CLAMP_EASE = 15.0  # m a push eases in and out over
 LANE_GRID = 2.0  # m between the places the lane is read at
 CLAMP_MAX = 2.5  # m a push is at most
-ISLAND_MAX = 4.0  # m a raised island pushes the plan at most: off a lane laid over it into the next
+# m a raised island pushes the plan at most: a plan clipping one. One needing more runs through its middle (a route
+# across a median, a lane laid over it that nav didn't move from), which a push only bends into a sharper S over it:
+# that island is left to the island_contact anomaly and the plugin's obstacle probes
+ISLAND_MAX = 2.5
 ISLAND_ROOM = 1.0  # m beside our body (and CLAMP_MARGIN) an island keeps the lane clamp from pulling the plan back over it
 FORK_BEFORE, FORK_AFTER = 20.0, 40.0  # m before and after a fork its gore side is kept to
 FORK_ROOM = 0.3  # m from the lane's centre towards the gore at most
@@ -1195,7 +1198,7 @@ class MapDriver:
                       corner_at=[round(float(v), 1) for v in c["corner"]])
     islands = getattr(lanes, "islands", None) or []
     if islands and len(self.path) >= 2:
-      push, _ = self._island_push(self.path, self.theta, islands)
+      push, _ = self._island_push(self.path, self.theta, islands, cap=None)
       hits = np.flatnonzero((np.abs(push) > KERB_MARGIN) & (self.s_path >= self.join_m))
       if len(hits):
         i = int(hits[np.argmax(np.abs(push[hits]))])
@@ -1447,11 +1450,13 @@ class MapDriver:
     need[: int(10.0 / STEP)] = 0.0  # where the car joins its line
     return need, why, room_l, room_r
 
-  def _island_push(self, line: np.ndarray, th: np.ndarray, islands: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+  def _island_push(self, line: np.ndarray, th: np.ndarray, islands: list[np.ndarray],
+                   cap: float | None = ISLAND_MAX) -> tuple[np.ndarray, np.ndarray]:
     """For each point of a line (headings th): how far (m, right positive) it must move for our body, CLAMP_MARGIN
     round it, to clear the raised islands (outlines [K, 2]), the shorter way round each, 0 where it's clear; and whether
     an island is within ISLAND_ROOM beside that body. Each island is passed on one side all along (the side it takes
-    less pushing to), so a line through its middle isn't pushed both ways in turn."""
+    less pushing to), so a line through its middle isn't pushed both ways in turn. An island needing more than `cap` is
+    left out (None: none is)."""
     from openpilot.tools.sim.bridge.gta5.map.junctions import densify
     need, near = np.zeros(len(line)), np.zeros(len(line), bool)
     front, rear, hw = self.body
@@ -1461,7 +1466,7 @@ class MapDriver:
       pts = densify(np.vstack([ring, ring[:1]]), 0.25)
       c = ring.mean(0)
       reach = float(np.hypot(*(ring - c).T).max()) + max(front, rear) + half + ISLAND_ROOM
-      hits = []  # (point, push right that clears it, push left that does)
+      hits, close = [], []  # (point, push right that clears it, push left that does); points it's beside
       for i in np.flatnonzero(np.hypot(*(line - c).T) < reach):
         f = np.array([math.cos(th[i]), math.sin(th[i])])
         rel = pts - line[i]
@@ -1469,11 +1474,14 @@ class MapDriver:
         ys = y[(x >= -(rear + m)) & (x <= front + m)]
         if not len(ys) or ys.min() >= half + ISLAND_ROOM or ys.max() <= -(half + ISLAND_ROOM):
           continue
-        near[i] = True
+        close.append(i)
         if ys.min() < half and ys.max() > -half:
           hits.append((i, half - float(ys.min()), half + float(ys.max())))
+      go_right = sum(h[1] for h in hits) <= sum(h[2] for h in hits)
+      if cap is not None and hits and max(h[1] if go_right else h[2] for h in hits) > cap:
+        continue  # through its middle: no push mends that
+      near[close] = True
       if hits:
-        go_right = sum(h[1] for h in hits) <= sum(h[2] for h in hits)
         for i, right, left in hits:
           d = right if go_right else -left
           if abs(d) > abs(need[i]):
