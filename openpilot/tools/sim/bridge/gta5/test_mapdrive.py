@@ -749,6 +749,50 @@ def test_lane_fixes_by_the_moves():
   print(f"lane fixes by the moves: ok ({done} of map1010c's trips re-planned)" if done else "lane fixes by the moves: ok (trips skipped: no recordings)")
 
 
+LANE_END_TRIP = "123.0,-517.0,42.2,198,9>-418.0,-1444.2"  # map1011c 002
+
+
+def test_lane_end_past_a_junction():
+  """map1011c 002: out of a right turn in the right lane, which ends 30 m past the through junction 56 m on. nav
+  squeezes the change left onto the junction's node (0.07 m, across the lanes' renumbering there), and with no room
+  past the junction nor (since lanefix) back across it, the plan kept it: "lane 2.0 674.1 m along, where the road has
+  2" on every style (11 of 40 before lanefix). Now such a change runs before the junction, where the lane it goes into
+  is one the junction's slots take, clear of the crossings, MIN_LC_M long at the least; and stays as nav has it where
+  that lane isn't one of them."""
+  from types import SimpleNamespace
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import CROSSING_CLEAR, MIN_LC_M
+  md = MapDriver({"seed": 3})
+  r = ms.straight(800, ours=3, junctions=[62, 67])  # junction nodes at 620 (the turn) and 670 (through)
+  nav = [(0.0, 2.0), (615.0, 2.0), (615.0, 2.0), (670.0, 2.0), (670.07, 1.0), (670.07, 1.0), (670.07, 0.0), (700.0, 0.0), (800.0, 0.0)]
+
+  class Slots:
+    def __init__(self, want):
+      self.moves = [SimpleNamespace(along=670.0, need=True, turn=False, free=640.0, opens=None, window=lambda v: (640.0, 640.0, 646.0))]
+      self.want = want
+
+    def target(self, s, v=0.0):
+      return r.lanes.section_at(s), SimpleNamespace(centre=False, want=self.want, move=self.moves[0])
+  out = md.retime(r, nav, Slots({1, 2}))
+  ch = [(out[a][0], out[b][0]) for a, b in chains(out) if out[b][0] - out[a][0] > 1e-3]
+  assert len(ch) == 1 and 620.0 + CROSSING_CLEAR - 1e-6 <= ch[0][0] and ch[0][1] <= 670.0 - CROSSING_CLEAR + 1e-6, out
+  assert ch[0][1] - ch[0][0] >= MIN_LC_M and lane_at(out, 668.0) == 1.0 and out[-4:] == nav[-4:], out
+  assert md.retime(r, nav, Slots({2})) == nav  # the lane it goes into isn't the junction's: as nav has it
+  # the trip itself, from the live router's route (routes_cache), over styles
+  if ms.trip_route(LANE_END_TRIP) is None:
+    print("lane end past a junction: ok (trip skipped: no live map or route)")
+    return
+  for seed in range(10):
+    route, pose = ms.trip_route(LANE_END_TRIP)
+    md = MapDriver({"seed": seed})
+    assert md._make_plan(route, {"pos": [pose[0], pose[1], 0.0], "heading": pose[2], "vEgo": 0.0}, 0.0), (seed, md.aborts)
+    keys = md.keys
+    assert not [a for a in md.anomalies if a["kind"] == "plan_lane_range"], (seed, md.anomalies)
+    for a, b in chains(keys):
+      s0, s1 = keys[a][0], keys[b][0]
+      assert s1 - s0 <= 1e-3 or not [c for c in route.stops if s0 - CROSSING_CLEAR < c < s1], (seed, s0, s1)
+  print("lane end past a junction: ok (map1011c 002 planned on 10 styles)")
+
+
 def test_oncoming_abort():
   """In the oncoming lanes by the bridge's lane matching (laneMap kind "oncoming") for ONCOMING_S away from a junction:
   the trip ends (map1010c 021 drove 10 s there until record_run stopped it)."""
@@ -968,6 +1012,7 @@ if __name__ == "__main__":
   test_live_starts()
   test_follow_slots()
   test_lane_fixes_by_the_moves()
+  test_lane_end_past_a_junction()
   test_oncoming_abort()
   test_lane_change_kept_off_a_jog()
   test_arrival()

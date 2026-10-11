@@ -746,7 +746,8 @@ class MapDriver:
     """Each single lane change over the style's time at the road's speed, its end placed by the style within its
     move's lane-slot window (freeway ones nav's schedule +-fwy_timing of a lane's time), clear of stop lines and junction
     nodes in the city, never begun back across the move before; one from where its lane opens kept there, no shorter
-    than MIN_LC_M."""
+    than MIN_LC_M; a city one nav squeezed under MIN_LC_M that finds no room so is run before the crossing it's on
+    (_room_before)."""
     keys = list(keys)
     crossings = sorted(route.stops + route.junctions)
     for a, b in chains(keys):
@@ -767,6 +768,7 @@ class MapDriver:
       while j > 0 and abs(keys[j - 1][1] - keys[j][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
         j -= 1
       lower = keys[j][0] if a > 0 else s0
+      back = lower
       upper = keys[b + 1][0] if b + 1 < len(keys) else s1
       window = None
       if slots is not None:
@@ -789,9 +791,8 @@ class MapDriver:
         e = s1
       e = min(max(e, lower + length), hi)
       start = max(e - length, lower)
-      if e - start < 0.6 * length:
-        continue  # no room: as nav has it
-      if not fwy:
+      placed = e - start >= 0.6 * length  # else no room: as nav has it
+      if placed and not fwy:
         for c in crossings:
           if start - CROSSING_CLEAR < c < e:
             if c + CROSSING_CLEAR + length <= hi:
@@ -799,11 +800,35 @@ class MapDriver:
             elif c - CROSSING_CLEAR - length >= lower:
               start, e = c - CROSSING_CLEAR - length, c - CROSSING_CLEAR
         if any(start - CROSSING_CLEAR < c < e for c in crossings) and not any(s0 - CROSSING_CLEAR < c < s1 for c in crossings):
-          continue  # only nav's timing was clear of them
-      if not (lower - EPS <= start < e <= upper + EPS):
-        continue
-      keys[a], keys[b] = (float(start), la), (float(e), lb)
+          placed = False  # only nav's timing was clear of them
+      placed = placed and lower - EPS <= start < e <= upper + EPS
+      least = MIN_LC_M * max(abs(lb - la), 1.0)
+      if not placed and not fwy and s1 - s0 < least - EPS:
+        # nav had no room for it (a lane ending just past a junction squeezes it onto the junction's node)
+        before = self._room_before(route, slots, crossings, s0, s1, lb, back, length, least)
+        if before is not None:
+          (start, e), placed = before, True
+      if placed:
+        keys[a], keys[b] = (float(start), la), (float(e), lb)
     return keys
+
+  def _room_before(self, route, slots, crossings: list[float], s0: float, s1: float, lane: float, back: float,
+                   length: float, least: float) -> tuple[float, float] | None:
+    """Where a city lane change into `lane` that nav squeezed into s0..s1 may run instead: ending CROSSING_CLEAR short
+    of the stop line or junction node it's on (else where nav began it), `length` long or as long as there's room for
+    down to `least`, not before `back` nor across a crossing, nor back across a move whose slot lanes don't include
+    `lane`; None where there's no such room."""
+    on = [c for c in crossings if s0 - CROSSING_CLEAR < c <= s1 + EPS]
+    e = min(on) - CROSSING_CLEAR if on else s0
+    start = max([e - length, back] + [c + CROSSING_CLEAR for c in crossings if c < e])
+    if e - start < least:
+      return None
+    for m in slots.moves if slots is not None else []:
+      if m.need and start < m.along <= s1 + 1.0:
+        good, target = self._slot_lanes(route, slots, m.along - 2.0, self._speed_at(route, m.along))
+        if good is None or target.move is not m or int(round(lane)) not in good:
+          return None
+    return start, e
 
   def slot_check(self, route, keys: list[tuple[float, float]], slots) -> dict:
     """The plan against the lane slots' targets: from each target's end to its move, the plan's lane (rounded) must be
