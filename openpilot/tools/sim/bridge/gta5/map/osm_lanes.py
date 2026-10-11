@@ -16,6 +16,9 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   `placement` (or its default) puts it, seen along the way, negative to the left: for a way whose line can't be moved
   to where the lanes are painted (our map's ways run along GTA's nodes) and isn't on a lane edge or middle placement can
   name. Where the next way's lanes sit elsewhere, they move across to it as any two ways' do (BLEND_M).
+  `placement:offset:start` / `:end` (ours): the offset at the way's first and last node, the lanes moving across
+  evenly between, as widths do with `width:lanes:start` / `:end` (a junction's link bent off its road's line to the
+  junction's node, its lanes kept on the road's line: junction_lanes.py).
 - `width`: kerb to kerb, metres, parking lanes and shoulders on the carriageway included. Without `width:lanes` it's
   shared out evenly; on a two-way way, what's left after `width:lanes` is a median centred between the directions.
 - `parking:left|right|both=lane` (with `parking:<side>:width`, else by `:orientation`): a parking lane on the
@@ -316,11 +319,11 @@ class WayLanes:
 
     plain_dir = (FORWARD if oneway == 1 else BACKWARD) if oneway else None
     for key, d in (('placement', plain_dir), ('placement:forward', FORWARD), ('placement:backward', BACKWARD)):
-      if (at := place(tags.get(key), d)) is not None:
-        road.placed[key] = at
+      if (where := place(tags.get(key), d)) is not None:
+        road.placed[key] = where
     if road.placed:
       road.line = sum(road.placed.values()) / len(road.placed)
-    road.line -= signed_metres(tags.get('placement:offset')) or 0.0
+    road.line -= signed_metres(get('placement:offset')) or 0.0
     tagged = metres(tags.get('width'))
     road.tagged = (tagged - sum(parking) - sl - sr if tagged else None, known, unknown)  # width=* less parking and shoulders
     return road
@@ -699,8 +702,9 @@ class OsmLanes:
     return self.xy[int(self.data.index([node])[0])]
 
   def has_ends(self, way: int) -> bool:
-    """Whether the way's lanes widen or narrow along it (width:lanes...:start / :end), as in a taper."""
-    return any(k.startswith('width') and k.endswith((':start', ':end')) for k in self.ways[way][0])
+    """Whether the way's lanes widen, narrow or move across along it (width:lanes...:start / :end,
+    placement:offset:start / :end), as in a taper."""
+    return any(k.startswith(('width', 'placement:offset')) and k.endswith((':start', ':end')) for k in self.ways[way][0])
 
   def lanes_at(self, way: int, end: str) -> WayLanes:
     """The way's lanes at its first node (`end` 'start') or last ('end')."""
@@ -712,6 +716,19 @@ class OsmLanes:
 
   def length(self, way: int) -> float:
     return float(np.hypot(*np.diff(self.way_points(way), axis=0).T).sum())
+
+  def moves_across(self, way: int) -> bool:
+    """Whether the way's lanes move across along it (placement:offset:start / :end)."""
+    return any(k.startswith('placement:offset:') for k in self.ways[way][0])
+
+  def section_along(self, way: int, s: float, d: int = FORWARD) -> 'Section':
+    """The way's cross-section s m along it from its first node, seen travelling d: as its lanes move across along it
+    (placement:offset:start / :end), else its one cross-section."""
+    if not self.moves_across(way):
+      return Section.of(self.lanes(way), d)
+    t = s / max(self.length(way), EPS)
+    sec = _lerp(Section.of(self.lanes_at(way, 'start')), Section.of(self.lanes_at(way, 'end')), t)
+    return sec if d == FORWARD else mirrored(sec)
 
   def _other(self, way: int, node: int) -> tuple[int, int] | None:
     """The one other way at a node where a road just carries on (two ways), and its direction away from the node
@@ -1668,6 +1685,12 @@ class RouteLanes:
       u_in = route(a) - route(max(a - CORNER_CHORD, self.along[0]))
       u_out = route(min(b + CORNER_CHORD, self.along[-1])) - route(b)
       u_in, u_out = u_in / max(np.hypot(*u_in), 1e-6), u_out / max(np.hypot(*u_out), 1e-6)
+      # lanes running straight on through the route's corner (a junction's ways bent to its node, their lanes moved
+      # back onto the road's line: junction_lanes) leave the lane line no corner to round
+      l_in, l_out = at(a) - at(max(a - CORNER_CHORD, s[0])), at(min(b + CORNER_CHORD, s[-1])) - at(b)
+      if min(np.hypot(*l_in), np.hypot(*l_out)) > 1.0 and \
+          abs(math.degrees((heading_of(l_out) - heading_of(l_in) + math.pi) % (2 * math.pi) - math.pi)) < CORNER_TURN / 2:
+        continue
       path = fillet(at(a), u_in, at(b), u_out, FILLET_RADIUS['left'], FILLET_RADIUS['right'])
       i0, i1 = int(np.searchsorted(s, a)), int(np.searchsorted(s, b, side='right'))
       if path is None or i0 < last:

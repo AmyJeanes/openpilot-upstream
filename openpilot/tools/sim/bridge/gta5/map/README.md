@@ -165,6 +165,14 @@ topcam poses) as tiles, so the check runs on them without the game.
     whole cross-section, lanes, lines and kerbs, that far right of where `placement` (or its default) puts it, seen
     along the way (negative: left). Where the next way's lanes sit elsewhere they move across to it over 10 m either
     side of the node, as any two ways' do (below).
+  - GTA meets every link of a junction at one node. Where a divided road's carriageways cross another road at a node
+    in their middle (Innocence Blvd's tram crossing, Las Lagunas Blvd), each carriageway's last link before the node
+    and first after it angle across to it, so their lanes jogged towards it and back (8 m at Innocence Blvd, over both
+    its raised islands) where the paint runs straight on. Where a one-way way in and one out bend off lines that run
+    on into each other, the links from each bend to the node get `placement:offset:start` / `:end` (ours: the offset
+    at the way's ends, the lanes moving across evenly between) putting their lanes back on that line, where the game
+    files' paint lines run over the moved lanes' middle at most half as often (`junction_lanes.py`: 4 of 13 such
+    junctions). Nav's lane line then runs straight through, with no fillet round the links' corner at the node.
   - GTA's offset between the directions of a two-way link is a painted median, 0.9 m a step whatever the lanes'
     width (5.2-5.5 m at 6 steps on narrow and normal links): `width` includes it, `width:lanes:forward` / `:backward`
     give the lanes, and what's left is centred between them. Its edges are the kinds the game files paint there

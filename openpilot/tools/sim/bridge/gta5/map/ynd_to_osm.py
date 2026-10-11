@@ -2812,9 +2812,13 @@ def main():
     print("roads carried through junctions: " + ', '.join(f'{n} {k}' for k, n in counts.items()))
     tiles = os.path.join(os.path.dirname(args.survey_lines), 'tiles')  # roadpaint's, beside its polylines
     if os.path.isdir(tiles):
-      from openpilot.tools.sim.bridge.gta5.map import painted_islands
+      from openpilot.tools.sim.bridge.gta5.map import junction_lanes, painted_islands
       from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
       from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+      moved, bends = junction_lanes.placed(OsmLanes.load(args.out, to_game), args.survey_lines, tiles)
+      junction_lanes.add(args.out, moved)
+      print(f"junction links bent off their road's line to its node: {len(bends)} bends, the lanes moved back onto the line at " +
+            f"{sum(b['ok'] for b in bends)} where the game files' paint shows them there ({len(moved)} ways)")
       osm = OsmLanes.load(args.out, to_game)
       found = painted_islands.islands(args.survey_lines, tiles, osm)
       strips = painted_islands.flush_strips(osm, tiles)

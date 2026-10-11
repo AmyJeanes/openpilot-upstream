@@ -1152,10 +1152,19 @@ class Junctions:
     pts = m.line.p[1:-1]
     return float(np.hypot(*np.diff(pts[:k + 1], axis=0).T).sum()) if k else 0.0
 
+  def _lanes_at(self, m: Member, s: float, towards: bool) -> list:
+    """The lanes of a road's first way, s m out from its junction node, running towards it or away: where they move
+    across along the way (placement:offset:start / :end), as they lie there."""
+    w, fwd = m.ways[0]
+    d = (BACKWARD if fwd else FORWARD) if towards else (FORWARD if fwd else BACKWARD)
+    if not self.osm.moves_across(w):
+      return self.osm.lanes(w).ours(d)
+    length = self.osm.length(w)
+    return self.osm.section_along(w, s if fwd else length - s, d).ours
+
   def _add_stop(self, j: Junction, m: Member, kind: str, along: float, signal: bool = False, node: int | None = None):
     w, fwd = m.ways[0]
-    spans = self.osm.lanes(w).ours(BACKWARD if fwd else FORWARD)  # the lanes towards the junction
-    if not spans:
+    if not self.osm.lanes(w).ours(BACKWARD if fwd else FORWARD):  # the lanes towards the junction
       return
     surveyed = node is not None and self.osm.data.node_tags.get(node, {}).get('source:position') == 'survey'
     s = along if surveyed else max(along, m.trim + STOP_SETBACK)  # surveyed: where painted, even inside the area
@@ -1163,6 +1172,7 @@ class Junctions:
       hit = crossing(Poly(c, 0.0, 0.0), m.line, math.inf, max(s, m.trim + CROSSING_REACH) + CROSSING_WIDTH)
       if hit is not None and hit[1] > m.trim - CROSSING_WIDTH:
         s = max(s, hit[1] + CROSSING_WIDTH / 2 + STOP_SETBACK)
+    spans = self._lanes_at(m, s, True)
     p, u = m.line.at(s), m.line.tangent(s)
     right = _left(u)  # right of the direction of travel into the junction
     lo, hi = min(sp.left for sp in spans), max(sp.right for sp in spans)
@@ -1394,11 +1404,14 @@ class Junctions:
         continue
       pairs = lane_moves([s.lane.turns for s in lanes_in], [(t, len(lo)) for t, _, lo in exits])
       ways_in = {w for w, _ in m_in.ways}
-      for k, (turned, m_out, lanes_out) in enumerate(exits):
+      s_in = stop_at.get(id(m_in), m_in.trim)
+      placed_in = self._lanes_at(m_in, s_in, True)  # where they lie at the stop line, moving across along the way
+      for k, (turned, m_out, _) in enumerate(exits):
         given = next((c for f, t, c in connects if f in ways_in and t == m_out.ways[0][0]), None)
+        placed_out = self._lanes_at(m_out, m_out.trim, False)
         for a, b in (given if given is not None else pairs[k]):
-          if a < len(lanes_in) and b < len(lanes_out):
-            out.append(self._movement(m_in, a, lanes_in[a], stop_at.get(id(m_in), m_in.trim), m_out, b, lanes_out[b], turned))
+          if a < len(placed_in) and b < len(placed_out):
+            out.append(self._movement(m_in, a, placed_in[a], s_in, m_out, b, placed_out[b], turned))
     return out
 
   def _reachable(self, j: Junction, node: int) -> set[int]:

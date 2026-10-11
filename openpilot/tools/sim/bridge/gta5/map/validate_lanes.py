@@ -7,7 +7,7 @@
 - width: width:lanes fit in width (less its parking lanes);
 - parking: parking:left|right|both values OSM knows, their widths metres;
 - placement: well formed, its lane is on the road, and given both ways the two agree but for the median; our
-  placement:offset metres;
+  placement:offset (and its :start / :end) metres;
 - transition: placement=transition only on ways up to TRANSITION_MAX long;
 - connectivity: type=connectivity relations have from, via and to, and their lanes are on those roads;
 - exit: every turn arrow has a way out that way at the junction ahead, that no restriction forbids.
@@ -136,8 +136,9 @@ def check_tags(tags: dict, length: float | None = None, drive_on_right: bool = T
       out.append(('placement', f'{key}={v}'))
     elif int(m.group(2)) > n_lanes:
       out.append(('placement', f'{key}={v} but {n_lanes} lanes that way'))
-  if 'placement:offset' in tags and signed_metres(tags['placement:offset']) is None:
-    out.append(('placement', f"placement:offset={tags['placement:offset']}"))
+  for key in ('placement:offset', 'placement:offset:start', 'placement:offset:end'):
+    if key in tags and signed_metres(tags[key]) is None:
+      out.append(('placement', f"{key}={tags[key]}"))
   if len(road.placed) > 1:
     # apart by no more than the median, and where lanes widen along the way, the lanes either side of it (turn bays
     # opening in it: placed beyond them, the line doesn't move with them)

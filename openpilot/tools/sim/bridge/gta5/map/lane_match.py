@@ -61,11 +61,15 @@ class LaneMatcher:
   def __init__(self, osm: OsmLanes, heights: dict[int, float] | None = None):
     self.osm = osm
     heights = node_heights(osm) if heights is None else heights
-    rows = []
+    rows, starts = [], []
     for wid, (_, refs) in osm.ways.items():
       pts = osm.way_points(wid)
+      along = 0.0
       for i in range(len(refs) - 1):
         rows.append((wid, *pts[i], heights.get(refs[i], np.nan), *pts[i + 1], heights.get(refs[i + 1], np.nan)))
+        starts.append(along)  # m along its way to the segment's start, for lanes moving across along it
+        along += float(np.hypot(*(pts[i + 1] - pts[i])))
+    self.start = np.array(starts, float)
     s = np.array(rows, dtype=float).reshape(-1, 7)
     self.way = s[:, 0].astype(np.int64)
     self.a, self.az, self.b, self.bz = s[:, 1:3], s[:, 3], s[:, 4:6], s[:, 6]
@@ -110,7 +114,8 @@ class LaneMatcher:
     for k in np.nonzero(ok)[0]:
       way = int(self.way[idx[k]])
       direction = FORWARD if align[k] > 0 else BACKWARD
-      sec = self.section(way, direction)
+      sec = self.section(way, direction) if not self.osm.moves_across(way) else \
+        self.osm.section_along(way, float(self.start[idx[k]] + np.clip(t[k], 0.0, ln[k])), direction)
       if not sec.spans:
         continue
       right = float(r[k] if direction == FORWARD else -r[k])

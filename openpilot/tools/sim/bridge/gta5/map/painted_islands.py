@@ -204,12 +204,17 @@ class Quads:
     for w in ways:
       pts = osm.way_points(w)
       lo, hi = osm.lanes(w).edges(FORWARD)
-      for a, b in zip(pts[:-1], pts[1:], strict=True):
+      along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))))
+      for k, (a, b) in enumerate(zip(pts[:-1], pts[1:], strict=True)):
         size = float(np.hypot(*(b - a)))
         if size < 0.05:
           continue
         r = np.array([(b - a)[1], -(b - a)[0]]) / size  # right of its direction
-        quads.append([a + r * lo, b + r * lo, b + r * hi, a + r * hi])
+        if osm.moves_across(w):  # its lanes moving across along it (placement:offset:start / :end)
+          (la, ha), (lb, hb) = osm.edges_at(w, float(along[k])), osm.edges_at(w, float(along[k + 1]))
+          quads.append([a + r * la, b + r * lb, b + r * hb, a + r * ha])
+        else:
+          quads.append([a + r * lo, b + r * lo, b + r * hi, a + r * hi])
         owner.append(w)
     self.q = np.array(quads, float).reshape(-1, 4, 2)
     self.owner = np.array(owner, np.int64)
