@@ -143,10 +143,11 @@ def islands(lines_path, tiles_dir, osm=None) -> list[Island]:
   return found
 
 
-def add(path: str, found: list[Island], to_lat_lon, surfaces=()) -> int:
-  """Writes the map at `path` again with each island, and each road surface strip [(outline [N, 2] at z, class, z)]
-  (flush_strips), as a closed way of new nodes, numbered on from the map's highest (they're GTA's nodes by area, a
-  65536 each: there are too many for the area tapers and stop lines take theirs from); returns how many."""
+def add(path: str, found: list[Island], to_lat_lon, surfaces=(), extra=()) -> int:
+  """Writes the map at `path` again with each island, each road surface strip [(outline [N, 2] at z, class, z)]
+  (flush_strips) and each other area [(outline [N, 3], tags)] (raised_islands.areas), as a closed way of new nodes,
+  numbered on from the map's highest (they're GTA's nodes by area, a 65536 each: there are too many for the area tapers
+  and stop lines take theirs from); returns how many."""
   import osmium
   nodes, ways, rels = [], [], []
   for o in osmium.FileProcessor(path):
@@ -162,6 +163,7 @@ def add(path: str, found: list[Island], to_lat_lon, surfaces=()) -> int:
   areas = [(island.ring[:-1], {'area': 'yes', 'traffic_calming': 'painted_island',
                                 **({'colour': island.colour} if island.colour else {})}) for island in found]
   areas += [(np.column_stack([xy, np.full(len(xy), z)]), {'area:highway': cls}) for xy, cls, z in surfaces]
+  areas += [(np.asarray(ring, float), dict(tags)) for ring, tags in extra]
   for ring, tags in areas:
     refs = []
     for x, y, z in ring:

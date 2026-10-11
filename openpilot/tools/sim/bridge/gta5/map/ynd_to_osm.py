@@ -2812,7 +2812,7 @@ def main():
     print("roads carried through junctions: " + ', '.join(f'{n} {k}' for k, n in counts.items()))
     tiles = os.path.join(os.path.dirname(args.survey_lines), 'tiles')  # roadpaint's, beside its polylines
     if os.path.isdir(tiles):
-      from openpilot.tools.sim.bridge.gta5.map import junction_lanes, painted_islands
+      from openpilot.tools.sim.bridge.gta5.map import junction_lanes, painted_islands, raised_islands
       from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
       from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
       moved, bends = junction_lanes.placed(OsmLanes.load(args.out, to_game), args.survey_lines, tiles)
@@ -2822,8 +2822,11 @@ def main():
       osm = OsmLanes.load(args.out, to_game)
       found = painted_islands.islands(args.survey_lines, tiles, osm)
       strips = painted_islands.flush_strips(osm, tiles)
-      painted_islands.add(args.out, found, to_lat_lon, strips)
+      raised = raised_islands.islands(osm, tiles, stats=(why := {}))
+      painted_islands.add(args.out, found, to_lat_lon, strips, raised_islands.areas(raised))
       print(f"{len(found)} painted islands (traffic_calming=painted_island), {len(strips)} flush edges' road surface (area:highway)")
+      print(f"{len(raised)} raised islands (traffic_calming=island, {sum(f.centre_hit for f in raised)} under a lane's centre); " +
+            "of the lanes' runs over kerb: " + ', '.join(f'{n} {k}' for k, n in why.items()))
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")
