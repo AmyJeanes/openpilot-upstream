@@ -42,6 +42,10 @@ RING = 0.5  # of the cells just outside it road or gutter, at least
 CLOSE = 3  # pixels a raised surface is grown by to join its pieces (gaps in a kerb up to 1.2 m), then shrunk back
 SIMPLIFY = 0.2  # m an outline's dropped points may be off it
 ZWIN = 1.5  # m from a road's height the tiles' surfaces are read within
+# raised surface the tiles read where the game draws road, checked in its top-down shots: a kerbed crescent over a
+# lane (with a U-turn arrow painted on it) and the pavement's corner by (22, -750)
+NOT_ISLANDS = ((22.1, -750.7),)
+NOT_REACH = 5.0  # m from one of those to an island's middle
 
 
 @dataclass
@@ -218,7 +222,9 @@ def islands(osm, tiles_dir, ways=None, stats=None) -> list[Raised]:
     found.append(Raised(ring, round(size, 1), round(dz, 3), xy[:-1].mean(0), {w: osm.ways[w][0]['highway']}, centre))
   out = [f for f in found if any(c != 'service' for c in f.ways.values())]
   stats['service roads only'] = len(found) - len(out)
-  return out
+  kept = [f for f in out if all(np.hypot(*(f.centre - q)) > NOT_REACH for q in NOT_ISLANDS)]
+  stats['road the game draws'] = len(out) - len(kept)
+  return kept
 
 
 def areas(found: list[Raised]) -> list[tuple[np.ndarray, dict]]:
