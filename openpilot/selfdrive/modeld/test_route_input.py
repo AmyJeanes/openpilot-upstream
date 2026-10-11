@@ -5,7 +5,9 @@ import time
 
 import numpy as np
 
-from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader, RouteInputWriter
+from openpilot.selfdrive.modeld.route_input import (HEADER, RouteInputReader, RouteInputWriter, model_layout, read_model_layout,
+                                                    write_model_layout)
+from openpilot.selfdrive.navd import route_input as ri
 
 N = 173
 
@@ -113,3 +115,36 @@ def test_writer_restart():
     RouteInputWriter(N, path).write(vec(2))
     assert not reader.read().any()
     np.testing.assert_array_equal(reader.read(), vec(2))
+
+
+def test_layouts():
+  """The bridge writes the encoder's whole vector (v2); each model's reader takes its layout's floats of it."""
+  with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "route_input")
+    full = np.random.default_rng(4).random(ri.ROUTE_LEN).astype(np.float32)
+    RouteInputWriter(ri.ROUTE_LEN, path).write(full)
+    for version in (1, 2, 3):
+      lay = model_layout(ri.LAYOUTS[version].width)
+      assert lay.version == version
+      np.testing.assert_array_equal(RouteInputReader.for_layout(lay, path).read(), ri.convert(full, version))
+    v3 = RouteInputReader.for_layout(model_layout(218, "3"), path).read()
+    assert len(v3) == 218 and v3[165] == full[165] and v3[166] == full[171]
+    RouteInputWriter(N, path).write(vec(5))  # a writer of v1 only: a v3 model gets no route rather than v1's floats
+    assert not RouteInputReader.for_layout(ri.LAYOUTS[3], path).read().any()
+
+
+def test_model_layout():
+  assert model_layout(218).version == 3 and model_layout(223, "2").version == 2
+  for width, version in ((218, "2"), (200, None)):
+    try:
+      model_layout(width, version)
+      raise AssertionError((width, version))
+    except ValueError:
+      pass
+  with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "route_input.model")
+    assert read_model_layout(path) is None
+    write_model_layout(ri.LAYOUTS[3], path)
+    assert read_model_layout(path) == {"version": 3, "width": 218}
+    write_model_layout(None, path)
+    assert read_model_layout(path) == {}

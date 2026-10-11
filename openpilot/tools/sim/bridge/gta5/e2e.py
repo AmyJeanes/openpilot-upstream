@@ -646,6 +646,13 @@ def driving_model() -> str:
     return 'picked' if _SP else 'big'
 
 
+def route_input_layout() -> int | None:
+  """The route input layout modeld's model reads (1, 2, 3; 0 without one), None before modeld has recorded it."""
+  from openpilot.selfdrive.modeld.route_input import read_model_layout
+  rec = read_model_layout()
+  return None if rec is None else int(rec.get("version", 0))
+
+
 def svc(action: str, what: str):
   print(f"e2e: svc {action} {what}", flush=True)
   subprocess.run(["bash", SVC, action, what], check=False)
@@ -868,7 +875,8 @@ class Trip:
     self.t0 = time.monotonic()
     rec = {'id': self.id, 'spec': spec_str(self.spec), 'mode': 'short' if self.short else self.args.mode, 'opts': self.opts,
            'car': self.args.car or 'current',
-           'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'stack': STACK, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
+           'traffic': int(self.args.traffic), 'lane': self.lane, 'model': driving_model(), 'route_input': route_input_layout(),
+           'stack': STACK, 'started': time.strftime('%Y-%m-%d %H:%M:%S')}
     if self.tune is not None:
       rec.update({'variant': self.variant, 'tune': self.tune, 'tune_ack': self.write_tune()})
     problem = self.setup()

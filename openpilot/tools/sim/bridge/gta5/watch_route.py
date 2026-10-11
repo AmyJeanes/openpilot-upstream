@@ -2,14 +2,15 @@
 """Shows the route input the driving model gets (navd/route_input.py), live from the bridge's shared memory: the NAV
 bins, the route's heading ahead as a path, the next maneuver and the next stop line; and below, route input v2's lane
 slots (navd/lane_slots.py), which the bridge also writes to a file of their own with the car's lane, and on them the
-driving model's guess at that lane (modelV2.laneHead)."""
+driving model's guess at that lane (modelV2.laneHead). The header names the layout modeld's model reads (v1, v2, v3:
+modeld's record of it); a v3 model doesn't read NEXT's lane fields, so they're marked so."""
 import time
 
 import numpy as np
 import pyray as rl
 
 import openpilot.cereal.messaging as messaging
-from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader
+from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader, read_model_layout
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.selfdrive.navd import lane_slots as slots_mod
@@ -114,7 +115,7 @@ def draw_nav(d, r: rl.Rectangle):
     text(s, min(max(x - text_w(s, 13) / 2, bar.x), bar.x + bar.width - text_w(s, 13)), bar.y + bar.height + 6, 13, DIM)
 
 
-def draw_next(d, r: rl.Rectangle):
+def draw_next(d, r: rl.Rectangle, model_version: int | None = None):
   rl.draw_rectangle_rec(r, PANEL)
   text("NEXT", r.x + 8, r.y + 6, 14, DIM)
   nx = d.next
@@ -137,7 +138,8 @@ def draw_next(d, r: rl.Rectangle):
   for i in range(n):
     rl.draw_rectangle_rec(rl.Rectangle(r.x + 8 + i * lane_w, y, lane_w - 3, 22), color if i in use else EMPTY)
   text(f"be in {lanes_text(use, n)}", r.x + 16 + n * lane_w, y + 1, 18)
-  text(f"v1 lane fields: {nx.lanes_in} lanes our way, {nx.lanes_out} after (left to right)", r.x + 8, y + 28, 14, DIM)
+  unread = " (not read by this model: v3)" if model_version == 3 else ""
+  text(f"v1 lane fields: {nx.lanes_in} lanes our way, {nx.lanes_out} after (left to right){unread}", r.x + 8, y + 28, 14, DIM)
 
 
 def lanes_text(use: list[int], n: int) -> str:
@@ -149,8 +151,14 @@ def lanes_text(use: list[int], n: int) -> str:
   return f"lane {use[0] + 1} of {n}" if len(use) == 1 else f"lanes {use[0] + 1}-{use[-1] + 1} of {n}"
 
 
+def model_text(model: dict | None) -> str:
+  if model is None:
+    return "model: ?"
+  return f"model reads v{model['version']}" if model.get("version") else "model: no route input"
+
+
 def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray | None = None, lanes_age: float | None = None,
-         head=None, car: tuple[int, int] | None = None):
+         head=None, car: tuple[int, int] | None = None, model: dict | None = None):
   rl.clear_background(BG)
   d = decode(vec)
   m = 10
@@ -160,6 +168,7 @@ def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray |
   text(status, w - m - text_w(status, 16), 9, 16, STOP if stale else DIM)
   present = "PRESENT" if d.present else "no route"
   text(present, m + text_w("Route input", 18, FontWeight.BOLD) + 14, 9, 16, GOOD if d.present else DIM)
+  text(model_text(model), m + text_w("Route input", 18, FontWeight.BOLD) + 28 + text_w(present, 16), 9, 16, DIM)
 
   draw_lanes(lanes, lanes_age, d.next, rl.Rectangle(m, h - m - LANES_H, w - 2 * m, LANES_H), head, car)
   h -= LANES_H + m  # the route input above it
@@ -171,7 +180,7 @@ def draw(vec: np.ndarray, age: float | None, w: int, h: int, lanes: np.ndarray |
   draw_nav(d, rl.Rectangle(x0, top, rw, 70))
   if vec.any():
     draw_heading(d, heading_r)
-    draw_next(d, next_r)
+    draw_next(d, next_r, (model or {}).get("version"))
     stop = f"STOP line {d.stop:.0f} m" if d.stop is not None else "stop line -"
     text(stop, x0, h - m - 30, 26, STOP if d.stop is not None else DIM, FontWeight.BOLD)
   else:
@@ -323,6 +332,6 @@ if __name__ == "__main__":
     fresh = sm.recv_frame["modelV2"] > 0 and time.monotonic() - sm.recv_time["modelV2"] < MODEL_STALE
     i, n = (int(v) for v in car_vec[slots_mod.CAR_LANE:])
     draw(vec, input_age(reader), rl.get_screen_width(), rl.get_screen_height(), lanes if lanes_age is not None else None, lanes_age,
-         sm["modelV2"].laneHead if fresh else None, (i, n) if n > 0 else None)
+         sm["modelV2"].laneHead if fresh else None, (i, n) if n > 0 else None, read_model_layout())
     due = max(due + 1 / FPS, time.monotonic())
     time.sleep(max(due - time.monotonic(), 0.0))

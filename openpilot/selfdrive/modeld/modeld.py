@@ -40,7 +40,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, 
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
-from openpilot.selfdrive.modeld.route_input import RouteInputReader
+from openpilot.selfdrive.modeld.route_input import RouteInputReader, model_layout, write_model_layout
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, LOCAL_BIG_PKL, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob, wait_for_chestnut
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -153,6 +153,7 @@ class ModelState:
     self.state_pairs = {name: f'next_{name}' for name in self.input_shapes if f'next_{name}' in jits['metadata']['output_shapes']}
     self.vision_input_names = ('img', 'big_img')
     self.output_slices = pickle.loads(base64.b64decode(jits['metadata']['metadata']['output_slices']))
+    self.metadata = jits['metadata']['metadata']
 
     self.prev_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     self.chestnut = chestnut
@@ -347,7 +348,15 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
-  route_reader = RouteInputReader(math.prod(model.input_shapes['route'][0])) if 'route' in model.input_shapes else None
+  route_reader, route_layout = None, None
+  if 'route' in model.input_shapes:  # a route-conditioned model: the route input in its layout (route_version, else its width)
+    route_layout = model_layout(math.prod(model.input_shapes['route'][0]), model.metadata.get('route_version'))
+    route_reader = RouteInputReader.for_layout(route_layout)
+    cloudlog.warning(f"modeld: route input v{route_layout.version} ({route_layout.width} floats)")
+  try:
+    write_model_layout(route_layout)
+  except OSError as e:
+    cloudlog.warning(f"modeld: couldn't record the route input layout: {e!r}")
   last_frames_t = time.monotonic()
 
   while True:

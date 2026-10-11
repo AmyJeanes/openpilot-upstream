@@ -137,8 +137,11 @@ route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without i
 Below it, it shows route input v2's lane slots (`selfdrive/navd/lane_slots.py`: the road here and the road out of the next
 maneuver, counted from the kerb, with the lanes the route needs), which the bridge also writes to a shared-memory file of
 their own with the car's lane (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats
-(route input v2); a model trained on v1's 173 reads only the start of it. On the road here it marks the model's lane
-(`modelV2.laneHead`, outlined, its P(index) as faint bars) against the car's true lane (a green mark).
+(route input v2, which the bridge writes whole). modeld reads the layout its model was trained on (`route_version` in the
+model's metadata, else the input's width): v1 the first 173 floats, v2 all 223, v3 218 (v2 without NEXT's five lane
+fields, which the slots supersede); the viewer's header names it and e2e records it per trip (`route_input`). On the
+road here it marks the model's lane (`modelV2.laneHead`, outlined, its P(index) as faint bars) against the car's true
+lane (a green mark).
 `GTA5_NAV_MSGS=1` also publishes openpilot's `navInstruction` and `navRoute` for that route (`gta5_nav_msgs.py`: the
 next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
 beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,

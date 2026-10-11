@@ -332,6 +332,57 @@ def test_route_input_v2():
   assert ri.describe(v2.encode(150.0, 0.0, 8.0)).count('here') == 1
 
 
+def test_route_input_v3():
+  """v3 is v2 without NEXT's lane fields: 218 floats, every other float as v2's, its parts moved up by 5."""
+  slots, r = bay()
+  enc = ri.RouteInput(r)
+  v3 = ri.LAYOUTS[3]
+  assert (v3.width, v3.next, v3.stop, v3.lanes) == (218, slice(161, 166), slice(166, 168), slice(168, 218))
+  assert [ri.layout(width=w).version for w in (173, 223, 218)] == [1, 2, 3]
+  seen_next = False
+  for s in np.linspace(0.0, r.length, 60):
+    full, vec = enc.encode(float(s), 0.0, 8.0), enc.encode(float(s), 0.0, 8.0, version=3)
+    assert vec.shape == (218,)
+    np.testing.assert_array_equal(vec[:166], full[:166])
+    np.testing.assert_array_equal(vec[166:], full[171:])
+    np.testing.assert_array_equal(vec[v3.lanes], slots.encode(float(s), 8.0))
+    np.testing.assert_array_equal(ri.convert(full, 3), vec)
+    np.testing.assert_array_equal(enc.encode(float(s), 0.0, 8.0, version=1), full[:ri.V1_LEN])
+    a, b = ri.decode(full), ri.decode(vec)  # the same route, read from either layout
+    assert a.stop == b.stop and np.array_equal(a.heading, b.heading) and np.array_equal(a.nav, b.nav)
+    if a.next is not None:
+      seen_next = True
+      assert b.next[:4] == a.next[:4] and not b.next.lane_data
+  assert seen_next
+  assert 'lanes ' not in ri.describe(enc.encode(150.0, 0.0, 8.0, version=3)).split('|')[2]
+  assert ri.describe(enc.encode(150.0, 0.0, 8.0, version=3)).count('here') == 1
+
+
+def test_route_input_convert():
+  """Between layouts: v1 has no lane slots (zero in v2/v3), v3 can't become v1 or v2 (its NEXT lane fields are gone)."""
+  rng = np.random.default_rng(0)
+  full = rng.random((4, ri.ROUTE_LEN)).astype(np.float32)
+  v1 = ri.convert(full, 1)
+  np.testing.assert_array_equal(v1, full[:, :ri.V1_LEN])
+  up = ri.convert(v1, 2)
+  np.testing.assert_array_equal(up[:, :ri.V1_LEN], v1)
+  assert not up[:, ri.LANES].any()
+  np.testing.assert_array_equal(ri.convert(v1, 3), ri.convert(up, 3))
+  for version in (1, 2):
+    try:
+      ri.convert(ri.convert(full, 3), version)
+      raise AssertionError(f"v3 -> v{version} converted")
+    except ValueError:
+      pass
+  for bad in ((3, 223), (2, 218)):
+    try:
+      ri.layout(*bad)
+      raise AssertionError(f"layout {bad}")
+    except ValueError:
+      pass
+  assert ri.layout("3", 218).version == 3 and ri.layout(None, 173).version == 1
+
+
 def skewed(road_on: float = 52.0, straight: bool = False):
   """A one-way road north into a junction, arrows left|through, whose road on goes off road_on deg to the left; a road
   also turns left 100 deg and right 90 deg, and with `straight`, one goes on 10 deg left."""
