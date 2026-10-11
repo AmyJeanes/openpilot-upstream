@@ -516,6 +516,9 @@ def main():
       z = near_z[np.argmin(np.hypot(*(near_xy - ring.mean(0)).T))] if high else None
       for piece in apart(ring, drawn_segs[colour]):
         add(KINDS.index('centre' if colour == 'yellow' else 'solid'), piece, 0, None if z is None else np.full(len(piece), z))
+  for xy, z in junctions.raised:  # raised islands' kerbs, at their road's height
+    ring = np.vstack([xy, xy[:1]])
+    add(KINDS.index('edge'), ring, 0, np.full(len(ring), z if np.isfinite(z) else 0.0) if high else None)
   crossings = junctions.crossing_lines()
   if high:  # a crossing's height is its nearest road node's
     road_nodes = sorted({n for _, refs in junctions.ways.values() for n in refs})

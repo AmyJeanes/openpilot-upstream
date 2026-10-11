@@ -876,7 +876,8 @@ def road_edges(samples: list[dict], edges: tuple[float, float], inner: tuple[flo
     best = max(clusters(found), key=lambda c: c[1], default=None)
     line = best[0] if best and best[1] >= need else None
     paint = Counter(colour[k] for k, v in found if line is not None and abs(v - line) <= AGREE).most_common(1)
-    asphalt = [d['kerbs'][side] for d in files if (d.get('kerbs') or {}).get(side) is not None]
+    # an edge read in past the outer lane's inner edge is a median's kerb the link's line runs beside, not the road's
+    asphalt = [v for d in files if (v := (d.get('kerbs') or {}).get(side)) is not None and (v - inner[i]) * sign >= 0.0]
     edge = float(np.median(asphalt)) if len(asphalt) >= need and max(asphalt) - min(asphalt) <= EDGE_SPREAD else None
     clear = False
     if edge is not None:
@@ -906,6 +907,41 @@ def painted_centre(samples: list[dict]) -> bool:
     seen += any(m['conf'] >= CONF and abs(m['offset']) <= TRACK_CENTRE and (m['colour'] == 'yellow' or m['type'] in CROSSING)
                 for m in d['marks'])
   return seen >= max(MIN_SAMPLES, (len(files) + 1) // 2)
+
+
+BARE_REACH = 1.5  # m either side of a lane boundary a painted mark would be its line
+BARE_EDGE = 1.5  # m from a direction's outer lane edge a line painted along it says the files read the road there
+
+
+def bare_lane_lines(samples: list[dict], section: list[tuple[float, float, int]]) -> dict[str, list[bool]]:
+  """The boundaries between a way's lanes one way that the game files paint no line on, as where GTA lays two lanes in
+  one wide painted lane (Senora Fwy): {'forward' | 'backward': [whether bare, each boundary left to right as seen
+  travelling it]}, only directions with a bare one. `section`: the way's lanes [(left, right, 1 forward / -1
+  backward)], m right of the link's line seen a -> b. A boundary is bare where UNPAINTED_SAMPLES or more samples show
+  lines along both that direction's outer lane edges (within BARE_EDGE: the files read the road there) and UNPAINTED
+  of them no mark within BARE_REACH of it. The files miss some freeways' lane lines (the Olympic Fwy's), so this is
+  only a candidate the captured game images must confirm (ynd_to_osm.unmarked_lane_lines)."""
+  files = [d for d in samples if d.get('src') == GAMEFILES]
+  if len(files) < UNPAINTED_SAMPLES:
+    return {}
+  out = {}
+  for key, heading in (('forward', 1), ('backward', -1)):
+    spans = sorted((a, b) for a, b, h in section if h == heading)
+    if len(spans) < 2:
+      continue
+    lo, hi = spans[0][0], spans[-1][1]
+    bare = []
+    for _, v in spans[:-1]:
+      read = empty = 0
+      for d in files:
+        at = [sum(m['pair']) / 2 if m.get('pair') else m['offset'] for m in d['marks'] if m['conf'] >= CONF]
+        if any(abs(o - lo) <= BARE_EDGE for o in at) and any(abs(o - hi) <= BARE_EDGE for o in at):
+          read += 1
+          empty += not any(abs(o - v) <= BARE_REACH for o in at)
+      bare.append(read >= UNPAINTED_SAMPLES and empty >= UNPAINTED * read)
+    if any(bare):
+      out[key] = bare if heading == 1 else bare[::-1]
+  return out
 
 
 OUTER_REACH = 1.2  # m from a one-way link's outer lane edge that a white lane line is that edge's

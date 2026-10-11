@@ -16,6 +16,9 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   `placement` (or its default) puts it, seen along the way, negative to the left: for a way whose line can't be moved
   to where the lanes are painted (our map's ways run along GTA's nodes) and isn't on a lane edge or middle placement can
   name. Where the next way's lanes sit elsewhere, they move across to it as any two ways' do (BLEND_M).
+  `placement:offset:start` / `:end` (ours): the offset at the way's first and last node, the lanes moving across
+  evenly between, as widths do with `width:lanes:start` / `:end` (a junction's link bent off its road's line to the
+  junction's node, its lanes kept on the road's line: junction_lanes.py).
 - `width`: kerb to kerb, metres, parking lanes and shoulders on the carriageway included. Without `width:lanes` it's
   shared out evenly; on a two-way way, what's left after `width:lanes` is a median centred between the directions.
 - `parking:left|right|both=lane` (with `parking:<side>:width`, else by `:orientation`): a parking lane on the
@@ -27,7 +30,9 @@ The tags (OSM wiki: Lanes, Key:turn, Key:width:lanes, Key:change, Key:divider, P
   Without placement the line is the middle of the lanes (and median) between the shoulders.
 - `divider`: the marking between the directions, or both edges of a median between them (each one solid line by
   default). `divider:forward` / `divider:backward`: a median's edge beside that direction's lanes, where its two edges
-  differ. `lane_markings=no`: no lines between lanes at all. These lines are yellow, or white with
+  differ. `lane_markings=no`: no lines between lanes at all. `divider:lanes` (ours, per lane like `change:lanes`):
+  `no` where no line is painted on that lane's right, seen travelling it, beside another lane its way, as where GTA
+  lays two lanes in one painted lane; the lanes and their `change:lanes` stay. These lines are yellow, or white with
   `divider:colour=white` (OSM has no key for it). On a one-way way, `divider:left` / `divider:right`: a line painted
   along that edge of its lanes, seen travelling them, as a carriageway's yellow edge beside a median (it is that edge's
   one edge line: a shoulder there has no other).
@@ -58,7 +63,7 @@ CHANGES = {'yes': (True, True), 'no': (False, False), 'not_left': (False, True),
            'only_left': (True, False), 'only_right': (False, True)}
 DIVIDERS = {'no': None, 'dashed_line': 'dashed', 'solid_line': 'solid', 'double_solid_line': 'double_solid',
             'solid_line;dashed_line': 'solid_dashed', 'dashed_line;solid_line': 'dashed_solid'}
-PER_LANE = ('turn', 'width', 'change', 'destination', 'destination:ref', 'access', 'motor_vehicle', 'vehicle', 'bus', 'psv')
+PER_LANE = ('turn', 'width', 'change', 'divider', 'destination', 'destination:ref', 'access', 'motor_vehicle', 'vehicle', 'bus', 'psv')
 SUFFIXES = ('', ':forward', ':backward', ':both_ways')
 PLACEMENT = re.compile(r'(left_of|middle_of|right_of):([1-9][0-9]*)')
 TRANSITION_MAX = 40.0  # m: placement=transition is for the short way where a line jumps across lanes
@@ -95,6 +100,7 @@ class Lane:
   change_right: bool = True
   access: bool = True  # open to cars (not a bus lane or access:lanes=no)
   destination: str | None = None
+  marked_right: bool = True  # a line painted on its right, seen travelling it, beside a lane its way (divider:lanes)
 
 
 class Span(NamedTuple):
@@ -279,14 +285,14 @@ class WayLanes:
     spare = width - lanes_w if width and width - lanes_w > EPS else 0.0
     width = lanes_w + spare + sum(parking) + sl + sr
     two_way = bool(fwd or both) and bool(back or both) and not (fwd == back == 0)
-    turns, changes, destinations = per_lane('turn'), per_lane('change'), per_lane('destination')
+    turns, changes, destinations, unmarked = per_lane('turn'), per_lane('change'), per_lane('destination'), per_lane('divider')
     closed = [any(v in ('no', 'private') for v in vs) for vs in zip(*(per_lane(k) for k in ('access', 'motor_vehicle', 'vehicle')), strict=True)]
     bus = [any(v == 'designated' for v in vs) for vs in zip(per_lane('bus'), per_lane('psv'), strict=True)]
     lanes = []
     for i, (d, _) in enumerate(order):
       left, right = CHANGES.get(changes[i] or 'yes', (True, True))
       lanes.append(Lane(d, widths[i], frozenset(t for t in (turns[i] or '').split(';') if t in TURNS and t != 'none'),
-                        left, right, not (closed[i] or bus[i]), destinations[i] or None))
+                        left, right, not (closed[i] or bus[i]), destinations[i] or None, unmarked[i] != 'no'))
     markings = tags.get('lane_markings') != 'no' and not (tags.get('lanes') is None and highway in UNMARKED)
     road = cls(lanes, width, spare if two_way else 0.0, 0.0 if two_way else spare / 2, markings, tags.get('divider'), parking,
                (sl, sr), (ll, lr))
@@ -313,11 +319,11 @@ class WayLanes:
 
     plain_dir = (FORWARD if oneway == 1 else BACKWARD) if oneway else None
     for key, d in (('placement', plain_dir), ('placement:forward', FORWARD), ('placement:backward', BACKWARD)):
-      if (at := place(tags.get(key), d)) is not None:
-        road.placed[key] = at
+      if (where := place(tags.get(key), d)) is not None:
+        road.placed[key] = where
     if road.placed:
       road.line = sum(road.placed.values()) / len(road.placed)
-    road.line -= signed_metres(tags.get('placement:offset')) or 0.0
+    road.line -= signed_metres(get('placement:offset')) or 0.0
     tagged = metres(tags.get('width'))
     road.tagged = (tagged - sum(parking) - sl - sr if tagged else None, known, unknown)  # width=* less parking and shoulders
     return road
@@ -417,7 +423,8 @@ class WayLanes:
           a_may = a.lane.change_right if a.heading == 1 else a.lane.change_left
           b_may = b.lane.change_left if b.heading == 1 else b.lane.change_right
           style = {(True, True): 'dashed', (False, False): 'solid', (True, False): 'dashed_solid', (False, True): 'solid_dashed'}[(a_may, b_may)]
-          out.append((('lane', i), Line(DIVIDER, a.right, style)))
+          if (a.lane.marked_right if a.heading == 1 else b.lane.marked_right):
+            out.append((('lane', i), Line(DIVIDER, a.right, style)))
         elif 0 in (a.heading, b.heading):  # a centre turn lane's edge: dashed on its side
           out.append((('lane', i), Line(CENTRE, a.right, 'dashed_solid' if a.heading == 0 else 'solid_dashed')))
         elif centre is None:
@@ -508,6 +515,13 @@ SAME_WIDTH = 0.5  # m: roads either side of a junction this near as wide are one
 MOVE_THROUGH, MOVE_SKEW, MOVE_U_TURN = 45.0, 55.0, 135.0  # deg
 MOVE_SPAN = 20.0  # m across the junction from its node
 MOVE_HEADING = 15.0  # m before the junction that the road's heading into it is taken over
+# Raised islands (`area=yes` + `traffic_calming=island`: kerbed, no car drives over them) cut the lanes GTA lays across
+# them (a tram crossing's D islands, a slip's pork chop): RouteLanes.blocked
+ISLAND_LEVEL = 3.0  # m: an island further above or below the route is another level's
+ISLAND_NEAR = 12.0  # m from an island's outline the route's segments are checked against it
+BODY_HALF = 0.9  # m either side of a lane's centre a car's body takes (the lane's half width where that's narrower)
+BLOCK_STEP = 0.5  # m between the places a lane is checked at
+ISLAND_CELL = 50.0  # m
 
 
 class Section:
@@ -696,8 +710,9 @@ class OsmLanes:
     return self.xy[int(self.data.index([node])[0])]
 
   def has_ends(self, way: int) -> bool:
-    """Whether the way's lanes widen or narrow along it (width:lanes...:start / :end), as in a taper."""
-    return any(k.startswith('width') and k.endswith((':start', ':end')) for k in self.ways[way][0])
+    """Whether the way's lanes widen, narrow or move across along it (width:lanes...:start / :end,
+    placement:offset:start / :end), as in a taper."""
+    return any(k.startswith(('width', 'placement:offset')) and k.endswith((':start', ':end')) for k in self.ways[way][0])
 
   def lanes_at(self, way: int, end: str) -> WayLanes:
     """The way's lanes at its first node (`end` 'start') or last ('end')."""
@@ -709,6 +724,19 @@ class OsmLanes:
 
   def length(self, way: int) -> float:
     return float(np.hypot(*np.diff(self.way_points(way), axis=0).T).sum())
+
+  def moves_across(self, way: int) -> bool:
+    """Whether the way's lanes move across along it (placement:offset:start / :end)."""
+    return any(k.startswith('placement:offset:') for k in self.ways[way][0])
+
+  def section_along(self, way: int, s: float, d: int = FORWARD) -> 'Section':
+    """The way's cross-section s m along it from its first node, seen travelling d: as its lanes move across along it
+    (placement:offset:start / :end), else its one cross-section."""
+    if not self.moves_across(way):
+      return Section.of(self.lanes(way), d)
+    t = s / max(self.length(way), EPS)
+    sec = _lerp(Section.of(self.lanes_at(way, 'start')), Section.of(self.lanes_at(way, 'end')), t)
+    return sec if d == FORWARD else mirrored(sec)
 
   def _other(self, way: int, node: int) -> tuple[int, int] | None:
     """The one other way at a node where a road just carries on (two ways), and its direction away from the node
@@ -1013,6 +1041,48 @@ class OsmLanes:
   def way_points(self, way: int) -> np.ndarray:
     return self.xy[self.data.index(self.ways[way][1])]
 
+  @cached_property
+  def islands(self) -> list[tuple[np.ndarray, float]]:
+    """The raised islands (`area=yes` + `traffic_calming=island`): each one's outline [K, 2] (not closed) and height
+    (its nodes' `ele`, NaN unknown)."""
+    out = []
+    for tags, refs in self.data.ways.values():
+      if tags.get('traffic_calming') != 'island' or tags.get('area') != 'yes' or len(refs) < 4:
+        continue
+      ring = self.xy[self.data.index(refs)]
+      if np.hypot(*(ring[-1] - ring[0])) < 1e-6:
+        ring = ring[:-1]
+      ele = [float(t['ele']) for n in refs if 'ele' in (t := self.data.node_tags.get(n, {}))]
+      out.append((ring, float(np.mean(ele)) if ele else math.nan))
+    return out
+
+  @cached_property
+  def _island_cells(self) -> dict[tuple[int, int], list[int]]:
+    cells: dict[tuple[int, int], list[int]] = {}
+    for n, (ring, _) in enumerate(self.islands):
+      lo, hi = ring.min(0) // ISLAND_CELL, ring.max(0) // ISLAND_CELL
+      for cx in range(int(lo[0]), int(hi[0]) + 1):
+        for cy in range(int(lo[1]), int(hi[1]) + 1):
+          cells.setdefault((cx, cy), []).append(n)
+    return cells
+
+  def islands_near(self, points, reach: float = ISLAND_NEAR) -> list[tuple[np.ndarray, float]]:
+    """The raised islands within reach of a polyline [N, 2] (islands' outlines and heights)."""
+    if not self.islands:
+      return []
+    pts = np.asarray(points, float)[:, :2]
+    dense = np.vstack([pts[:1]] + [a + (b - a) * np.linspace(0.0, 1.0, int(np.hypot(*(b - a)) // (ISLAND_CELL / 2)) + 2)[1:, None]
+                                   for a, b in zip(pts[:-1], pts[1:], strict=True)])
+    keys = {(int(x // ISLAND_CELL) + dx, int(y // ISLAND_CELL) + dy) for x, y in dense for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+    found = sorted({n for k in keys for n in self._island_cells.get(k, ())})
+    out = []
+    for n in found:
+      ring = self.islands[n][0]
+      c = ring.mean(0)
+      if _seg_dist(pts, c) <= reach + float(np.hypot(*(ring - c).T).max()):
+        out.append(self.islands[n])
+    return out
+
   def nodes_at(self, p, tol: float = MATCH_TOL) -> list[int]:
     """The road nodes within tol of a point, nearest first: more than one where roads pass over each other."""
     cx, cy = int(p[0] // self.CELL), int(p[1] // self.CELL)
@@ -1238,12 +1308,33 @@ def _true_runs(mask: np.ndarray) -> list[tuple[int, int]]:
   return list(zip(edges[::2], edges[1::2], strict=True))
 
 
+def _seg_dist(line: np.ndarray, q: np.ndarray) -> float:
+  """m from a point to a polyline [N, 2]."""
+  if len(line) < 2:
+    return float(np.hypot(*(line[0] - q))) if len(line) else math.inf
+  a, ab = line[:-1], np.diff(line, axis=0)
+  t = np.clip(((q - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+  return float(np.hypot(*(a + ab * t[:, None] - q).T).min())
+
+
+def inside_ring(pts: np.ndarray, ring: np.ndarray) -> np.ndarray:
+  """Which points [P, 2] lie inside an outline [K, 2] (closed or not; even-odd, as it needn't be convex)."""
+  pts = np.asarray(pts, float).reshape(-1, 2)
+  r = ring if np.hypot(*(ring[-1] - ring[0])) < 1e-9 else np.vstack([ring, ring[:1]])
+  a, b = r[:-1], r[1:]
+  x, y = pts[:, None, 0], pts[:, None, 1]
+  spans = (a[None, :, 1] > y) != (b[None, :, 1] > y)
+  dy = np.where(b[:, 1] == a[:, 1], 1e-12, b[:, 1] - a[:, 1])[None]
+  cross = x < a[None, :, 0] + (y - a[None, :, 1]) * (b[None, :, 0] - a[None, :, 0]) / dy
+  return (spans & cross).sum(axis=1) % 2 == 1
+
+
 class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
                junctions=None, explicit: dict | None = None, moves: list | None = None, blended: dict | None = None,
-               merges: dict | None = None, splits: dict | None = None):
+               merges: dict | None = None, splits: dict | None = None, islands: list | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
@@ -1275,6 +1366,9 @@ class RouteLanes:
     self._openings: list[tuple[float, int]] | None = None
     self._maps: list[tuple[float, tuple[int | None, ...], int]] | None = None
     self._runs: dict[int, tuple[int, int]] = {}
+    # the raised islands beside the route at its height (outlines [K, 2]), which no lane drives over (blocked)
+    self.islands: list[np.ndarray] = islands or []
+    self._blocked: list[tuple[float, float, int, int]] | None = None
 
   @classmethod
   def from_osm(cls, points, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes) -> 'RouteLanes':
@@ -1318,7 +1412,72 @@ class RouteLanes:
     moves = [junction_move(osm, nodes, pts, along, k) for k in ends]
     merges = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k)) is not None}
     splits = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k, True)) is not None}
-    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits)
+    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits, cls._islands(pts, osm, nodes))
+
+  @staticmethod
+  def _islands(pts: np.ndarray, osm: OsmLanes, nodes: list | None) -> list[np.ndarray]:
+    """The map's raised islands beside the route (islands_near) at its height: within ISLAND_LEVEL of its nearest
+    shape point with a known height (either unknown: kept)."""
+    near = osm.islands_near(pts) if len(pts) >= 2 else []
+    if not near:
+      return []
+    nodes = nodes if nodes else route_nodes(pts, osm)
+    z = np.array([float(osm.data.node_tags.get(n, {}).get('ele', 'nan')) if n is not None else math.nan for n in nodes])
+    known = np.flatnonzero(np.isfinite(z))
+    out = []
+    for ring, iz in near:
+      if math.isfinite(iz) and len(known):
+        k = known[int(np.argmin(np.hypot(*(pts[known] - ring.mean(0)).T)))]
+        if abs(z[k] - iz) > ISLAND_LEVEL:
+          continue
+      out.append(ring)
+    return out
+
+  @property
+  def blocked(self) -> list[tuple[float, float, int, int]]:
+    """Where a raised island cuts one of our lanes' bands (its centre BODY_HALF either side, or its own width where
+    narrower), by the cross-sections along the route (section_at): [(m along from, to, the lane from the left of ours,
+    how many there)], in order."""
+    if self._blocked is None:
+      self._blocked = self._find_blocked()
+    return self._blocked
+
+  def _find_blocked(self) -> list[tuple[float, float, int, int]]:
+    if not self.islands or len(self.points) < 2:
+      return []
+    hits: dict[tuple[int, int], list[float]] = {}
+    for ring in self.islands:
+      lo, hi = ring.min(0) - ISLAND_NEAR, ring.max(0) + ISLAND_NEAR
+      for k in range(len(self.points) - 1):
+        a, b = self.points[k], self.points[k + 1]
+        if (np.minimum(a, b) > hi).any() or (np.maximum(a, b) < lo).any() or self.sections[k] is None:
+          continue
+        size = float(self.along[k + 1] - self.along[k])
+        if size < 1e-6:
+          continue
+        u = (b - a) / size
+        nrm = np.array([u[1], -u[0]])
+        for s in np.arange(self.along[k] + BLOCK_STEP / 2, self.along[k + 1], BLOCK_STEP):
+          sec = self.section_at(float(s), k)
+          if sec is None or not sec.lanes:
+            continue
+          p = a + u * (s - self.along[k])
+          for i, sp in enumerate(sec.ours):
+            half = min(BODY_HALF, (sp.right - sp.left) / 2)
+            lat = sp.centre + np.linspace(-half, half, 5)
+            if inside_ring(p + nrm * lat[:, None], ring).any():
+              hits.setdefault((i, sec.lanes), []).append(float(s))
+    out = []
+    for (i, n), ss in hits.items():
+      ss = sorted(set(ss))
+      a0 = prev = ss[0]
+      for v in ss[1:]:
+        if v - prev > 2 * BLOCK_STEP + EPS:
+          out.append((a0 - BLOCK_STEP / 2, prev + BLOCK_STEP / 2, i, n))
+          a0 = v
+        prev = v
+      out.append((a0 - BLOCK_STEP / 2, prev + BLOCK_STEP / 2, i, n))
+    return sorted(out)
 
   @staticmethod
   def _blended(pts: np.ndarray, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes, n: int) -> dict:
@@ -1671,6 +1830,12 @@ class RouteLanes:
       u_in = route(a) - route(max(a - CORNER_CHORD, self.along[0]))
       u_out = route(min(b + CORNER_CHORD, self.along[-1])) - route(b)
       u_in, u_out = u_in / max(np.hypot(*u_in), 1e-6), u_out / max(np.hypot(*u_out), 1e-6)
+      # lanes running straight on through the route's corner (a junction's ways bent to its node, their lanes moved
+      # back onto the road's line: junction_lanes) leave the lane line no corner to round
+      l_in, l_out = at(a) - at(max(a - CORNER_CHORD, s[0])), at(min(b + CORNER_CHORD, s[-1])) - at(b)
+      if min(np.hypot(*l_in), np.hypot(*l_out)) > 1.0 and \
+          abs(math.degrees((heading_of(l_out) - heading_of(l_in) + math.pi) % (2 * math.pi) - math.pi)) < CORNER_TURN / 2:
+        continue
       path = fillet(at(a), u_in, at(b), u_out, FILLET_RADIUS['left'], FILLET_RADIUS['right'])
       i0, i1 = int(np.searchsorted(s, a)), int(np.searchsorted(s, b, side='right'))
       if path is None or i0 < last:

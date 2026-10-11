@@ -165,6 +165,14 @@ topcam poses) as tiles, so the check runs on them without the game.
     whole cross-section, lanes, lines and kerbs, that far right of where `placement` (or its default) puts it, seen
     along the way (negative: left). Where the next way's lanes sit elsewhere they move across to it over 10 m either
     side of the node, as any two ways' do (below).
+  - GTA meets every link of a junction at one node. Where a divided road's carriageways cross another road at a node
+    in their middle (Innocence Blvd's tram crossing, Las Lagunas Blvd), each carriageway's last link before the node
+    and first after it angle across to it, so their lanes jogged towards it and back (8 m at Innocence Blvd, over both
+    its raised islands) where the paint runs straight on. Where a one-way way in and one out bend off lines that run
+    on into each other, the links from each bend to the node get `placement:offset:start` / `:end` (ours: the offset
+    at the way's ends, the lanes moving across evenly between) putting their lanes back on that line, where the game
+    files' paint lines run over the moved lanes' middle at most half as often (`junction_lanes.py`: 4 of 13 such
+    junctions). Nav's lane line then runs straight through, with no fillet round the links' corner at the node.
   - GTA's offset between the directions of a two-way link is a painted median, 0.9 m a step whatever the lanes'
     width (5.2-5.5 m at 6 steps on narrow and normal links): `width` includes it, `width:lanes:forward` / `:backward`
     give the lanes, and what's left is centred between them. Its edges are the kinds the game files paint there
@@ -187,6 +195,17 @@ topcam poses) as tiles, so the check runs on them without the game.
     tagged, else a shoulder's (below; its `shoulder:<side>:markings` are dropped where the divider is tagged). The white
     line side_by_side would draw at a kerb on that side (a flush shoulder's, a gore's, or between ways side by side), or
     at the left edge of a way beside with its own left edge line, is left out (`osm_to_roads.lined_kerbs`).
+  - Where GTA lays two lanes in one painted lane (Senora Fwy: two 6 m lanes between the yellow and white edge lines,
+    AI cars driving two abreast) the lanes stay and no line is drawn between them: `divider:lanes` (ours; per lane as
+    `change:lanes`, `no` where nothing is painted on that lane's right beside a lane its way). Where the game files'
+    sections read both that direction's outer edge lines and no mark within 1.5 m of the boundary
+    (`paint_survey.bare_lane_lines`), the captured top-down images show none there either (`--lines-bare`, from
+    `imgcheck/lane_paint.py`: the files miss some freeways' lane lines, the Olympic Fwy's), and the ways so joined end
+    to end run 60 m or more (`short_unmarked`). The images carry such a stretch on past its ends onto the ways joined
+    end to end with as many lanes that way (the files read neither edge on some of them, and carry decals the game
+    doesn't show on others): onto a way where they show no line along its first half from the stretch's end, and on
+    past it where they show none on it at all (`lane_paint.carries`), so the first painted dash stops it.
+    Lanes, `change:lanes`, lane numbering and nav read nothing of it.
   - GTA lays a left-turn bay as a one-way link of its own (through its slip lane or left turn only nodes) from where
     it splits off its road to the junction ahead, over a two-way road's median or beside a one-way road's left lane.
     Real maps make it a lane of the road (osm_lanes.md P3), and so does ours (`detached_bays`): the bay's links are
@@ -313,8 +332,10 @@ topcam poses) as tiles, so the check runs on them without the game.
     freeways), where the class layout's (or the survey's) kerbs fell on or inside the line. A way's outer lanes widen
     (or narrow) to the edge lines its sections paint (the outermost solid line within 2.5 m of the lanes' edge, a lane
     or more out from the lane's other edge, in half the sections), every other line staying put: each side to its own
-    where placement keeps the way's line on the lanes between, else both alike (the line the middle of the lanes) where
-    they're within 0.3 m of as far out, or to the one painted where the other side's asphalt has room. The asphalt
+    where placement keeps the way's line on the lanes between (with both lines painted, `placement:offset` moving the
+    lanes across to keep the lines between put), else both alike (the line the middle of the lanes) where they're
+    within 0.3 m of as far out, or to the one painted where the other side's asphalt has room. An asphalt edge the
+    files read in past the outer lane's inner edge is a median's kerb the link runs beside, not the road's. The asphalt
     beyond, out to the files' edge of it with nothing else painted on it, is a shoulder (`shoulder=left|right|both`,
     `shoulder:<side>:width`, part of `width`): `osm_lanes.py` puts the kerb at its outer edge and draws the edge line
     where the lanes run to one (white, yellow on a one-way road's left, or `shoulder:<side>:markings` from the files'
@@ -405,7 +426,10 @@ topcam poses) as tiles, so the check runs on them without the game.
   A stop line painted level with the road it meets, nearer the junction's node than the class layout's kerbs meet,
   is drawn where it's painted, along that road's edge (between where the kerbs meet it: square across GTA's link it
   lay askew at a skewed T, Vinewood Park Dr), inside the junction's area, which is shaped as without it: cut back to
-  it, the road's kerbs ran out across the other road's lanes (junctions.py).
+  it, the road's kerbs ran out across the other road's lanes (junctions.py). It lies as the paint does (the node's
+  `stop_line:bearing`, ours, the painted line's direction): along the road it meets only where that is within 10
+  degrees of the paint (a tram crossing's line is painted along the tracks, a line at a skewed junction often square
+  to its own road; 19 lines were turned 25-40 degrees off the paint).
 - Painted islands and flush edges (`painted_islands.py`), from roadpaint's height-layered tiles beside its polylines
   (road, kerb, pavement or gutter at each height; a raised island reads pavement or kerb). Painted islands, flat
   painted areas with road all round them: areas outlined in white or yellow (the painted triangle where Mt Haan Dr's
@@ -422,6 +446,14 @@ topcam poses) as tiles, so the check runs on them without the game.
   map view and the overlay draw an island's outline in its colour, and a junction's corner ends at a painted
   island's tip, square, rather than trimming back over a painted gore (Vinewood Blvd's hatched median beside the
   left-turn lane, hidden under a junction area trimmed 40 m back).
+- Raised islands (`raised_islands.py`), from the same tiles: kerbed islands a little above the road with road all round
+  them, where a road's lanes run over them (the D-shaped islands with a lamp post on a tram crossing's centre line,
+  where GTA lays every link to one junction node; slip, corner and pork-chop islands; median noses), each a closed way
+  `area=yes` + `traffic_calming=island` (no highway tag: the router reads past it), outlined as a kerb in the map view
+  and the overlay (`Junctions.raised`). Read along each road's lanes and a car's width either side, kept where the
+  surface is real kerb standing 5-40 cm up, closed (not a pavement or a long median), ringed by road, and under a road
+  other than a service road (a driveway cuts a pavement into closed pieces): 20 from the 19293 lanes' runs over kerb or
+  pavement, most of which are concrete roads and yards the tiles call pavement.
 - Flags with no OSM equivalent keep a `gta:` prefix: junction, no left / right turn, slip lane, keep left / right, left
   turn only lane on nodes; switched off, no GPS and off-road on the ways at such nodes.
 - GTA's no left / no right turn flags, and its one-lane left turn only lanes, become `no_left_turn` / `no_right_turn` /

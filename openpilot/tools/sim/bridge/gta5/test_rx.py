@@ -8,11 +8,12 @@ import threading
 import time
 from multiprocessing.shared_memory import SharedMemory
 
+import numpy as np
 import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import debug_cmd, display_from_env
-from openpilot.tools.sim.bridge.gta5.gta5_rx import VIEWS, Receiver, exit_with_parent
+from openpilot.tools.sim.bridge.gta5.gta5_rx import FRAME_BYTES, NV12_SIZE, SLOTS, VIEWS, Receiver, exit_with_parent
 from openpilot.tools.sim.lib.camerad import W, H
 
 
@@ -148,6 +149,36 @@ def _bridge_killed(pid_out):
   rx.start()
   pid_out.send(rx.pid)
   os.kill(os.getpid(), signal.SIGKILL)
+
+
+def test_snap_off_the_receiving_thread(tmp_path):
+  # a snap's PNGs (0.4 s or more) are written on their own thread: the frame that carries it is passed on at once, as
+  # the next ones are, and its pictures and state follow
+  shm = [SharedMemory(create=True, size=SLOTS * NV12_SIZE) for _ in VIEWS]
+  try:
+    frames_recv, frames_send = multiprocessing.Pipe(duplex=False)
+    controls_recv, _controls = multiprocessing.Pipe(duplex=False)
+    rx = Receiver(frames_send, controls_recv, {n: m.name for n, m in zip(VIEWS, shm, strict=True)}, debug_port=0)
+    rng = np.random.default_rng(3)
+    pic = rng.integers(16, 236, FRAME_BYTES, dtype=np.uint8).tobytes()
+    head = json.dumps({"width": W, "height": H, "views": ["road"], "state": {"t": 1.0}}).encode()
+    msg = memoryview(bytearray(struct.pack("<I", len(head)) + head + pic))
+    rx.command({"type": "snap", "path": str(tmp_path / "s")})
+    took = []
+    for _ in range(3):
+      t0 = time.monotonic()
+      rx.on_frame(msg)
+      took.append(time.monotonic() - t0)
+      assert frames_recv.poll(1) and frames_recv.recv()[3] == len(took) - 1
+    assert max(took) < 0.15, took
+    rx.snaps.join()
+    assert (tmp_path / "s_road.png").stat().st_size > 0
+    assert json.loads((tmp_path / "s_state.json").read_text())["state"] == {"t": 1.0}
+    assert rx.snap_path is None
+  finally:
+    for m in shm:
+      m.close()
+      m.unlink()
 
 
 def test_rx_ends_with_the_bridge_process():

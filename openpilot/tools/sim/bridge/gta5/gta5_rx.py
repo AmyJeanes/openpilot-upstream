@@ -6,6 +6,7 @@ messages: (slot, views, state). It also listens on localhost for debug commands 
 and sets the plugin's map debug overlay and GPS route again each time the game connects."""
 import json
 import os
+import queue
 import socket
 import struct
 import threading
@@ -106,6 +107,25 @@ class Receiver:
     self.bad_headers = 0
     self.burst_path = ""
     self.burst_left = 0
+    # snaps are written off the receiving thread: their full-size PNGs took 0.4 s or more, which held up the frames and states
+    # past the plugin's 0.3 s command timeout and dropped control at speed (017 seed 19 into the median)
+    self.snaps: queue.Queue = queue.Queue()
+    threading.Thread(target=self._save_snaps, name="snaps", daemon=True).start()
+
+  def _save_snaps(self) -> None:
+    from PIL import Image
+    while True:
+      path, views, head = self.snaps.get()
+      try:
+        for name, frame in views:
+          Image.fromarray(nv12_to_rgb(frame)).save(f"{path}_{name}.png")
+        with open(f"{path}_state.json", "w") as f:
+          json.dump(head, f, indent=1)
+        print(f"gta5: saved {path}_*.png", flush=True)
+      except OSError as e:
+        print(f"gta5: snap {path} not saved: {e}", flush=True)
+      finally:
+        self.snaps.task_done()
 
   def send_plugin(self, obj: dict) -> None:
     data = (json.dumps(obj) + "\n").encode()
@@ -209,6 +229,7 @@ class Receiver:
       raise ValueError(f"unsupported frame size {head['width']}x{head['height']}")
     slot = self.seq % SLOTS
     off = 4 + head_len
+    snap = [] if self.snap_path else None
     if tuple(head["views"]) == VIEWS:
       road_y = np.frombuffer(msg[off:off + W * H], dtype=np.uint8).reshape(H, W)
       wide_y = np.frombuffer(msg[off + FRAME_BYTES:off + FRAME_BYTES + W * H], dtype=np.uint8).reshape(H, W)
@@ -225,17 +246,14 @@ class Receiver:
       y, uv = nv12_planes(buf[slot * NV12_SIZE:(slot + 1) * NV12_SIZE])
       y[:] = frame[:W * H].reshape(H, W)
       uv[:] = frame[W * H:].reshape(H // 2, W)
-      if self.snap_path:
-        from PIL import Image
-        Image.fromarray(nv12_to_rgb(frame)).save(f"{self.snap_path}_{name}.png")
+      if snap is not None:
+        snap.append((name, frame.copy()))
       if self.burst_left:
         from PIL import Image
         # quarter-size luma, cheap enough to keep up with consecutive frames
         Image.fromarray(np.ascontiguousarray(y[::4, ::4])).save(f"{self.burst_path}_{self.seq:06d}_{name}.jpg", quality=80)
-    if self.snap_path:
-      with open(f"{self.snap_path}_state.json", "w") as f:
-        json.dump(head, f, indent=1)
-      print(f"gta5: saved {self.snap_path}_*.png", flush=True)
+    if snap is not None:
+      self.snaps.put((self.snap_path, snap, head))
       self.snap_path = None
     if self.burst_left:
       self.burst_left -= 1

@@ -408,6 +408,38 @@ def test_capture_runner():
     capture.gta5_cmd.send, capture.gta5_cmd.read_state, capture.win_path, capture.RETRY_WAITS, capture.time.sleep = saved
 
 
+def test_bare_run_carries_on():
+  from openpilot.tools.sim.bridge.gta5.map.imgcheck import lane_paint
+  n = 40
+  bare, judged = np.zeros(n, bool), np.ones(n, bool)
+  assert lane_paint.carries(judged, bare) == (True, True)
+  # the first dash past CARRY of the way: it joins the run, which stops there
+  dash = bare.copy()
+  dash[30:] = True
+  assert lane_paint.carries(judged, dash) == (True, False)
+  # a seam across the boundary isn't a line on it
+  dash[3:6] = True
+  assert lane_paint.carries(judged, lane_paint.lines_along(dash)) == (True, False)
+  # paint before CARRY of the way, or too little of it seen
+  dash = bare.copy()
+  dash[12:28] = True
+  assert lane_paint.carries(judged, dash) == (False, False)
+  assert lane_paint.carries(np.arange(n) < 10, bare) == (False, False)
+  assert lane_paint.carries(np.zeros(0, bool), np.zeros(0, bool)) == (False, False)
+
+  class Osm:
+    ways = {1: ({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}, [10, 11]),
+            2: ({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}, [11, 12]),
+            3: ({'highway': 'motorway_link', 'lanes': '1', 'oneway': 'yes'}, [11, 13]),
+            4: ({'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}, [14, 10])}
+  ends = {}
+  for wid, (_, refs) in Osm.ways.items():
+    ends.setdefault(refs[0], []).append(wid)
+    ends.setdefault(refs[-1], []).append(wid)
+  # past both ends, onto the ways with as many lanes that way, not the one-lane ramp
+  assert sorted(lane_paint.joined(Osm, ends, 1, 1, 0)) == [(2, 1, 0, 11), (4, 1, 0, 10)]
+
+
 if __name__ == "__main__":
   for name, fn in list(globals().items()):
     if name.startswith("test_") and callable(fn):

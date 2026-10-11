@@ -10,8 +10,9 @@ kept, moved off jogs in the route's line (route_jogs, where the lane line swerve
 room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
 and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in, and
 kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner kerb (a far-side turn's a median's
-edge, else the road's far edge), within its lane outside lane changes and turns' corners, and past a fork off its
-gore. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
+edge, else the road's far edge), within its lane outside lane changes and turns' corners, past a fork off its
+gore, and off the map's raised islands (traffic_calming=island: a tram crossing's D islands), our body CLAMP_MARGIN
+clear of each. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
 wander (never periodic, faded out through turns, junctions and forks, and within its lane), joining it from where the
 car is (on the trip's first plan, a bend it can't take there where the route doubles back fails the plan). The plan is
 checked against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another
@@ -57,7 +58,8 @@ ONCOMING_S in the oncoming lanes away from a junction (the bridge's lane matchin
 brake to a stop and end the trip, for good (on_abort=ai hands it to the game's AI). Map anomalies are logged with their place,
 for the map-fix work: kerb_contact (past a road's kerbs, or into a turn's corner kerb, from its legs' cross-sections),
 gta_edge (the plan's lane near GTA's road edge where the map's road is wider), lane_disagree, tracking_saturated,
-gta_link_offset, stop_line_far, plan_slot_mismatch, plan_lane_range, sharp_corner, jog_change, plan_clamp.
+gta_link_offset, stop_line_far, plan_slot_mismatch, plan_lane_range, sharp_corner, jog_change, plan_clamp,
+island_contact.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
@@ -232,6 +234,11 @@ CORNER_ZONE = 15.0  # m either side of such a turn's point
 CLAMP_EASE = 15.0  # m a push eases in and out over
 LANE_GRID = 2.0  # m between the places the lane is read at
 CLAMP_MAX = 2.5  # m a push is at most
+# m a raised island pushes the plan at most: a plan clipping one. One needing more runs through its middle (a route
+# across a median, a lane laid over it that nav didn't move from), which a push only bends into a sharper S over it:
+# that island is left to the island_contact anomaly and the plugin's obstacle probes
+ISLAND_MAX = 2.5
+ISLAND_ROOM = 1.0  # m beside our body (and CLAMP_MARGIN) an island keeps the lane clamp from pulling the plan back over it
 CARRY_MAX = 50.0  # m without a guide of its own a lane is carried across, at most (_lane_room)
 FORK_BEFORE, FORK_AFTER = 20.0, 40.0  # m before and after a fork its gore side is kept to
 FORK_ROOM = 0.3  # m from the lane's centre towards the gore at most
@@ -617,6 +624,7 @@ class MapDriver:
     self.corners: list[dict] = []
     self.clamps: list[dict] = []  # where _clamp moved the plan back: {"i": path index, "push": m right, "why", "length"}
     self.jog_changes: list[tuple[float, float]] = []  # lane changes left across a jog, with no room off it
+    self.moves_along: list[float] = []  # m along the route of the lane slots' moves (turns, forks, junctions through)
     self.unclear = np.zeros(0)
     self.front, self.rear, self.half_width = FRONT, FRONT, HALF_WIDTH  # our car's body from its origin (_body)
     self.cars: list[dict] | None = None  # the vehicles around, in the world (_vehicles); None: the plugin reports none
@@ -737,24 +745,36 @@ class MapDriver:
   def retime(self, route, keys: list[tuple[float, float]], slots) -> list[tuple[float, float]]:
     """Each single lane change over the style's time at the road's speed, its end placed by the style within its
     move's lane-slot window (freeway ones nav's schedule +-fwy_timing of a lane's time), clear of stop lines and junction
-    nodes in the city."""
+    nodes in the city, never begun back across the move before; one from where its lane opens kept there, no shorter
+    than MIN_LC_M; a city one nav squeezed under MIN_LC_M that finds no room so is run before the crossing it's on
+    (_room_before)."""
     keys = list(keys)
     crossings = sorted(route.stops + route.junctions)
     for a, b in chains(keys):
-      if b != a + 1 or (a > 0 and keys[a][0] - keys[a - 1][0] <= EPS):
-        continue  # renumbering inside it or where it starts: left as nav has it
+      if b != a + 1:
+        continue  # renumbering inside it: left as nav has it
       (s0, la), (s1, lb) = keys[a], keys[b]
+      if a > 0 and s0 - keys[a - 1][0] <= EPS:
+        # from where its lane opens: as nav has it, but no shorter than MIN_LC_M where that ends short of the next
+        # crossing and key (nav squeezes it between the opening and the target's end)
+        least = MIN_LC_M * max(abs(lb - la), 1.0)
+        room = min([keys[b + 1][0] - 1.0 if b + 1 < len(keys) else math.inf] + [c - CROSSING_CLEAR for c in crossings if c > s1])
+        if s1 - s0 < least <= room - s0:
+          keys[b] = (float(s0 + least), lb)
+        continue
       v = self._speed_at(route, s0)
       length = max(lc_seconds(self.style, lb - la) * v, MIN_LC_M * max(abs(lb - la), 1.0))
       j = a - 1  # back over holds in its lane to the change, step or start before it
       while j > 0 and abs(keys[j - 1][1] - keys[j][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
         j -= 1
       lower = keys[j][0] if a > 0 else s0
+      back = lower
       upper = keys[b + 1][0] if b + 1 < len(keys) else s1
       window = None
       if slots is not None:
         for m in slots.moves:
           if m.along >= s1 - 1.0 and m.need:
+            lower = max(lower, min(m.free + CROSSING_CLEAR, s0))  # not back across the move before (its lanes may not lead on)
             _, w0, w1 = m.window(v)
             if w1 >= s1 - 1.0:
               window = (w0, w1)
@@ -771,9 +791,8 @@ class MapDriver:
         e = s1
       e = min(max(e, lower + length), hi)
       start = max(e - length, lower)
-      if e - start < 0.6 * length:
-        continue  # no room: as nav has it
-      if not fwy:
+      placed = e - start >= 0.6 * length  # else no room: as nav has it
+      if placed and not fwy:
         for c in crossings:
           if start - CROSSING_CLEAR < c < e:
             if c + CROSSING_CLEAR + length <= hi:
@@ -781,11 +800,35 @@ class MapDriver:
             elif c - CROSSING_CLEAR - length >= lower:
               start, e = c - CROSSING_CLEAR - length, c - CROSSING_CLEAR
         if any(start - CROSSING_CLEAR < c < e for c in crossings) and not any(s0 - CROSSING_CLEAR < c < s1 for c in crossings):
-          continue  # only nav's timing was clear of them
-      if not (lower - EPS <= start < e <= upper + EPS):
-        continue
-      keys[a], keys[b] = (float(start), la), (float(e), lb)
+          placed = False  # only nav's timing was clear of them
+      placed = placed and lower - EPS <= start < e <= upper + EPS
+      least = MIN_LC_M * max(abs(lb - la), 1.0)
+      if not placed and not fwy and s1 - s0 < least - EPS:
+        # nav had no room for it (a lane ending just past a junction squeezes it onto the junction's node)
+        before = self._room_before(route, slots, crossings, s0, s1, lb, back, length, least)
+        if before is not None:
+          (start, e), placed = before, True
+      if placed:
+        keys[a], keys[b] = (float(start), la), (float(e), lb)
     return keys
+
+  def _room_before(self, route, slots, crossings: list[float], s0: float, s1: float, lane: float, back: float,
+                   length: float, least: float) -> tuple[float, float] | None:
+    """Where a city lane change into `lane` that nav squeezed into s0..s1 may run instead: ending CROSSING_CLEAR short
+    of the stop line or junction node it's on (else where nav began it), `length` long or as long as there's room for
+    down to `least`, not before `back` nor across a crossing, nor back across a move whose slot lanes don't include
+    `lane`; None where there's no such room."""
+    on = [c for c in crossings if s0 - CROSSING_CLEAR < c <= s1 + EPS]
+    e = min(on) - CROSSING_CLEAR if on else s0
+    start = max([e - length, back] + [c + CROSSING_CLEAR for c in crossings if c < e])
+    if e - start < least:
+      return None
+    for m in slots.moves if slots is not None else []:
+      if m.need and start < m.along <= s1 + 1.0:
+        good, target = self._slot_lanes(route, slots, m.along - 2.0, self._speed_at(route, m.along))
+        if good is None or target.move is not m or int(round(lane)) not in good:
+          return None
+    return start, e
 
   def slot_check(self, route, keys: list[tuple[float, float]], slots) -> dict:
     """The plan against the lane slots' targets: from each target's end to its move, the plan's lane (rounded) must be
@@ -804,6 +847,8 @@ class MapDriver:
       steps = [keys[i][0] for i in range(len(keys) - 1) if keys[i + 1][0] - keys[i][0] <= EPS and
                abs(keys[i + 1][1] - keys[i][1]) > EPS and end - EPS <= keys[i][0] < m.along - 1.0]
       first = max([end] + [x + MIN_LC_M for x in steps] + ([m.opens + MIN_LC_M] if m.opens is not None else []))
+      if end <= m.free + EPS:  # no room before the move before: the target's end is a lane change past it
+        first = max(first, m.free + CROSSING_CLEAR + MIN_LC_M)
       bad = None
       for s in np.arange(max(first, route.at + 1.0), m.along - 2.0, 2.0):
         good, target = self._slot_lanes(route, slots, float(s), v)
@@ -835,8 +880,9 @@ class MapDriver:
 
   def follow_slots(self, route, keys: list[tuple[float, float]], mismatches: list[dict], slots) -> list[tuple[float, float]]:
     """The keys with a lane change into the slots' nearest target lane for each mismatch, done by its target's end
-    (from a lane change's length before, not over the plan's change before nor before the move before, whose target the
-    plan keeps through it), else as soon after as MIN_LC_M allows, short of its move; then in that lane to its move:
+    (from a lane change's length before, not over the plan's change before nor before the move or turn before, whose
+    target the plan keeps through it), else as soon after as MIN_LC_M allows, short of its move; or where the plan's own
+    change for the move goes past the target lane, that change stopped in it; then in that lane to its move:
     the plan's own changes there dropped, its renumbering steps (lanes beginning or ending) kept. Past the move, the plan
     on from the lane it's then in (a change of its own under way there counted from where it began), but from a turn's
     own renumbering step there as nav has it, as that says which lane the turn comes out in."""
@@ -849,23 +895,35 @@ class MapDriver:
       good, _ = self._slot_lanes(route, slots, end + 0.1, v)
       want = sorted(good) if good else bad["want"]
       p = round(lane_at(keys, end + 0.1))
+      if p in want:  # still in a target lane at the end, out of it by the move: a change of its own under way there
+        p = round(lane_at(keys, bad["s"]))
       w = min(want, key=lambda x: abs(x - p))
       delta = w - p
       if delta == 0 or abs(lane_at(keys, move - 0.5) - w) < 0.02:
         continue  # in it by the move already: a change a fix before finished after the target's end
       length = max(lc_seconds(self.style, delta) * v, MIN_LC_M * abs(delta))
       changes = [keys[b][0] for a, b in chains(keys) if keys[b][0] <= end]
-      before = [m.along + CROSSING_CLEAR for m in moves if m.need and m.along < end - EPS]
+      # (a turn whatever its lanes, and one at the target's end too: a window with no room before it ends there)
+      before = [m.along + CROSSING_CLEAR for m in moves if (m.need or m.turn) and m.along < end + 0.11 and m.along < move - 1.0]
       # nor before the lane it's into has opened
       shut = [x for x in np.arange(move - 1.0, end - length - LANE_GRID, -LANE_GRID)
               if (sec := route.lanes.opened_at(float(x))) is not None and sec.lanes and w >= sec.lanes]
       start = max(end - length, max(changes + before + [x + LANE_GRID for x in shut[:1]], default=keys[0][0]), keys[0][0])
-      if end - start < 0.4 * length:
-        end = min(start + 0.4 * length, move - 1.0)
-        if end - start < MIN_LC_M * abs(delta):
-          continue  # no room: left as it is (still a mismatch)
-      out = [k for k in keys if k[0] <= start]
-      out += [(start, out[-1][1] if out else lane_at(keys, start)), (end, float(w))]  # a change under way there dropped
+      # the plan's own change for this move (after the move before, done by the target's end) past the target lane: it
+      # stops in it instead, rather than a change back after it, late, across the stop line
+      own = [(a, b) for a, b in chains(keys) if keys[b][0] <= end + EPS]
+      a, b = own[-1] if own else (0, 0)
+      moved = self._chain_lanes(keys, a, b) if own and keys[a][0] >= max(before, default=-math.inf) - EPS else 0.0
+      if abs(moved) > EPS and 0.0 < (keys[b][1] - w) / moved <= 1.0 + EPS:
+        out = keys[:a] + self._retarget_chain(keys, a, b, float(w))
+        end = keys[b][0]
+      else:
+        if end - start < 0.4 * length:
+          end = min(start + 0.4 * length, move - 1.0)
+          if end - start < MIN_LC_M * abs(delta):
+            continue  # no room: left as it is (still a mismatch)
+        out = [k for k in keys if k[0] <= start]
+        out += [(start, out[-1][1] if out else lane_at(keys, start)), (end, float(w))]  # a change under way there dropped
       lane, i = float(w), 0
       inside = [k for k in keys if end < k[0] < move - EPS]
       while i < len(inside):
@@ -957,6 +1015,7 @@ class MapDriver:
     except Exception as e:  # the slots on a map they can't read: plan without them
       self._event("mapdrive_warning", t, why=f"lane slots: {e!r}")
       slots = None
+    self.moves_along = sorted(m.along for m in slots.moves) if slots is not None else []
     nav = self.nav_keys(route, lane)
     keys = self.retime(route, nav, slots) if self.c["retime"] else nav
     check = self.slot_check(route, keys, slots)
@@ -1113,7 +1172,8 @@ class MapDriver:
   def fit_durations(self, route, keys: list[tuple[float, float]], v0: float) -> list[tuple[float, float]]:
     """The keys with each lane change re-placed to take its time (lc_seconds) at the speed the car will drive it
     (drive_speeds of the path just built), its end kept: started later where it'd be slow, earlier where quick, never
-    before the key before it; city ones not across a stop line or junction node it didn't cross already. Where that
+    before the key before it nor back across the move before; city ones not across a stop line or junction node it
+    didn't cross already. Where that
     leaves it short and it's the move into the plan's lanes from the car's (at the plan's start), it ends later
     instead, up to the key after. Renumbering steps inside a change stay at their places."""
     original, keys = keys, list(keys)
@@ -1144,6 +1204,9 @@ class MapDriver:
       while j > 0 and abs(keys[j - 1][1] - keys[j][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
         j -= 1
       lower = keys[j][0] if a > 0 else s0
+      prev = [x for x in self.moves_along if x < s1 - 1.0]
+      if prev:  # nor back across the move before (its lanes may not lead on), unless nav's own change is
+        lower = max(lower, min(prev[-1] + CROSSING_CLEAR, s0))
       upper = keys[b + 1][0] if b + 1 < len(keys) and abs(keys[b + 1][1] - keys[b][1]) < EPS else s1
       shortest = LC_SHORTEST * max(lanes, 1.0)
       s_new = min(max(at_time(s1, -want), lower), along_of(path_s(s1) - shortest))
@@ -1170,7 +1233,7 @@ class MapDriver:
   def off_jogs(self, route, keys: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """The keys with each single lane change moved off the route's jogs (route_jogs), where the lane line already
     swerves: wholly before the jog where there's room back to the key before, else after it where there's room on to
-    the key after; one with neither stays, logged as a jog_change anomaly."""
+    the key after, neither onto a stop line it was clear of; one with neither stays, logged as a jog_change anomaly."""
     spans = route_jogs(route)
     if not spans:
       return keys
@@ -1190,7 +1253,9 @@ class MapDriver:
         return not any(j0 < x1 and x0 < j1 for j0, j1 in spans) and not any(x0 - CROSSING_CLEAR < c < x1 for c in crossings)
       # before or after it; first where it crosses no stop line or junction node, as nav keeps changes off them
       options = [(hit[0] - length, hit[0]), (hit[1], hit[1] + length)]
-      ok = [o for o in options if o[0] >= lower and o[1] <= upper - 1.0 and clear(*o)]
+      # never onto a stop line it was clear of: on the jog is better than across the line into the junction
+      stops = () if any(s0 - CROSSING_CLEAR < c < s1 for c in route.stops) else route.stops
+      ok = [o for o in options if o[0] >= lower and o[1] <= upper - 1.0 and clear(*o, stops)]
       best = [o for o in ok if clear(*o, sorted(route.stops + route.junctions))] or ok
       if best:
         keys[a], keys[b] = (best[0][0], la), (best[0][1], lb)
@@ -1202,6 +1267,19 @@ class MapDriver:
   def _chain_lanes(keys, a: int, b: int) -> float:
     """Lanes a change crosses: its ramps' changes, without its renumbering steps."""
     return sum(keys[j + 1][1] - keys[j][1] for j in range(a, b) if keys[j + 1][0] - keys[j][0] > EPS)
+
+  @staticmethod
+  def _retarget_chain(keys, a: int, b: int, lane: float) -> list[tuple[float, float]]:
+    """A change's keys (a to b) ending in `lane` instead, at the same places: its ramps scaled, its renumbering steps
+    kept."""
+    moved = MapDriver._chain_lanes(keys, a, b)
+    scale = (moved - (keys[b][1] - lane)) / moved
+    out = [keys[a]]
+    for j in range(a, b):
+      (s, l0), (s1, l1) = keys[j], keys[j + 1]
+      out.append((s1, out[-1][1] + ((l1 - l0) if s1 - s <= EPS else (l1 - l0) * scale)))
+    out[-1] = (out[-1][0], lane)
+    return out
 
   @staticmethod
   def _replace_chain(keys, a: int, b: int, s0: float, s1: float) -> list[tuple[float, float]]:
@@ -1398,6 +1476,13 @@ class MapDriver:
         self._anomaly("kerb_contact", t, self.path[i], float(self.s_path[i]), planned=True, corner=c["side"],
                       depth=round(float(np.nanmax(depth)), 2),
                       corner_at=[round(float(v), 1) for v in c["corner"]])
+    islands = getattr(lanes, "islands", None) or []
+    if islands and len(self.path) >= 2:
+      push, _ = self._island_push(self.path, self.theta, islands, cap=None)
+      hits = np.flatnonzero((np.abs(push) > KERB_MARGIN) & (self.s_path >= self.join_m))
+      if len(hits):
+        i = int(hits[np.argmax(np.abs(push[hits]))])
+        self._anomaly("island_contact", t, self.path[i], float(self.s_path[i]), planned=True, depth=round(float(abs(push[i])), 2))
     for st in self.stops:
       after = junctions[junctions > st["along"] - 1.0] if len(junctions) else junctions
       gap = float(after[0] - st["along"]) if len(after) else math.inf
@@ -1542,8 +1627,9 @@ class MapDriver:
     """The intent moved back where it strays (the lane line's fillets and eased corners cut across what's beside the
     lane): our body out of each turn's inside corner kerb (_corners) by CLAMP_MARGIN; outside lane changes and the
     corners of turns of CLAMP_TURN or more (but bends), our body within its lane, CLAMP_MARGIN in from its edges, and
-    near a fork within FORK_ROOM of the lane's centre on the gore's side. Each push eased in and out over CLAMP_EASE m,
-    at most CLAMP_MAX. Also how far (m) the line may then move left and right in its lane (for the in-lane bias and
+    near a fork within FORK_ROOM of the lane's centre on the gore's side; our body CLAMP_MARGIN clear of the raised
+    islands (_island_push, up to ISLAND_MAX), the lane's own limits let go beside one. Each push eased in and out over
+    CLAMP_EASE m, at most CLAMP_MAX. Also how far (m) the line may then move left and right in its lane (for the in-lane bias and
     wander): (intent, left, right). The pushes are kept in `clamps`, plan_clamp anomalies."""
     self.clamps = []
     along, _ = along_route(route, intent, route.at - 5.0)
@@ -1641,6 +1727,20 @@ class MapDriver:
     th = headings(line)
     front, rear, hw = self.body
     m = CLAMP_MARGIN
+    islands = getattr(route.lanes, "islands", None) or []
+    if islands:
+      push, near = self._island_push(line, th, islands)
+      if near.any():  # by an island the lane is no guide: the island's push holds the plan off it, the lane's doesn't pull it back
+        w = int(CLAMP_EASE / STEP)
+        zone = np.convolve(near.astype(float), np.ones(2 * w + 1), mode="same") > 0.5
+        lo[zone], hi[zone] = -np.inf, np.inf
+        room_l[zone], room_r[zone] = 0.0, 0.0
+        for i in np.flatnonzero(np.abs(push) > 0.05):
+          if push[i] > 0:
+            lo[i] = min(float(push[i]), ISLAND_MAX)
+          else:
+            hi[i] = max(float(push[i]), -ISLAND_MAX)
+          why[i] = "island"
     for c in self._corners(route, line, along):
       # within its legs: beyond them the road may bend away from their kerb lines
       near = np.flatnonzero(np.abs(along - c["along"]) < c["leg"])
@@ -1655,6 +1755,44 @@ class MapDriver:
     need = np.where(both, (np.where(both, lo, 0.0) + np.where(both, hi, 0.0)) / 2, np.where(lo > 0, lo, np.where(hi < 0, hi, 0.0)))
     need[: int(10.0 / STEP)] = 0.0  # where the car joins its line
     return need, why, room_l, room_r
+
+  def _island_push(self, line: np.ndarray, th: np.ndarray, islands: list[np.ndarray],
+                   cap: float | None = ISLAND_MAX) -> tuple[np.ndarray, np.ndarray]:
+    """For each point of a line (headings th): how far (m, right positive) it must move for our body, CLAMP_MARGIN
+    round it, to clear the raised islands (outlines [K, 2]), the shorter way round each, 0 where it's clear; and whether
+    an island is within ISLAND_ROOM beside that body. Each island is passed on one side all along (the side it takes
+    less pushing to), so a line through its middle isn't pushed both ways in turn. An island needing more than `cap` is
+    left out (None: none is)."""
+    from openpilot.tools.sim.bridge.gta5.map.junctions import densify
+    need, near = np.zeros(len(line)), np.zeros(len(line), bool)
+    front, rear, hw = self.body
+    m = CLAMP_MARGIN
+    half = hw + m
+    for ring in islands:
+      pts = densify(np.vstack([ring, ring[:1]]), 0.25)
+      c = ring.mean(0)
+      reach = float(np.hypot(*(ring - c).T).max()) + max(front, rear) + half + ISLAND_ROOM
+      hits, close = [], []  # (point, push right that clears it, push left that does); points it's beside
+      for i in np.flatnonzero(np.hypot(*(line - c).T) < reach):
+        f = np.array([math.cos(th[i]), math.sin(th[i])])
+        rel = pts - line[i]
+        x, y = rel @ f, rel @ np.array([-f[1], f[0]])  # along, left of the line
+        ys = y[(x >= -(rear + m)) & (x <= front + m)]
+        if not len(ys) or ys.min() >= half + ISLAND_ROOM or ys.max() <= -(half + ISLAND_ROOM):
+          continue
+        close.append(i)
+        if ys.min() < half and ys.max() > -half:
+          hits.append((i, half - float(ys.min()), half + float(ys.max())))
+      go_right = sum(h[1] for h in hits) <= sum(h[2] for h in hits)
+      if cap is not None and hits and max(h[1] if go_right else h[2] for h in hits) > cap:
+        continue  # through its middle: no push mends that
+      near[close] = True
+      if hits:
+        for i, right, left in hits:
+          d = right if go_right else -left
+          if abs(d) > abs(need[i]):
+            need[i] = d
+    return need, near
 
   def _splice(self, route, state: dict, t: float):
     """A new route under way: the old path kept past the lane change under way and 3 s on, then the new plan's."""

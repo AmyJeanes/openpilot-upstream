@@ -481,6 +481,52 @@ def test_clamp_across_a_junction():
   print(f"clamp across a junction: ok (the plan at least {after:.2f} m right of the centre line, {before:.2f} before)")
 
 
+def island_keep(island=(-2.75, -12.0)):
+  """A two-lane one-way road north 400 m into a junction, bearing slight right through it (a keep either lane may take),
+  with a raised island 3 m square at `island` (None: none): over our left lane, centred 2.75 m left of the route's line,
+  just before the node (map1010c 017's tram crossing)."""
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
+  from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
+  from openpilot.tools.sim.bridge.gta5.map.router import Route
+  nodes = {1: (0.0, -400.0), 2: (0.0, 0.0), 3: (60.0, 140.0), 4: (-150.0, 0.0)}
+  road = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}
+  ways = {1: (road, [1, 2]), 2: (road, [2, 3]), 3: ({'highway': 'residential', 'lanes': '2', 'width': '8'}, [2, 4])}
+  if island is not None:
+    x, y = island
+    nodes |= {21: (x - 1.5, y - 1.5), 22: (x + 1.5, y - 1.5), 23: (x + 1.5, y + 1.5), 24: (x - 1.5, y + 1.5)}
+    ways[20] = ({'area': 'yes', 'traffic_calming': 'island'}, [21, 22, 23, 24, 21])
+  ids = np.array(sorted(nodes), np.int64)
+  osm = OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {}),
+                 lambda lat, lon: (np.asarray(lon, float), np.asarray(lat, float)))
+  mans = [{"type": ms.START, "begin_shape_index": 0}, {"type": 9, "begin_shape_index": 1}, {"type": ms.DEST, "begin_shape_index": 2}]
+  return Route(np.array([nodes[i] for i in (1, 2, 3)], float), mans, osm=osm)
+
+
+def test_island():
+  """A raised island over the left lane before a junction (map1010c 017): the plan changes into the right lane for it
+  (the lane slots' target, plan_check=fix); with the plan left in the left lane (plan_check=event) the clamp pushes our
+  body clear of it (a plan_clamp "island"), no island_contact. Without the island nothing changes."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import HALF_WIDTH
+  cfg = {"seed": 3, "bias_max": 0, "wander": 0}
+  plain = ms.drive(island_keep(None), {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert plain.plan["keys"] == [(0.0, 0.0)] and not plain.clamps and not plain.anomalies, (plain.plan["keys"], plain.anomalies)
+  r = island_keep()
+  fixed = ms.drive(r, cfg, lane=0, seconds=0.2).md
+  assert fixed.plan["keys"][-1][1] == 1.0 and fixed.plan["slot_check"]["fixed"], fixed.plan
+  assert not np.abs(fixed._island_push(fixed.path, fixed.theta, r.lanes.islands)[0]).any()
+  # the plan left in the left lane, the island right over it: no push mends that (ISLAND_MAX), it's an island_contact
+  middle = ms.drive(island_keep(), {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert not [c for c in middle.clamps if c["why"] == "island"] and kinds(middle, "island_contact"), middle.clamps
+  # an island clipping the left lane's left side: the clamp pushes our body clear of it
+  r2 = island_keep((-5.0, -12.0))
+  left = ms.drive(r2, {**cfg, "plan_check": "event"}, lane=0, seconds=0.2).md
+  assert left.plan["keys"] == [(0.0, 0.0)] and [c for c in left.clamps if c["why"] == "island"], left.clamps
+  assert np.abs(left._island_push(left.path, left.theta, r2.lanes.islands)[0]).max() < 1e-6 and not kinds(left, "island_contact")
+  i = int(np.argmin(np.abs(left.route_s - 388.0)))
+  assert left.route_r[i] > -3.5 + HALF_WIDTH, left.route_r[i]  # past the island's right side (-3.5 m) by our half width
+  print("island: ok")
+
+
 COLLISIONS = [  # map1010b's trips that hit the kerb or the gore: spec, map driver seed, where it first touched
   ("012", "883.2,-2077.8,29.5,96,0>-250.5,-1067.2", 165189838, (187.0, -1776.9)),
   ("014", "670.0,-2893.8,5.2,0,9>1358.8,-1110.4", 375068520, (561.3, -2547.6)),
@@ -624,6 +670,127 @@ def test_follow_slots():
   assert len(change) == 1 and change[0][0] >= 321.8 + 5.0 - 1e-6 and change[0][1] - change[0][0] >= 20.0, (change, out)
   assert all(abs(lane - round(lane)) < 1e-6 for s, lane in out if s >= 362.0), out
   print(f"follow slots: ok (seed 46's change into the left lane {change[0][0]:.1f}-{change[0][1]:.1f} m)")
+
+
+# map1010c's trips with lane misses (segment, route index, map driver seed): 001, 004 and 014 went through a junction
+# from a turn-only lane or changed lanes across its stop line, 011, 018 and 021 had plan keys in lane -1
+LANE_TRIPS = [("6aca53230021", 3, 84455483), ("6aca53230030", 2, 477986459), ("6aca53230053", 3, 603450814),
+              ("6aca53230063", 3, 978177677), ("6aca53230077", 2, 162756933), ("6aca53230088", 3, 750878412)]
+
+
+def test_lane_fixes_by_the_moves():
+  """map1010c's lane misses (recorded on older code, re-planned): 004's change for a left turn was retimed back across
+  the through junction before it and its stop line, into that junction's left-only lane, then fixed by changes back
+  across both junctions' stop lines; and nav's 12 m change from where a right-turn lane opens to its target's end was
+  moved off a jog onto the turn's stop line. 014's fork left 37 m past a through junction wanting the right lane (the
+  fork's window ends at the junction) flipped the fixes until the plan crossed the junction half in its left-only
+  lane. 001's change for a through junction went one lane past the target into a right-only lane, then back across
+  the stop line. Now a change isn't retimed or fitted back across the move before, nor moved onto a stop line off a
+  jog; one from where its lane opens is MIN_LC_M long where there's room; a fix starts past a move at its target's end
+  (whose check starts a lane change past it) or a turn before it, and the plan's own change past the target stops in
+  it."""
+  from types import SimpleNamespace
+  from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import CROSSING_CLEAR, MIN_LC_M
+  md = MapDriver({"seed": 3})
+
+  def change_list(keys):
+    return [(keys[a][0], keys[b][0]) for a, b in chains(keys) if abs(keys[b][1] - keys[a][1]) > 0.4]
+  # 004: not retimed back across the through junction (880 m, its stop line at 851) the left turn's window begins at
+  r = ms.straight(1100, stops=[(851.2, "light")], junctions=[88])
+  slots = SimpleNamespace(moves=[SimpleNamespace(along=880.0, need=True, turn=False, free=0.0, window=lambda v: (0.0, 600.0, 850.0)),
+                                 SimpleNamespace(along=956.3, need=True, turn=True, free=880.0, window=lambda v: (880.0, 880.0, 926.3))])
+  out = md.retime(r, [(0.0, 1.0), (879.1, 1.0), (919.1, 0.0), (1100.0, 0.0)], slots)
+  assert lane_at(out, 879.0) == 1.0 and change_list(out)[0][0] >= 879.1 - 1e-6, out
+  # 004: from where its lane opens, MIN_LC_M long, ending short of the stop line; not moved off a jog onto one
+  r = ms.straight(1400, stops=[(1274.5, "light")], junctions=[129])
+  out = md.retime(r, [(0.0, 0.0), (1246.6, 0.0), (1246.6, 0.0), (1259.0, 1.0), (1289.0, 1.0), (1289.0, 0.0), (1400.0, 0.0)], None)
+  assert change_list(out) == [(1246.6, 1246.6 + MIN_LC_M)], out
+  r = jog_road()
+  j0, j1 = g.route_jogs(r)[0]
+  r.stops.append(j1 + 10.0)
+  keys = [(0.0, 1.0), (j0 - 10.0, 1.0), (j0 - 5.0, 1.0), (j0 + 30.0, 0.0), (400.0, 0.0)]  # no room before the jog, a line after
+  assert md.off_jogs(r, keys) == keys
+  # 014: the fork's fix starts past the through junction, which keeps the right lane
+  r = ms.straight(600)
+  slots = FakeSlots((282.8, False), (319.8, False))
+  nav = [(0.0, 1.0), (242.7, 1.0), (279.8, 0.0), (600.0, 0.0)]
+  first = md.follow_slots(r, nav, [{"s": 270.8, "move": 282.8, "end": 252.8, "want": [1]}], slots)
+  out = md.follow_slots(r, first, [{"s": 307.8, "move": 319.8, "end": 282.8, "want": [0]}], slots)
+  ch = change_list(out)
+  assert all(lane_at(out, s) == 1.0 for s in (252.8, 270.8, 282.0)) and lane_at(out, 319.0) == 0.0, out
+  assert len(ch) == 1 and ch[0][0] >= 282.8 + CROSSING_CLEAR - 1e-6 and ch[0][1] - ch[0][0] >= MIN_LC_M, (ch, out)
+  # 001: a left lane opening inside nav's change (renumbered +1), which goes on into lane 2 where the slots want 1: it
+  # stops in lane 1 (the car's own lane, renumbered), no change back after the target's end
+  r = ms.straight(1200, ours=3)
+  nav = [(0.0, 0.0), (900.0, 0.0), (903.0, 0.07), (903.0, 1.07), (980.0, 2.0), (1010.0, 2.0), (1200.0, 2.0)]
+  out = md.follow_slots(r, nav, [{"s": 980.0, "move": 1010.0, "end": 980.0, "want": [1]}], FakeSlots((800.0, True), (1010.0, False)))
+  assert sorted({k for k in out if 900.0 <= k[0] <= 1010.0}) == [(900.0, 0.0), (903.0, 0.0), (903.0, 1.0), (980.0, 1.0), (1010.0, 1.0)], out
+  # the trips themselves, re-planned on the live map: the slots' lanes at each move, no change across a stop line
+  done = 0
+  for seg, i, seed in LANE_TRIPS:
+    got = ms.recorded_route(seg, i)
+    if got is None:
+      continue
+    from openpilot.selfdrive.navd.lane_slots import LaneSlots
+    route, pose, v = got
+    md = MapDriver({"seed": seed})
+    assert md._make_plan(route, {"pos": [pose[0], pose[1], 0.0], "heading": pose[2], "vEgo": v}, 0.0), (seg, md.aborts)
+    keys = md.keys
+    assert not md.plan["slot_check"]["mismatches"] and MapDriver._outside_lanes(route, keys) is None, (seg, md.plan["slot_check"])
+    slots = LaneSlots(route, True)
+    for m in slots.moves:
+      good, _ = MapDriver._slot_lanes(route, slots, m.along - 3.0, md._speed_at(route, m.along))
+      if m.need and good and m.along > route.at + 5.0:
+        assert round(lane_at(keys, m.along - 1.0)) in good, (seg, m.along, lane_at(keys, m.along - 1.0), good)
+    for s0, s1 in change_list(keys):
+      assert not [c for c in route.stops if s0 - CROSSING_CLEAR < c < s1], (seg, s0, s1)
+    done += 1
+  print(f"lane fixes by the moves: ok ({done} of map1010c's trips re-planned)" if done else "lane fixes by the moves: ok (trips skipped: no recordings)")
+
+
+LANE_END_TRIP = "123.0,-517.0,42.2,198,9>-418.0,-1444.2"  # map1011c 002
+
+
+def test_lane_end_past_a_junction():
+  """map1011c 002: out of a right turn in the right lane, which ends 30 m past the through junction 56 m on. nav
+  squeezes the change left onto the junction's node (0.07 m, across the lanes' renumbering there), and with no room
+  past the junction nor (since lanefix) back across it, the plan kept it: "lane 2.0 674.1 m along, where the road has
+  2" on every style (11 of 40 before lanefix). Now such a change runs before the junction, where the lane it goes into
+  is one the junction's slots take, clear of the crossings, MIN_LC_M long at the least; and stays as nav has it where
+  that lane isn't one of them."""
+  from types import SimpleNamespace
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import CROSSING_CLEAR, MIN_LC_M
+  md = MapDriver({"seed": 3})
+  r = ms.straight(800, ours=3, junctions=[62, 67])  # junction nodes at 620 (the turn) and 670 (through)
+  nav = [(0.0, 2.0), (615.0, 2.0), (615.0, 2.0), (670.0, 2.0), (670.07, 1.0), (670.07, 1.0), (670.07, 0.0), (700.0, 0.0), (800.0, 0.0)]
+
+  class Slots:
+    def __init__(self, want):
+      self.moves = [SimpleNamespace(along=670.0, need=True, turn=False, free=640.0, opens=None, window=lambda v: (640.0, 640.0, 646.0))]
+      self.want = want
+
+    def target(self, s, v=0.0):
+      return r.lanes.section_at(s), SimpleNamespace(centre=False, want=self.want, move=self.moves[0])
+  out = md.retime(r, nav, Slots({1, 2}))
+  ch = [(out[a][0], out[b][0]) for a, b in chains(out) if out[b][0] - out[a][0] > 1e-3]
+  assert len(ch) == 1 and 620.0 + CROSSING_CLEAR - 1e-6 <= ch[0][0] and ch[0][1] <= 670.0 - CROSSING_CLEAR + 1e-6, out
+  assert ch[0][1] - ch[0][0] >= MIN_LC_M and lane_at(out, 668.0) == 1.0 and out[-4:] == nav[-4:], out
+  assert md.retime(r, nav, Slots({2})) == nav  # the lane it goes into isn't the junction's: as nav has it
+  # the trip itself, from the live router's route (routes_cache), over styles
+  if ms.trip_route(LANE_END_TRIP) is None:
+    print("lane end past a junction: ok (trip skipped: no live map or route)")
+    return
+  for seed in range(10):
+    route, pose = ms.trip_route(LANE_END_TRIP)
+    md = MapDriver({"seed": seed})
+    assert md._make_plan(route, {"pos": [pose[0], pose[1], 0.0], "heading": pose[2], "vEgo": 0.0}, 0.0), (seed, md.aborts)
+    keys = md.keys
+    assert not [a for a in md.anomalies if a["kind"] == "plan_lane_range"], (seed, md.anomalies)
+    for a, b in chains(keys):
+      s0, s1 = keys[a][0], keys[b][0]
+      assert s1 - s0 <= 1e-3 or not [c for c in route.stops if s0 - CROSSING_CLEAR < c < s1], (seed, s0, s1)
+  print("lane end past a junction: ok (map1011c 002 planned on 10 styles)")
 
 
 def test_oncoming_abort():
@@ -838,11 +1005,14 @@ if __name__ == "__main__":
   test_clamp_corners()
   test_far_corner_beside_the_flank()
   test_clamp_lane_and_fork()
+  test_island()
   test_clamp_across_a_junction()
   test_collision_routes()
   test_start_stub_and_join()
   test_live_starts()
   test_follow_slots()
+  test_lane_fixes_by_the_moves()
+  test_lane_end_past_a_junction()
   test_oncoming_abort()
   test_lane_change_kept_off_a_jog()
   test_arrival()

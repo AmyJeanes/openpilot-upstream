@@ -9,7 +9,9 @@ taper has ended, so a target is always a lane of ours that exists where the car 
 set only where the route needs particular lanes: the lanes its move is taken from (the map's turn arrows, else nav's
 fallbacks: planner Turn, Fork and Through .lanes) are a strict subset of the lanes allowed. Before a bay the route
 needs has opened, the target is the lane it opens from, and the bay once it has. A shared centre turn lane is the
-target only within CENTRE_LANE_M of the turn, the lane beside it before that.
+target only within CENTRE_LANE_M of the turn, the lane beside it before that. A lane a raised island cuts near the move
+(RouteLanes.blocked, BLOCK_BEFORE m before it to BLOCK_AFTER past one that doesn't turn) isn't one it may be taken from:
+the rest are its target, unless that would leave none (then it stays as it was, `blocked_all`).
 
 The target shows from TARGET_SHOW m before the car may start moving into it. TARGET_START counts down to that point:
 where nav would start the lane changes from the farthest allowed lane, and not inside a stretch where change:lanes
@@ -50,6 +52,8 @@ NEAR = 60.0  # m on to look for a road's lanes from a segment without (inside a 
 EXIT_PAST = 1.0  # m past a maneuver's point where its road out begins
 FORK_NEAR = 15.0  # m between a keep maneuver and GTA's fork in the road
 BAN_BACK = 600.0  # m before a move to look for a stretch where change:lanes bans changing towards its lanes
+BLOCK_BEFORE = 40.0  # m before a move a raised island across one of our lanes keeps the move out of that lane
+BLOCK_AFTER = 30.0  # m past a move that doesn't turn (the road out's far side of a junction)
 # NEXT's choice of the next maneuver (route_input.py)
 NEXT_PAST, NEXT_AHEAD, NEXT_SOON = 20.0, 500.0, 60.0
 
@@ -61,7 +65,7 @@ def lane_slots_path() -> str:
 
 class Move:
   """A turn, fork or straight on through a junction, and the lanes of the road into it the route needs."""
-  def __init__(self, along: float, nav, sec: Section | None, maneuver: bool):
+  def __init__(self, along: float, nav, sec: Section | None, maneuver: bool, blocked: set[int] | None = None):
     self.along = along
     self.nav = nav  # planner Turn, Fork or Through, aimed by the map's arrows
     self.turn = isinstance(nav, planner.Turn)
@@ -74,9 +78,17 @@ class Move:
     self.free = 0.0  # m along from which its changes may start: past the move before
     self.bans: list[tuple[float, float]] = []  # m along: stretches where changing towards its lanes is banned
     self.opens: float | None = None  # m along where its target lanes begin to be the target: a bay's opening
+    self.blocked = set(blocked or ())  # of the lanes into its junction: those a raised island cuts near it
+    self.blocked_all = False  # every lane it may be taken from blocked: left as it was
     if sec is not None and self.n:
       self.targets, self.centre = targets(sec, nav)
       allowed = allowed_lanes(sec)
+      if self.blocked and not self.centre:
+        free = (self.targets or allowed) - self.blocked
+        if free:
+          self.targets = free if free != allowed else set()
+        elif self.blocked & allowed:
+          self.blocked_all = True
       if self.targets:
         self.worst = max((min(abs(i - t) for t in self.targets) for i in allowed - self.targets), default=0)
       elif self.centre:
@@ -225,7 +237,9 @@ class LaneSlots:
     maneuver_ids = {id(nav) for nav in navs if not isinstance(nav, planner.Through)}
     free = 0.0
     for nav in navs:
-      move = Move(nav.dist, nav, self.section_here(nav.dist - EXIT_PAST, False), id(nav) in maneuver_ids)
+      sec = self.section_here(nav.dist - EXIT_PAST, False)
+      blocked = self._blocked(nav, sec) if getattr(self.lanes, "islands", None) else set()
+      move = Move(nav.dist, nav, sec, id(nav) in maneuver_ids, blocked)
       move.free = free
       if move.targets:
         opening = self.lanes.opening(self.lanes.segment(nav.dist - EXIT_PAST))
@@ -238,6 +252,43 @@ class LaneSlots:
       self.moves.append(move)
     self.along = np.array([m.along for m in self.moves])
     self.next = [k for k, m in enumerate(self.moves) if m.maneuver]
+
+  def _blocked(self, nav, sec: Section | None) -> set[int]:
+    """The lanes into a move's junction (as `sec` numbers them, the lanes there as they are open) that a raised island
+    cuts within BLOCK_BEFORE m before it, or BLOCK_AFTER m past it where it doesn't turn: each island's lane followed
+    across where our lanes change between (lane_maps) only where it carries on as one lane there."""
+    lanes = self.lanes
+    if sec is None or not sec.lanes:
+      return set()
+    at = nav.dist - EXIT_PAST
+    full = lanes.section_at(at)  # the move's lanes as the blocked spans number them, every lane counted
+    if full is None or full.lanes != sec.lanes:
+      return set()  # a bay still opening at the move: numbered otherwise
+    after = 0.0 if isinstance(nav, planner.Turn) else BLOCK_AFTER
+    maps = self.maps or []
+    out = set()
+    for a0, a1, lane, n in lanes.blocked:
+      if a1 < nav.dist - BLOCK_BEFORE or a0 > nav.dist + after:
+        continue
+      j: int | None = lane
+      if a1 <= at:  # before the move: carried on to it
+        between = [m for m in maps if a1 < m[0] < nav.dist - planner.MAP_AT]
+        if (len(between[0][1]) if between else sec.lanes) != n:
+          continue
+        for _, mp, _ in between:
+          j = mp[j] if j is not None and j < len(mp) else None
+      elif a0 >= nav.dist:  # past it: back to it
+        between = [m for m in maps if nav.dist - planner.MAP_AT <= m[0] < a0]
+        if (between[-1][2] if between else sec.lanes) != n:
+          continue
+        for _, mp, _ in reversed(between):
+          came = [i for i, x in enumerate(mp) if x == j] if j is not None else []
+          j = came[0] if len(came) == 1 else None
+      elif n != sec.lanes:
+        continue
+      if j is not None and 0 <= j < sec.lanes:
+        out.add(j)
+    return out
 
   def section_here(self, s: float, ahead: bool = True) -> Section | None:
     """The road's lanes at s m along as they are there (RouteLanes.opened_at), else the nearest within NEAR m on
