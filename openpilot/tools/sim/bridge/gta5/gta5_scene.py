@@ -105,6 +105,9 @@ COLOUR_GROUPS = {
   "orange": (2, [36, 37, 38, 88, 89, 90]),
 }
 WHEEL = 156  # the game's default alloy colour
+# the Model 3's interior, by its white leather's paint layer (extra colour 5, the plugin's trim command), roughly by the
+# real cars' shares: palette 134 pure white, 12 matte black
+INTERIORS = {"black": (65, 12), "white": (35, 134)}
 
 WEATHERS = {"EXTRASUNNY": 25, "CLEAR": 22, "CLOUDS": 18, "OVERCAST": 12, "SMOG": 5, "FOGGY": 5, "CLEARING": 4, "RAIN": 7, "THUNDER": 2}
 TRAFFIC_LEVELS = {0.3: 15, 0.6: 25, 1.0: 40, 1.5: 20}  # vehicle density multipliers
@@ -142,6 +145,16 @@ def pick_colours(rng: random.Random, car: str = "") -> dict:
     pearl = primary if rng.random() < 0.5 else rng.choice(shades) if rng.random() < 0.6 else rng.choice([5, 111])
   return {"primary": primary, "secondary": secondary, "pearl": pearl, "wheel": WHEEL, "dirt": round(rng.triangular(0, 8, 1), 1),
           "group": group}
+
+
+def pick_interior(rng: random.Random) -> int:
+  """The Model 3's interior colour (a palette index)."""
+  return INTERIORS[weighted(rng, {k: w for k, (w, _) in INTERIORS.items()})][1]
+
+
+def interior_index(value) -> int:
+  """A palette index from a name in INTERIORS or a number."""
+  return INTERIORS[value][1] if value in INTERIORS else int(float(value))
 
 
 def pick_time(rng: random.Random) -> tuple[int, int]:
@@ -201,11 +214,14 @@ def pick(seed: int, model_share: float = 0.6, mount: str = "mixed", jitter: bool
     mount = "comma" if vehicle and car == "model3" and rng.random() < comma_share else "dashcam"
   if mount in ("dashcam", "comma"):
     choice["mount"] = pick_mount(rng, mount, jitter)
+  if vehicle and car == "model3":  # drawn last, so a seed's other choices stay as they were
+    choice["vehicle"]["interior"] = pick_interior(rng)
   return choice
 
 
 def commands(choice: dict) -> list[dict]:
-  """The plugin commands for a choice, the car first so its model loads while the rest go."""
+  """The plugin commands for a choice, the car first so its model loads while the rest go (but trim_commands after the
+  swap)."""
   out = []
   if "vehicle" in choice:
     v = choice["vehicle"]
@@ -217,3 +233,9 @@ def commands(choice: dict) -> list[dict]:
   if "mount" in choice:
     out.append({"type": "mount", **choice["mount"]})
   return out
+
+
+def trim_commands(choice: dict) -> list[dict]:
+  """The interior colour, sent once the car swap is done: the plugin's trim colours the player's current car."""
+  v = choice.get("vehicle", {})
+  return [{"type": "trim", "interior": v["interior"]}] if "interior" in v else []

@@ -11,8 +11,11 @@
   gta5_cmd.py traffic vehicles=0.6 peds=0.8 parked=1
                                                 traffic and pedestrian density, held until changed (reset=1; on=0 none)
   gta5_cmd.py vehicle premier [colours=random|keep] [primary=111 secondary=0 pearl=5 wheel=156 dirt=2] [force=1]
-                                                swap the player's car for a new one where it is (model3, a car of
-                                                `vehicle list`, any model name or 0x hash; random picks one), coloured
+             [interior=white|black|12]          swap the player's car for a new one where it is (model3, a car of
+                                                `vehicle list`, any model name or 0x hash; random picks one), coloured;
+                                                interior: the Model 3's interior colour, after the swap
+  gta5_cmd.py trim interior=134 [dashboard=0]   the car's interior and dashboard colours (palette indices; the Model 3's
+                                                white leather: 134 white, 12 black)
   gta5_cmd.py mount dashcam [drop=0.08 back=0.06] [jitter=1] [dx= dy= dz= pitch= yaw=]
                                                 the camera at the top of the windscreen (comma: a comma device's place, the
                                                 default); jitter=1 moves it a little at random, jitter=0 not at all
@@ -162,9 +165,13 @@ def vehicle(argv: list[str]) -> None:
   cmd = {"type": "vehicle", "model": gta5_scene.model_for(car)}
   if opts.pop("colours", "random") == "random":
     cmd.update({k: v for k, v in gta5_scene.pick_colours(rng, car).items() if k != "group"})
+  interior = opts.pop("interior", None)
   cmd.update(opts)
   print(json.dumps(cmd))
   send(cmd)
+  if interior is not None:
+    time.sleep(SWAP_WAIT)  # trim colours the current car, so after the swap
+    send({"type": "trim", "interior": gta5_scene.interior_index(interior)})
 
 
 def mount(argv: list[str]) -> None:
@@ -194,6 +201,8 @@ def randomise(argv: list[str]) -> None:
   send(*gta5_scene.commands(choice))
   if "vehicle" in choice:
     time.sleep(float(opts.get("wait", SWAP_WAIT)))  # a setup sent during the swap would place the old car
+    if trim := gta5_scene.trim_commands(choice):
+      send(*trim)
 
 
 def on_off(argv: list[str]) -> int:
