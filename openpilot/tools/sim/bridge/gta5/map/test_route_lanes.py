@@ -459,6 +459,41 @@ def pbf_bytes() -> bytes:
   return out
 
 
+def island_map(island_z: float = 10.0, centre=(0.0, 2.75)) -> OsmLanes:
+  """A one-way road east, two lanes 5.5 m wide (lane 0, on the left, centred 2.75 m north of its line), with a raised
+  island 3 m square at `centre` (traffic_calming=island)."""
+  cx, cy = centre
+  nodes = {1: (-100.0, 0.0), 2: (0.0, 0.0), 3: (100.0, 0.0),
+           21: (cx - 1.5, cy - 1.5), 22: (cx + 1.5, cy - 1.5), 23: (cx + 1.5, cy + 1.5), 24: (cx - 1.5, cy + 1.5)}
+  ways = {10: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}, [1, 2]),
+          11: ({'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '11'}, [2, 3]),
+          20: ({'area': 'yes', 'traffic_calming': 'island'}, [21, 22, 23, 24, 21])}
+  tags = {n: {'ele': '10.0'} for n in (1, 2, 3)} | {n: {'ele': str(island_z)} for n in (21, 22, 23, 24)}
+  ids = np.array(sorted(nodes), np.int64)
+  data = OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), tags, ways, {})
+  return OsmLanes(data, lambda lat, lon: (lon, lat))
+
+
+def test_lanes_blocked_by_a_raised_island():
+  osm = island_map()
+  assert len(osm.islands) == 1 and osm.islands[0][0].shape == (4, 2) and osm.islands[0][1] == 10.0
+  pts = np.array([(-100.0, 0.0), (0.0, 0.0), (100.0, 0.0)])
+  rl = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert len(rl.islands) == 1
+  blocked = rl.blocked
+  assert [(lane, n) for _, _, lane, n in blocked] == [(0, 2)]  # the left lane only
+  a0, a1 = blocked[0][:2]
+  assert abs(a0 - 98.5) <= 0.5 and abs(a1 - 101.5) <= 0.5  # along the island's 3 m
+  # on the lane line between them it cuts neither lane's body band (2.75 m +- 0.9 m either side)
+  between = island_map(centre=(0.0, 0.0))
+  assert RouteLanes.from_osm(pts, ways_from_nodes(pts, between), between).blocked == []
+  high = island_map(island_z=20.0)  # another level's
+  rl = RouteLanes.from_osm(pts, ways_from_nodes(pts, high), high)
+  assert rl.islands == [] and rl.blocked == []
+  plain = junction_map()  # no islands
+  assert RouteLanes.from_osm(left_turn_route(), ways_from_nodes(left_turn_route(), plain), plain).blocked == []
+
+
 def test_pbf():
   with tempfile.TemporaryDirectory() as d:
     path = os.path.join(d, 'tiny.osm.pbf')

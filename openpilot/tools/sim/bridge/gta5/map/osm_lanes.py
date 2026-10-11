@@ -514,6 +514,13 @@ SAME_WIDTH = 0.5  # m: roads either side of a junction this near as wide are one
 MOVE_THROUGH, MOVE_SKEW, MOVE_U_TURN = 45.0, 55.0, 135.0  # deg
 MOVE_SPAN = 20.0  # m across the junction from its node
 MOVE_HEADING = 15.0  # m before the junction that the road's heading into it is taken over
+# Raised islands (`area=yes` + `traffic_calming=island`: kerbed, no car drives over them) cut the lanes GTA lays across
+# them (a tram crossing's D islands, a slip's pork chop): RouteLanes.blocked
+ISLAND_LEVEL = 3.0  # m: an island further above or below the route is another level's
+ISLAND_NEAR = 12.0  # m from an island's outline the route's segments are checked against it
+BODY_HALF = 0.9  # m either side of a lane's centre a car's body takes (the lane's half width where that's narrower)
+BLOCK_STEP = 0.5  # m between the places a lane is checked at
+ISLAND_CELL = 50.0  # m
 
 
 class Section:
@@ -1033,6 +1040,48 @@ class OsmLanes:
   def way_points(self, way: int) -> np.ndarray:
     return self.xy[self.data.index(self.ways[way][1])]
 
+  @cached_property
+  def islands(self) -> list[tuple[np.ndarray, float]]:
+    """The raised islands (`area=yes` + `traffic_calming=island`): each one's outline [K, 2] (not closed) and height
+    (its nodes' `ele`, NaN unknown)."""
+    out = []
+    for tags, refs in self.data.ways.values():
+      if tags.get('traffic_calming') != 'island' or tags.get('area') != 'yes' or len(refs) < 4:
+        continue
+      ring = self.xy[self.data.index(refs)]
+      if np.hypot(*(ring[-1] - ring[0])) < 1e-6:
+        ring = ring[:-1]
+      ele = [float(t['ele']) for n in refs if 'ele' in (t := self.data.node_tags.get(n, {}))]
+      out.append((ring, float(np.mean(ele)) if ele else math.nan))
+    return out
+
+  @cached_property
+  def _island_cells(self) -> dict[tuple[int, int], list[int]]:
+    cells: dict[tuple[int, int], list[int]] = {}
+    for n, (ring, _) in enumerate(self.islands):
+      lo, hi = ring.min(0) // ISLAND_CELL, ring.max(0) // ISLAND_CELL
+      for cx in range(int(lo[0]), int(hi[0]) + 1):
+        for cy in range(int(lo[1]), int(hi[1]) + 1):
+          cells.setdefault((cx, cy), []).append(n)
+    return cells
+
+  def islands_near(self, points, reach: float = ISLAND_NEAR) -> list[tuple[np.ndarray, float]]:
+    """The raised islands within reach of a polyline [N, 2] (islands' outlines and heights)."""
+    if not self.islands:
+      return []
+    pts = np.asarray(points, float)[:, :2]
+    dense = np.vstack([pts[:1]] + [a + (b - a) * np.linspace(0.0, 1.0, int(np.hypot(*(b - a)) // (ISLAND_CELL / 2)) + 2)[1:, None]
+                                   for a, b in zip(pts[:-1], pts[1:], strict=True)])
+    keys = {(int(x // ISLAND_CELL) + dx, int(y // ISLAND_CELL) + dy) for x, y in dense for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+    found = sorted({n for k in keys for n in self._island_cells.get(k, ())})
+    out = []
+    for n in found:
+      ring = self.islands[n][0]
+      c = ring.mean(0)
+      if _seg_dist(pts, c) <= reach + float(np.hypot(*(ring - c).T).max()):
+        out.append(self.islands[n])
+    return out
+
   def nodes_at(self, p, tol: float = MATCH_TOL) -> list[int]:
     """The road nodes within tol of a point, nearest first: more than one where roads pass over each other."""
     cx, cy = int(p[0] // self.CELL), int(p[1] // self.CELL)
@@ -1258,12 +1307,33 @@ def _true_runs(mask: np.ndarray) -> list[tuple[int, int]]:
   return list(zip(edges[::2], edges[1::2], strict=True))
 
 
+def _seg_dist(line: np.ndarray, q: np.ndarray) -> float:
+  """m from a point to a polyline [N, 2]."""
+  if len(line) < 2:
+    return float(np.hypot(*(line[0] - q))) if len(line) else math.inf
+  a, ab = line[:-1], np.diff(line, axis=0)
+  t = np.clip(((q - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+  return float(np.hypot(*(a + ab * t[:, None] - q).T).min())
+
+
+def inside_ring(pts: np.ndarray, ring: np.ndarray) -> np.ndarray:
+  """Which points [P, 2] lie inside an outline [K, 2] (closed or not; even-odd, as it needn't be convex)."""
+  pts = np.asarray(pts, float).reshape(-1, 2)
+  r = ring if np.hypot(*(ring[-1] - ring[0])) < 1e-9 else np.vstack([ring, ring[:1]])
+  a, b = r[:-1], r[1:]
+  x, y = pts[:, None, 0], pts[:, None, 1]
+  spans = (a[None, :, 1] > y) != (b[None, :, 1] > y)
+  dy = np.where(b[:, 1] == a[:, 1], 1e-12, b[:, 1] - a[:, 1])[None]
+  cross = x < a[None, :, 0] + (y - a[None, :, 1]) * (b[None, :, 0] - a[None, :, 0]) / dy
+  return (spans & cross).sum(axis=1) % 2 == 1
+
+
 class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
                junctions=None, explicit: dict | None = None, moves: list | None = None, blended: dict | None = None,
-               merges: dict | None = None, splits: dict | None = None):
+               merges: dict | None = None, splits: dict | None = None, islands: list | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
@@ -1289,6 +1359,9 @@ class RouteLanes:
     self._openings: list[tuple[float, int]] | None = None
     self._maps: list[tuple[float, tuple[int | None, ...], int]] | None = None
     self._runs: dict[int, tuple[int, int]] = {}
+    # the raised islands beside the route at its height (outlines [K, 2]), which no lane drives over (blocked)
+    self.islands: list[np.ndarray] = islands or []
+    self._blocked: list[tuple[float, float, int, int]] | None = None
 
   @classmethod
   def from_osm(cls, points, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes) -> 'RouteLanes':
@@ -1332,7 +1405,72 @@ class RouteLanes:
     moves = [junction_move(osm, nodes, pts, along, k) for k in ends]
     merges = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k)) is not None}
     splits = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k, True)) is not None}
-    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits)
+    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits, cls._islands(pts, osm, nodes))
+
+  @staticmethod
+  def _islands(pts: np.ndarray, osm: OsmLanes, nodes: list | None) -> list[np.ndarray]:
+    """The map's raised islands beside the route (islands_near) at its height: within ISLAND_LEVEL of its nearest
+    shape point with a known height (either unknown: kept)."""
+    near = osm.islands_near(pts) if len(pts) >= 2 else []
+    if not near:
+      return []
+    nodes = nodes if nodes else route_nodes(pts, osm)
+    z = np.array([float(osm.data.node_tags.get(n, {}).get('ele', 'nan')) if n is not None else math.nan for n in nodes])
+    known = np.flatnonzero(np.isfinite(z))
+    out = []
+    for ring, iz in near:
+      if math.isfinite(iz) and len(known):
+        k = known[int(np.argmin(np.hypot(*(pts[known] - ring.mean(0)).T)))]
+        if abs(z[k] - iz) > ISLAND_LEVEL:
+          continue
+      out.append(ring)
+    return out
+
+  @property
+  def blocked(self) -> list[tuple[float, float, int, int]]:
+    """Where a raised island cuts one of our lanes' bands (its centre BODY_HALF either side, or its own width where
+    narrower), by the cross-sections along the route (section_at): [(m along from, to, the lane from the left of ours,
+    how many there)], in order."""
+    if self._blocked is None:
+      self._blocked = self._find_blocked()
+    return self._blocked
+
+  def _find_blocked(self) -> list[tuple[float, float, int, int]]:
+    if not self.islands or len(self.points) < 2:
+      return []
+    hits: dict[tuple[int, int], list[float]] = {}
+    for ring in self.islands:
+      lo, hi = ring.min(0) - ISLAND_NEAR, ring.max(0) + ISLAND_NEAR
+      for k in range(len(self.points) - 1):
+        a, b = self.points[k], self.points[k + 1]
+        if (np.minimum(a, b) > hi).any() or (np.maximum(a, b) < lo).any() or self.sections[k] is None:
+          continue
+        size = float(self.along[k + 1] - self.along[k])
+        if size < 1e-6:
+          continue
+        u = (b - a) / size
+        nrm = np.array([u[1], -u[0]])
+        for s in np.arange(self.along[k] + BLOCK_STEP / 2, self.along[k + 1], BLOCK_STEP):
+          sec = self.section_at(float(s), k)
+          if sec is None or not sec.lanes:
+            continue
+          p = a + u * (s - self.along[k])
+          for i, sp in enumerate(sec.ours):
+            half = min(BODY_HALF, (sp.right - sp.left) / 2)
+            lat = sp.centre + np.linspace(-half, half, 5)
+            if inside_ring(p + nrm * lat[:, None], ring).any():
+              hits.setdefault((i, sec.lanes), []).append(float(s))
+    out = []
+    for (i, n), ss in hits.items():
+      ss = sorted(set(ss))
+      a0 = prev = ss[0]
+      for v in ss[1:]:
+        if v - prev > 2 * BLOCK_STEP + EPS:
+          out.append((a0 - BLOCK_STEP / 2, prev + BLOCK_STEP / 2, i, n))
+          a0 = v
+        prev = v
+      out.append((a0 - BLOCK_STEP / 2, prev + BLOCK_STEP / 2, i, n))
+    return sorted(out)
 
   @staticmethod
   def _blended(pts: np.ndarray, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes, n: int) -> dict:
