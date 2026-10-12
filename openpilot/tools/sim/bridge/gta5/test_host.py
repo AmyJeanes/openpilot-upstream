@@ -41,7 +41,8 @@ def test_host_without_link(tmp_path):
         state = {"t": t, "inVehicle": True, "vEgo": 0.0, "heading": 0.0, "yawRate": 0.0, "pos": [0.0, 0.0, 30.0],
                  "aMeas": 0.0, "engagePresses": presses[0]}
         try:
-          conn.sendall((json.dumps({"views": [], "state": state}) + "\n").encode())
+          # the plugin's state alone, as it sends it while nothing takes its frames
+          conn.sendall((json.dumps({"type": "state", "t": t, "state": state}) + "\n").encode())
         except OSError:
           return
         t += 0.05

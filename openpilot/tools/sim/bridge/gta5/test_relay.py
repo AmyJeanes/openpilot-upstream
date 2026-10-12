@@ -7,6 +7,8 @@ import time
 
 from openpilot.tools.sim.bridge.gta5 import gta5_relay
 
+FRAMES_ON, FRAMES_OFF = b'{"type": "frames", "on": 1}', b'{"type": "frames", "on": 0}'
+
 
 def free_port() -> int:
   with socket.socket() as s:
@@ -55,8 +57,8 @@ def test_relay(tmp_path, monkeypatch):
   bridge, _ = bridge_srv.accept()
   bridge.sendall(b"settings\n")  # as rx sends the overlay's settings on each connection
   game = plugin_connect(relay_port)
-  assert recv_n(game, 9) == b"settings\n"
-  frames = [bytes([i]) * (3 << 20) for i in range(3)]
+  assert read_lines(game, b"settings") == [FRAMES_ON, b"settings"]  # a bridge takes the frames
+  frames =[bytes([i]) * (3 << 20) for i in range(3)]
   for f in frames:
     game.sendall(struct.pack("<I", len(f)) + f)
   for f in frames:
@@ -94,7 +96,7 @@ def test_relay_bridge_reset(tmp_path, monkeypatch):
   second, _ = bridge_srv.accept()
   game = plugin_connect(relay_port)
   second.sendall(b"hi\n")  # the bridge's commands are JSON lines
-  assert recv_n(game, 3) == b"hi\n"
+  assert read_lines(game, b"hi") == [FRAMES_ON, b"hi"]
   game.close()
   second.close()
   bridge_srv.close()
@@ -138,7 +140,7 @@ def test_relay_brain(tmp_path, monkeypatch):
 
   bridge.sendall(b'{"type": "control", "active": true, "curvature": 0.2}\n{"type": "hud", "setSpeed": 30}\n{"type": "mark1"}\n')
   got = read_lines(game, b"mark1")
-  assert got == [b'{"type": "control", "active": true, "curvature": 0.2}', b'{"type": "mark1"}']  # a brain: no bridge HUD
+  assert got == [FRAMES_ON, b'{"type": "control", "active": true, "curvature": 0.2}', b'{"type": "mark1"}']  # a brain: no bridge HUD
   brain.sendall(b'{"type": "owner", "who": "brain"}\n{"type": "control", "active": true, "curvature": 0.1}\n')
   time.sleep(0.2)
   bridge.sendall(b'{"type": "control", "active": false}\n{"type": "mark2"}\n')
@@ -294,7 +296,7 @@ def test_relay_no_bridge(tmp_path, monkeypatch):
   assert head["views"] == ["road"] and "hostSeq" in head
   assert recv_msg(recorder) == (head, b"\0" * (1 << 16))  # with no bridge, the recorder still gets the frames
   brain.sendall(b'{"type": "owner", "who": "brain"}\n{"type": "control", "active": true, "curvature": 0.1}\n')
-  assert read_lines(game, b"curvature") == [b'{"type": "control", "active": true, "curvature": 0.1}']
+  assert read_lines(game, b"curvature") == [FRAMES_ON, b'{"type": "control", "active": true, "curvature": 0.1}']  # the recorder's
 
   half = frame_msg(2.0)
   game.sendall(half[:len(half) // 2])  # a message begun before the bridge comes
@@ -322,3 +324,131 @@ def test_relay_no_bridge(tmp_path, monkeypatch):
   assert game.recv(1) == b""  # neither a bridge nor a brain: the game goes
   game.close()
   recorder.close()
+
+
+def test_frames_switch(monkeypatch):
+  """Frames on at once while something takes them, off only once nothing has for FRAMES_HOLD s."""
+  monkeypatch.setattr(gta5_relay, "FRAMES_HOLD", 2.0)
+  s = gta5_relay.FramesSwitch()
+  assert not s.on(False, 0.0)
+  assert s.on(True, 1.0) and s.on(False, 2.9) and not s.on(False, 3.0)
+  assert s.on(True, 4.0) and s.on(False, 5.0) and s.on(True, 5.5) and s.on(False, 7.4) and not s.on(False, 7.5)
+
+
+def state_msg(t: float) -> bytes:
+  """A plugin message with the state alone: a header and nothing after it."""
+  header = b'{"type": "state", "t": %.2f, "state": {"t": %.2f, "inVehicle": true}}' % (t, t)
+  body = struct.pack("<I", len(header)) + header
+  return struct.pack("<I", len(body)) + body
+
+
+def test_pipe_up_state_alone():
+  """A state alone goes only to on_header, unstamped and taking no number; the frames around it go on as before."""
+  state = state_msg(1.0)
+  data = struct.pack("<I", 8) + struct.pack("<I", 2) + b"{}f1" + state + struct.pack("<I", 8) + struct.pack("<I", 2) + b"{}f2"
+  for piece in (1, 4096):
+    heads, bridge, frames = [], Sink(), gta5_relay.Frames()
+    gta5_relay.pipe_up(Stream(data, piece), bridge, threading.Event(), frames, heads.append, seqs=iter(range(10, 20)))
+    assert heads == [b'{"hostSeq":10}', state[8:], b'{"hostSeq":11}']
+    out = [struct.pack("<I", len(h)) + h + f for h, f in ((heads[0], b"f1"), (heads[2], b"f2"))]
+    assert bytes(bridge.data) == b"".join(struct.pack("<I", len(m)) + m for m in out)
+    n, _, _, states = frames.take()
+    assert (n, states) == (2, 1)
+
+
+class Lines:
+  """A socket's lines one at a time, what's come past the last kept for the next."""
+  def __init__(self, sock: socket.socket):
+    self.sock, self.buf = sock, b""
+
+  def next(self, timeout: float = 5.0) -> bytes:
+    self.sock.settimeout(timeout)
+    while b"\n" not in self.buf:
+      chunk = self.sock.recv(65536)
+      assert chunk, "closed early"
+      self.buf += chunk
+    line, self.buf = self.buf.split(b"\n", 1)
+    return line
+
+  def none(self, wait: float):
+    """Nothing comes for wait s."""
+    try:
+      raise AssertionError(f"got {self.next(wait)!r}")
+    except TimeoutError:
+      pass
+
+
+def test_relay_frames_on_off(tmp_path, monkeypatch):
+  """With only a brain the plugin's frames are off and its states alone reach the brain, and nothing else; a recorder or
+  a bridge coming turns them on, and they go off FRAMES_HOLD s after the last goes, not while one comes straight back."""
+  monkeypatch.setattr(gta5_relay, "RETRY_EVERY", 0.05)
+  monkeypatch.setattr(gta5_relay, "FRAMES_HOLD", 0.6)
+  relay_port, brain_port, frames_port = free_port(), free_port(), free_port()
+  link_file = tmp_path / "link.txt"  # none yet: no bridge
+  threading.Thread(target=gta5_relay.main, args=(["--port", str(relay_port), "--brain-port", str(brain_port), "--frames-port",
+                                                  str(frames_port), "--plugin-file", str(tmp_path / "plugin.txt"), "--link-file",
+                                                  str(link_file)],), daemon=True).start()
+  brain = plugin_connect(brain_port)
+  game = plugin_connect(relay_port)
+  lines = Lines(game)
+  assert lines.next() == FRAMES_OFF  # only a brain: map driving
+  game.sendall(state_msg(1.0))
+  head = json.loads(read_lines(brain, b'"t": 1.00')[-1])
+  assert head == {"type": "state", "t": 1.0, "state": {"t": 1.0, "inVehicle": True}}  # no relay number
+
+  recorder = plugin_connect(frames_port)
+  assert lines.next() == FRAMES_ON
+  game.sendall(state_msg(2.0) + frame_msg(3.0))
+  assert read_lines(brain, b'"t": 3.00')  # the brain gets the newest header
+  recorder.settimeout(5.0)
+  got, frames = recv_msg(recorder)  # the frame, not the state before it
+  assert got["state"]["t"] == 3.0 and "hostSeq" in got and frames == b"\0" * (1 << 16)
+
+  recorder.close()
+  t0 = time.monotonic()
+  assert lines.next() == FRAMES_OFF and time.monotonic() - t0 > 0.5
+  game.sendall(state_msg(4.0))
+  assert read_lines(brain, b'"t": 4.00')  # the state still reaches the brain
+
+  bridge_srv = socket.create_server(("127.0.0.1", 0))
+  link_file.write_text(f"127.0.0.1:{bridge_srv.getsockname()[1]}\n")
+  bridge, _ = bridge_srv.accept()
+  bridge.settimeout(5.0)
+  assert lines.next() == FRAMES_ON
+  game.sendall(state_msg(5.0) + frame_msg(6.0))
+  assert recv_msg(bridge)[0]["state"]["t"] == 6.0
+
+  bridge.close()  # a bridge restarting: the relay connects again at once
+  again, _ = bridge_srv.accept()
+  lines.none(1.0)  # longer than the hold: no off and on again
+  link_file.unlink()
+  again.close()
+  bridge_srv.close()
+  t0 = time.monotonic()
+  assert lines.next() == FRAMES_OFF and time.monotonic() - t0 > 0.5
+  game.sendall(state_msg(7.0))
+  assert read_lines(brain, b'"t": 7.00')
+
+  brain.close()
+  game.settimeout(5.0)
+  assert game.recv(1) == b""  # neither a bridge nor a brain: the game goes
+  game.close()
+
+
+def test_relay_old_plugin(tmp_path, monkeypatch):
+  """A plugin that doesn't know the frames command sends frames anyway: their headers still reach the brain."""
+  monkeypatch.setattr(gta5_relay, "RETRY_EVERY", 0.05)
+  relay_port, brain_port = free_port(), free_port()
+  threading.Thread(target=gta5_relay.main, args=(["--port", str(relay_port), "--brain-port", str(brain_port), "--frames-port",
+                                                  str(free_port()), "--plugin-file", str(tmp_path / "plugin.txt"), "--link-file",
+                                                  str(tmp_path / "link.txt")],), daemon=True).start()
+  brain = plugin_connect(brain_port)
+  game = plugin_connect(relay_port)
+  assert Lines(game).next() == FRAMES_OFF
+  heads = []
+  for t in (1.0, 2.0):
+    game.sendall(frame_msg(t))
+    heads.append(json.loads(read_lines(brain, b'"t": %.2f' % t)[-1]))
+  assert heads[1]["hostSeq"] == heads[0]["hostSeq"] + 1
+  brain.close()
+  game.close()

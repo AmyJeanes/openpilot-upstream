@@ -26,7 +26,9 @@ GALLIUM_DRIVER=d3d12 BLOCK=soundd ./openpilot/tools/sim/launch_openpilot.sh   # 
 ```
 Get into a car in the game. Once the bridge is running, the plugin connects to it and switches to the openpilot camera; it
 switches back when the bridge stops. The bridge writes its address to `C:\Users\Public\gta5op-bridge.txt` for the plugin;
-set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL.
+set `bridge=` in `gta5op.ini` if that path isn't reachable from WSL. Through the Windows relay (`gta5_relay.py`) the plugin
+renders and sends openpilot's camera only while a bridge or the host's recorder takes the frames, and 2 s after the last
+goes; with only the host's brain (the map driver alone) the game keeps its own camera and sends its state alone.
 
 `gta5_cmd.py` sends debug commands through the running bridge: `snap` saves the next frames as PNGs, `burst` the next N
 frames' luma, `reset part=hook|capture|camera` restarts that part of the camera pipeline, `setup` spawns a car
