@@ -169,6 +169,7 @@ def vehicle(argv: list[str]) -> None:
   cmd = {"type": "vehicle", "model": gta5_scene.model_for(car)}
   if mine:
     cmd.update({k: v for k, v in gta5_scene.MY_CAR.items() if k != "car"})
+    opts.setdefault("interior", gta5_scene.MY_CAR_INTERIOR)
   elif opts.pop("colours", "random") == "random":
     cmd.update({k: v for k, v in gta5_scene.pick_colours(rng, car).items() if k != "group"})
   trim = {k: opts.pop(k) for k in ("interior", "chrome") if k in opts}
