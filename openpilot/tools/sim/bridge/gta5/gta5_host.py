@@ -28,7 +28,7 @@ import time
 
 from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, Brain
 from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO, RemoteIO, link_address
-from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder, RelayFrames
+from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, FrameWorker, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_relay import BRAIN_PORT, FRAMES_PORT, LINK_FILE
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None):
   if RECORD:
     brain.recorder = Recorder(RECORD, brain, host=True)
     io.model_tap(brain.recorder.on_link)
-    RelayFrames(args.frames_port, brain.recorder)
+    FrameWorker(args.frames_port, brain.recorder)
   if MAP:
     brain.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, host="127.0.0.1")  # 0.0.0.0 asks the firewall
     print(f"gta5: map view on http://localhost:{MAP_PORT}/", flush=True)

@@ -19,9 +19,10 @@ A segment ends early at a gap in the frames, a teleport, leaving the car or the 
 libx265 on the CPU, niced: about 1.3 cores per camera.
 
 In the bridge in WSL the recorder takes the frames camerad gets and modeld's outputs from openpilot in the same process.
-In the Windows host (gta5_host.py) it takes the plugin's frames from the relay (RelayFrames), and the link (gta5_link.py)
-streams back modeld's records (ModelTap) and the camerad frame id each of the relay's frames got: the same files, with
-the model's columns empty for the frames openpilot didn't get (all of them while it's down)."""
+In the Windows host (gta5_host.py) a frame worker process (FrameWorker) takes the plugin's frames from the relay and
+runs the encoders, and the link (gta5_link.py) streams back modeld's records (ModelTap) and the camerad frame id each of
+the relay's frames got: the same files, with the model's columns empty for the frames openpilot didn't get (all of them
+while it's down)."""
 import base64
 import json
 import os
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +47,7 @@ FFMPEG = os.getenv("GTA5_RECORD_FFMPEG", "/usr/bin/ffmpeg" if os.name == "posix"
 # the encoders and finalize below the bridge's priority: nice on Linux, a priority class on Windows (with no console window)
 NICE = ["nice", "-n", "10"] if os.name == "posix" else []
 LOW_PRIORITY = {} if os.name == "posix" else {"creationflags": subprocess.BELOW_NORMAL_PRIORITY_CLASS | subprocess.CREATE_NO_WINDOW}
+NO_WINDOW = {} if os.name == "posix" else {"creationflags": subprocess.CREATE_NO_WINDOW}
 CRF = int(os.getenv("GTA5_RECORD_CRF", "21"))
 # the camera's mount on the car, m forward of and above the car's origin, which the game's pose is for, when the plugin's
 # state has none
@@ -57,6 +60,8 @@ QUEUE_FRAMES = 40  # per camera; a full queue (the encoder behind) ends the segm
 MODEL_WAIT = 2.0  # s a finished segment waits for modeld's outputs on its last frames
 KEYINT = 20
 RETRY_EVERY = 1.0  # s between the host's tries to reach the relay's frames port
+WORKER_FRAMES = 40  # frames the host's frame worker keeps for the recorder to send to its encoders: 2 s
+WORKER_WAIT = 120.0  # s a saved segment waits for the frame worker to finish its videos
 DEVICE_TYPE_TICI = 4  # cereal InitData.DeviceType
 DESIRE_LEN = 8
 DESIRE_PRED_LEN = 32
@@ -92,6 +97,21 @@ def state_mount(state: dict) -> tuple | None:
   if not isinstance(m, dict) or "y" not in m or "z" not in m:
     return None
   return tuple(round(float(m.get(k, 0.0)), 4) for k in ("y", "z", "x", "pitch", "yaw"))
+
+
+def unusable_frame(frame, state: dict | None) -> str | None:
+  """Why a road frame can't be recorded, else None."""
+  if frame is None:
+    return "no frame"
+  if state is None or "pos" not in state:
+    return "no game state"
+  if not state.get("inVehicle"):
+    return "out of the car"
+  if state.get("paused"):
+    return "the game paused"
+  if (state.get("mount") or {}).get("pending"):  # the dashcam mount is found a moment after a new car
+    return "the mount pending"
+  return None
 
 
 def full_mount(info: dict) -> tuple:
@@ -198,12 +218,12 @@ class Video:
 
 
 class Segment:
-  def __init__(self, path: Path, info: dict, size: tuple):
+  def __init__(self, path: Path, info: dict, size: tuple, video=Video):
     path.mkdir(parents=True, exist_ok=True)
     self.path = path
     self.info = info
-    self.road = Video(path / "fcamera.hevc", *size)
-    self.wide = Video(path / "ecamera.hevc", *size)
+    self.road = video(path / "fcamera.hevc", *size)
+    self.wide = video(path / "ecamera.hevc", *size)
     self.rows: list[list[float]] = []
     self.routes: list[dict] = []
     self.lane_lines: list[dict] = []
@@ -218,6 +238,7 @@ class Segment:
     self.mount = None  # the plugin's report of it, which a change of ends the segment
     self.seqs: list[int] = []  # in the host, the relay's number for each road frame
     self.broken = ""
+    self.end = ""  # why it ended
     self.done_at = 0.0  # when it stopped taking frames
 
 
@@ -235,6 +256,8 @@ class Recorder:
     self.synthetic = synthetic
     self.host = host
     self.frame_ids: dict[int, int] = {}  # in the host, the relay's number for a frame -> camerad's frame id for it
+    self.video = Video  # a camera's encoder, Video(path, *size); FrameWorker.video in the host's frame worker
+    self.worker: FrameWorker | None = None
     self.started = datetime.now()
     self.route_name = self.started.strftime("%Y-%m-%d--%H-%M-%S")
     self.segment_count = 0
@@ -271,22 +294,25 @@ class Recorder:
       self.wide_id += 1
       seg, self.wide_for = self.wide_for, None
       if seg is not None and (frame is None or not seg.wide.add(frame)):
-        seg.broken = "no wide frame" if frame is None else "wide encoder behind"
+        seg.broken = "no wide frame" if frame is None else getattr(seg.wide, "why", "") or "wide encoder behind"
       return
     frame_id = self.road_id
     self.road_id += 1
     self._wrap_up()
     if self.failed:
-      self._end()
+      self._end("the encoder failed")
       return
-    ok = frame is not None and state is not None and state.get("inVehicle") and not state.get("paused") and "pos" in state
-    ok = ok and not (state.get("mount") or {}).get("pending")  # the dashcam mount is found a moment after a new car
+    unusable = unusable_frame(frame, state)
     seg = self.segment
-    if seg is not None and (not ok or seg.broken or len(seg.rows) >= SEGMENT_FRAMES or t - self.last_t > GAP or
-                            state.get("resets") != self.last_resets or state_mount(state) != seg.mount):
-      self._end()
-      seg = None
-    if not ok or (seg is not None and t == self.last_t):  # camerad sometimes sends a game frame twice; the loaders need new times
+    if seg is not None:
+      why = unusable or seg.broken or ("full" if len(seg.rows) >= SEGMENT_FRAMES else None)
+      why = why or (f"a {t - self.last_t:.2f} s gap in the frames" if t - self.last_t > GAP else None)
+      why = why or ("a teleport (resets)" if state.get("resets") != self.last_resets else None)
+      why = why or ("the mount changed" if state_mount(state) != seg.mount else None)
+      if why:
+        self._end(why)
+        seg = None
+    if unusable or (seg is not None and t == self.last_t):  # camerad sometimes sends a game frame twice; the loaders need new times
       return
     if self.host:  # camerad's id comes from the link, if openpilot got the frame at all: filled in as it's saved
       frame_id = None
@@ -298,7 +324,7 @@ class Recorder:
         print(f"gta5: recording stopped: {e}", flush=True)
         return
     if not seg.road.add(frame):
-      seg.broken = "road encoder behind"
+      seg.broken = getattr(seg.road, "why", "") or "road encoder behind"
       if not seg.road.thread.is_alive():  # it failed: don't start another each frame
         self.failed = True
         print("gta5: recording stopped: the encoder failed", flush=True)
@@ -322,7 +348,7 @@ class Recorder:
       info["scene"] = scene
     self.segment_count += 1
     self.last_route = self.last_lane_line = None
-    seg = Segment(self.data / name, info, self.size)
+    seg = Segment(self.data / name, info, self.size, self.video)
     seg.mount = mount
     return seg
 
@@ -398,10 +424,11 @@ class Recorder:
             route.right if route is not None else nan,
             nan if not m or m.get("lane") is None else m["lane"], nan if not m else float(bool(m.get("oncoming")))]
 
-  def _end(self):
+  def _end(self, why: str):
     seg, self.segment, self.wide_for = self.segment, None, None
     if seg is None:
       return
+    seg.end = why
     seg.road.finish()
     seg.wide.finish()
     if seg.md is not None:
@@ -457,10 +484,10 @@ class Recorder:
     if any(m is not None for m in model):
       out.update(stack_model(model))
     seg.info.update({"frames": len(rows), "road_frames": seg.road.frames, "wide_frames": seg.wide.frames, "ended": seg.broken or None,
-                     "errors": [e for e in (seg.road.error, seg.wide.error) if e] or None,
+                     "end": seg.end or None, "errors": [e for e in (seg.road.error, seg.wide.error) if e] or None,
                      "model_frames": sum(m is not None for m in model)})
     np.savez(seg.path / "gta5.npz", **out)
-    print(f"gta5: recorded {seg.path.name}: {len(rows)} frames" + (f", ended: {seg.broken}" if seg.broken else ""), flush=True)
+    print(f"gta5: recorded {seg.path.name}: {len(rows)} frames, ended by {seg.end or 'nothing'}", flush=True)
     routes = {"routes": seg.routes, "lane_lines": seg.lane_lines, **({"expert_paths": seg.expert_paths} if seg.expert_paths else {})}
     (seg.path / "routes.json").write_text(json.dumps(routes, default=json_default))
     (seg.path / "gta5.json").write_text(json.dumps(seg.info, indent=1))
@@ -471,8 +498,10 @@ class Recorder:
 
   def close(self):
     self.stopped = True
-    self._end()
+    self._end("the recording stopped")
     self._wrap_up(wait=True)
+    if self.worker is not None:
+      self.worker.close()
 
   # *** modeld's outputs ***
 
@@ -582,67 +611,229 @@ def model_record_from_json(rec: dict) -> dict:
           for k, v in rec.items()}
 
 
-class RelayFrames:
-  """The game's frames for the host's recorder, from the relay's frames port on localhost (gta5_relay.FrameTap): the
-  plugin's messages as the link gets them, each with the relay's number for the frame (hostSeq), the newest if this
-  falls behind. A pair whose road and wide views don't match is dropped, as the link's rx drops it
-  (gta5_rx.views_match), so the recording has the frames openpilot could have had."""
-  def __init__(self, port: int, recorder: Recorder):
-    self.port = port
+class FrameWorker:
+  """The host's recorder's frames, in a process of their own (`gta5_record frames`, frames_main): it takes the plugin's
+  messages from the relay's frames port, drops a pair whose road and wide views don't match as the link's rx does
+  (gta5_rx.views_match), times each frame as it comes and keeps the last WORKER_FRAMES, and runs the segments' encoders.
+  The recorder here gets a JSON line per frame (its relay number, time and game state) and sends back which frames go to
+  which segment's encoders (RemoteVideo). The host's own process is too busy for this: each GIL handoff from the brain's
+  thread waits up to its switch interval (Windows rounds it up to its 15.6 ms timer), and a frame's numpy work and I/O
+  hand it off dozens of times, which took frames 0.5-1.5 s apart and broke recordings into segments a frame long."""
+  def __init__(self, port: int, recorder: "Recorder"):
     self.recorder = recorder
-    self.mismatched = 0
-    threading.Thread(target=self._run, daemon=True).start()
+    self.lock = threading.Lock()
+    self.videos: dict[str, RemoteVideo] = {}
+    self.seen = 0  # frames the worker sent
+    self.proc = subprocess.Popen([sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_record", "frames", "--port", str(port)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, **NO_WINDOW)
+    recorder.video = self.video
+    recorder.worker = self
+    threading.Thread(target=self._events, daemon=True).start()
 
-  def _run(self):
-    from openpilot.tools.sim.bridge.gta5.gta5_rx import recv_exact
-    rec, last = self.recorder, None
-    while not rec.stopped and not rec.failed:
-      try:
-        sock = socket.create_connection(("127.0.0.1", self.port), timeout=1.0)
-      except OSError as e:
-        if str(e) != last:
-          print(f"gta5: recording: waiting for the relay's frames on 127.0.0.1:{self.port} ({e})", flush=True)
-          last = str(e)
-        time.sleep(RETRY_EVERY)
-        continue
-      sock.settimeout(None)
-      sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
-      print(f"gta5: recording: the relay's frames from 127.0.0.1:{self.port}", flush=True)
-      last = None
-      size = bytearray(4)
-      try:
-        while not rec.stopped and not rec.failed and recv_exact(sock, memoryview(size)):
-          msg = memoryview(bytearray(struct.unpack("<I", size)[0]))  # its own: the encoders' queues hold onto its frames
-          if not recv_exact(sock, msg):
-            break
-          # Windows' monotonic() ticks in 15.6 ms steps before Python 3.13: too coarse for the frames' times
-          self._message(msg, time.perf_counter())
-      except OSError:
-        pass
-      finally:
-        sock.close()
-      print("gta5: recording: the relay's frames went", flush=True)
+  def video(self, path: Path, *size) -> "RemoteVideo":
+    v = RemoteVideo(self, path)
+    with self.lock:
+      self.videos[v.id] = v
+    self.send({"op": "open", "id": v.id, "path": str(path)})
+    return v
 
-  def _message(self, msg: memoryview, t: float):
-    from openpilot.tools.sim.bridge.gta5.gta5_rx import FRAME_BYTES, MATCH_THRESHOLD, VIEWS, views_match
-    from openpilot.tools.sim.lib.common import W, H
-    head_len = struct.unpack_from("<I", msg, 0)[0]
+  def send(self, msg: dict, flush: bool = True):
     try:
-      head = json.loads(bytes(msg[4:4 + head_len]))
-    except ValueError:
-      return
-    off = 4 + head_len
-    if tuple(head.get("views") or ()) != VIEWS or (head.get("width"), head.get("height")) != (W, H) or len(msg) < off + 2 * FRAME_BYTES:
-      return
-    road, wide = msg[off:off + FRAME_BYTES], msg[off + FRAME_BYTES:off + 2 * FRAME_BYTES]
-    road_y = np.frombuffer(road, dtype=np.uint8, count=W * H).reshape(H, W)
-    wide_y = np.frombuffer(wide, dtype=np.uint8, count=W * H).reshape(H, W)
-    if views_match(road_y, wide_y) < MATCH_THRESHOLD:
-      self.mismatched += 1
-      return
-    state = head.get("state")
-    self.recorder.add(False, road, state, t, head.get("hostSeq"))
-    self.recorder.add(True, wide, state, t)
+      with self.lock:
+        self.proc.stdin.write((json.dumps(msg) + "\n").encode())
+        if flush:
+          self.proc.stdin.flush()
+    except (OSError, ValueError):
+      pass  # the events' reader sees it go
+
+  def flush(self):
+    try:
+      with self.lock:
+        self.proc.stdin.flush()
+    except (OSError, ValueError):
+      pass
+
+  def _events(self):
+    rec = self.recorder
+    for line in self.proc.stdout:
+      try:
+        msg = json.loads(line)
+      except ValueError:
+        continue
+      kind = msg.get("type")
+      if kind == "frame":
+        self.seen += 1
+        try:
+          rec.add(False, msg["key"], msg["state"], msg["t"], msg.get("seq"))
+          rec.add(True, msg["key"], msg["state"], msg["t"])
+        except Exception:  # a bug in one frame mustn't end the recording unseen
+          traceback.print_exc()
+        self.flush()
+      elif kind == "video":
+        with self.lock:
+          v = self.videos.get(msg["id"])
+          if msg.get("done"):
+            self.videos.pop(msg["id"], None)
+        if v is not None:
+          v.update(msg)
+    if not rec.stopped:
+      print("gta5: recording stopped: the frame worker stopped", flush=True)
+      rec.failed = True
+    with self.lock:
+      videos, self.videos = list(self.videos.values()), {}
+    for v in videos:
+      v.update({"alive": False, "done": True, "error": v.error or "the frame worker stopped"})
+
+  def close(self):
+    try:
+      self.proc.stdin.close()
+      self.proc.wait(10)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+      self.proc.kill()
+
+
+class RemoteVideo:
+  """A segment's camera encoder in the frame worker (Video there), fed with frames by their key."""
+  def __init__(self, worker: FrameWorker, path: Path):
+    self.worker = worker
+    self.path = path
+    self.id = str(path)
+    self.thread = self  # Video's thread: is_alive
+    self.frames = 0
+    self.error = ""
+    self.why = ""  # why it can't take frames
+    self.alive = True
+    self.finished = threading.Event()
+
+  def is_alive(self) -> bool:
+    return self.alive
+
+  def add(self, key) -> bool:
+    if not self.alive or self.why:
+      return False
+    self.worker.send({"op": "add", "id": self.id, "key": key}, flush=False)
+    self.frames += 1
+    return True
+
+  def finish(self):
+    self.worker.send({"op": "finish", "id": self.id})
+
+  def wait(self):
+    if not self.finished.wait(WORKER_WAIT):
+      self.error = self.error or "the frame worker never finished it"
+
+  def update(self, msg: dict):
+    self.why = msg.get("why") or self.why
+    self.alive = msg.get("alive", self.alive)
+    self.error = msg.get("error") or self.error
+    if msg.get("done"):
+      self.frames = msg.get("frames", self.frames)
+      self.finished.set()
+
+
+def frames_main(port: int):
+  """The frame worker (FrameWorker): commands as JSON lines on stdin, events on stdout; ends with its stdin."""
+  from collections import OrderedDict
+  from openpilot.tools.sim.bridge.gta5.gta5_rx import FRAME_BYTES, MATCH_THRESHOLD, VIEWS, recv_exact, views_match
+  from openpilot.tools.sim.lib.common import W, H
+  events = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
+  sys.stdout = sys.stderr  # Video's prints, and this one's, go to the log
+  out_lock, lock = threading.Lock(), threading.Lock()
+  frames: OrderedDict = OrderedDict()  # key -> (road, wide), the last WORKER_FRAMES
+  videos: dict[str, Video] = {}
+  size = (W, H, W, H, H // 2)
+
+  def emit(msg: dict):
+    try:
+      with out_lock:
+        events.write((json.dumps(msg) + "\n").encode())
+        events.flush()
+    except (OSError, ValueError):
+      pass  # the host went: its stdin's end finishes this process
+
+  def finish(vid: str, video: Video):
+    video.finish()
+    video.wait()
+    emit({"type": "video", "id": vid, "done": True, "frames": video.frames, "error": video.error, "alive": False})
+
+  def command(cmd: dict):
+    op, vid = cmd.get("op"), cmd.get("id")
+    if op == "open":
+      try:
+        videos[vid] = Video(Path(cmd["path"]), *size)
+      except OSError as e:
+        emit({"type": "video", "id": vid, "alive": False, "done": True, "frames": 0, "error": f"no encoder: {e}"})
+    elif op == "add" and vid in videos:
+      video = videos[vid]
+      with lock:
+        pair = frames.get(cmd["key"])
+      if pair is None:
+        emit({"type": "video", "id": vid, "why": "the recorder fell behind the frames", "alive": video.thread.is_alive()})
+      elif not video.add(pair[0 if vid.endswith("fcamera.hevc") else 1]):
+        emit({"type": "video", "id": vid, "why": "encoder behind", "alive": video.thread.is_alive()})
+    elif op == "finish" and vid in videos:
+      threading.Thread(target=finish, args=(vid, videos.pop(vid)), daemon=True).start()
+
+  def commands():
+    try:
+      for line in sys.stdin.buffer:
+        try:
+          command(json.loads(line))
+        except Exception:  # one bad command mustn't stop the rest
+          traceback.print_exc()
+      for vid, video in list(videos.items()):  # the host went: what's begun is kept
+        finish(vid, video)
+    finally:
+      os._exit(0)
+
+  threading.Thread(target=commands, daemon=True).start()
+  key, last = 0, None
+  while True:
+    try:
+      sock = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    except OSError as e:
+      if str(e) != last:
+        print(f"gta5: recording: waiting for the relay's frames on 127.0.0.1:{port} ({e})", flush=True)
+        last = str(e)
+      time.sleep(RETRY_EVERY)
+      continue
+    sock.settimeout(None)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
+    print(f"gta5: recording: the relay's frames from 127.0.0.1:{port}", flush=True)
+    last, prev, mismatched = None, 0.0, 0
+    head_size = bytearray(4)
+    try:
+      while recv_exact(sock, memoryview(head_size)):
+        msg = memoryview(bytearray(struct.unpack("<I", head_size)[0]))  # its own: the encoders' queues hold onto its frames
+        if not recv_exact(sock, msg):
+          break
+        t = time.perf_counter()  # Windows' monotonic() ticks in 15.6 ms steps before Python 3.13
+        if prev and t - prev > GAP:
+          print(f"gta5: recording: {t - prev:.2f} s between the relay's frames", flush=True)
+        prev = t
+        n = struct.unpack_from("<I", msg, 0)[0]
+        try:
+          head = json.loads(bytes(msg[4:4 + n]))
+        except ValueError:
+          continue
+        off = 4 + n
+        if tuple(head.get("views") or ()) != VIEWS or (head.get("width"), head.get("height")) != (W, H) or len(msg) < off + 2 * FRAME_BYTES:
+          continue
+        road, wide = msg[off:off + FRAME_BYTES], msg[off + FRAME_BYTES:off + 2 * FRAME_BYTES]
+        if views_match(np.frombuffer(road, np.uint8, W * H).reshape(H, W), np.frombuffer(wide, np.uint8, W * H).reshape(H, W)) < MATCH_THRESHOLD:
+          mismatched += 1
+          continue
+        key += 1
+        with lock:
+          frames[key] = (road, wide)
+          while len(frames) > WORKER_FRAMES:
+            frames.popitem(last=False)
+        emit({"type": "frame", "key": key, "seq": head.get("hostSeq"), "t": t, "state": head.get("state")})
+    except OSError:
+      pass
+    finally:
+      sock.close()
+    print(f"gta5: recording: the relay's frames went ({mismatched} mismatched pairs dropped)", flush=True)
 
 
 def stack_model(model: list[dict | None]) -> dict[str, np.ndarray]:
@@ -829,9 +1020,13 @@ if __name__ == "__main__":
   p.add_argument("--start", type=float, required=True, help="the log's mono time to start at")
   p.add_argument("--seconds", type=float, default=60.0)
   p.add_argument("--frames", help="raw NV12 frames padded as camerad's buffers, looped")
+  p = sub.add_parser("frames", help="the host's frame worker (FrameWorker starts it)")
+  p.add_argument("--port", type=int, required=True, help="the relay's frames port")
   args = parser.parse_args()
   if args.cmd == "finalize":
     for s in args.segments:
       finalize(s)
+  elif args.cmd == "frames":
+    frames_main(args.port)
   else:
     replay(args.log, args.root, args.start, args.seconds, args.frames)

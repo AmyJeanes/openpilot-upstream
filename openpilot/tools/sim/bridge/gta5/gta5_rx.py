@@ -54,18 +54,16 @@ def views_match(road_y: np.ndarray, wide_y: np.ndarray) -> float:
   ch, cw = int(h * 0.6), int(wd * 0.6)
   crop = r[(h - ch) // 2:(h + ch) // 2, (wd - cw) // 2:(wd + cw) // 2]
   sh, sw = round(ch * WIDE_FROM_ROAD_SCALE), round(cw * WIDE_FROM_ROAD_SCALE)
-  small = np.asarray(Image.fromarray(crop).resize((sw, sh), Image.BILINEAR), dtype=np.float32)
-  a = small - small.mean()
-  best = -1.0
-  # the wide frame comes a little after the road one, so in a turn the view has moved on a few pixels
-  for dy in range(-MATCH_SHIFT, MATCH_SHIFT + 1):
-    for dx in range(-MATCH_SHIFT, MATCH_SHIFT + 1):
-      y0, x0 = (h - sh) // 2 + dy, (wd - sw) // 2 + dx
-      center = w[y0:y0 + sh, x0:x0 + sw]
-      b = center - center.mean()
-      denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
-      best = max(best, float((a * b).sum()) / denom if denom > 1e-3 else 1.0)
-  return best
+  small = np.asarray(Image.fromarray(crop).resize((sw, sh), Image.BILINEAR), dtype=np.float64)
+  a = (small - small.mean()).ravel()
+  # the wide frame comes a little after the road one, so in a turn the view has moved on a few pixels: every shift at once,
+  # as a few numpy calls rather than a loop of hundreds, each of which waits for the GIL in a busy process (the host's)
+  y0, x0 = (h - sh) // 2 - MATCH_SHIFT, (wd - sw) // 2 - MATCH_SHIFT
+  region = w[y0:y0 + sh + 2 * MATCH_SHIFT, x0:x0 + sw + 2 * MATCH_SHIFT].astype(np.float64)
+  b = np.lib.stride_tricks.sliding_window_view(region, (sh, sw)).reshape(-1, sh * sw)
+  b = b - b.mean(axis=1, keepdims=True)
+  denom = np.sqrt((a @ a) * np.einsum("ij,ij->i", b, b))
+  return float(np.where(denom > 1e-3, (b @ a) / np.maximum(denom, 1e-12), 1.0).max())
 
 
 def nv12_to_rgb(frame: np.ndarray) -> np.ndarray:

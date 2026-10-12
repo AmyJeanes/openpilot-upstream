@@ -27,7 +27,7 @@ link restarting, or a host run without openpilot), its frames dropped, and a bri
 next message's start. With no brain, the bridge going ends the plugin's connection, as without a relay.
 
 Each frame's header goes up with the relay's number for the frame first ("hostSeq", counting on across connections), by
-which the link's model tap and the host's recorder find the same frame. The host's recorder (gta5_record.RelayFrames)
+which the link's model tap and the host's recorder find the same frame. The host's recorder (gta5_record.FrameWorker)
 connects on the frames port and gets the plugin's messages as the bridge does, bridge or not, the newest only if it
 falls behind (FrameTap). Every STATS_EVERY s it logs the frames piped up, MB/s and the longest gap between frames."""
 import argparse
@@ -228,7 +228,7 @@ class Copy:
 
 
 class FrameTap:
-  """The frames port, for the host's recorder (gta5_record.RelayFrames): the plugin's messages as the bridge gets them.
+  """The frames port, for the host's recorder (gta5_record.FrameWorker): the plugin's messages as the bridge gets them.
   Each is copied as it's piped and handed over whole by the tap's own thread, the newest only if the recorder falls
   behind, so it never holds up the bridge's stream; nothing is copied while no recorder is connected. One recorder at a
   time, a new one replacing the last."""

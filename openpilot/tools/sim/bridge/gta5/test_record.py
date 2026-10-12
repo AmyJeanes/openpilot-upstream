@@ -3,7 +3,6 @@ bridge and in the Windows host, from the same synthetic drive, with the real enc
 import json
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -15,7 +14,7 @@ import numpy as np
 import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_record, gta5_relay
-from openpilot.tools.sim.bridge.gta5.gta5_record import Recorder, RelayFrames, model_record_from_json, model_record_to_json, stack_model
+from openpilot.tools.sim.bridge.gta5.gta5_record import FrameWorker, Recorder, model_record_from_json, model_record_to_json, stack_model
 
 
 class Encoder:
@@ -33,7 +32,7 @@ class Encoder:
 
 
 class Segment:
-  def __init__(self, path, info, size):
+  def __init__(self, path, info, size, video=None):
     self.road, self.wide = Encoder(), Encoder()
     self.info = info
     self.rows: list = []
@@ -170,93 +169,152 @@ def test_host_recording_matches_the_bridges(tmp_path):
   assert np.array_equal(nc["frame"][:, 1:], na["frame"][:, 1:], equal_nan=True)
 
 
-def plugin_message(i: int, road: bytes, wide: bytes) -> bytes:
-  from openpilot.tools.sim.lib.common import W, H
-  header = json.dumps({"type": "frame", "t": i, "width": W, "height": H, "views": ["road", "wide"], "state": car_state(i)}).encode()
-  body = struct.pack("<I", len(header)) + header + road + wide
-  return struct.pack("<I", len(body)) + body
-
-
 def free_port() -> int:
   with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     return s.getsockname()[1]
 
 
+# a stand-in plugin and bridge, each in its own process, as the game and the link are: a busy test process would hold them
+# up as it holds up anything in it
+PLUGIN = r"""
+import json, os, socket, struct, sys, time
+port, spec, go = int(sys.argv[1]), json.load(open(sys.argv[2])), sys.argv[3]
+fb = spec["frame_bytes"]
+
+def msg(state, road, wide):
+  view = lambda v: os.urandom(fb) if v is None else bytes([v]) * fb
+  head = json.dumps({"type": "frame", "width": spec["width"], "height": spec["height"], "views": ["road", "wide"],
+                     "state": state}).encode()
+  body = struct.pack("<I", len(head)) + head + view(road) + view(wide)
+  return struct.pack("<I", len(body)) + body
+
+end = time.monotonic() + 30
+while True:
+  try:
+    s = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    break
+  except OSError:
+    if time.monotonic() > end:
+      sys.exit("no relay")
+    time.sleep(0.05)
+s.settimeout(None)
+warm = msg(spec["warmup"], 1, 1)
+while not os.path.exists(go):  # until the recorder's frame worker is up
+  s.sendall(warm)
+  time.sleep(0.05)
+for state, road, wide in spec["frames"]:
+  s.sendall(msg(state, road, wide))
+  time.sleep(0.05)
+time.sleep(2.0)
+"""
+BRIDGE = r"""
+import socket, sys
+conn, _ = socket.create_server(("127.0.0.1", int(sys.argv[1]))).accept()
+while conn.recv(1 << 20):
+  pass
+"""
+
+
 @pytest.fixture
 def relay(tmp_path):
-  """A relay in its own process, ended with the test (a relay keeps trying to reach its bridge), and its stand-in bridge:
-  (its plugin port, its frames port, the bridge's listening socket)."""
-  bridge_srv = socket.create_server(("127.0.0.1", 0))
-  link_file = tmp_path / "link.txt"
-  link_file.write_text(f"127.0.0.1:{bridge_srv.getsockname()[1]}\n")
-  ports = free_port(), free_port()
+  """A relay and a stand-in bridge draining it, in processes of their own and ended with the test: (the relay's plugin
+  port, its frames port)."""
+  bridge_port, ports = free_port(), (free_port(), free_port())
+  bridge = subprocess.Popen([sys.executable, "-c", BRIDGE, str(bridge_port)])
+  (tmp_path / "link.txt").write_text(f"127.0.0.1:{bridge_port}\n")
   proc = subprocess.Popen([sys.executable, gta5_relay.__file__, "--port", str(ports[0]), "--frames-port", str(ports[1]),
-                           "--brain-port", str(free_port()), "--plugin-file", str(tmp_path / "plugin.txt"), "--link-file", str(link_file)],
-                          stdout=subprocess.DEVNULL)
+                           "--brain-port", str(free_port()), "--plugin-file", str(tmp_path / "plugin.txt"), "--link-file",
+                           str(tmp_path / "link.txt")], stdout=subprocess.DEVNULL)
   try:
-    yield ports[0], ports[1], bridge_srv
+    yield ports
   finally:
-    proc.kill()
-    proc.wait()
-    bridge_srv.close()
+    for p in (proc, bridge):
+      p.kill()
+      p.wait()
 
 
-def test_relay_frames(tmp_path, monkeypatch, relay):
-  """The host's recorder fed from the relay's frames port: each frame with the relay's number for it, as the bridge got
-  it; a pair whose views don't match dropped, as the link's rx drops it."""
+def padded(frame: bytes) -> bytes:
+  """A frame as the plugin sends it, padded as camerad's buffers are."""
+  from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+  from openpilot.tools.sim.lib.common import W, H
+  stride, y_height, uv_height, size = get_nv12_info(W, H)
+  out = np.zeros(size, np.uint8)
+  planes = out[:stride * (y_height + uv_height)].reshape(-1, stride)
+  src = np.frombuffer(frame, np.uint8)
+  planes[:H, :W] = src[:W * H].reshape(H, W)
+  planes[y_height:y_height + H // 2, :W] = src[W * H:].reshape(H // 2, W)
+  return out.tobytes()
+
+
+@pytest.mark.skipif(shutil.which(gta5_record.FFMPEG) is None, reason="no ffmpeg")
+def test_frame_worker(tmp_path, relay):
+  """The host's recorder through its frame worker process while this process is kept busy, as the brain keeps the
+  host's (a busy process took frames 0.5-1.5 s apart and broke recordings into segments a frame long): one segment of
+  every frame whose views match, timed and numbered by the worker, a mismatched pair dropped, and the same video as the
+  bridge's recorder makes of the same frames."""
   from openpilot.tools.sim.bridge.gta5.gta5_rx import FRAME_BYTES
-  monkeypatch.setattr(gta5_record, "RETRY_EVERY", 0.05)
-  monkeypatch.setattr(gta5_record, "Segment", Segment)
-  monkeypatch.setattr(gta5_record, "MODEL_WAIT", 1e9)
-  relay_port, frames_port, bridge_srv = relay
-  rec = Recorder(str(tmp_path), host=True)
-  feed = RelayFrames(frames_port, rec)
-  bridge, _ = bridge_srv.accept()
-  up = bytearray()
+  from openpilot.tools.sim.lib.common import W, H
+  relay_port, frames_port = relay
+  rec = Recorder(str(tmp_path / "host"), host=True)
+  worker = FrameWorker(frames_port, rec)
+  values = [40 + 4 * i for i in range(40)]  # flat views always match
+  frames = [[car_state(i), v, v] for i, v in enumerate(values)]
+  frames.insert(10, [car_state(10), None, None])  # noise: a mismatched pair
+  spec = {"frame_bytes": FRAME_BYTES, "width": W, "height": H, "warmup": {**car_state(0), "inVehicle": False}, "frames": frames}
+  (tmp_path / "spec.json").write_text(json.dumps(spec))
+  go = tmp_path / "go"
+  plugin = subprocess.Popen([sys.executable, "-c", PLUGIN, str(relay_port), str(tmp_path / "spec.json"), str(go)])
+  stop = threading.Event()
 
-  def read_up():
-    try:
-      while data := bridge.recv(1 << 20):
-        up.extend(data)
-    except OSError:  # closed as the test ends
-      pass
+  def busy():
+    while not stop.is_set():
+      x = 0
+      for i in range(1000):
+        x += i * i
 
-  threading.Thread(target=read_up, daemon=True).start()
-  end = time.monotonic() + 5
-  while True:
-    try:
-      game = socket.create_connection(("127.0.0.1", relay_port), timeout=1.0)
-      break
-    except OSError:
-      assert time.monotonic() < end
+  try:
+    end = time.monotonic() + 60
+    while not worker.seen:  # the worker's process starting, out of the car: no segment yet
+      assert time.monotonic() < end and plugin.poll() is None, "the frame worker never sent a frame"
       time.sleep(0.05)
-  time.sleep(0.5)  # the recorder's connection is the relay's
-  rng = np.random.default_rng(1)
-  frames = [(bytes([60 + i]) * FRAME_BYTES, bytes([60 + i]) * FRAME_BYTES) for i in range(4)]  # flat views match
-  frames.insert(2, (rng.integers(0, 255, FRAME_BYTES, np.uint8).tobytes(), rng.integers(0, 255, FRAME_BYTES, np.uint8).tobytes()))
-  for i, (road, wide) in enumerate(frames):
-    game.sendall(plugin_message(i, road, wide))
-    time.sleep(0.2)  # the recorder keeps up, so no frame is replaced by a newer one; the dropped pair's gap stays under GAP
+    threading.Thread(target=busy, daemon=True).start()
+    go.write_text("go")
+    bridge_rec = Recorder(str(tmp_path / "bridge"))
+    for i, v in enumerate(values):
+      f = padded(bytes([v]) * FRAME_BYTES)
+      bridge_rec.add(False, f, car_state(i), i * 0.05)
+      bridge_rec.add(True, f, car_state(i), i * 0.05)
+    end = time.monotonic() + 30
+    while rec.segment is None or len(rec.segment.rows) < len(values):
+      assert time.monotonic() < end, (rec.segment_count, rec.segment and len(rec.segment.rows))
+      time.sleep(0.05)
+  finally:
+    stop.set()
+    plugin.kill()
+    plugin.wait()
+  rec.close()
+  bridge_rec.close()
+  a, b = finished(tmp_path / "bridge"), finished(tmp_path / "host")
+  info = json.loads((b / "gta5.json").read_text())
+  assert rec.segment_count == 1 and info["frames"] == len(values) and info["end"] == "the recording stopped" and not info["ended"]
+  npz = np.load(b / "gta5.npz")
+  assert len(set(npz["host_seq"])) == len(values) and np.all(np.diff(npz["frame"][:, 1]) < gta5_record.GAP)
+  for name in ("fcamera.hevc", "ecamera.hevc"):
+    assert (a / name).read_bytes() == (b / name).read_bytes(), name
+  assert worker.proc.poll() is not None  # closed with the recorder
 
-  def bridge_seqs() -> list[int]:
-    """The relay's numbers in the whole messages the bridge has had."""
-    seqs, at, got = [], 0, bytes(up)
-    while at + 8 <= len(got) and at + 4 + struct.unpack_from("<I", got, at)[0] <= len(got):
-      head_len = struct.unpack_from("<I", got, at + 4)[0]
-      seqs.append(json.loads(got[at + 8:at + 8 + head_len])["hostSeq"])
-      at += 4 + struct.unpack_from("<I", got, at)[0]
-    return seqs
 
-  end = time.monotonic() + 10
-  while len(bridge_seqs()) < 5 or rec.segment is None or len(rec.segment.seqs) < 4:
-    assert time.monotonic() < end, (len(up), feed.mismatched)
-    time.sleep(0.05)
-  seqs = bridge_seqs()
-  assert len(seqs) == 5 and seqs == list(range(seqs[0], seqs[0] + 5)) and feed.mismatched == 1
-  kept = frames[:2] + frames[3:]
-  assert rec.segment.seqs == seqs[:2] + seqs[3:]
-  assert rec.segment.road.frames == [r for r, _ in kept] and rec.segment.wide.frames == [w for _, w in kept]
-  rec.stopped = True
-  for s in (game, bridge):
-    s.close()
+@pytest.mark.skipif(shutil.which(gta5_record.FFMPEG) is None, reason="no ffmpeg")
+def test_frame_worker_outlives_no_host(tmp_path):
+  """A host that dies with a segment open: its frame worker, unable to tell it anything more, still finishes the videos
+  and ends, leaving no encoder behind."""
+  proc = subprocess.Popen([sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_record", "frames", "--port", str(free_port())],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+  proc.stdin.write((json.dumps({"op": "open", "id": "v", "path": str(tmp_path / "fcamera.hevc")}) + "\n").encode())
+  proc.stdin.flush()
+  time.sleep(2.0)  # the encoder starts
+  proc.stdout.close()  # as a dead host's end of the pipe
+  proc.stdin.close()
+  assert proc.wait(30) == 0
+  assert (tmp_path / "fcamera.hevc").exists()
