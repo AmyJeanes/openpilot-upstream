@@ -202,3 +202,28 @@ def test_mark_key(monkeypatch, tmp_path):
   m = json.loads(lines[-1])
   assert len(lines) == 2 and m["driver"] == "map" and m["map"] == {"phase": "drive"} and m["segment"] is None
   assert m["plan"][0] == [0.0, 100.0] and m["plan"][-1] == [0.0, 480.0]
+
+
+def test_map_match_from_the_fixes(monkeypatch):
+  """navd's map match moves each step on the car's speed and yaw rate, and takes each GNSS fix openpilot got once,
+  wherever openpilot is (LocalIO here; the link's, through the host's RemoteIO)."""
+  from openpilot.tools.sim.bridge.gta5 import gta5_world
+  from openpilot.tools.sim.bridge.gta5.gta5_gnss import Gnss
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  clock = [100.0]
+  monkeypatch.setattr(brain_mod.time, "monotonic", lambda: clock[0])
+  io = gta5_world.LocalIO.__new__(gta5_world.LocalIO)
+  gnss = Gnss("perfect", seed=0, pm=SimpleNamespace(send=lambda *a: None))
+  io.gnss_fix(gnss.update(0.0, 120.0, -40.0, 30.0, 0.0, 10.0), gnss.profile)
+  calls = []
+  w = Brain.__new__(Brain)
+  w.io, w.match_t = io, None
+  w.matcher = SimpleNamespace(predict=lambda *a: calls.append(("predict", *a)), update=lambda *a: calls.append(("update", *a)))
+  state = {"vEgo": 10.0, "yawRate": 0.1}
+  w._match_step(state)
+  clock[0] += 0.01
+  w._match_step(state)
+  assert [c[0] for c in calls] == ["predict", "update", "predict"] and calls[0][1:] == (0.0, 10.0, 0.1)
+  assert abs(calls[2][1] - 0.01) < 1e-9
+  x, y = to_game(io.fix["lat"], io.fix["lon"])
+  assert np.allclose(calls[1][1:3], (x, y)) and np.allclose((x, y), (120.0, -40.0), atol=0.01) and calls[1][-1] == 0.0

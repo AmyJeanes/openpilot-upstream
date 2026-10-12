@@ -23,7 +23,7 @@ import socket
 import threading
 import time
 
-from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, Brain
+from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, Brain
 from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO, RemoteIO, link_address
 from openpilot.tools.sim.bridge.gta5.gta5_relay import BRAIN_PORT, LINK_FILE
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None):
   else:
     print("gta5: no link: no openpilot", flush=True)
   log = open(LOG, "a", buffering=1) if LOG else None
-  brain = Brain(io, relay.send, log)
+  brain = Brain(io, relay.send, log, match=NAV_MATCH and not args.no_link)  # the fixes are the link's
   if MAP:
     brain.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, host="127.0.0.1")  # 0.0.0.0 asks the firewall
     print(f"gta5: map view on http://localhost:{MAP_PORT}/", flush=True)

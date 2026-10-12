@@ -103,7 +103,7 @@ def on_path(p, line: np.ndarray, near: float = ON_PATH):
 class Brain:
   def __init__(self, io: OpenpilotIO, send, log=None, match: bool = False):
     """send(cmd) sends the plugin a command; log is a file for nav's and the drivers' events (GTA5_LOG); match: routing
-    from navd's map match of the GNSS (NAV_MATCH, with the bridge's GNSS), which the bridge feeds."""
+    from navd's map match of the GNSS (NAV_MATCH), from the fixes openpilot gets (io.take_fix)."""
     self.io = io
     self._send = send
     self.log = log
@@ -146,6 +146,7 @@ class Brain:
     self.gps_route: list = []
     self.noo, self.noo_t = NOO != "off", 0.0
     self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
+    self.match_t: float | None = None  # its last step
     self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
 
   def _init_drivers(self):
@@ -162,6 +163,7 @@ class Brain:
     v = state["vEgo"]
     bearing = (-state["heading"]) % 360  # the game's heading is counterclockwise from north; a bearing is clockwise
     model = self.io.model() or {}
+    self._match_step(state)
     inputs: dict = {"speed_limit": speed_limit(state.get("street", ""))}
     self.gps_route = state.get("route") or []
     if self.navigator is not None:
@@ -339,6 +341,19 @@ class Brain:
   def _log_event(self, what: str, **kw):
     if self.log:
       self.log.write(json.dumps({"mono": round(time.monotonic(), 3), "event": what, **kw}) + "\n")
+
+  def _match_step(self, state: dict):
+    """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix openpilot
+    gets (the link's, from the host)."""
+    if self.matcher is None:
+      return
+    now = time.monotonic()
+    self.matcher.predict(0.0 if self.match_t is None else now - self.match_t, state["vEgo"], state["yawRate"])
+    self.match_t = now
+    fix = self.io.take_fix()
+    if fix is not None:
+      x, y = to_game(fix["lat"], fix["lon"])
+      self.matcher.update(x, y, fix["bearing"], fix["bearing_accuracy"], fix["speed"], fix["latency"])
 
   def _load_paths(self, path: str):
     try:

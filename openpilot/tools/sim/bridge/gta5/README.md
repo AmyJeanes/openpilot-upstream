@@ -218,7 +218,8 @@ inputs still carry the game's true pose and lane (`truth_*`). The bridge's side 
   simulated 3X GNSS, scored against the game's own pose snapped to the map: wrong road and wrong way shares, episodes,
   latency after turns, false and missed reroutes. `Navigator.update(..., match=...)` takes its matches, and
   `GTA5_NAV_MATCH=1` has the bridge route from them (off by default: the match puts the car on its road's line, so the
-  route's lane for the car is wrong). `nav_replay.py run` follows the same variable.
+  route's lane for the car is wrong). With the Windows host it's set on the host, and the fixes are the link's (its
+  `GTA5_GPS`), passed on in its state. `nav_replay.py run` follows the same variable.
 
 ### Map debug overlay and GPS route
 `gta5_cmd.py debug on` (or Delete) draws the map around the car into the world, from the player's camera, to spot map

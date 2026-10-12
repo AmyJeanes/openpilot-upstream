@@ -33,7 +33,6 @@ from openpilot.tools.sim.bridge.gta5.gta5_opio import INPUTS, PARAMS, OpenpilotI
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
-from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
@@ -91,6 +90,10 @@ def own_ip() -> str:
 
 class LocalIO(OpenpilotIO):
   """openpilot in this process (gta5_opio.OpenpilotIO): the simulated car's state and buttons, its messages and params."""
+  fix: dict | None = None  # the newest GNSS fix published (take_fix's), counted by fix_seq, at fix_t
+  fix_seq = 0
+  fix_t = 0.0
+  fix_taken = 0
   def __init__(self, simulator_state: SimulatorState, q: Queue, tesla: bool):
     self.simulator_state = simulator_state
     self.q = q
@@ -189,6 +192,19 @@ class LocalIO(OpenpilotIO):
       self.bookmark_pm = messaging.PubMaster(["userBookmark"])
     self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
 
+  def gnss_fix(self, msg, profile):
+    """A GNSS fix gta5_gnss published, for navd's map match: the brain's here, or the host's through the status."""
+    g = getattr(msg, profile.service)
+    self.fix = {"lat": g.latitude, "lon": g.longitude, "bearing": g.bearingDeg, "bearing_accuracy": g.bearingAccuracyDeg,
+                "speed": g.speed, "latency": profile.latency}
+    self.fix_seq, self.fix_t = self.fix_seq + 1, time.monotonic()
+
+  def take_fix(self) -> dict | None:
+    if self.fix is None or self.fix_taken == self.fix_seq:
+      return None
+    self.fix_taken = self.fix_seq
+    return self.fix
+
   def nav_instruction(self, content: dict | None):
     self._nav_pub().nav_instruction(content)
 
@@ -215,8 +231,9 @@ class LocalIO(OpenpilotIO):
         params[key] = self.params.get_bool(key)
       except Exception:
         params[key] = False
+    gnss = None if self.fix is None else {**self.fix, "seq": self.fix_seq, "age": time.monotonic() - self.fix_t}
     return {"type": "status", "engaged": self.engaged, "set_speed_kph": float(self.set_speed_kph), "model": self.model(),
-            "params": params}
+            "params": params, "gnss": gnss}
 
 
 class GTA5World(World):
@@ -249,7 +266,6 @@ class GTA5World(World):
     self.io = LocalIO(simulator_state, q, is_tesla())
     self.gnss = gta5_gnss.from_env()
     self.publishes_gps = self.gnss is not None
-    self.match_t: float | None = None
     if LINK:
       from openpilot.tools.sim.bridge.gta5.gta5_link import LinkServer
       self.link = LinkServer(self.io)
@@ -401,8 +417,8 @@ class GTA5World(World):
     if self.gnss is not None:
       p = state["pos"]
       fix = self.gnss.update(time.monotonic(), p[0], p[1], p[2], simulator_state.velocity.x, simulator_state.velocity.y)
-      if self.brain is not None and self.brain.matcher is not None:
-        self._match(fix, v, yaw_rate)
+      if fix is not None:
+        self.io.gnss_fix(fix, self.gnss.profile)
 
     user = state.get("user") or {}
     simulator_state.user_gas = 1.0 if user.get("gas") else 0.0
@@ -421,17 +437,6 @@ class GTA5World(World):
     elif now - self.idle_since > FULL_GC_IDLE and now >= self.next_full_gc:
       self.next_full_gc = now + FULL_GC_EVERY
       gc.collect()
-
-  def _match(self, fix, v: float, yaw_rate: float):
-    """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix."""
-    matcher = self.brain.matcher
-    now = time.monotonic()
-    matcher.predict(0.0 if self.match_t is None else now - self.match_t, v, yaw_rate)
-    self.match_t = now
-    if fix is not None:
-      g = getattr(fix, self.gnss.profile.service)
-      x, y = to_game(g.latitude, g.longitude)
-      matcher.update(x, y, g.bearingDeg, g.bearingAccuracyDeg, g.speed, self.gnss.profile.latency)
 
   def read_cameras(self):
     pass

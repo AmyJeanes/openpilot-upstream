@@ -14,11 +14,12 @@ class FakeLocalIO:
     self.inputs: dict = {}
     self.values: dict = {"IsMetric": True, "NavDestination": None}
     self.engaged = False
+    self.gnss: dict | None = None
     self.params = self
 
   def status(self) -> dict:
     return {"type": "status", "engaged": self.engaged, "set_speed_kph": 40.0, "params": dict(self.values),
-            "model": {"turns": {}, "lane_change": 2, "lane_head": [0, 2, 0.9]}}
+            "model": {"turns": {}, "lane_change": 2, "lane_head": [0, 2, 0.9]}, "gnss": self.gnss}
 
   def set_inputs(self, **inputs):
     self.inputs.update(inputs)
@@ -54,9 +55,9 @@ def until(cond, link: LinkServer, timeout: float = 5.0):
 
 
 def test_link_round_trip(monkeypatch):
-  """The host's calls arrive and are applied on the link's step; openpilot's state comes back; vectors go at most every
-  VECTOR_EVERY s, the newest; a param the brain set holds against a state from before the link had it; the host going
-  resets the link's inputs."""
+  """The host's calls arrive and are applied on the link's step; openpilot's state comes back, with each GNSS fix once;
+  vectors go at most every VECTOR_EVERY s, the newest; a param the brain set holds against a state from before the link
+  had it; the nav messages' navRoute goes whole only when it changed; the host going resets the link's inputs."""
   monkeypatch.setattr(gta5_opio, "RETRY_EVERY", 0.05)
   port = free_port()
   local = FakeLocalIO()
@@ -90,6 +91,14 @@ def test_link_round_trip(monkeypatch):
   remote.update()  # a state from before the put still says None: the brain's value holds
   assert remote.params.get("NavDestination") == {"latitude": 1.0, "longitude": 2.0}
   until(lambda: ("put", "NavDestination", {"latitude": 1.0, "longitude": 2.0}) in local.calls, link)
+
+  assert remote.take_fix() is None
+  local.gnss = {"lat": 34.0, "lon": -118.0, "bearing": 90.0, "bearing_accuracy": 2.0, "speed": 10.0, "latency": 0.3,
+                "seq": 1, "age": 0.1}
+  fix = []
+  until(lambda: fix.append(remote.take_fix()) or fix[-1] is not None, link)
+  assert fix[-1]["lat"] == 34.0 and fix[-1]["latency"] >= 0.4  # its age in the link added
+  assert remote.take_fix() is None  # each fix once
 
   route = {"coordinates": [[34.0, -118.0], [34.1, -118.1]], "roads": []}
   remote.nav_instruction({"distanceRemaining": 120.0})

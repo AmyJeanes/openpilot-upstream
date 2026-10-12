@@ -77,6 +77,11 @@ class OpenpilotIO:
   def nav_route(self, content: dict) -> None:
     """navRoute for the onroad UI, from gta5_nav_msgs' content; the same object again when it's to be sent again."""
 
+  def take_fix(self) -> dict | None:
+    """The newest GNSS fix openpilot got (gta5_gnss.py) since the last call, for navd's map match: {"lat", "lon",
+    "bearing", "bearing_accuracy", "speed", "latency": s from the position to now}; None without a new one."""
+    return None
+
 
 class MemoryParams:
   """Params kept here, for no openpilot: a key never put reads as None (False)."""
@@ -147,6 +152,7 @@ class RemoteIO(OpenpilotIO):
     self.sent_inputs: dict = {}
     self.vectors: dict[str, tuple] = {}  # op: (the newest vector, sent yet, when one was last sent)
     self.nav_route_sent: dict | None = None  # the navRoute content the link has
+    self.fix_seq: int | None = None  # the link's last GNSS fix taken
     self.connected = False
     threading.Thread(target=self._run, daemon=True).start()
 
@@ -164,6 +170,15 @@ class RemoteIO(OpenpilotIO):
 
   def model(self) -> dict | None:
     return self.status.get("model") if self.connected else None
+
+  def take_fix(self) -> dict | None:
+    status, status_t = self.status, self.status_t
+    fix = status.get("gnss") if self.connected else None
+    if not fix or fix["seq"] == self.fix_seq:
+      return None
+    self.fix_seq = fix["seq"]
+    # its age in the link when sent, then here since: each measured on its own side's clock
+    return {**fix, "latency": fix["latency"] + fix["age"] + (time.monotonic() - status_t)}
 
   # *** to openpilot ***
 
@@ -224,6 +239,7 @@ class RemoteIO(OpenpilotIO):
         self.sock, self.connected = None, False
         self.sent_inputs = {}  # a new link starts from its defaults
         self.nav_route_sent = None
+        self.fix_seq = None
         self.vectors = {op: (vec, False, t) for op, (vec, _, t) in self.vectors.items()}
     close(sock)
 
