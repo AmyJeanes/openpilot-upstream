@@ -2,7 +2,9 @@
 model (~/gta5test/notes/ai_driver.md has the research).
 
 Off unless the bridge runs with GTA5_EXPERT set: 1 for the control file at CONTROL, or the file's path. The bridge then
-watches that file (gta5_cmd.py expert on|off|route writes it; changes from before the bridge started are ignored):
+watches that file (gta5_cmd.py expert on|off|route writes it; changes from before the bridge started are ignored). The
+Windows host (gta5_host.py) is set the same way, and also takes the WSL control file's changes from the link
+(gta5_link.py), which writes this one's own changes to it, so gta5_cmd.py in WSL drives it as it does the bridge:
   {"on": true, "speed": 12, "style": 1076369579, "ability": 1, "aggr": 0, "task": "longrange", "limits": true,
    "need_route": false, "dest": null, "ahead_min": 60, "ahead_max": 120, "past": 25, "targets": "junction",
    "retarget_every": 0, "ramp": 0, "lead": 2, "launch": null, "decel": 0, "turn_speed": 6, "arrive": "task",
@@ -117,10 +119,12 @@ def wrap(deg: float) -> float:
 
 
 class Expert:
-  def __init__(self, send, cancel_engagement, clear_nav_desire):
+  def __init__(self, send, cancel_engagement, clear_nav_desire, wrote=None):
+    """wrote(cfg): what it writes to its control file, for one elsewhere (the link's)."""
     self.send = send
     self.cancel_engagement = cancel_engagement
     self.clear_nav_desire = clear_nav_desire
+    self.wrote = wrote
     self.path = control_path()
     self.router = Router(ROUTER, timeout=5.0) if ROUTER else None
     self.started = time.time()  # noqa: TID251  # compared with the control file's mtime, a wall clock time
@@ -188,11 +192,16 @@ class Expert:
       if mtime == self.mtime or mtime < self.started:
         return
       self.mtime = mtime
-      cfg = {**DEFAULTS, **json.loads(self.path.read_text())}
+      cfg = json.loads(self.path.read_text())
     except (OSError, ValueError) as e:
       if not isinstance(e, FileNotFoundError):
         print(f"gta5: expert control file: {e}", flush=True)
       return
+    self.control(cfg)
+
+  def control(self, cfg: dict):
+    """A control file's settings: its own, or the link's (the WSL one gta5_cmd.py writes, with the Windows host)."""
+    cfg = {**DEFAULTS, **cfg}
     was = self.on
     self.cfg, self.on = cfg, bool(cfg["on"])
     print(f"gta5: expert {'on' if self.on else 'off'} {json.dumps({k: v for k, v in cfg.items() if k != 'on'})}", flush=True)
@@ -757,6 +766,8 @@ class Expert:
     self.send({"type": "ai", "on": 0, "indicator": "off"})
 
   def _write_control(self, cfg: dict):
+    if self.wrote is not None:
+      self.wrote(cfg)
     if self.path is None:
       return
     try:

@@ -13,6 +13,7 @@ import json
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 LINK_PORT = 8796  # the link's control port, on the address the link writes to its link file
@@ -21,7 +22,8 @@ INPUTS = ("user_torque", "left_blinker", "right_blinker", "left_blindspot", "rig
           "speed_limit_follow", "cruise_cap", "cap_set_speed")
 PARAMS = ("IsMetric", "NavigateOnOpenpilot", "TurnDesireRefresh", "NavDestination")  # the params the brain reads
 OPS = ("cruise", "set_inputs", "nav_desire", "nav_speed", "route_input", "lane_slots", "bookmark", "param_put", "param_remove",
-       "nav_instruction", "nav_route")
+       "nav_instruction", "nav_route", "expert_control")
+COMMANDS = ("expert", "destination")  # what the link passes on to the brain from WSL (take_commands)
 STATUS_EVERY = 0.05  # s between the link's states
 VECTOR_EVERY = 0.05  # s between route input or lane slot vectors sent, the newest when it changed
 CONNECT_TIMEOUT = 1.0  # s
@@ -81,6 +83,15 @@ class OpenpilotIO:
     """The newest GNSS fix openpilot got (gta5_gnss.py) since the last call, for navd's map match: {"lat", "lon",
     "bearing", "bearing_accuracy", "speed", "latency": s from the position to now}; None without a new one."""
     return None
+
+  def take_commands(self) -> list[dict]:
+    """What came from WSL for the brain since the last call (the link's COMMANDS): {"type": "expert", "cfg"}, the WSL
+    expert control file's new settings; {"type": "destination", "xy": [x, y] or None}, a destination posted to WSL's
+    map view port (gta5_cmd.py expert route)."""
+    return []
+
+  def expert_control(self, cfg: dict) -> None:
+    """What expert mode writes to its control file, for the WSL one (the link's)."""
 
 
 class MemoryParams:
@@ -153,6 +164,7 @@ class RemoteIO(OpenpilotIO):
     self.vectors: dict[str, tuple] = {}  # op: (the newest vector, sent yet, when one was last sent)
     self.nav_route_sent: dict | None = None  # the navRoute content the link has
     self.fix_seq: int | None = None  # the link's last GNSS fix taken
+    self.commands: deque[dict] = deque()
     self.connected = False
     threading.Thread(target=self._run, daemon=True).start()
 
@@ -180,6 +192,12 @@ class RemoteIO(OpenpilotIO):
     # its age in the link when sent, then here since: each measured on its own side's clock
     return {**fix, "latency": fix["latency"] + fix["age"] + (time.monotonic() - status_t)}
 
+  def take_commands(self) -> list[dict]:
+    out = []
+    while self.commands:
+      out.append(self.commands.popleft())
+    return out
+
   # *** to openpilot ***
 
   def cruise(self, cmd: str) -> None:
@@ -204,6 +222,9 @@ class RemoteIO(OpenpilotIO):
 
   def bookmark(self) -> None:
     self.send("bookmark")
+
+  def expert_control(self, cfg: dict) -> None:
+    self.send("expert_control", cfg)
 
   def nav_instruction(self, content: dict | None) -> None:
     self.send("nav_instruction", content)
@@ -269,6 +290,8 @@ class RemoteIO(OpenpilotIO):
           msg = json.loads(line)
           if msg.get("type") == "status":
             self.status, self.status_t, self.connected = msg, time.monotonic(), True
+          elif msg.get("type") in COMMANDS:
+            self.commands.append(msg)
       except (OSError, ValueError):
         pass
       self._drop(sock)

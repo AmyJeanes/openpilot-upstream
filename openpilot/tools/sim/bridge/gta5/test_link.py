@@ -1,8 +1,10 @@
 """The brain's openpilot over the wire: gta5_opio.RemoteIO on the host to gta5_link.LinkServer in the link, on localhost."""
+import json
 import socket
 import time
+from types import SimpleNamespace
 
-from openpilot.tools.sim.bridge.gta5 import gta5_opio
+from openpilot.tools.sim.bridge.gta5 import gta5_link, gta5_opio
 from openpilot.tools.sim.bridge.gta5.gta5_link import LinkServer
 from openpilot.tools.sim.bridge.gta5.gta5_opio import RemoteIO
 
@@ -52,6 +54,38 @@ def until(cond, link: LinkServer, timeout: float = 5.0):
     assert time.monotonic() < end, "timed out"
     link.step()
     time.sleep(0.01)
+
+
+def test_link_stands_in_for_the_host_in_wsl(tmp_path, monkeypatch):
+  """The WSL expert control file's changes while the host is connected go to it, not those from before; what the
+  host's expert mode writes goes to the file, and isn't passed back; a destination posted to the link's map view goes
+  to the host."""
+  monkeypatch.setattr(gta5_opio, "RETRY_EVERY", 0.05)
+  monkeypatch.setattr(gta5_link, "CONTROL_EVERY", 0.0)
+  control = tmp_path / "gta5_expert.json"
+  control.write_text('{"on": false, "from": "before"}\n')
+  port = free_port()
+  link = LinkServer(FakeLocalIO(), port, control=control)
+  picks: list = []
+  link.view = SimpleNamespace(take_destination=lambda: picks.pop() if picks else None, close=lambda: None)
+  remote = RemoteIO(lambda: ("127.0.0.1", port))
+  until(lambda: remote.connected, link)
+  picks.append(([10.0, -20.0],))
+  got: list[dict] = []
+  until(lambda: got.extend(remote.take_commands()) or any(c["type"] == "destination" for c in got), link)
+  assert got == [{"type": "destination", "xy": [10.0, -20.0]}]  # and not the file from before
+  time.sleep(0.01)
+  control.write_text('{"on": true, "speed": 9}\n')
+  until(lambda: got.extend(remote.take_commands()) or len(got) == 2, link)
+  assert got[1] == {"type": "expert", "cfg": {"on": True, "speed": 9}}
+  remote.expert_control({"on": False})
+  until(lambda: json.loads(control.read_text()) == {"on": False}, link)
+  for _ in range(20):
+    link.step()
+    got.extend(remote.take_commands())
+    time.sleep(0.01)
+  assert len(got) == 2  # its own write isn't passed back
+  link.close()
 
 
 def test_link_round_trip(monkeypatch):

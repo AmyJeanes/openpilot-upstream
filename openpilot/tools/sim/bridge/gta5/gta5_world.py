@@ -31,6 +31,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, NAV_SPEED
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_opio import INPUTS, PARAMS, OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE
+from openpilot.tools.sim.bridge.gta5.gta5_expert import CONTROL, control_path
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
@@ -268,7 +269,7 @@ class GTA5World(World):
     self.publishes_gps = self.gnss is not None
     if LINK:
       from openpilot.tools.sim.bridge.gta5.gta5_link import LinkServer
-      self.link = LinkServer(self.io)
+      self.link = LinkServer(self.io, control=control_path() or CONTROL)
     else:
       self.brain = Brain(self.io, self._send, self.log, match=NAV_MATCH and self.gnss is not None)
       if RECORD:
@@ -294,6 +295,9 @@ class GTA5World(World):
       # made once rx has forked: a socket it inherited would outlive this process
       self.brain.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, stacks=stacks)
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
+    elif self.link is not None:
+      self.link.view = MapView(os.path.join(MAP or "", "roads.json"), MAP_PORT, stacks=stacks)
+      print(f"gta5: destinations for the host on http://localhost:{MAP_PORT}/destination")
     self.frames = frames_recv
     threading.Thread(target=self._frame_reader, daemon=True).start()
     self.pinner = pin_ui()

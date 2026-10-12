@@ -260,6 +260,21 @@ def test_recheck():
   print(f"recheck: ok, {rep['trips_before']} -> {rep['trips_after']} trips")
 
 
+def test_control_from_elsewhere(tmp_path, monkeypatch):
+  """Settings handed in (the link's, from WSL's control file) work as its own file's, and what it writes to its control
+  file goes to `wrote` too (for the link to write WSL's)."""
+  monkeypatch.setenv("GTA5_EXPERT", str(tmp_path / "control.json"))
+  monkeypatch.setenv("GTA5_EXPERT_LOG", str(tmp_path / "expert.jsonl"))
+  wrote: list[dict] = []
+  e = Expert(lambda m: None, lambda: None, lambda: None, wrote=wrote.append)
+  e.control({"on": True, "speed": 9})
+  assert e.on and e.cfg["speed"] == 9 and e.cfg["ahead_min"] == 60  # the defaults filled in
+  e._write_control({"on": False})
+  assert wrote == [{"on": False}] and (tmp_path / "control.json").read_text().strip() == '{"on": false}'
+  e.control({"on": False})
+  assert not e.on
+
+
 if __name__ == "__main__":
   test_plain_route_unchanged()
   test_shortcut_link()
@@ -268,3 +283,4 @@ if __name__ == "__main__":
   test_sharp_turns()
   test_router_avoids_uturns()
   test_recheck()
+

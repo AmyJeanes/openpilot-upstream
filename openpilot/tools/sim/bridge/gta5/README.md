@@ -290,7 +290,10 @@ bits, `ability=`, `aggr=`), ignores openpilot's controls and the player's drivin
 gives the car back. Expert mode (`gta5_expert.py`, on with `GTA5_EXPERT=1` on terminal 2) follows our map's route:
 `gta5_cmd.py expert route <trip>` places the car at an e2e trip's start, sets its destination and drives it, keeping the
 AI's target 60-120 m ahead just past the next junction, with the indicators from the route's turns, openpilot disengaged
-and a JSON line per frame in `expert.jsonl` beside `GTA5_LOG`; `expert off` stops it.
+and a JSON line per frame in `expert.jsonl` beside `GTA5_LOG`; `expert off` stops it. With the Windows host,
+`GTA5_EXPERT=1` goes in the host's environment, and `gta5_cmd.py` and the harnesses drive it from WSL as before: the
+link passes the WSL control file's changes and the destination `expert route` posts to it on, and writes the host's
+changes to the file (`gta5_link.py`). `expert.jsonl` is then beside the host's `GTA5_LOG`.
 
 ## Recording
 `GTA5_RECORD=<folder>` on terminal 2 records the drive for training the driving model, in comma's comma1M segment layout

@@ -29,8 +29,9 @@
   gta5_cmd.py camera yaw=5 pitch=0              rotate the camera on its mount (degrees)
   gta5_cmd.py ai on speed=12 style=1076369579   the game's AI drives the car: to the map's waypoint, else wandering
   gta5_cmd.py ai x=100 y=-200 z=30              ... to a point; ai off gives the car back
-  gta5_cmd.py expert on speed=12                expert mode (gta5_expert.py; the bridge runs with GTA5_EXPERT=1): the AI
-                                                drives our route to the destination set; off stops it
+  gta5_cmd.py expert on speed=12                expert mode (gta5_expert.py; the bridge runs with GTA5_EXPERT=1, or the
+                                                Windows host does, through the link): the AI drives our route to the
+                                                destination set; off stops it
   gta5_cmd.py expert route L1 [speed=12 ...]    put the car at an e2e trip's start (a name in ~/gta5test/e2e/*.txt, or
                                                 'x,y,z,heading[,lane]>dx,dy'), set its destination and drive it
   gta5_cmd.py expert route L1 driver=map [mapdrive='{"seed":3,"preset":"calm"}']

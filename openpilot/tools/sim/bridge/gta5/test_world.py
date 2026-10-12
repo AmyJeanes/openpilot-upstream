@@ -227,3 +227,18 @@ def test_map_match_from_the_fixes(monkeypatch):
   assert abs(calls[2][1] - 0.01) < 1e-9
   x, y = to_game(io.fix["lat"], io.fix["lon"])
   assert np.allclose(calls[1][1:3], (x, y)) and np.allclose((x, y), (120.0, -40.0), atol=0.01) and calls[1][-1] == 0.0
+
+
+def test_commands_from_wsl():
+  """The link's commands: the WSL expert control file's settings for expert mode, while it's enabled here, and a
+  destination posted in WSL as the map view's pick."""
+  cfgs = []
+  w = Brain.__new__(Brain)
+  w.picked = None
+  w.expert = SimpleNamespace(path=None, control=cfgs.append)
+  w._command({"type": "expert", "cfg": {"on": True}})
+  assert cfgs == []  # not enabled (GTA5_EXPERT): left alone, as the bridge leaves its file
+  w.expert.path = "control.json"
+  w._command({"type": "expert", "cfg": {"on": True}})
+  w._command({"type": "destination", "xy": [5.0, 6.0]})
+  assert cfgs == [{"on": True}] and w.picked == ([5.0, 6.0],)

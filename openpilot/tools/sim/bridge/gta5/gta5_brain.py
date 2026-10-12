@@ -119,7 +119,8 @@ class Brain:
     self.marks_due: list[tuple[float, dict]] = []  # marks waiting for MARK_AFTER s more of the track
     self._init_nav()
     self.blindspot = BlindSpot()
-    self.expert = Expert(self._send, lambda: self.io.cruise("cruise_cancel"), lambda: self._set_nav_desire(""))
+    self.expert = Expert(self._send, lambda: self.io.cruise("cruise_cancel"), lambda: self._set_nav_desire(""),
+                         wrote=self.io.expert_control)
     self._init_drivers()
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
     self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
@@ -148,6 +149,7 @@ class Brain:
     self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
     self.match_t: float | None = None  # its last step
     self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
+    self.picked: tuple | None = None  # a destination from WSL's map view port, through the link (io.take_commands)
 
   def _init_drivers(self):
     """Who drives while engaged (gta5_drivers.py): openpilot, and the engage key's driver (GTA5_DRIVER; the map driver
@@ -163,6 +165,8 @@ class Brain:
     v = state["vEgo"]
     bearing = (-state["heading"]) % 360  # the game's heading is counterclockwise from north; a bearing is clockwise
     model = self.io.model() or {}
+    for cmd in self.io.take_commands():
+      self._command(cmd)
     self._match_step(state)
     inputs: dict = {"speed_limit": speed_limit(state.get("street", ""))}
     self.gps_route = state.get("route") or []
@@ -342,6 +346,16 @@ class Brain:
     if self.log:
       self.log.write(json.dumps({"mono": round(time.monotonic(), 3), "event": what, **kw}) + "\n")
 
+  def _command(self, cmd: dict):
+    """One from WSL, through the link (gta5_opio.COMMANDS)."""
+    if cmd.get("type") == "expert":
+      if self.expert.path is None:  # as the bridge leaves its control file alone without GTA5_EXPERT
+        print("gta5: expert mode isn't enabled here (GTA5_EXPERT): WSL's control file is left alone", flush=True)
+      else:
+        self.expert.control(cmd.get("cfg") or {})
+    elif cmd.get("type") == "destination":
+      self.picked = (cmd.get("xy"),)
+
   def _match_step(self, state: dict):
     """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix openpilot
     gets (the link's, from the host)."""
@@ -389,6 +403,8 @@ class Brain:
     and the map view's."""
     pos = np.array(state["pos"][:2], dtype=float)
     picked = self.map_view.take_destination() if self.map_view is not None else None
+    if self.picked is not None:
+      picked, self.picked = self.picked, None
     dest = self.destination.update(state.get("waypoint"), pos, picked, (state.get("mission") or {}).get("dest"))
     match = self.matcher.match if self.matcher is not None else None
     route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
