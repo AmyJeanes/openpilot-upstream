@@ -793,6 +793,13 @@ class Navigator:
     self.next_try = 0.0
     self.busy = False
     self.lock = threading.Lock()
+    self.map_version = 0  # counts the map data the router has had (refresh)
+    self.route_version = 0  # what the route was made with
+
+  def refresh(self):
+    """The router has more of the map (its paths and lanes load after the bridge starts): route again, keeping the
+    route until the new one comes, as one made without them has no lanes."""
+    self.map_version += 1
 
   def update(self, pos: np.ndarray, bearing: float, dest: np.ndarray | None, now: float, z: float | None = None,
              match=None) -> Route | None:
@@ -813,7 +820,8 @@ class Navigator:
     if route is not None:
       off = route.locate(pos, z, heading)
       self.off_since = None if off < self.OFF_ROUTE or route.on_road() else (self.off_since or now)
-      if self.off_since is not None and now - self.off_since > self.OFF_FOR and now >= self.next_try:
+      off_route = self.off_since is not None and now - self.off_since > self.OFF_FOR
+      if (off_route or self.route_version < self.map_version) and now >= self.next_try:
         self._start(pos, bearing, dest, now, z)
     elif now >= self.next_try:
       self._start(pos, bearing, dest, now, z)
@@ -823,15 +831,15 @@ class Navigator:
     if self.busy:
       return
     self.busy, self.next_try = True, now + self.RETRY
-    threading.Thread(target=self._route, args=(pos.copy(), bearing, dest.copy(), z), daemon=True).start()
+    threading.Thread(target=self._route, args=(pos.copy(), bearing, dest.copy(), z, self.map_version), daemon=True).start()
 
-  def _route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None):
+  def _route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None, version: int):
     try:
       route = self.router.route(pos, bearing, dest, z)
       route.locate(pos, z, -bearing)
       with self.lock:
         if self.dest is not None and np.hypot(*(dest - self.dest)) <= 1.0:
-          self.route, self.off_since = route, None
+          self.route, self.off_since, self.route_version = route, None, version
     except (OSError, ValueError, KeyError) as e:
       print(f"router: {e}")
     finally:

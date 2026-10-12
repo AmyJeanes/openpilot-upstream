@@ -38,3 +38,16 @@ def test_navigator_without_a_match_is_unchanged():
   nav, starts = navigator_on(route)
   nav.update(np.array([3.0, 100.0]), 0.0, np.array([0.0, 500.0]), 0.0)
   assert abs(route.off - 3.0) < 1e-6 and abs(route.at - 100.0) < 1e-6 and not starts
+
+
+def test_navigator_routes_again_with_more_map():
+  """A route made before the map's paths and lanes loaded is routed again once they have, on the route meanwhile."""
+  route = Route(np.array([(0.0, 0.0), (0.0, 500.0)]), [])
+  nav, starts = navigator_on(route)
+  dest = np.array([0.0, 500.0])
+  nav.update(np.array([0.0, 100.0]), 0.0, dest, 0.0)
+  nav.refresh()
+  assert nav.update(np.array([0.0, 101.0]), 0.0, dest, 1.0) is route and len(starts) == 1
+  nav.route_version = nav.map_version  # the new route came
+  nav.update(np.array([0.0, 102.0]), 0.0, dest, 5.0)
+  assert len(starts) == 1

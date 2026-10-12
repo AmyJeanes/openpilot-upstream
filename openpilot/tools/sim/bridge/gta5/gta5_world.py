@@ -533,6 +533,7 @@ class GTA5World(World):
       self.lane_matcher = LaneMatcher(lanes)
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
+    self.navigator.refresh()
 
   def _match(self, fix, v: float, yaw_rate: float):
     """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix."""
