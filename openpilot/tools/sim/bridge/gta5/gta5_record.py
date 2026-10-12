@@ -32,7 +32,7 @@ import numpy as np
 RECORD = os.getenv("GTA5_RECORD")
 ENCODER = os.getenv("GTA5_RECORD_ENCODER", "libx265")  # or hevc_nvenc
 # the system's: openpilot's venv puts an ffmpeg without libx265 first on PATH
-FFMPEG = os.getenv("GTA5_RECORD_FFMPEG", "/usr/bin/ffmpeg" if os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
+FFMPEG = os.getenv("GTA5_RECORD_FFMPEG", "/usr/bin/ffmpeg" if os.name == "posix" and os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
 CRF = int(os.getenv("GTA5_RECORD_CRF", "21"))
 # the camera's mount on the car, m forward of and above the car's origin, which the game's pose is for, when the plugin's
 # state has none
@@ -131,7 +131,7 @@ class Video:
     try:
       import fcntl
       fcntl.fcntl(self.proc.stdin.fileno(), 1031, 4 << 20)  # F_SETPIPE_SZ: fewer, larger writes
-    except OSError:
+    except (ImportError, OSError):  # no fcntl on Windows
       pass
     self.queue: queue.Queue = queue.Queue(QUEUE_FRAMES)
     self.frames = 0

@@ -2,13 +2,14 @@
 attach under WSL's ptrace_scope 1 without sudo) nor the GIL, so it works while another thread holds that.
 
 watch() sets a process up: `kill -USR1 <pid>` appends its threads' stacks to its file (GTA5_STACKS, else
-bridge_stacks.txt beside GTA5_LOG, else in /tmp; a named process's file has its name added, bridge_stacks_rx.txt), and a
-fatal signal (a segfault, a bus error) prints them to stderr, the bridge's log, as the process dies. Stall appends them
-when the bridge loop's heartbeat stops for a while."""
+bridge_stacks.txt beside GTA5_LOG, else in the temp folder; a named process's file has its name added,
+bridge_stacks_rx.txt), and a fatal signal (a segfault, a bus error) prints them to stderr, the bridge's log, as the
+process dies. Stall appends them when the bridge loop's heartbeat stops for a while."""
 import faulthandler
 import os
 import signal
 import sys
+import tempfile
 import time
 from typing import TextIO
 
@@ -20,7 +21,7 @@ def stacks_path(name: str = "") -> str:
   path = os.getenv("GTA5_STACKS")
   if not path:
     log = os.getenv("GTA5_LOG")
-    path = os.path.join(os.path.dirname(os.path.abspath(log)) if log else "/tmp", "bridge_stacks.txt")
+    path = os.path.join(os.path.dirname(os.path.abspath(log)) if log else tempfile.gettempdir(), "bridge_stacks.txt")
   root, ext = os.path.splitext(path)
   return f"{root}_{name}{ext}" if name else path
 
@@ -39,7 +40,8 @@ def watch(name: str = "") -> TextIO | None:
     return None
   pid = os.getpid()
   f.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} pid {pid}{' (' + name + ')' if name else ''}: kill -USR1 {pid} adds its stacks\n")
-  faulthandler.register(signal.SIGUSR1, file=f, all_threads=True)
+  if hasattr(signal, "SIGUSR1"):  # not on Windows, which has the Stall dumps only
+    faulthandler.register(signal.SIGUSR1, file=f, all_threads=True)
   return f
 
 
