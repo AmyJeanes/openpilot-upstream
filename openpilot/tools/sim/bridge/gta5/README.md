@@ -402,3 +402,15 @@ resuming after the game comes back. gta5-train's `scripts/juncrec_labels.sh` mak
   pitch and roll. The throttle adds what gravity takes on a grade, as a real car's drive unit delivers its acceleration.
 - The plugin sets the maximum wanted level to zero while connected.
 - openpilot and the bridge each restart on their own: modeld takes the restarted bridge's camera streams.
+
+## Tests
+`PYTHONPATH=$PWD python -m pytest openpilot/tools/sim/bridge/gta5/` in the venv. The parts that move to a Windows host
+need nothing from openpilot's runtime: `test_portable.py` imports them with cereal, msgq, capnp, zmq and opendbc
+blocked. Their tests also run on Windows' own Python (3.12 with numpy, pillow, pytest, pyvalhalla and zstandard),
+straight from the WSL checkout. Forward slashes keep pytest from mangling the share's path, and the cache prefix keeps
+Windows' `.pyc` files out of the checkout:
+```powershell
+$env:PYTHONPATH = '\\wsl.localhost\Ubuntu\home\<you>\<checkout>'; $env:PYTHONPYCACHEPREFIX = "$env:TEMP\gta5op-pycache"
+cd $env:TEMP; python -m pytest -q -p no:cacheprovider --rootdir . //wsl.localhost/Ubuntu/home/<you>/<checkout>/openpilot/tools/sim/bridge/gta5/test_portable.py
+```
+Tests that import `gta5_world`, `gta5_nav_msgs`, `gta5_pilot` or cereal fail or skip there.
