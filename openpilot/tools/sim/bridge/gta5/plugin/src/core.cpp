@@ -69,6 +69,7 @@ struct Config {
   bool splitViews = false;
   float roadVfov = 30.0f, wideVfov = 116.0f;
   float wideDelay = 0.025f;  // s from the road view to the wide view; 0 is the next frame
+  bool model3Chrome = false;  // the Model 3's trim: chrome, or its matte black chrome delete
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -347,6 +348,7 @@ void ReadConfig() {
   c.tickHz = std::clamp(num("tick_hz", 0), 0.0f, 240.0f);
   c.presentHook = num("present_hook", 1) != 0;
   c.splitViews = num("split_views", 0) != 0;
+  c.model3Chrome = num("model3_chrome", 0) != 0;
   c.roadVfov = num("road_vfov", c.roadVfov);
   c.wideVfov = num("wide_vfov", c.wideVfov);
   g_cfg = c;
@@ -721,6 +723,14 @@ void DashcamMount() {
   ApplyMount();
 }
 
+// The Model 3's matte black chrome delete is five extras (the body and each door, so it opens with them). The game turns
+// extras on at random as a car spawns, so all five are set together.
+void SetModel3Trim(Vehicle v, bool chrome) {
+  if (GET_ENTITY_MODEL(v) != GET_HASH_KEY("tmodel")) return;
+  for (int id = 1; id <= 5; id++)
+    if (DOES_EXTRA_EXIST(v, id)) SET_VEHICLE_EXTRA(v, id, chrome);
+}
+
 void OnVehicleChanged(Vehicle v) {
   ReleaseControls();
   ReleaseCamera();
@@ -733,6 +743,7 @@ void OnVehicleChanged(Vehicle v) {
   g_indicator = 0;
   if (!v) return;
   SET_VEHICLE_RADIO_ENABLED(v, FALSE);
+  SetModel3Trim(v, g_cfg.model3Chrome);
   g_veh.model = GET_ENTITY_MODEL(v);
   for (const char *c = GET_DISPLAY_NAME_FROM_VEHICLE_MODEL(g_veh.model); c && *c; c++)
     if (isalnum(static_cast<unsigned char>(*c)) || *c == '_' || *c == ' ') g_veh.name += *c;
@@ -2836,7 +2847,12 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "trim" && g_veh.handle) {
     if (m.count("interior")) SET_VEHICLE_EXTRA_COLOUR_5(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
     if (m.count("dashboard")) SET_VEHICLE_EXTRA_COLOUR_6(g_veh.handle, static_cast<int>(MsgNum(m, "dashboard")));
-    Log("trim interior " + Num(MsgNum(m, "interior", -1)) + " dashboard " + Num(MsgNum(m, "dashboard", -1)));
+    if (m.count("chrome")) {
+      g_cfg.model3Chrome = MsgBool(m, "chrome");  // and for the next Model 3s
+      SetModel3Trim(g_veh.handle, g_cfg.model3Chrome);
+    }
+    Log("trim interior " + Num(MsgNum(m, "interior", -1)) + " dashboard " + Num(MsgNum(m, "dashboard", -1)) + " chrome " +
+        (g_cfg.model3Chrome ? "on" : "off"));
   } else if (type == "extra" && g_veh.handle) {
     // id=N on=1|0: one of the car's switchable parts (the Model 3's chrome trim or its matte black delete)
     int id = static_cast<int>(MsgNum(m, "id"));
