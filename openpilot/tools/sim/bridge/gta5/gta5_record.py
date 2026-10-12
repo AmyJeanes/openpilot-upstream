@@ -235,6 +235,12 @@ class Recorder:
       threading.Thread(target=self._model_loop, daemon=True).start()
     print(f"gta5: recording to {self.data}", flush=True)
 
+  @property
+  def recording(self) -> bool:
+    """A segment is open and its frames are going to the encoders: not idle, between segments, failed or on foot."""
+    seg = self.segment
+    return seg is not None and not seg.broken and not self.failed
+
   # *** frames, from the camera thread ***
 
   def add(self, wide: bool, frame: bytes | None, state: dict | None, t: float) -> None:

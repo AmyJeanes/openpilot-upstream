@@ -690,7 +690,7 @@ class GTA5World(World):
     paths = self.navigator.router.paths if self.navigator is not None else None
     osm = self.navigator.router.osm if self.navigator is not None else None
     out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), lambda: self._turn_points(state),
-                              self.recorder is not None, osm, lambda: self.blindspot.overlay(state, OVERLAY_LEAD))
+                              self.recorder is not None and self.recorder.recording, osm, lambda: self.blindspot.overlay(state, OVERLAY_LEAD))
     return out + self.gps.update(state, self.route)
 
   def _turn_points(self, state: dict):
