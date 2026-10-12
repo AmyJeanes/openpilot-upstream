@@ -2836,6 +2836,15 @@ void HandleMessage(const Message &m, double now) {
     if (m.count("interior")) SET_VEHICLE_EXTRA_COLOUR_5(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
     if (m.count("dashboard")) SET_VEHICLE_EXTRA_COLOUR_6(g_veh.handle, static_cast<int>(MsgNum(m, "dashboard")));
     Log("trim interior " + Num(MsgNum(m, "interior", -1)) + " dashboard " + Num(MsgNum(m, "dashboard", -1)));
+  } else if (type == "extra" && g_veh.handle) {
+    // id=N on=1|0: one of the car's switchable parts (the Model 3's chrome trim or its matte black delete)
+    int id = static_cast<int>(MsgNum(m, "id"));
+    if (!DOES_EXTRA_EXIST(g_veh.handle, id)) {
+      Log("extra " + std::to_string(id) + ": the car has none");
+    } else {
+      SET_VEHICLE_EXTRA(g_veh.handle, id, !MsgBool(m, "on"));
+      Log("extra " + std::to_string(id) + (IS_VEHICLE_EXTRA_TURNED_ON(g_veh.handle, id) ? " on" : " off"));
+    }
   } else if (type == "paint" && g_veh.handle) {
     int r = static_cast<int>(MsgNum(m, "r")), g = static_cast<int>(MsgNum(m, "g")), b = static_cast<int>(MsgNum(m, "b"));
     int paintType = static_cast<int>(MsgNum(m, "finish", 1));  // metallic

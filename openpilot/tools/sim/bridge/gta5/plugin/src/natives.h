@@ -111,6 +111,10 @@ inline void SET_VEHICLE_CUSTOM_PRIMARY_COLOUR(Vehicle v, int r, int g, int b) { 
 // interior trim and dashboard, as palette indices (0 metallic black, 12 matte black, 111 white)
 inline void SET_VEHICLE_EXTRA_COLOUR_5(Vehicle v, int color) { Invoke(0xF40DD601A65F7F19, v, color); }
 inline void SET_VEHICLE_EXTRA_COLOUR_6(Vehicle v, int color) { Invoke(0x6089CDF6A57F326C, v, color); }
+// a model's switchable parts (extra_1..extra_14 bones); disable TRUE turns one off
+inline void SET_VEHICLE_EXTRA(Vehicle v, int extraId, BOOL disable) { Invoke(0x7EE3A3C5E4A40CC9, v, extraId, disable); }
+inline BOOL DOES_EXTRA_EXIST(Vehicle v, int extraId) { return Invoke<BOOL>(0x1262D55792428154, v, extraId); }
+inline BOOL IS_VEHICLE_EXTRA_TURNED_ON(Vehicle v, int extraId) { return Invoke<BOOL>(0xD2E6822DBFD6C8BD, v, extraId); }
 inline void SET_VEHICLE_CUSTOM_SECONDARY_COLOUR(Vehicle v, int r, int g, int b) { Invoke(0x36CED73BFED89754, v, r, g, b); }
 inline void SET_VEHICLE_FORWARD_SPEED(Vehicle v, float s) { Invoke(0xAB54A438726D25D5, v, s); }
 // palette indices (DurtyFree's vehicleColors.json): primary and secondary, then pearlescent and wheel
