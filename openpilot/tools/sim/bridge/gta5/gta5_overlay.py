@@ -41,8 +41,8 @@ import argparse
 import contextlib
 import glob
 import hashlib
+import multiprocessing
 import os
-import socket
 import subprocess
 import sys
 import threading
@@ -1302,7 +1302,7 @@ class OverlayProcess(Overlay):
   def __init__(self, wait_maps: bool = False):
     super().__init__()
     self.wait_maps = wait_maps  # the process reads the maps before a snapshot, not while going on without them (tests)
-    self.proc: subprocess.Popen | None = None
+    self.proc: multiprocessing.process.BaseProcess | None = None
     self.conn: Connection | None = None
     self.busy = False  # a snapshot sent, its message not yet back
     self.pending: dict | None = None
@@ -1373,17 +1373,17 @@ class OverlayProcess(Overlay):
       self._fail(f"its process failed: {e}")
 
   def _start(self):
-    ours, theirs = socket.socketpair()
+    ctx = multiprocessing.get_context("spawn")  # a fresh interpreter, as forking the bridge's threads isn't safe
+    ours, theirs = ctx.Pipe()
     try:
-      cmd = [sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_overlay", "serve", str(theirs.fileno())]
-      self.proc = subprocess.Popen(cmd + (["--wait-maps"] if self.wait_maps else []), env=child_env(),
-                                   stdin=subprocess.DEVNULL, pass_fds=(theirs.fileno(),))
+      self.proc = ctx.Process(target=serve, args=(theirs, CACHE_DIR, self.wait_maps), name="gta5 overlay", daemon=True)
+      self.proc.start()
     except OSError:
       ours.close()
       raise
     finally:
       theirs.close()
-    self.conn = Connection(ours.detach())
+    self.conn = ours
 
   def _fail(self, why: str):
     """Overlay's thread from here on."""
@@ -1401,16 +1401,16 @@ class OverlayProcess(Overlay):
       self.conn = None
     if self.proc is not None:
       self.proc.terminate()
-      with contextlib.suppress(subprocess.TimeoutExpired):
-        self.proc.wait(2)
+      self.proc.join(2)
       self.proc = None
 
 
-def serve(fd: int, wait_maps: bool = False):
-  """OverlayProcess's process: makes each snapshot's message in turn on the connection at fd, reading the maps from their
-  files in a thread while it goes on without them (but with wait_maps)."""
+def serve(conn: Connection, cache_dir: str, wait_maps: bool = False):
+  """OverlayProcess's process: makes each snapshot's message in turn on conn, reading the maps from their files in a
+  thread while it goes on without them (but with wait_maps), and the lines from the bridge's cache."""
+  global CACHE_DIR
   from openpilot.tools.sim.bridge.gta5.map.paths import Paths
-  conn = Connection(fd)
+  CACHE_DIR = cache_dir
   overlay = Overlay()
   route, lane = None, None
   maps: dict = {"files": None, "read": (None, None)}
@@ -1512,9 +1512,6 @@ def main(argv=None):
   from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
   from openpilot.tools.sim.bridge.gta5.map.paths import Paths
   argv = sys.argv[1:] if argv is None else argv
-  if argv[:1] == ["serve"]:  # OverlayProcess's
-    serve(int(argv[1]), "--wait-maps" in argv[2:])
-    return
   ap = argparse.ArgumentParser(description=main.__doc__)
   ap.add_argument("command", choices=["cache"])
   ap.add_argument("paths")
