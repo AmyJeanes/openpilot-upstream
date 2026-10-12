@@ -104,6 +104,11 @@ inline void SET_VEHICLE_ENGINE_CAN_DEGRADE(Vehicle v, BOOL on) { Invoke(0x983765
 inline BOOL HAS_ENTITY_COLLIDED_WITH_ANYTHING(Entity e) { return Invoke<BOOL>(0x8BAD02F0368D9E14, e); }
 inline float GET_VEHICLE_BODY_HEALTH(Vehicle v) { return Invoke<float>(0xF271147EB7B40F12, v); }
 inline void SET_VEHICLE_MOD_KIT(Vehicle v, int kit) { Invoke(0x1F2AA07F00B3217A, v, kit); }
+// a mod shop part: modType's slot (10 roof, ...), modIndex into the kit's parts for it; -1 from GET_VEHICLE_MOD is stock
+inline void SET_VEHICLE_MOD(Vehicle v, int modType, int modIndex, BOOL customTires) { Invoke(0x6AF0636DDEDCB6DD, v, modType, modIndex, customTires); }
+inline void REMOVE_VEHICLE_MOD(Vehicle v, int modType) { Invoke(0x92D619E420858204, v, modType); }
+inline int GET_VEHICLE_MOD(Vehicle v, int modType) { return Invoke<int>(0x772960298DA26FDB, v, modType); }
+inline int GET_NUM_VEHICLE_MODS(Vehicle v, int modType) { return Invoke<int>(0xE38E9162A2500646, v, modType); }
 // paintType: 0 normal, 1 metallic, 2 pearl, 3 matte, 4 metal, 5 chrome
 inline void SET_VEHICLE_MOD_COLOR_1(Vehicle v, int paintType, int color, int pearl) { Invoke(0x43FEB945EE7F85B8, v, paintType, color, pearl); }
 inline void SET_VEHICLE_MOD_COLOR_2(Vehicle v, int paintType, int color) { Invoke(0x816562BADFDEC83E, v, paintType, color); }

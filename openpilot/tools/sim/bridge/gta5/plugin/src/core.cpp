@@ -723,12 +723,18 @@ void DashcamMount() {
   ApplyMount();
 }
 
-// The Model 3's matte black chrome delete is five extras (the body and each door, so it opens with them). The game turns
-// extras on at random as a car spawns, so all five are set together.
+// The Model 3's matte black chrome delete is its mod kit's one roof-slot part, as Los Santos Customs sells it. Set only on
+// cars the plugin spawns or is told to, so one the player customised keeps its choice.
+const int MODEL3_TRIM_SLOT = 10;
 void SetModel3Trim(Vehicle v, bool chrome) {
   if (GET_ENTITY_MODEL(v) != GET_HASH_KEY("tmodel")) return;
-  for (int id = 1; id <= 5; id++)
-    if (DOES_EXTRA_EXIST(v, id)) SET_VEHICLE_EXTRA(v, id, chrome);
+  SET_VEHICLE_MOD_KIT(v, 0);
+  if (GET_NUM_VEHICLE_MODS(v, MODEL3_TRIM_SLOT) < 1) {
+    Log("model 3 trim: the car has no chrome delete part (an older build of the add-on)");
+    return;
+  }
+  if (chrome) REMOVE_VEHICLE_MOD(v, MODEL3_TRIM_SLOT);
+  else SET_VEHICLE_MOD(v, MODEL3_TRIM_SLOT, 0, FALSE);
 }
 
 void OnVehicleChanged(Vehicle v) {
@@ -743,7 +749,6 @@ void OnVehicleChanged(Vehicle v) {
   g_indicator = 0;
   if (!v) return;
   SET_VEHICLE_RADIO_ENABLED(v, FALSE);
-  SetModel3Trim(v, g_cfg.model3Chrome);
   g_veh.model = GET_ENTITY_MODEL(v);
   for (const char *c = GET_DISPLAY_NAME_FROM_VEHICLE_MODEL(g_veh.model); c && *c; c++)
     if (isalnum(static_cast<unsigned char>(*c)) || *c == '_' || *c == ' ') g_veh.name += *c;
@@ -2332,6 +2337,7 @@ void StepSwap(Ped ped, double now) {
   SET_VEHICLE_ENGINE_ON(v, TRUE, TRUE, FALSE);
   if (speed > 1.0f) SET_VEHICLE_FORWARD_SPEED(v, speed);
   ApplyColours(v, s.colours);
+  SetModel3Trim(v, g_cfg.model3Chrome);
   ProtectFromDamage(v);
   // the AI driver's task was for the old car: give it again for this one
   g_ai.tasked = false;
@@ -2848,7 +2854,7 @@ void HandleMessage(const Message &m, double now) {
     if (m.count("interior")) SET_VEHICLE_EXTRA_COLOUR_5(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
     if (m.count("dashboard")) SET_VEHICLE_EXTRA_COLOUR_6(g_veh.handle, static_cast<int>(MsgNum(m, "dashboard")));
     if (m.count("chrome")) {
-      g_cfg.model3Chrome = MsgBool(m, "chrome");  // and for the next Model 3s
+      g_cfg.model3Chrome = MsgBool(m, "chrome");  // and for the next Model 3s the plugin spawns
       SetModel3Trim(g_veh.handle, g_cfg.model3Chrome);
     }
     Log("trim interior " + Num(MsgNum(m, "interior", -1)) + " dashboard " + Num(MsgNum(m, "dashboard", -1)) + " chrome " +
