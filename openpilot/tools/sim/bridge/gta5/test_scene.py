@@ -7,8 +7,9 @@ def test_interior_only_for_the_model_3():
   for seed in range(300):
     choice = gta5_scene.pick(seed)
     v = choice["vehicle"]
-    assert ("interior" in v) == (v["car"] == "model3")
-    assert gta5_scene.trim_commands(choice) == ([{"type": "trim", "interior": v["interior"]}] if "interior" in v else [])
+    assert ("interior" in v) == ("chrome" in v) == (v["car"] == "model3")
+    want = [{"type": "trim", "interior": v["interior"], "chrome": v["chrome"]}] if "interior" in v else []
+    assert gta5_scene.trim_commands(choice) == want
     assert all(c["type"] != "trim" for c in gta5_scene.commands(choice))  # sent after the swap instead
 
 
@@ -16,6 +17,11 @@ def test_interior_picks_both():
   rng = random.Random(1)
   picks = {gta5_scene.pick_interior(rng) for _ in range(100)}
   assert picks == {gta5_scene.INTERIORS["white"][1], gta5_scene.INTERIORS["black"][1]}
+
+
+def test_trim_picks_both():
+  rng = random.Random(1)
+  assert {gta5_scene.pick_chrome(rng) for _ in range(100)} == {True, False}
 
 
 def test_interior_index():

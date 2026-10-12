@@ -108,6 +108,8 @@ WHEEL = 156  # the game's default alloy colour
 # the Model 3's interior, by its white leather's paint layer (extra colour 5, the plugin's trim command), roughly by the
 # real cars' shares: palette 134 pure white, 12 matte black
 INTERIORS = {"black": (65, 12), "white": (35, 134)}
+# its window trim, door handles and mirrors: chrome until 2020, the matte black chrome delete since
+TRIMS = {"black": 60, "chrome": 40}
 
 WEATHERS = {"EXTRASUNNY": 25, "CLEAR": 22, "CLOUDS": 18, "OVERCAST": 12, "SMOG": 5, "FOGGY": 5, "CLEARING": 4, "RAIN": 7, "THUNDER": 2}
 TRAFFIC_LEVELS = {0.3: 15, 0.6: 25, 1.0: 40, 1.5: 20}  # vehicle density multipliers
@@ -150,6 +152,11 @@ def pick_colours(rng: random.Random, car: str = "") -> dict:
 def pick_interior(rng: random.Random) -> int:
   """The Model 3's interior colour (a palette index)."""
   return INTERIORS[weighted(rng, {k: w for k, (w, _) in INTERIORS.items()})][1]
+
+
+def pick_chrome(rng: random.Random) -> bool:
+  """The Model 3's trim: chrome, or its matte black chrome delete."""
+  return weighted(rng, TRIMS) == "chrome"
 
 
 def interior_index(value) -> int:
@@ -216,6 +223,7 @@ def pick(seed: int, model_share: float = 0.6, mount: str = "mixed", jitter: bool
     choice["mount"] = pick_mount(rng, mount, jitter)
   if vehicle and car == "model3":  # drawn last, so a seed's other choices stay as they were
     choice["vehicle"]["interior"] = pick_interior(rng)
+    choice["vehicle"]["chrome"] = pick_chrome(rng)
   return choice
 
 
@@ -236,6 +244,7 @@ def commands(choice: dict) -> list[dict]:
 
 
 def trim_commands(choice: dict) -> list[dict]:
-  """The interior colour, sent once the car swap is done: the plugin's trim colours the player's current car."""
+  """The Model 3's interior colour and trim, sent once the car swap is done: the plugin's trim sets the player's current
+  car."""
   v = choice.get("vehicle", {})
-  return [{"type": "trim", "interior": v["interior"]}] if "interior" in v else []
+  return [{"type": "trim", **{k: v[k] for k in ("interior", "chrome") if k in v}}] if "interior" in v else []

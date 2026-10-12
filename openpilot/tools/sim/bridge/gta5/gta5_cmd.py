@@ -11,11 +11,14 @@
   gta5_cmd.py traffic vehicles=0.6 peds=0.8 parked=1
                                                 traffic and pedestrian density, held until changed (reset=1; on=0 none)
   gta5_cmd.py vehicle premier [colours=random|keep] [primary=111 secondary=0 pearl=5 wheel=156 dirt=2] [force=1]
-             [interior=white|black|12]          swap the player's car for a new one where it is (model3, a car of
+             [interior=white|black|12] [chrome=0|1]
+                                                swap the player's car for a new one where it is (model3, a car of
                                                 `vehicle list`, any model name or 0x hash; random picks one), coloured;
-                                                interior: the Model 3's interior colour, after the swap
-  gta5_cmd.py trim interior=134 [dashboard=0]   the car's interior and dashboard colours (palette indices; the Model 3's
-                                                white leather: 134 white, 12 black)
+                                                interior, chrome: the Model 3's interior colour and trim, after the swap
+  gta5_cmd.py trim interior=134 [dashboard=0] [chrome=0|1]
+                                                the car's interior and dashboard colours (palette indices; the Model 3's
+                                                white leather: 134 white, 12 black); chrome=0 the Model 3's matte black
+                                                chrome delete, for this and later Model 3s (gta5op.ini model3_chrome)
   gta5_cmd.py mount dashcam [drop=0.08 back=0.06] [jitter=1] [dx= dy= dz= pitch= yaw=]
                                                 the camera at the top of the windscreen (comma: a comma device's place, the
                                                 default); jitter=1 moves it a little at random, jitter=0 not at all
@@ -164,13 +167,15 @@ def vehicle(argv: list[str]) -> None:
   cmd = {"type": "vehicle", "model": gta5_scene.model_for(car)}
   if opts.pop("colours", "random") == "random":
     cmd.update({k: v for k, v in gta5_scene.pick_colours(rng, car).items() if k != "group"})
-  interior = opts.pop("interior", None)
+  trim = {k: opts.pop(k) for k in ("interior", "chrome") if k in opts}
+  if "interior" in trim:
+    trim["interior"] = gta5_scene.interior_index(trim["interior"])
   cmd.update(opts)
   print(json.dumps(cmd))
   send(cmd)
-  if interior is not None:
-    time.sleep(SWAP_WAIT)  # trim colours the current car, so after the swap
-    send({"type": "trim", "interior": gta5_scene.interior_index(interior)})
+  if trim:
+    time.sleep(SWAP_WAIT)  # trim sets the current car, so after the swap
+    send({"type": "trim", **trim})
 
 
 def mount(argv: list[str]) -> None:
