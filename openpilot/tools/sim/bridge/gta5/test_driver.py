@@ -1,15 +1,12 @@
 """The GTA layer around navd: the simulated driver and the destination."""
 import numpy as np
-from cereal import log
+import pytest
 
 import openpilot.tools.sim.bridge.gta5.gta5_driver as driver_mod
 from openpilot.selfdrive.navd.inputs import NavOutputs
-from openpilot.tools.sim.bridge.gta5.gta5_driver import GO_GAS, NUDGE_TIMEOUT, NUDGE_TORQUE, Driver, PullAway
+from openpilot.tools.sim.bridge.gta5.gta5_driver import GO_GAS, NUDGE_TIMEOUT, NUDGE_TORQUE, Driver, LaneChangeState, PullAway
 from openpilot.tools.sim.bridge.gta5.gta5_navd import CANCELLED_FROM, Destination
-from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
-
-LaneChangeState = log.LaneChangeState
 
 
 class Clock:
@@ -28,7 +25,6 @@ def driver():
 
 def test_nudge_held_every_step_until_the_timeout():
   # the car thread samples the torque at its own phase, so the nudge must be the step's whole value, not a moment of it
-  assert GTA5World.sets_torque
   clock = Clock()
   driver_mod.time = clock
   d, _ = driver()
@@ -39,6 +35,15 @@ def test_nudge_held_every_step_until_the_timeout():
   assert all(tq == -NUDGE_TORQUE for t, tq in torques if t < NUDGE_TIMEOUT - 0.01)
   assert all(tq == 0 for t, tq in torques if t > NUDGE_TIMEOUT + 0.01)
   assert driver()[0].stalk("left", 0.0, 0.0, LaneChangeState.preLaneChange, False) == NUDGE_TORQUE
+
+
+def test_the_world_sets_the_torque_once_per_step():
+  assert pytest.importorskip("openpilot.tools.sim.bridge.gta5.gta5_world").GTA5World.sets_torque  # needs openpilot
+
+
+def test_lane_change_states_are_cereals():
+  log = pytest.importorskip("openpilot.cereal").log  # needs openpilot
+  assert {s.name: s.value for s in LaneChangeState} == dict(log.LaneChangeState.schema.enumerants)
 
 
 def test_no_nudge_once_the_lane_change_starts_or_for_a_turn():

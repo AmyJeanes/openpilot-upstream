@@ -7,8 +7,8 @@ turns green (PullAway).
 It approves every request at once, as the bridge did before navd asked rather than acted."""
 import os
 import time
+from enum import IntEnum
 
-from openpilot.cereal import log
 from openpilot.selfdrive.navd.inputs import CANCEL_SIGNAL, LANE_CHANGE_LEFT, LANE_CHANGE_RIGHT, SIGNAL_TURN_LEFT, \
   SIGNAL_TURN_RIGHT, NavOutputs
 
@@ -29,7 +29,13 @@ GO_EVERY = 3.0  # s
 GO_TRIES = 3
 GO_CLEAR = 15.0  # m: a vehicle nearer ahead leads the car away
 INDICATOR = {SIGNAL_TURN_LEFT: "left", SIGNAL_TURN_RIGHT: "right", LANE_CHANGE_LEFT: "left", LANE_CHANGE_RIGHT: "right"}
-LaneChangeState = log.LaneChangeState
+
+
+class LaneChangeState(IntEnum):  # cereal's log.LaneChangeState, without cereal
+  off = 0
+  preLaneChange = 1
+  laneChangeStarting = 2
+  laneChangeFinishing = 3
 
 
 class Driver:
