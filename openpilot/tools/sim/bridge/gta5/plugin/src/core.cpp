@@ -737,6 +737,24 @@ void SetModel3Trim(Vehicle v, bool chrome) {
   else SET_VEHICLE_MOD(v, MODEL3_TRIM_SLOT, 0, FALSE);
 }
 
+// The Model 3's interior: its white leather takes the trim paint layer's colour (extra colour 5), and the kit's chassis-slot
+// part swaps it for a black copy, as Los Santos Customs sells it; matte black (12) uses that part where the car has it.
+const int MODEL3_INTERIOR_SLOT = 5;
+const int MATTE_BLACK = 12;
+void SetInterior(Vehicle v, int colour) {
+  bool part = false;
+  if (GET_ENTITY_MODEL(v) == GET_HASH_KEY("tmodel")) {
+    SET_VEHICLE_MOD_KIT(v, 0);
+    part = GET_NUM_VEHICLE_MODS(v, MODEL3_INTERIOR_SLOT) > 0;
+  }
+  if (part && colour == MATTE_BLACK) {
+    SET_VEHICLE_MOD(v, MODEL3_INTERIOR_SLOT, 0, FALSE);
+    return;
+  }
+  if (part) REMOVE_VEHICLE_MOD(v, MODEL3_INTERIOR_SLOT);
+  SET_VEHICLE_EXTRA_COLOUR_5(v, colour);
+}
+
 void OnVehicleChanged(Vehicle v) {
   ReleaseControls();
   ReleaseCamera();
@@ -2851,7 +2869,7 @@ void HandleMessage(const Message &m, double now) {
     auto &k = MsgStr(m, "dir") == "up" ? g_speedUp : g_speedDown;
     (MsgBool(m, "five") ? k.presses5 : k.presses) += static_cast<int>(MsgNum(m, "times", 1));
   } else if (type == "trim" && g_veh.handle) {
-    if (m.count("interior")) SET_VEHICLE_EXTRA_COLOUR_5(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
+    if (m.count("interior")) SetInterior(g_veh.handle, static_cast<int>(MsgNum(m, "interior")));
     if (m.count("dashboard")) SET_VEHICLE_EXTRA_COLOUR_6(g_veh.handle, static_cast<int>(MsgNum(m, "dashboard")));
     if (m.count("chrome")) {
       g_cfg.model3Chrome = MsgBool(m, "chrome");  // and for the next Model 3s the plugin spawns
