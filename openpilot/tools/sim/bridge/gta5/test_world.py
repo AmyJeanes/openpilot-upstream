@@ -136,3 +136,34 @@ def test_nav_speed_cap(monkeypatch):
   w.nav_speed_pm = None  # GTA5_NAV_SPEED=can
   w._set_cap(s, 7.0, "bendLeft")
   assert len(sent) == 3 and s.cruise_cap == 7.0 and s.cap_set_speed
+
+
+def test_mark_key(monkeypatch, tmp_path):
+  """Each new mark press is a line in GTA5_MARKS (where, what drove, the recording's segment and frame) and a userBookmark;
+  the first state seen and a reloaded core's count from 0 again are no mark."""
+  import json
+  marks = tmp_path / "marks.jsonl"
+  monkeypatch.setattr(world_mod, "MARKS", str(marks))
+  sent = []
+  w = GTA5World.__new__(GTA5World)
+  w.presses, w.q = {}, SimpleNamespace(put=lambda c: None)
+  w.simulator_state = SimpleNamespace(is_engaged=True)
+  w.expert = SimpleNamespace(md=None, active=False, source="none")
+  w.route = SimpleNamespace(at=120.04, length=900.0, points=np.array([[0.0, 0.0, 0.0], [10.0, 20.0, 0.0]]))
+  w.recorder = SimpleNamespace(segment=SimpleNamespace(path=world_mod.Path("/rec/data/6acb00000012"), rows=[0] * 345),
+                               route_name="2026-10-12--15-00-00")
+  w.bookmark_pm = SimpleNamespace(send=lambda s, m: sent.append(s))
+  state = {"t": 5.0, "pos": [1.234, 2.0, 30.0], "heading": 90.0, "vEgo": 8.0, "street": "Elgin Ave", "markPresses": 3}
+  w._update_buttons(state)
+  assert not marks.exists() and not sent
+  w._update_buttons({**state, "markPresses": 4})
+  m = json.loads(marks.read_text())
+  assert sent == ["userBookmark"] and m["pos"] == [1.23, 2.0, 30.0] and m["driver"] == "openpilot" and m["street"] == "Elgin Ave"
+  assert m["segment"] == "6acb00000012" and m["frame"] == 345 and m["route"] == {"at": 120.0, "length": 900.0, "dest": [10.0, 20.0]}
+  w._update_buttons({**state, "markPresses": 0})
+  w.expert = SimpleNamespace(md=SimpleNamespace(info=lambda: {"phase": "drive"}), active=True, source="map")
+  w.recorder = None
+  w._update_buttons({**state, "markPresses": 1})
+  lines = marks.read_text().splitlines()
+  m = json.loads(lines[-1])
+  assert len(lines) == 2 and m["driver"] == "map" and m["map"] == {"phase": "drive"} and m["segment"] is None

@@ -67,6 +67,7 @@ ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the m
 OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
 # route input v2's lane slots (navd/lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
+MARKS = os.path.expanduser(os.getenv("GTA5_MARKS", "~/gta5test/marks.jsonl"))  # the mark key's bookmarks, a JSON line each
 # the car's set speed follows the map's speed limits along the route (GTA5_FOLLOW_LIMIT=1, as before navSpeed, for A/B runs);
 # off, the set speed is the driver's alone and nav caps the speed at the limit (navSpeed, reason speedLimit)
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT") == "1"
@@ -175,6 +176,7 @@ class GTA5World(World):
     self.VM: VehicleModel | None = None
     self.last_status = 0.0
     self.presses: dict[str, int] = {}
+    self.bookmark_pm = None  # made on the first mark
     self.curvature = 0.0  # what the steering is set for
     self.steering = False  # whether the driver was steering
     self.braking = False
@@ -728,6 +730,12 @@ class GTA5World(World):
     shift)."""
     commands = {"speedUpPresses": "cruise_up", "speedDownPresses": "cruise_down", "speedUp5Presses": "cruise_up5",
                 "speedDown5Presses": "cruise_down5"}
+    marks = state.get("markPresses")
+    if marks is not None:
+      new = marks - self.presses.get("markPresses", marks)
+      self.presses["markPresses"] = marks
+      if new > 0:  # a reloaded core counts from 0 again
+        self._mark(state)
     for key in ("engagePresses", *commands):
       presses = state.get(key)
       if presses is None:
@@ -740,6 +748,31 @@ class GTA5World(World):
         else:
           cmd = commands[key]
         self.q.put(control_cmd_gen(cmd))
+
+  def _mark(self, state: dict):
+    """A bookmark (the plugin's mark key): where and when, what drove and what it was doing, and the recording's segment
+    and frame, appended to MARKS for review; openpilot's userBookmark too, so loggerd keeps the segment."""
+    r, md, rec = self.route, self.expert.md, self.recorder
+    seg = rec.segment if rec is not None else None
+    mark = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "mono": round(time.monotonic(), 3), "t_game": state.get("t"),
+            "pos": [round(float(c), 2) for c in state.get("pos") or []], "heading": state.get("heading"), "vEgo": state.get("vEgo"),
+            "street": state.get("street"), "lane": state.get("lane"), "indicator": state.get("indicator"),
+            "driver": self.expert.source if self.expert.active else "openpilot" if self.simulator_state.is_engaged else "user",
+            "map": md.info() if md is not None and self.expert.active else None,
+            "route": None if r is None else {"at": round(float(r.at), 1), "length": round(float(r.length), 1),
+                                             "dest": [round(float(c), 1) for c in r.points[-1][:2]]},
+            "segment": seg.path.name if seg is not None else None, "frame": len(seg.rows) if seg is not None else None,
+            "recording": rec.route_name if rec is not None else None}
+    try:
+      Path(MARKS).parent.mkdir(parents=True, exist_ok=True)
+      with open(MARKS, "a") as f:
+        f.write(json.dumps(mark) + "\n")
+    except OSError as e:
+      print(f"gta5: mark not saved: {e}", flush=True)
+    if self.bookmark_pm is None:
+      self.bookmark_pm = messaging.PubMaster(["userBookmark"])
+    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
+    print(f"gta5: mark at {mark['pos'][:2]} {mark['street']!r} ({mark['driver']}, segment {mark['segment']} f{mark['frame']})", flush=True)
 
   def _set_blinkers(self, simulator_state: SimulatorState):
     # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between

@@ -38,6 +38,8 @@
                                                 width/widths scale them (all, or by layer letter), dist m drawn, grow m from
                                                 the camera they start widening to stay visible (0 off), thin=1 the old 1-px
                                                 lines; off while recording unless force=1; debug off
+  gta5_cmd.py mark                              a bookmark where the car is, as the mark key (End) makes: the bridge
+                                                logs it to GTA5_MARKS for review, and sends openpilot's userBookmark
   gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16 take=1]
                                                 our route on the minimap and map as a custom GPS route, the map's waypoint held
                                                 off it meanwhile (take=0 leaves it); gpsroute off

@@ -56,6 +56,7 @@ struct Config {
   int keySpeedUp = VK_UP;
   int keySpeedDown = VK_DOWN;
   int keyDebug = VK_DELETE;  // the map debug overlay on and off
+  int keyMark = VK_END;  // a bookmark: the bridge logs where and when, for review
   bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
@@ -84,6 +85,7 @@ std::mutex g_stateMutex;
 std::string g_state = "{}";  // latest vehicle state as JSON, sent with each frame
 
 std::atomic<int> g_engagePresses{0}, g_leftPresses{0}, g_rightPresses{0};
+std::atomic<int> g_markPresses{0};  // a running count; the bridge logs each new one
 
 // cruise speed buttons: a press, then repeats while held, as a car's stalk steps the set speed
 struct HeldKey {
@@ -338,6 +340,7 @@ void ReadConfig() {
   c.keySpeedUp = key("key_speed_up", c.keySpeedUp);
   c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
   c.keyDebug = key("key_debug", c.keyDebug);
+  c.keyMark = key("key_mark", c.keyMark);
   c.gpsRoute = num("gps_route", 0) != 0;
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
@@ -1008,6 +1011,15 @@ void DrawSpeed(double now) {
   DrawText(std::to_string(static_cast<int>(std::lround(g_m.v * toUnit))) + (g_hud.metric ? " km/h" : " mph"), 0.985f, 0.74f, 0.9f, r, g, b);
   std::string set = fresh && g_hud.setKph > 0 ? std::to_string(static_cast<int>(std::lround(g_hud.setKph * (g_hud.metric ? 1.0f : 0.621371f)))) : "-";
   DrawText("SET " + set, 0.985f, 0.795f, 0.55f, 200, 200, 200);
+}
+
+// "Bookmarked" for a moment after each mark, so a press is known to have landed
+void DrawMarked(double now) {
+  static int seen = 0;
+  static double until = 0;
+  int n = g_markPresses.load();
+  if (n != seen) seen = n, until = now + 2.0;
+  if (now < until) DrawText("Bookmarked " + std::to_string(n), 0.985f, 0.69f, 0.55f, 255, 210, 80);
 }
 
 // *** map debug overlay, GPS route, GTA's directions ***
@@ -2135,7 +2147,7 @@ std::string MountState() {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"speedUpPresses\":" << g_speedUp.presses
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
   if (inVehicle) {
@@ -2814,6 +2826,8 @@ void HandleMessage(const Message &m, double now) {
     Log("reset " + part);
   } else if (type == "engage") {
     g_engagePresses++;  // as if the engage key were pressed
+  } else if (type == "mark") {
+    g_markPresses++;  // as if the mark key were pressed
   } else if (type == "cruise") {
     // as if the cruise speed keys were pressed: up or down, by 5 with five=1
     auto &k = MsgStr(m, "dir") == "up" ? g_speedUp : g_speedDown;
@@ -3152,6 +3166,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   lastOp = view >= 0;
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0 && (g_top.hud || !g_top.on)) DrawSpeed(now);
+  if (view < 0) DrawMarked(now);
   if (g_debugPresses.exchange(0) % 2) {
     g_debug.on = !g_debug.on;
     if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
@@ -3209,4 +3224,5 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   else if (static_cast<int>(key) == g_cfg.keyLeft) g_leftPresses++;
   else if (static_cast<int>(key) == g_cfg.keyRight) g_rightPresses++;
   else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
+  else if (static_cast<int>(key) == g_cfg.keyMark) g_markPresses++;
 }
