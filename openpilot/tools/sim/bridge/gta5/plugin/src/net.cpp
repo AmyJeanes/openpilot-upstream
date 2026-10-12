@@ -110,8 +110,10 @@ void Link::SendFrame(const std::string &header, std::vector<uint8_t> &&payload) 
   memcpy(msg.data() + 8 + headLen, payload.data(), payload.size());
   {
     std::lock_guard lk(sendMutex_);
+    if (payload.empty() && hasPending_ && pendingFrames_) return;
     pending_ = std::move(msg);
     hasPending_ = true;
+    pendingFrames_ = !payload.empty();
   }
   sendCv_.notify_one();
 }
@@ -186,6 +188,10 @@ void Link::Run() {
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char *>(&nodelay), sizeof(nodelay));
     int sndbuf = 16 << 20;
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char *>(&sndbuf), sizeof(sndbuf));
+    {
+      std::lock_guard lk(recvMutex_);
+      received_.push_back({{"type", "connected"}});  // ahead of anything this connection receives
+    }
     sock_ = sock;
     connected_ = true;
     log_("connected to the bridge at " + addr);

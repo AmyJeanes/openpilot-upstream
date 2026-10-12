@@ -83,7 +83,18 @@ enum class Hook { Off, On, Failed } g_hook = Hook::Off;
 std::mutex g_logMutex;
 
 std::mutex g_stateMutex;
-std::string g_state = "{}";  // latest vehicle state as JSON, sent with each frame
+std::string g_state = "{}";  // latest vehicle state as JSON, sent with each frame, or alone while there are none
+
+// Whether to render and send openpilot's frames: the relay says ({"type": "frames", "on": 0|1}) as something takes them
+// or not, and reads the state alone meanwhile. A bridge the plugin connects to directly never says, so the frames are
+// on once a connection has gone FRAMES_GRACE s without the command.
+constexpr double FRAMES_GRACE = 0.5;  // s
+constexpr double STATE_EVERY = 0.05;  // s: the state alone at the frames' 20 Hz
+int g_framesCmd = -1;  // this connection's frames command: -1 none yet, 0 off, 1 on
+double g_connectedAt = 0;
+bool g_frames = false;
+std::atomic<double> g_lastFrameAt{0};
+double g_nextState = 0;
 
 std::atomic<int> g_engagePresses{0}, g_leftPresses{0}, g_rightPresses{0};
 std::atomic<int> g_markPresses{0};  // a running count; the bridge logs each new one
@@ -463,10 +474,10 @@ struct TopCam {
 // Picks the frames to render the openpilot camera in, and returns the view the frame being drawn shows (a HOOK_ view), or
 // -1 for the player's camera. Interleaved, that's one frame at each 20 Hz capture time, or with split views a road view
 // then a wide view half a period later, so the player's frames are evenly spaced; the rest are the player's camera.
-// holds the game's frame loop to tick_hz: waits in the script tick until the next frame's slot
+// holds the game's frame loop to tick_hz while the frames are on: waits in the script tick until the next frame's slot
 void PaceTick() {
   static double next = 0;
-  if (g_cfg.tickHz <= 0) {
+  if (g_cfg.tickHz <= 0 || !g_frames) {
     next = 0;
     return;
   }
@@ -2677,7 +2688,11 @@ std::string AiState(Vehicle v) {
 
 void HandleMessage(const Message &m, double now) {
   std::string type = MsgStr(m, "type");
-  if (type == "control") {
+  if (type == "connected") {
+    g_framesCmd = -1, g_connectedAt = now;
+  } else if (type == "frames") {
+    g_framesCmd = MsgBool(m, "on") ? 1 : 0;
+  } else if (type == "control") {
     g_ctl.active = MsgBool(m, "active");
     g_ctl.curvature = static_cast<float>(MsgNum(m, "curvature"));
     g_ctl.accel = static_cast<float>(MsgNum(m, "accel"));
@@ -3100,6 +3115,16 @@ void SendFrame(std::vector<uint8_t> &&frames, double t) {
   std::string header = "{\"type\":\"frame\",\"t\":" + Num(t) + ",\"width\":" + std::to_string(CAM_W) + ",\"height\":" +
                        std::to_string(CAM_H) + ",\"views\":[\"road\",\"wide\"],\"state\":" + state + "}";
   g_link.SendFrame(header, std::move(frames));
+  g_lastFrameAt = QpcSeconds();
+}
+
+void SendState(double t) {
+  std::string state;
+  {
+    std::lock_guard lk(g_stateMutex);
+    state = g_state;
+  }
+  g_link.SendFrame("{\"type\":\"state\",\"t\":" + Num(t) + ",\"state\":" + state + "}", {});
 }
 
 }  // namespace
@@ -3160,7 +3185,16 @@ extern "C" __declspec(dllexport) void CoreTick() {
   }
 
   bool connected = g_link.Connected();
-  bool want = connected && v != 0;
+  if (!connected) g_framesCmd = -1, g_connectedAt = now;
+  bool decided = g_framesCmd >= 0 || now - g_connectedAt >= FRAMES_GRACE;
+  if (connected && decided && (g_framesCmd != 0) != g_frames) {
+    g_frames = g_framesCmd != 0;
+    Log(!g_frames ? "frames off: nothing takes them, the state goes alone"
+        : g_framesCmd > 0 ? "frames on: something takes them"
+                          : "frames on: no frames command (a bridge without the relay)");
+  }
+  bool want = connected && decided && g_frames && v != 0;
+  if (!g_frames && g_capture.Running() && !g_capture.HookMode()) g_capture.Stop();  // the window capture costs even idle
   if (want && !g_cam) ActivateCamera();
   else if (!want && g_cam) ReleaseCamera();
 
@@ -3249,6 +3283,11 @@ extern "C" __declspec(dllexport) void CoreTick() {
   // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
   if (v && !g_ai.on) ApplyControls(dt, now);
   Publish(now, v != 0);
+  // only the relay reads a message without frames; it also covers the capture starting up or stalled
+  if (connected && v && g_framesCmd >= 0 && now - g_lastFrameAt.load() > 2 * STATE_EVERY && now >= g_nextState) {
+    g_nextState = std::max(g_nextState + STATE_EVERY, now);
+    SendState(now);
+  }
 }
 
 extern "C" __declspec(dllexport) void CoreShutdown() {

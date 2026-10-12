@@ -30,8 +30,9 @@ class Link {
   bool Connected() const { return connected_; }
 
   // Queues a frame message: [u32 total][u32 header length][header JSON][payload]. Only the newest frame is kept while
-  // the previous one is still being sent.
+  // the previous one is still being sent; a message without a payload (state only) never replaces one with frames.
   void SendFrame(const std::string &header, std::vector<uint8_t> &&payload);
+  // the bridge's messages, each connection's starting with {"type": "connected"} from the link itself
   std::vector<Message> TakeMessages();
 
  private:
@@ -48,7 +49,7 @@ class Link {
   std::mutex sendMutex_;
   std::condition_variable sendCv_;
   std::vector<uint8_t> pending_;
-  bool hasPending_ = false;
+  bool hasPending_ = false, pendingFrames_ = false;
 
   std::mutex recvMutex_;
   std::deque<Message> received_;
