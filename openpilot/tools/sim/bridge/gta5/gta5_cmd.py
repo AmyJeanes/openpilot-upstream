@@ -18,7 +18,7 @@
   gta5_cmd.py trim interior=134 [dashboard=0] [chrome=0|1]
                                                 the car's interior and dashboard colours (palette indices; the Model 3's
                                                 white leather: 134 white, 12 black); chrome=0 the Model 3's matte black
-                                                chrome delete, for this and later Model 3s (gta5op.ini model3_chrome)
+                                                chrome delete, for this car and the Model 3s the plugin spawns next (gta5op.ini model3_chrome)
   gta5_cmd.py mount dashcam [drop=0.08 back=0.06] [jitter=1] [dx= dy= dz= pitch= yaw=]
                                                 the camera at the top of the windscreen (comma: a comma device's place, the
                                                 default); jitter=1 moves it a little at random, jitter=0 not at all
