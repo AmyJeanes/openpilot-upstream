@@ -3,8 +3,31 @@ from types import SimpleNamespace
 
 import numpy as np
 
-import openpilot.tools.sim.bridge.gta5.gta5_world as world_mod
-from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
+import openpilot.tools.sim.bridge.gta5.gta5_brain as brain_mod
+from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
+
+
+class FakeIO:
+  """An OpenpilotIO (gta5_opio.py) that keeps what the brain tells openpilot."""
+  def __init__(self):
+    self.calls: list[tuple] = []
+    self.inputs: dict = {}
+    self.params = SimpleNamespace(get=lambda k: None, get_bool=lambda k: True, put=lambda k, v: None, remove=lambda k: None)
+
+  def __getattr__(self, op):
+    return lambda *args: self.calls.append((op, *args))
+
+  def set_inputs(self, **inputs):
+    self.inputs.update(inputs)
+
+  def sent(self, op: str) -> list:
+    return [c[1:] for c in self.calls if c[0] == op]
+
+
+def brain() -> Brain:
+  b = Brain.__new__(Brain)
+  b.io = FakeIO()
+  return b
 
 
 def test_lane_slots_preview():
@@ -14,11 +37,8 @@ def test_lane_slots_preview():
   osm, nodes = fixture('lht.osm', drive_on_right=False)
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
   r.at, r.off = 20.0, 1.0
-  w = GTA5World.__new__(GTA5World)
+  w = brain()
   w.noo, w.noo_t = True, float("inf")  # Navigate on openpilot on, the param read
-  writes, inputs = [], []
-  w.lanes_writer = SimpleNamespace(write=writes.append)
-  w.route_writer = SimpleNamespace(write=inputs.append)
   w.route_input, w.route = None, r
   w.navigator = SimpleNamespace(router=SimpleNamespace(osm=osm))
   state = {"vEgo": 10.0, "heading": 0.0}
@@ -27,17 +47,19 @@ def test_lane_slots_preview():
   enc = w.route_input[1]
   w._write_lane_slots(state)
   assert w.route_input[1] is enc  # once per route, for the model's input and the preview
+  writes, inputs = [c[0] for c in w.io.sent("lane_slots")], [c[0] for c in w.io.sent("route_input")]
   assert writes[-1][ls.SIDE] == -1.0 and ls.describe(writes[-1][:ls.LANE_SLOTS_LEN]) == 'here aTo..... out ao...... | from 0 by 50 m'
   np.testing.assert_array_equal(inputs[-1][ri.LANES], writes[-1][:ls.LANE_SLOTS_LEN])
-  r.off = world_mod.OFF_ROUTE_INPUT + 1.0
+  r.off = brain_mod.OFF_ROUTE_INPUT + 1.0
   w._write_lane_slots(state)
   w._write_route_input(state)
+  writes, inputs = [c[0] for c in w.io.sent("lane_slots")], [c[0] for c in w.io.sent("route_input")]
   assert len(writes) == 3 and not writes[-1].any() and not inputs[-1].any()
 
 
 def test_map_lane_for_nav():
   from openpilot.tools.sim.bridge.gta5.map.test_lane_match import matcher
-  w = GTA5World.__new__(GTA5World)
+  w = brain()
   w.lane_matcher, w.junction_areas = matcher(), None
   state = {"pos": [-3.0, -150.0, 0.5], "heading": 0.0}  # northbound in the divided road's southbound lanes
   read = w._map_lane(state)
@@ -100,42 +122,37 @@ def test_lane_slots_failure_keeps_v1():
   osm, nodes = fixture('lht.osm', drive_on_right=False)
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
   r.at, r.off = 20.0, 1.0
-  w = GTA5World.__new__(GTA5World)
+  w = brain()
   w.noo, w.noo_t = True, float("inf")
-  inputs = []
-  w.route_writer = SimpleNamespace(write=inputs.append)
   w.route_input, w.route = None, r
   w.navigator = SimpleNamespace(router=SimpleNamespace(osm=osm))
   w._route_encoder(r).slots.encode = None  # broken: calling it raises
   w._write_route_input({"vEgo": 10.0, "heading": 0.0})
+  inputs = [c[0] for c in w.io.sent("route_input")]
   assert w.route_input[1].slots is None and inputs[-1][ri.PRESENT] == 1.0 and not inputs[-1][ri.LANES].any()
 
 
 def test_nav_speed_cap(monkeypatch):
   """nav's cap goes to openpilot's planner as navSpeed (the car's set speed stays the driver's), at most every
   NAV_SPEED_EVERY unless its reason changes; with GTA5_NAV_SPEED=can, the simulated car shows it as its set speed."""
-  from openpilot.tools.sim.lib.common import SimulatorState
   now = [100.0]
-  monkeypatch.setattr(world_mod.time, "monotonic", lambda: now[0])
-  sent = []
-  w = GTA5World.__new__(GTA5World)
+  monkeypatch.setattr(brain_mod.time, "monotonic", lambda: now[0])
+  w = brain()
   w.cap, w.cap_reason, w.next_nav_speed = 0.0, "", 0.0
-  w.nav_speed_pm = SimpleNamespace(send=lambda s, m: sent.append((s, round(m.navSpeed.speedCap, 2), str(m.navSpeed.reason))))
-  s = SimulatorState()
-  w._set_cap(s, 6.0, "turnLeft")
-  assert sent == [("navSpeed", 6.0, "turnLeft")] and s.cruise_cap == 6.0 and not s.cap_set_speed
+  w._set_cap(6.0, "turnLeft")
+  assert w.io.sent("nav_speed") == [(6.0, "turnLeft")] and w.io.inputs == {"cruise_cap": 6.0, "cap_set_speed": False}
   now[0] += 0.01
-  w._set_cap(s, 5.9, "turnLeft")
-  assert len(sent) == 1 and w.cap == 5.9
-  w._set_cap(s, 5.8, "arrival")
-  assert sent[-1] == ("navSpeed", 5.8, "arrival")
-  now[0] += world_mod.NAV_SPEED_EVERY
-  w._set_cap(s, 0.0, "")
-  assert sent[-1] == ("navSpeed", 0.0, "none") and len(sent) == 3
+  w._set_cap(5.9, "turnLeft")
+  assert len(w.io.sent("nav_speed")) == 1 and w.cap == 5.9 and w.io.inputs["cruise_cap"] == 5.9
+  w._set_cap(5.8, "arrival")
+  assert w.io.sent("nav_speed")[-1] == (5.8, "arrival")
+  now[0] += brain_mod.NAV_SPEED_EVERY
+  w._set_cap(0.0, "")
+  assert w.io.sent("nav_speed")[-1] == (0.0, "none") and len(w.io.sent("nav_speed")) == 3
 
-  w.nav_speed_pm = None  # GTA5_NAV_SPEED=can
-  w._set_cap(s, 7.0, "bendLeft")
-  assert len(sent) == 3 and s.cruise_cap == 7.0 and s.cap_set_speed
+  monkeypatch.setattr(brain_mod, "NAV_SPEED", "can")
+  w._set_cap(7.0, "bendLeft")
+  assert len(w.io.sent("nav_speed")) == 3 and w.io.inputs == {"cruise_cap": 7.0, "cap_set_speed": True}
 
 
 def test_mark_key(monkeypatch, tmp_path):
@@ -144,21 +161,19 @@ def test_mark_key(monkeypatch, tmp_path):
   MARK_BEFORE s before the press; the first state seen and a reloaded core's count from 0 again are no mark."""
   import json
   now = [1000.0]
-  monkeypatch.setattr(world_mod.time, "monotonic", lambda: now[0])
+  monkeypatch.setattr(brain_mod.time, "monotonic", lambda: now[0])
   marks = tmp_path / "marks.jsonl"
-  monkeypatch.setattr(world_mod, "MARKS", str(marks))
-  sent = []
-  w = GTA5World.__new__(GTA5World)
-  w.presses, w.q = {}, SimpleNamespace(put=lambda c: None)
-  w.track, w.lane_lines, w.marks_due = world_mod.deque(maxlen=200), world_mod.deque(maxlen=20), []
+  monkeypatch.setattr(brain_mod, "MARKS", str(marks))
+  w = brain()
+  w.presses = {}
+  w.track, w.lane_lines, w.marks_due = brain_mod.deque(maxlen=200), brain_mod.deque(maxlen=20), []
   w.lane_line = (None, 0.0, [[0.0, 0.0], [1.0, 1.0]])
   w.openpilot = w.pilot = w.driving = SimpleNamespace(name="openpilot")
   w.expert = SimpleNamespace(md=None, md_driving=False, source="none")
   pts = np.array([[0.0, float(y), 0.0] for y in range(0, 1001, 10)])
   w.route = SimpleNamespace(at=500.04, length=1000.0, points=pts, along=pts[:, 1].copy())
-  w.recorder = SimpleNamespace(segment=SimpleNamespace(path=world_mod.Path("/rec/data/6acb00000012"), rows=[0] * 345),
+  w.recorder = SimpleNamespace(segment=SimpleNamespace(path=brain_mod.Path("/rec/data/6acb00000012"), rows=[0] * 345),
                                route_name="2026-10-12--15-00-00")
-  w.bookmark_pm = SimpleNamespace(send=lambda s, m: sent.append(s))
   state = {"t": 5.0, "pos": [1.234, 2.0, 30.0], "heading": 90.0, "vEgo": 8.0, "street": "Elgin Ave", "markPresses": 3}
 
   def drive(seconds, **kw):
@@ -167,16 +182,16 @@ def test_mark_key(monkeypatch, tmp_path):
       w._update_buttons({**state, "pos": [0.0, (now[0] - 1000.0) * 8.0, 30.0], **kw})
 
   drive(40.0)
-  assert not marks.exists() and not sent
+  assert not marks.exists() and not w.io.sent("bookmark")
   drive(0.05, markPresses=4)
-  assert sent == ["userBookmark"] and not marks.exists()
-  drive(world_mod.MARK_AFTER + 0.1, markPresses=4)
+  assert w.io.sent("bookmark") == [()] and not marks.exists()
+  drive(brain_mod.MARK_AFTER + 0.1, markPresses=4)
   m = json.loads(marks.read_text())
   assert m["driver"] == "openpilot" and m["street"] == "Elgin Ave" and m["segment"] == "6acb00000012" and m["frame"] == 345
   assert m["route"] == {"at": 500.0, "length": 1000.0, "dest": [0.0, 1000.0]} and m["plan"] is None
   assert len(m["route_line"]) == 38 and m["route_line"][0] == [0.0, 210.0] and m["lane_line"] == [[0.0, 0.0], [1.0, 1.0]]
   t = np.array(m["track"])
-  assert abs(t[0, 0] - (m["mono"] - world_mod.MARK_BEFORE)) < 0.25 and abs(t[-1, 0] - (m["mono"] + world_mod.MARK_AFTER)) < 0.25
+  assert abs(t[0, 0] - (m["mono"] - brain_mod.MARK_BEFORE)) < 0.25 and abs(t[-1, 0] - (m["mono"] + brain_mod.MARK_AFTER)) < 0.25
   drive(0.05, markPresses=0)
   md = SimpleNamespace(info=lambda: {"phase": "drive"}, s=400.0, s_path=np.arange(0.0, 1000.0), path=np.c_[np.zeros(1000), np.arange(1000.0)])
   w.expert = w.driving = SimpleNamespace(md=md, md_driving=True, source="map")

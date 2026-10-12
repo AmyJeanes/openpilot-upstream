@@ -47,11 +47,13 @@ def make_world(head: dict, mp, rec: dict, wait_maps: bool = False):
   """nav_replay's world with the real overlay and GPS route, and the nav messages built (not sent), as Amy's bridge_env."""
   from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
   w, _ = nav_replay._world(head, mp, rec)
-  del w.__dict__["_overlay"]
+  core = getattr(w, "brain", None) or w  # the brain's parts after its split (gta5_brain.py)
+  del core.__dict__["_overlay"]
   process = getattr(gta5_overlay, "OverlayProcess", None)
-  w.overlay = process(wait_maps=wait_maps) if process is not None and gta5_overlay.PROCESS else gta5_overlay.Overlay()
-  w.gps = gta5_overlay.GpsRoute()
-  w.nav_msgs = NavMessages(pm=SimpleNamespace(send=lambda *a: None))
+  core.overlay = process(wait_maps=wait_maps) if process is not None and gta5_overlay.PROCESS else gta5_overlay.Overlay()
+  core.gps = gta5_overlay.GpsRoute()
+  core.nav_msgs = NavMessages(pm=SimpleNamespace(send=lambda *a: None))
+  w.overlay, w.navigator = core.overlay, core.navigator  # what the bench reads and times
   return w
 
 

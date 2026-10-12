@@ -36,15 +36,15 @@ def test_wide_road_outer_lane_is_on_the_road():
 
 
 def world(tagged: bool = True):
-  from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
-  w = GTA5World.__new__(GTA5World)
+  from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
+  w = Brain.__new__(Brain)
   w.navigator = SimpleNamespace(router=SimpleNamespace(osm=object() if tagged else None))
   w.good_lane = (None, 0.0)
   return w
 
 
 def test_car_lane_never_from_a_gta_link():
-  from openpilot.tools.sim.bridge.gta5 import gta5_world
+  from openpilot.tools.sim.bridge.gta5 import gta5_brain
   w = world()
   # the route's reading on its road; the plugin's 1-lane GTA link says [0, 1]
   assert w._car_lane([2, 3], 2.15, [0, 1], None, 10.0) == ([2, 3], 2.15)
@@ -52,7 +52,7 @@ def test_car_lane_never_from_a_gta_link():
   own = {"lane": 2, "lanes": 3, "kind": "own"}
   assert w._car_lane(None, None, [0, 1], own, 11.0) == ([2, 3], None)
   assert w._car_lane(None, None, [0, 1], {"lane": -1, "lanes": 2, "kind": "oncoming"}, 12.0) == ([2, 3], None)  # held
-  assert w._car_lane(None, None, [0, 1], None, 11.0 + gta5_world.LANE_HOLD + 0.1) == (None, None)
+  assert w._car_lane(None, None, [0, 1], None, 11.0 + gta5_brain.LANE_HOLD + 0.1) == (None, None)
   # the plugin reading another lane of as many: neither, unless the map's match sides with the route's
   assert w._car_lane([1, 3], 1.0, [0, 3], None, 20.0) == (None, None)
   assert w._car_lane([1, 3], 1.0, [0, 3], {"lane": 1, "lanes": 3, "kind": "own"}, 20.0) == ([1, 3], 1.0)
@@ -253,7 +253,7 @@ def test_crossing_between_carriageways():
 
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
-  from openpilot.tools.sim.bridge.gta5.gta5_world import on_path
+  from openpilot.tools.sim.bridge.gta5.gta5_brain import on_path
   line = np.array([[4.0, 0.0], [4.0, 50.0], [20.0, 66.0]])
   assert np.allclose(on_path(np.array([0.0, 30.0]), line), [4.0, 30.0])
   assert np.allclose(on_path(np.array([0.0, 30.0]), line[:0]), [0.0, 30.0])
@@ -389,10 +389,10 @@ def test_live_freeway_merge_exit_and_splits():
 
 
 def bridge_line(r: Route, lane) -> np.ndarray:
-  """The lane line as the bridge draws it (GTA5World._lane_line), from the car's lane."""
+  """The lane line as the bridge draws it (Brain._lane_line), from the car's lane."""
   from openpilot.selfdrive.navd.planner import Planner
-  from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
-  w = GTA5World.__new__(GTA5World)
+  from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
+  w = Brain.__new__(Brain)
   w.nav, w.route, w.lane_line = Planner(), r, (None, 0.0, [])
   w.expert, w.pilot = SimpleNamespace(md_driving=False), None  # no map driver driving
   return np.array(w._lane_line({"lane": lane}, 0.0))

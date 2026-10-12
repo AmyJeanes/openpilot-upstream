@@ -1,20 +1,17 @@
 """Pilots: who drives the car while it's engaged.
 
 The engage key engages the bridge's pilot (GTA5_PILOT: openpilot, the default, or map) and disengages it, and the HUD's
-engaged state, the driver's hand-back and arrival go through it, whichever it is. Each bridge step the world steps the
-pilot driving with the game state and the route, then sends the plugin its control message.
-- OpenpilotPilot: openpilot's own controls (carControl), engaged with the simulated car's cruise buttons.
+engaged state, the driver's hand-back and arrival go through it, whichever it is. Each bridge step the brain
+(gta5_brain.py) steps the pilot driving with the game state and the route, then sends the plugin its control message.
+- OpenpilotPilot: openpilot, through the OpenpilotIO (gta5_opio.py): engaged with the simulated car's cruise buttons, its
+  controls carControl's.
 - MapPilot: our map driver (gta5_mapdrive.py) along the route. Without a route it can't engage, and the engage key
   engages openpilot instead. Expert mode (gta5_expert.py) drives with a MapPilot of its own.
 A pilot hands the car back at once on the driver's brake, gas or steering."""
-import math
 import os
 
-import numpy as np
-from opendbc.car.tesla.values import CarControllerParams as TeslaParams
-from opendbc.car.vehicle_model import VehicleModel
-
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import USER_STEER, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 
 PILOT = os.getenv("GTA5_PILOT", "openpilot")
 PILOTS = ("openpilot", "map")
@@ -55,28 +52,25 @@ class Pilot:
 
 
 class OpenpilotPilot(Pilot):
-  """openpilot drives: the cruise buttons engage it, and carControl's curvature and acceleration go to the car."""
+  """openpilot drives: the cruise buttons engage it, and its controls (carControl's curvature and acceleration) go to
+  the car."""
   name = "openpilot"
 
-  def __init__(self, simulator_state, cruise, sm, tesla: bool):
-    self.simulator_state = simulator_state
-    self.cruise = cruise  # sends the simulated car a cruise button (common.control_cmd_gen's names)
-    self.sm = sm
-    self.tesla = tesla
-    self.VM: VehicleModel | None = None
+  def __init__(self, io: OpenpilotIO):
+    self.io = io
     self.steering = False  # whether the driver was steering
     self.braking = False
 
   @property
   def engaged(self) -> bool:
-    return bool(self.simulator_state.is_engaged)
+    return bool(self.io.engaged)
 
   def engage(self, route) -> bool:
-    self.cruise("cruise_down")
+    self.io.cruise("cruise_down")
     return True
 
   def disengage(self, why: str) -> None:
-    self.cruise("cruise_cancel")
+    self.io.cruise("cruise_cancel")
 
   def step(self, state: dict, route, now: float) -> str | None:
     # the brake and steering disengage (gas overrides), since the game's steering has no torque for openpilot to blend
@@ -85,28 +79,12 @@ class OpenpilotPilot(Pilot):
     user = state.get("user") or {}
     steering, braking = abs(user.get("steer", 0)) > USER_STEER, bool(user.get("brake"))
     if (steering and not self.steering or braking and not self.braking) and self.engaged:
-      self.cruise("cruise_cancel")
+      self.io.cruise("cruise_cancel")
     self.steering, self.braking = steering, braking
     return None
 
-  def update_model(self):
-    if self.VM is None and self.sm.seen['carParams']:
-      self.VM = VehicleModel(self.sm['carParams'])
-
   def controls(self, state: dict) -> dict | None:
-    if not self.engaged:
-      return None
-    actuators = self.sm['carControl'].actuators
-    # openpilot's curvature is right-positive (controlsd negates the vehicle model's); the plugin takes left-positive
-    curvature = -actuators.curvature
-    accel = float(actuators.accel)
-    if self.tesla and self.VM is not None and self.sm.seen['carOutput']:
-      # What a Model 3 executes: the angle after the car controller's rate and lateral jerk limits, through the car's
-      # vehicle model, and the acceleration within its limits
-      angle = self.sm['carOutput'].actuatorsOutput.steeringAngleDeg
-      curvature = self.VM.calc_curvature(math.radians(angle), max(abs(state['vEgo']), 1.0), state.get("bank", 0.0))
-      accel = float(np.clip(accel, TeslaParams.ACCEL_MIN, TeslaParams.ACCEL_MAX))
-    return {"type": "control", "active": True, "curvature": curvature, "accel": accel}
+    return self.io.controls(state)
 
 
 class MapPilot(Pilot):

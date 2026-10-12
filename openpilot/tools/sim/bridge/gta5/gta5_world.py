@@ -1,46 +1,40 @@
+"""The GTA V bridge's world (openpilot's tools/sim World): the game's frames to openpilot's cameras, its state to the
+simulated car's sensors, and the plugin's controls from whoever drives.
+
+The decisions (nav, the pilots, expert mode, the overlay, the map view, marks) are the brain's (gta5_brain.py), which
+talks to openpilot through LocalIO here. Run with GTA5_LINK=1 the world is the link instead: no brain, openpilot's side
+of the Windows host (gta5_host.py), which runs the brain and reaches this LocalIO through gta5_link.LinkServer."""
 import gc
 import json
 import math
 import multiprocessing
 import os
 import subprocess
-import sys
 import threading
 import time
-from collections import deque
 from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
 import numpy as np
+from opendbc.car.tesla.values import CarControllerParams as TeslaParams
+from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.route_input import RouteInputWriter
-from openpilot.selfdrive.navd.lane_slots import PREVIEW_LEN, lane_slots_path, preview
-from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
-from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
-from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
+from openpilot.selfdrive.navd.lane_slots import PREVIEW_LEN, lane_slots_path
+from openpilot.selfdrive.navd.route_input import ROUTE_LEN
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5 import gta5_gnss, gta5_stacks
-from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
+from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, NAV_SPEED, Brain, speed_limit
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
-from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
-from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
-from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
-from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
-from openpilot.tools.sim.bridge.gta5.gta5_pilot import INACTIVE, MapPilot, OpenpilotPilot, Pilot, pilot_from_env
-from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
-  OverlayProcess
+from openpilot.tools.sim.bridge.gta5.gta5_opio import INPUTS, PARAMS, OpenpilotIO
+from openpilot.tools.sim.bridge.gta5.gta5_pilot import INACTIVE
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
-from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
-from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, Paths
-from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route, Router
-from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
 OP_WHEELBASE = 2.7
@@ -49,48 +43,11 @@ MIN_FRAME_SPACING = 0.040  # s
 DEBUG = bool(os.getenv("GTA5_DEBUG"))  # print commanded vs measured motion each second
 LOG = os.getenv("GTA5_LOG")  # a file to record the game state and the controls sent, a JSON line each, for analysis
 CAMLOG = os.getenv("GTA5_CAMLOG")  # a file to record each camera frame handed to openpilot: its seq and rx's newest
-MAP = os.getenv("GTA5_MAP")  # the map's folder (map/README.md): serves the map view
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
-MAP_EVERY = 0.1  # s
-LANE_LINE_EVERY = 0.5  # s
-ON_PATH = 15.0  # m: the overlay's turn markers go on nav's lane line where it passes this near their route points
-ROUTER = os.getenv("GTA5_ROUTER")  # a Valhalla server on the map (map/README.md) routes, rather than the game's GPS
-# m: the route nav gets, in the form of the plugin's GTA route (500 m), as far as a freeway move's lane changes may start
-ROUTE_AHEAD, ROUTE_STEP = 3500.0, 5.0
 MODEL_STALE = 0.5  # s: the model's lane (modelV2.laneHead) for nav from a message no older
-# s the car's last lane reading by the map's lanes stands while there's none: the plugin's own reading counts GTA's
-# link, one of several side by side on a wide road (a 1-lane link reads [0, 1] in any lane), so it's used only on a
-# map without lane tags
-LANE_HOLD = 3.0
-# the route input of a route-conditioned driving model (navd/route_input.py); modeld reads it only if its model has one
-ROUTE_INPUT = os.getenv("GTA5_ROUTE_INPUT", "1") != "0"  # 0: no route for the model, to A/B one model with and without
-OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's labels
-# route input v2's lane slots (navd/lane_slots.py; also in the model's route input), to their own file for watch_route.py
-LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
-MARKS = os.path.expanduser(os.getenv("GTA5_MARKS", "~/gta5test/marks.jsonl"))  # the mark key's bookmarks, a JSON line each
-MARK_BEFORE, MARK_AFTER = 30.0, 5.0  # s of the car's track a mark keeps before and after the press (a press comes late)
-TRACK_EVERY = 0.2  # s between the track's points
-PLAN_BEHIND, PLAN_AHEAD = 300.0, 80.0  # m of the plan about the car a mark keeps
-# the car's set speed follows the map's speed limits along the route (GTA5_FOLLOW_LIMIT=1, as before navSpeed, for A/B runs);
-# off, the set speed is the driver's alone and nav caps the speed at the limit (navSpeed, reason speedLimit)
-FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT") == "1"
 # openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
 NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
-# Navigate on openpilot: "param" (the default) follows the NavigateOnOpenpilot param the UI's nav button sets (off:
-# guidance only); "on" nav drives regardless, as test runs need; "off" guidance only
-NOO = os.getenv("GTA5_NOO", "param")
-NOO_CHECK = 0.5  # s between reads of the param
-# how nav's speed cap reaches openpilot: "plan" (the default) publishes it as navSpeed for openpilot's longitudinal
-# planner, below the driver's set speed, which stays the car's; "can" lowers the simulated car's set speed to it instead
-NAV_SPEED = os.getenv("GTA5_NAV_SPEED", "plan")
-NAV_SPEED_EVERY = 0.05  # s
-# routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
-# pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
-# lane for the car is wrong (replays ask for needless lane changes) until the lane comes from elsewhere.
-NAV_MATCH = os.getenv("GTA5_NAV_MATCH") == "1"
-# GTA has no speed limits; a guess from the street's name, mph: freeways, highways and routes, then anything else
-SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
-CITY_SPEED_LIMIT = 35
+LINK = os.getenv("GTA5_LINK") == "1"  # the link: no brain here, the Windows host's (gta5_host.py)
 # the plugin reads the bridge's address from here when its gta5op.ini doesn't set one
 BRIDGE_FILE = Path(os.getenv("GTA5_BRIDGE_FILE", "/mnt/c/Users/Public/gta5op-bridge.txt"))
 PIN_UI = Path(__file__).parent / "pin_ui.ps1"
@@ -99,6 +56,9 @@ PIN_UI = Path(__file__).parent / "pin_ui.ps1"
 # only once it has been idle (no game state, or on foot) this long, at most every FULL_GC_EVERY s
 FULL_GC_IDLE = 2.0  # s
 FULL_GC_EVERY = 60.0  # s
+# the simulated car's inputs from the brain before it sets any, and after the link loses the host
+DEFAULT_INPUTS = {"user_torque": 0, "left_blinker": False, "right_blinker": False, "left_blindspot": False,
+                  "right_blindspot": False, "speed_limit_follow": False, "cruise_cap": 0.0, "cap_set_speed": False}
 
 
 def hold_full_collections():
@@ -131,24 +91,121 @@ def own_ip() -> str:
     return "127.0.0.1"
 
 
-def speed_limit(street: str) -> float:
-  if not street:
-    return 0.0
-  mph = next((limit for words, limit in SPEED_LIMITS if any(w in street for w in words)), CITY_SPEED_LIMIT)
-  return mph * 0.44704
+class LocalIO(OpenpilotIO):
+  """openpilot in this process (gta5_opio.OpenpilotIO): the simulated car's state and buttons, its messages and params."""
+  def __init__(self, simulator_state: SimulatorState, q: Queue, tesla: bool):
+    self.simulator_state = simulator_state
+    self.q = q
+    self.tesla = tesla
+    self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState',
+                                   'controlsState', 'carOutput'])
+    self.params = Params()
+    self.VM: VehicleModel | None = None
+    self.inputs = dict(DEFAULT_INPUTS)
+    self.nav_speed_pm = messaging.PubMaster(["navSpeed"]) if NAV_SPEED != "can" else None
+    self.bookmark_pm = None  # made on the first bookmark
+    self.route_writer: RouteInputWriter | None = None  # made on the first vector
+    self.lanes_writer: RouteInputWriter | None = None
 
+  @property
+  def engaged(self) -> bool:
+    return bool(self.simulator_state.is_engaged)
 
-def on_path(p, line: np.ndarray, near: float = ON_PATH):
-  """The point of a polyline nearest p, where it passes within `near` m; else p."""
-  if p is None or len(line) < 2:
-    return p
-  p = np.asarray(p, float)
-  a, ab = line[:-1], np.diff(line, axis=0)
-  t = np.clip(np.einsum('ij,ij->i', p - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
-  foot = a + ab * t[:, None]
-  d = np.hypot(*(foot - p).T)
-  k = int(np.argmin(d))
-  return foot[k] if d[k] < near else p
+  def update(self):
+    self.sm.update(0)
+    if self.VM is None and self.sm.seen['carParams']:
+      self.VM = VehicleModel(self.sm['carParams'])
+    cluster = self.sm['carState'].vCruiseCluster
+    self.set_speed_kph = self.sm['controlsState'].deprecated.vCruise if cluster == 0.0 else cluster
+
+  def model(self) -> dict:
+    meta = self.sm['modelV2'].meta
+    desire = meta.desireState
+    turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
+             "keepRight": desire[log.Desire.keepRight]} if len(desire) > log.Desire.keepRight else {}
+    lane_change = meta.laneChangeState
+    lane_head = None
+    if self.sm.recv_frame['modelV2'] > 0 and time.monotonic() - self.sm.recv_time['modelV2'] <= MODEL_STALE:
+      lh = self.sm['modelV2'].laneHead
+      lane_head = [int(lh.laneIdx), int(lh.laneCount), round(float(lh.prob), 3)] if 0 <= lh.laneIdx < lh.laneCount else None
+    return {"turns": turns, "lane_change": int(getattr(lane_change, "raw", lane_change)), "lane_head": lane_head}
+
+  def controls(self, state: dict) -> dict | None:
+    if not self.engaged:
+      return None
+    actuators = self.sm['carControl'].actuators
+    # openpilot's curvature is right-positive (controlsd negates the vehicle model's); the plugin takes left-positive
+    curvature = -actuators.curvature
+    accel = float(actuators.accel)
+    if self.tesla and self.VM is not None and self.sm.seen['carOutput']:
+      # What a Model 3 executes: the angle after the car controller's rate and lateral jerk limits, through the car's
+      # vehicle model, and the acceleration within its limits
+      angle = self.sm['carOutput'].actuatorsOutput.steeringAngleDeg
+      curvature = self.VM.calc_curvature(math.radians(angle), max(abs(state['vEgo']), 1.0), state.get("bank", 0.0))
+      accel = float(np.clip(accel, TeslaParams.ACCEL_MIN, TeslaParams.ACCEL_MAX))
+    return {"type": "control", "active": True, "curvature": curvature, "accel": accel}
+
+  def cruise(self, cmd: str):
+    self.q.put(control_cmd_gen(cmd))
+
+  def set_inputs(self, **inputs):
+    self.inputs.update((k, v) for k, v in inputs.items() if k in INPUTS)
+
+  def apply(self, simulator_state: SimulatorState):
+    """The brain's inputs onto the simulated car, once per step: the car thread could read any value set in between."""
+    for k, v in self.inputs.items():
+      setattr(simulator_state, k, v)
+
+  def reset(self):
+    """The brain's inputs back to their defaults, and nav's desire gone (the link lost the host)."""
+    self.inputs = dict(DEFAULT_INPUTS)
+    self.nav_desire("")
+
+  def nav_desire(self, desire: str):
+    if desire:
+      self.params.put("NavDesire", desire)
+    else:
+      self.params.remove("NavDesire")
+
+  def nav_speed(self, cap: float, reason: str):
+    if self.nav_speed_pm is None:
+      return
+    msg = messaging.new_message("navSpeed", valid=True)
+    msg.navSpeed.speedCap = cap
+    msg.navSpeed.reason = reason
+    self.nav_speed_pm.send("navSpeed", msg)
+
+  def route_input(self, vec):
+    if self.route_writer is None:
+      self.route_writer = RouteInputWriter(ROUTE_LEN)
+    self.route_writer.write(np.asarray(vec, np.float32))
+
+  def lane_slots(self, vec):
+    if self.lanes_writer is None:
+      self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path())
+    self.lanes_writer.write(np.asarray(vec, np.float32))
+
+  def bookmark(self):
+    if self.bookmark_pm is None:
+      self.bookmark_pm = messaging.PubMaster(["userBookmark"])
+    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
+
+  def status(self) -> dict:
+    """What the link sends the host (gta5_opio.RemoteIO) of openpilot's state."""
+    params = {}
+    for key in PARAMS:
+      try:
+        value = self.params.get(key)
+      except Exception:  # params built before the key existed
+        value = None
+      params[key] = value.decode() if isinstance(value, bytes) else value
+    for key in ("IsMetric", "NavigateOnOpenpilot", "TurnDesireRefresh"):
+      try:
+        params[key] = self.params.get_bool(key)
+      except Exception:
+        params[key] = False
+    return {"type": "status", "engaged": self.engaged, "set_speed_kph": float(self.set_speed_kph), "model": self.model(),
+            "params": params}
 
 
 class GTA5World(World):
@@ -157,6 +214,9 @@ class GTA5World(World):
   idle_since: float | None = None  # when the bridge last stopped driving (_idle_gc)
   next_full_gc = 0.0
   stall: gta5_stacks.Stall | None = None  # the bridge loop's heartbeat (gta5_stacks.py)
+  brain: Brain | None = None
+  link = None  # gta5_link.LinkServer, as the link
+  recorder: Recorder | None = None
 
   def __init__(self, simulator_state: SimulatorState, q: Queue, port: int):
     super().__init__(dual_camera=True)
@@ -171,39 +231,24 @@ class GTA5World(World):
     self.pair: dict[str, tuple] = {}  # the frame being handed to openpilot, road and wide from the same one
     self.handed = -1  # its seq
     self.last_frame_time = 0.0
-    self.sm = messaging.SubMaster(['carControl', 'carParams', 'vehicleParameters', 'modelV2', 'selfdriveState', 'carState', 'controlsState',
-                                   'carOutput'])
-    self.tesla = is_tesla()
-    self.metric = Params().get_bool("IsMetric")
-    self.next_hud = 0.0
     self.last_status = 0.0
-    self.presses: dict[str, int] = {}
-    self.bookmark_pm = None  # made on the first mark
-    self.track: deque = deque(maxlen=int(MARK_BEFORE / TRACK_EVERY) + 10)  # [mono, x, y, v], for marks
-    self.lane_lines: deque = deque(maxlen=int(MARK_BEFORE / 2) + 2)  # (mono, the line ahead then), every 2 s
-    self.marks_due: list[tuple[float, dict]] = []  # marks waiting for MARK_AFTER s more of the track
     self.curvature = 0.0  # what the steering is set for
     self.pinner: subprocess.Popen | None = None
     self.log = open(LOG, "a", buffering=1) if LOG else None
-    self.params = Params()
-    self._init_nav()
-    self.blindspot = BlindSpot()
+    self.io = LocalIO(simulator_state, q, is_tesla())
     self.gnss = gta5_gnss.from_env()
     self.publishes_gps = self.gnss is not None
-    self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
-    self._init_pilots()
-    self.map_view: MapView | None = None  # made once rx has forked: a socket it inherited would outlive this process
-    self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
-    self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
-    self.junction_areas: JunctionAreas | None = None
-    if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
-      threading.Thread(target=self._load_paths, args=(os.path.join(MAP, "paths.jsonl"),), daemon=True).start()
-    self.route_writer = RouteInputWriter(ROUTE_LEN) if ROUTE_INPUT else None
-    self.nav_msgs = NavMessages() if NAV_MSGS else None
-    self.lanes_writer = RouteInputWriter(PREVIEW_LEN, lane_slots_path()) if LANE_SLOTS else None
-    self.recorder = Recorder(RECORD, self) if RECORD else None
-    self.overlay = OverlayProcess() if OVERLAY_PROCESS else Overlay()  # the plugin map debug overlay, while it asks for it
-    self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
+    self.match_t: float | None = None
+    if LINK:
+      from openpilot.tools.sim.bridge.gta5.gta5_link import LinkServer
+      self.link = LinkServer(self.io)
+    else:
+      self.brain = Brain(self.io, self._send, self.log, match=NAV_MATCH and self.gnss is not None)
+      if NAV_MSGS:
+        from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
+        self.brain.nav_msgs = NavMessages()
+      if RECORD:
+        self.recorder = self.brain.recorder = Recorder(RECORD, self.brain)
 
     self.shm = {name: SharedMemory(create=True, size=NV12_SIZE * SLOTS) for name in VIEWS}
     self.rx_latest = multiprocessing.Value('q', -1, lock=False)  # the newest frame's seq that rx has written
@@ -221,8 +266,9 @@ class GTA5World(World):
       raise RuntimeError(f"could not listen for the game on port {port}: {error}")
     stacks = gta5_stacks.watch()
     self.stall = gta5_stacks.Stall(stacks) if stacks is not None else None
-    if MAP:
-      self.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, stacks=stacks)
+    if MAP and self.brain is not None:
+      # made once rx has forked: a socket it inherited would outlive this process
+      self.brain.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, stacks=stacks)
       print(f"gta5: map view on http://localhost:{MAP_PORT}/")
     self.frames = frames_recv
     threading.Thread(target=self._frame_reader, daemon=True).start()
@@ -234,46 +280,6 @@ class GTA5World(World):
       print(f"gta5: waiting for the game at {addr} (written to {BRIDGE_FILE})")
     except OSError as e:
       print(f"gta5: waiting for the game at {addr}; set bridge={addr} in gta5op.ini ({BRIDGE_FILE}: {e})")
-
-  def _init_nav(self):
-    """navd's planner, and the GTA layer's parts around it: the simulated driver and the destination."""
-    self.params.remove("NavDesire")  # a killed bridge can leave one
-    self.nav = Planner(Tune(os.getenv("GTA5_NAVTUNE")), refresh=self.params.get_bool("TurnDesireRefresh"))
-    self.driver = Driver(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")))
-    self.destination = Destination(self.params, self._send, ends=NOO != "on")
-    self.next_map = 0.0
-    self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
-    self.route: Route | None = None
-    self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
-    self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
-    self.cap = 0.0
-    self.cap_reason = ""
-    self.nav_speed_pm = messaging.PubMaster(["navSpeed"]) if NAV_SPEED != "can" else None
-    self.next_nav_speed = 0.0
-    self.gps_route: list = []
-    self.noo, self.noo_t = NOO != "off", 0.0
-    self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
-    self.match_t: float | None = None
-    self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
-
-  def _init_pilots(self):
-    """Who drives while engaged (gta5_pilot.py): openpilot, and the engage key's pilot (GTA5_PILOT)."""
-    self.openpilot = OpenpilotPilot(self.simulator_state, lambda cmd: self.q.put(control_cmd_gen(cmd)), self.sm, self.tesla)
-    self.pilot = pilot_from_env(self.openpilot, self._send, self._log_event)
-    self.driving: Pilot | Expert | None = None  # whose controls the car takes, as of the last step
-
-  def _nav_drives(self) -> bool:
-    """Navigate on openpilot: nav drives, rather than only guiding."""
-    if NOO != "param":
-      return NOO != "off"
-    now = time.monotonic()
-    if now - self.noo_t > NOO_CHECK:
-      self.noo_t = now
-      try:
-        self.noo = self.params.get_bool("NavigateOnOpenpilot")
-      except Exception:  # params built before the key existed
-        self.noo = True
-    return self.noo
 
   def _frame_reader(self):
     last_release = 0.0
@@ -312,33 +318,24 @@ class GTA5World(World):
 
   # *** World interface ***
 
-  def _send_hud(self):
-    """The set speed for the game's HUD, as openpilot's UI shows it (km/h; 0 when not set)."""
-    now = time.monotonic()
-    if now < self.next_hud:
-      return
-    self.next_hud = now + 0.2
-    cluster = self.sm['carState'].vCruiseCluster
-    set_kph = self.sm['controlsState'].deprecated.vCruise if cluster == 0.0 else cluster
-    self._send({"type": "hud", "setSpeed": set_kph if 0 < set_kph < 255 else 0, "metric": self.metric,
-                "engaged": self.pilot.engaged or self.openpilot.engaged})
-
   def apply_controls(self, steer_angle, throttle_out, brake_out):
-    """Sends the controls of whoever drives (gta5_pilot.py; openpilot's are carControl's curvature and acceleration),
-    rather than the bridge's steer_angle/throttle/brake: those are shaped for the simulated Honda, not for the game car."""
-    self.sm.update(0)
-    self.openpilot.update_model()
+    """Sends the controls of whoever drives (the brain's pilots; openpilot's are carControl's curvature and acceleration),
+    rather than the bridge's steer_angle/throttle/brake: those are shaped for the simulated Honda, not for the game car.
+    As the link, openpilot's, which the host's relay passes on only while openpilot drives."""
+    self.io.update()
     with self.lock:
       state = self.state
     if state is None or not state.get("inVehicle"):
       return
-    self._send_hud()
-    driving = self.driving
-    msg = driving.controls(state) if driving is not None else None
-    self._send(msg if msg is not None else INACTIVE)
+    if self.brain is not None:
+      self.brain.hud()
+      msg = self.brain.controls(state)
+    else:
+      msg = self.io.controls(state) or INACTIVE
+    self._send(msg)
 
     now = time.monotonic()
-    if DEBUG and driving is self.openpilot and msg is not None and now - self.last_status > 1.0:
+    if DEBUG and msg.get("active") and now - self.last_status > 1.0:
       self.last_status = now
       out = state.get("out", {})
       print(f"gta5: v={state['vEgo']:5.2f} curvature cmd={msg['curvature']:+.4f} meas={self.curvature:+.4f} " +
@@ -352,6 +349,8 @@ class GTA5World(World):
   def read_sensors(self, simulator_state: SimulatorState):
     if self.stall is not None:
       self.stall.beat(time.monotonic())
+    if self.link is not None:
+      self.link.step()  # the host's calls, and openpilot's state back to it
     with self.lock:
       state = self.state
       fresh = time.monotonic() - self.last_frame_time < 0.5
@@ -373,7 +372,7 @@ class GTA5World(World):
     # the plugin reports the curvature the car follows, standing in for a steering angle sensor
     self.curvature = state.get("steerCurvature", yaw_rate / v if v > 2.0 else 0.0)
     grade, bank = state.get("grade", 0.0), state.get("bank", 0.0)  # radians: nose up, right side down (NED roll)
-    vm = self.openpilot.VM
+    vm = self.io.VM
     if vm is not None:
       # The angle for the curvature the car follows, through the car's own fixed vehicle model (carParams', with no
       # offset), as a real sensor measures a physical angle: paramsd then learns the car's values, as on a real Model 3.
@@ -394,110 +393,17 @@ class GTA5World(World):
     if self.gnss is not None:
       p = state["pos"]
       fix = self.gnss.update(time.monotonic(), p[0], p[1], p[2], simulator_state.velocity.x, simulator_state.velocity.y)
-      if self.matcher is not None:
+      if self.brain is not None and self.brain.matcher is not None:
         self._match(fix, v, yaw_rate)
 
     user = state.get("user") or {}
     simulator_state.user_gas = 1.0 if user.get("gas") else 0.0
     simulator_state.user_brake = 1.0 if user.get("brake") else 0.0
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
-    desire = self.sm['modelV2'].meta.desireState
-    turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
-             "keepRight": desire[log.Desire.keepRight]} if len(desire) > log.Desire.keepRight else {}
-    self.gps_route = state.get("route") or []
-    if self.navigator is not None:
-      state = self._map_route(state, bearing)
-      limits = state.get("limits")
-      known = bool(limits) and limits[0][0] == 0 and limits[0][1] > 0
-      if known:
-        simulator_state.speed_limit = limits[0][1]
-      simulator_state.speed_limit_follow = known and FOLLOW_LIMIT
-    # the car's blind-spot monitor (gta5_blindspot.py), for openpilot (the Model 3's own signals), nav and the driver
-    left, right = self.blindspot.update(state, time.monotonic())
-    simulator_state.left_blindspot, simulator_state.right_blindspot = left, right
-    state = {**state, "blindspot": [left, right]}
-    # set once per step, held until the next: the car thread could read any value set in between
-    indicator = state.get("indicator")
-    simulator_state.user_torque = self.driver.stalk(indicator, state["heading"], state["yawRate"],
-                                                    self.sm['modelV2'].meta.laneChangeState, self.nav.signaling,
-                                                    left if indicator == "left" else right if indicator == "right" else False)
-    if self.nav_msgs is not None:
-      # the game's pose stands in for the car's localizer (GPS and odometry)
-      self.nav_msgs.update(self.route, v, self.navigator.router.osm if self.navigator is not None else None, self._lane_slots,
-                           pose=(np.array(state["pos"][:2], dtype=float), bearing))
-    for msg in self._overlay(state, v):
-      self._send(msg)
-    self.driving = self._step_pilots(state)
-    if self.driving is not None and self.driving is not self.openpilot:
-      # expert mode or another pilot drives: openpilot stays disengaged, and nav and pull-away wait
-      self._set_cap(simulator_state, 0.0, "")
-      self._set_blinkers(simulator_state)
-      self._update_buttons(state)
-      if self._map_driver() is not None:
-        self._lane_line(state, v)  # the map driver's path, for recordings and the overlay, whether drawn or not
-      self._update_map(state, bearing, v)
-      simulator_state.valid = True
-      return
-    state = {**state, "modelLane": self._model_lane()}
-    drives = self._nav_drives()
-    out = self.nav.update(nav_inputs(state, self.simulator_state.is_engaged, state.get("indicator"), turns, time.monotonic(), drives))
-    self.driver.act(out)
-    for e in out.events:  # map errors nav found, in the state log as the map driver's anomalies are in its own
-      if self.log:
-        self.log.write(json.dumps({"mono": round(time.monotonic(), 3), **e}) + "\n")
-    for d in out.desires:
-      self._set_nav_desire(d)
-    self._set_cap(simulator_state, out.cap, out.cap_reason)
-    self._set_blinkers(simulator_state)
-    if out.arrived:
-      self.destination.arrived()
-    self.driver.pull_away.update(state, self.simulator_state.is_engaged)
-    self._update_buttons(state)
-    self._update_map(state, bearing, v)
+    if self.brain is not None:
+      self.brain.step(state)
+    self.io.apply(simulator_state)
     simulator_state.valid = True
-
-  def _step_pilots(self, state: dict) -> Pilot | Expert | None:
-    """Steps whoever drives (expert mode first, while it's on), handing the car back where the pilot says so: who
-    drives now, None for the player."""
-    now = time.monotonic()
-    self.openpilot.step(state, self.route, now)
-    p = self.pilot
-    if self.expert.update(state, self.route, self.openpilot.engaged):
-      if p is not self.openpilot and p.engaged:
-        p.disengage("expert mode drives")
-      return self.expert
-    if p is not self.openpilot and p.engaged:
-      why = p.step(state, self.route, now)
-      if why is not None:
-        p.disengage(why)
-        if why == "arrived":
-          self.destination.arrived()
-      return p if p.engaged else None
-    return self.openpilot if self.openpilot.engaged else None
-
-  def _map_driver(self):
-    """The map driver driving now (expert mode's, or the engage key's), else None."""
-    if self.expert.md_driving:
-      return self.expert.md
-    return self.pilot.md if isinstance(self.pilot, MapPilot) and self.pilot.engaged else None
-
-  def _driver_name(self) -> str:
-    """Who drives now, for marks: expert mode's source (ai, map, ...), the pilot's name, or user."""
-    if self.driving is self.expert:
-      return self.expert.source
-    return self.driving.name if self.driving is not None else "user"
-
-  def _log_event(self, what: str, **kw):
-    if self.log:
-      self.log.write(json.dumps({"mono": round(time.monotonic(), 3), "event": what, **kw}) + "\n")
-
-  def _model_lane(self) -> list | None:
-    """The driving model's lane for nav (modelV2.laneHead): [index from the left of ours, count, probability], None
-    without a fresh one or from a model without the head."""
-    if self.sm.recv_frame['modelV2'] <= 0 or time.monotonic() - self.sm.recv_time['modelV2'] > MODEL_STALE:
-      return None
-    lh = self.sm['modelV2'].laneHead
-    return [int(lh.laneIdx), int(lh.laneCount), round(float(lh.prob), 3)] if 0 <= lh.laneIdx < lh.laneCount else None
 
   def _idle_gc(self):
     """The full garbage collection hold_full_collections leaves out, while nothing is driving."""
@@ -508,347 +414,16 @@ class GTA5World(World):
       self.next_full_gc = now + FULL_GC_EVERY
       gc.collect()
 
-  def _set_cap(self, simulator_state: SimulatorState, cap: float, reason: str):
-    """nav's speed cap (m/s, 0 for none) to openpilot: as navSpeed for its planner, or as the car's set speed (NAV_SPEED)."""
-    simulator_state.cruise_cap = self.cap = cap
-    simulator_state.cap_set_speed = self.nav_speed_pm is None
-    now = time.monotonic()
-    if self.nav_speed_pm is None or (now < self.next_nav_speed and reason == self.cap_reason):
-      self.cap_reason = reason
-      return
-    self.cap_reason, self.next_nav_speed = reason, now + NAV_SPEED_EVERY
-    msg = messaging.new_message("navSpeed", valid=True)
-    msg.navSpeed.speedCap = cap
-    msg.navSpeed.reason = reason or "none"
-    self.nav_speed_pm.send("navSpeed", msg)
-
-  def _load_paths(self, path: str):
-    try:
-      paths = Paths(path)
-      paths.index()
-      self.navigator.router.paths = paths
-    except (OSError, ValueError, KeyError) as e:
-      print(f"gta5: no road heights or lanes for routes: {e}")
-      return
-    osm = os.path.join(os.path.dirname(path), "gta5.osm.pbf")
-    try:
-      lanes = OsmLanes.load(osm, to_game) if os.path.exists(osm) else None
-    except (OSError, ValueError, KeyError) as e:
-      print(f"gta5: no lanes from {osm}: {e}")
-      lanes = None
-    self.navigator.router.roads = lanes
-    if NAV_MATCH and lanes is not None and self.gnss is not None:
-      self.matcher = MapMatcher(RoadGraph.from_osm(lanes))
-      print("gta5: routing from navd's map match of the GNSS")
-    if lanes is not None and lanes.tagged:
-      self.junction_areas = self._junction_areas(lanes)
-      StopLines.of(lanes, build=False)  # read before routes are made on the map, which take their stop lines from it
-      self.navigator.router.osm = lanes
-      print(f"gta5: lanes from the map's tags ({osm})")
-      self.lane_matcher = LaneMatcher(lanes)
-    else:
-      print("gta5: the map has no lane tags: lanes from GTA's links")
-    self.navigator.refresh()
-
   def _match(self, fix, v: float, yaw_rate: float):
     """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix."""
+    matcher = self.brain.matcher
     now = time.monotonic()
-    self.matcher.predict(0.0 if self.match_t is None else now - self.match_t, v, yaw_rate)
+    matcher.predict(0.0 if self.match_t is None else now - self.match_t, v, yaw_rate)
     self.match_t = now
     if fix is not None:
       g = getattr(fix, self.gnss.profile.service)
       x, y = to_game(g.latitude, g.longitude)
-      self.matcher.update(x, y, g.bearingDeg, g.bearingAccuracyDeg, g.speed, self.gnss.profile.latency)
-
-  def _map_route(self, state: dict, bearing: float) -> dict:
-    """The state with our route to the destination, in the form of the plugin's GTA route, and what nav uses of the
-    map along it. The destination is whichever was set last of the game map's waypoint (else a mission's GPS route's end)
-    and the map view's."""
-    pos = np.array(state["pos"][:2], dtype=float)
-    picked = self.map_view.take_destination() if self.map_view is not None else None
-    dest = self.destination.update(state.get("waypoint"), pos, picked, (state.get("mission") or {}).get("dest"))
-    match = self.matcher.match if self.matcher is not None else None
-    route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
-    self.routes += route is not None and route is not self.route
-    self.route = route
-    self._write_route_input(state)
-    state = {**state, "waypoint": dest.tolist() if dest is not None else None, "route": [], "laneMap": self._map_lane(state)}
-    plugin = state.get("lane")
-    if self.route is None:
-      lane, _ = self._car_lane(None, None, plugin, state["laneMap"], time.monotonic())
-      self._write_lane_slots(state, lane)
-      return {**state, "lane": lane, "lanePlugin": plugin}
-    on = self.route.on_road()
-    lane, frac = self._car_lane(self.route.lane() if on else None, self.route.lane_frac() if on else None, plugin,
-                                state["laneMap"], time.monotonic())
-    self._write_lane_slots(state, lane)
-    return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
-            "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None,
-            "beside": self.route.beside() if on else None, "besideLanes": self.route.beside_lanes() if on else None}
-
-  def _car_lane(self, lane: list[int] | None, frac: float | None, plugin: list[int] | None, map_lane: dict | None,
-                now: float) -> tuple[list[int] | None, float | None]:
-    """The car's lane [i from the left, of n] and where it is between lanes, for nav, its lane line and recordings: the
-    route's (`lane`, on its road), else the map's lane match on our side of the road, else the last of those for
-    LANE_HOLD s. The plugin's own reading stands only on a map without lane tags; where it reads as many lanes as the
-    route's but another one, and the map's match doesn't side with the route's, there's no lane."""
-    matched = [map_lane["lane"], map_lane["lanes"]] if map_lane and map_lane.get("kind") == "own" and map_lane.get("lanes") else None
-    tagged = self.navigator is not None and self.navigator.router.osm is not None
-    if lane and plugin and plugin[1] == lane[1] and plugin[0] != lane[0] and matched != lane:
-      return None, None  # they disagree: no lane changes on either
-    if lane:
-      self.good_lane = (lane, now)
-      return lane, frac
-    if matched:
-      self.good_lane = (matched, now)
-      return matched, None
-    if not tagged and plugin:
-      return plugin, None
-    held, t = self.good_lane
-    return (held, None) if held is not None and now - t < LANE_HOLD else (None, None)
-
-  @staticmethod
-  def _junction_areas(osm: OsmLanes) -> JunctionAreas | None:
-    """The map's junction areas from their cache, built with its stop lines (stop_lines.py) by a separate process the
-    first time (about half a minute)."""
-    areas = JunctionAreas.cached(osm, build=False)
-    if areas is not None and StopLines.cached(osm, build=False) is not None:
-      return areas
-    print("gta5: building the map's junction areas and stop lines in the background", flush=True)
-    try:
-      subprocess.run(["nice", "-n", "10", sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.map.lane_match", osm.path],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True, timeout=600)
-    except (OSError, subprocess.SubprocessError) as e:
-      print(f"gta5: no junction areas: {e}")
-      return None
-    return JunctionAreas.cached(osm, build=False)
-
-  def _map_lane(self, state: dict) -> dict | None:
-    """The car's lane by the map's lanes alone (lane_match.py), for nav's way back out of the oncoming lanes; None in a
-    junction's area, where the car is on the moves through it. "areas" says whether those were looked at yet."""
-    m, areas = self.lane_matcher, self.junction_areas
-    if m is None:
-      return None
-    x, y, z = state["pos"]
-    if areas is not None and areas.inside(x, y, z):
-      return None
-    r = m.match(x, y, math.radians(state["heading"] + 90.0), z)
-    return None if r is None else {"lane": r.lane, "lanes": r.lanes, "kind": r.kind, "bay": r.bay, "oncoming": r.oncoming,
-                                   "beside": list(r.beside), "areas": areas is not None, "way": r.way, "right": r.right}
-
-  def _write_route_input(self, state: dict):
-    """The driving model's route input for the route and the car's place on it; zero off it."""
-    if self.route_writer is None:
-      return
-    if self.route is None or self.route.off > OFF_ROUTE_INPUT or not self._nav_drives():  # guiding only: no route for the model
-      self.route_writer.write(np.zeros(ROUTE_LEN, np.float32))
-      return
-    enc = self._route_encoder(self.route)
-    try:
-      vec = enc.encode(self.route.at, state["heading"], state["vEgo"])
-    except Exception as e:  # the lane slots on a map they can't read: the rest of the input carries on without them
-      print(f"gta5: lane slots: {e!r}")
-      enc = self._route_encoder(self.route, lanes=False)
-      vec = enc.encode(self.route.at, state["heading"], state["vEgo"])
-    self.route_writer.write(vec)
-
-  def _route_encoder(self, route: Route, lanes: bool = True) -> RouteInput:
-    """The route's RouteInput, made once per route (a few ms); without its lane slots where they fail."""
-    if self.route_input is None or self.route_input[0] is not route or (not lanes and self.route_input[1].slots is not None):
-      osm = self.navigator.router.osm
-      side = osm.drive_on_right if osm is not None else True
-      try:
-        enc = RouteInput(route, side, lanes)
-      except Exception as e:
-        if not lanes:
-          raise
-        print(f"gta5: lane slots: {e!r}")
-        enc = RouteInput(route, side, False)
-      self.route_input = (route, enc)
-    return self.route_input[1]
-
-  def _lane_slots(self, route: Route):
-    """The route's lane slots, from its RouteInput (made once per route), for the nav messages' lane guidance."""
-    return self._route_encoder(route).slots
-
-  def _write_lane_slots(self, state: dict, lane: list[int] | None = None):
-    """Route input v2's lane slots for the preview, zero off the route; with the car's lane, for the model's guess at it."""
-    if self.lanes_writer is None:
-      return
-    route = self.route if self.route is not None and self.route.off <= OFF_ROUTE_INPUT else None
-    try:
-      vec = preview(self._route_encoder(route).slots if route is not None else None, route.at if route is not None else 0.0,
-                    state["vEgo"], lane)
-    except Exception as e:  # only a preview: it mustn't stop the bridge
-      print(f"gta5: lane slots: {e!r}")
-      vec = preview(None, 0.0, 0.0)
-      if route is not None:
-        self._route_encoder(route, lanes=False)
-    self.lanes_writer.write(vec)
-
-  def _overlay(self, state: dict, v: float) -> list[dict]:
-    paths = self.navigator.router.paths if self.navigator is not None else None
-    osm = self.navigator.router.osm if self.navigator is not None else None
-    out = self.overlay.update(state, self.route, paths, lambda: self._lane_line(state, v), lambda: self._turn_points(state),
-                              self.recorder is not None and self.recorder.recording, osm, lambda: self.blindspot.overlay(state, OVERLAY_LEAD))
-    return out + self.gps.update(state, self.route)
-
-  def _turn_points(self, state: dict):
-    """The next turn navd signals and where its signal comes on, for the overlay: on nav's lane line, as the route's
-    points are its road's line (a two-way road's middle, a junction's centre). Once signalled, where the car was."""
-    points = self.nav.turn_points(np.array(state["route"], dtype=float), state.get("forks"), state.get("stops"),
-                                  state.get("junctions"), state.get("turns"))
-    if points is None:
-      return None
-    line = np.asarray(self._lane_line(state, state.get("vEgo", 0.0)), float).reshape(-1, 2)
-    turn, signal = points
-    return on_path(turn, line), signal if signal is None or self.nav.signaling else on_path(signal, line)
-
-  def _update_map(self, state: dict, bearing: float, v: float):
-    now = time.monotonic()
-    if self.map_view is None or now < self.next_map:
-      return
-    self.next_map = now + MAP_EVERY
-    waypoint = state.get("waypoint")
-    speed = f"{v * 3.6:.0f} km/h" if self.metric else f"{v / 0.44704:.0f} mph"
-    self.map_view.update({
-      "t": now,
-      "car": {"x": state["pos"][0], "y": state["pos"][1], "z": round(state["pos"][2] - CAR_HEIGHT, 1), "bearing": bearing},
-      "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
-                 "lanes": self._lane_line(state, v)},
-      "waypoint": waypoint if waypoint and any(waypoint) else None,
-      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.pilot.engaged or self.openpilot.engaged else ''}",
-      "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),
-              "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
-    })
-
-  def _lane_line(self, state: dict, v: float) -> list:
-    """The route in the lanes nav aims for, for the map; while the map driver drives, the path it drives (its intent,
-    without the in-lane wander), so the ribbon is what's driven."""
-    r, now = self.route, time.monotonic()
-    md = self._map_driver()
-    if md is not None and md.path is not None:
-      if r is not self.lane_line[0] or now >= self.lane_line[1]:
-        self.lane_line = (r, now + LANE_LINE_EVERY, md.intent_line())
-      return self.lane_line[2]
-    if r is None:
-      return []
-    if r is self.lane_line[0] and now < self.lane_line[1]:
-      return self.lane_line[2]  # it can take several ms on a long route; the view trims it to the car
-    forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
-    lane = list(self.nav.lane) if self.nav.lane is not None else state.get("lane")  # the lane nav plans from
-    line = r.lane_line(lane_plan(r.rest(), forks, lane, r.lanes_at, v, self.nav.tune, r.lane_arrows(r.length, 0.0),
-                                 r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length), turns=r.turns(r.length),
-                                 classes=r.changes(r.classes, r.length), limits=r.changes(r.limit_list, r.length),
-                                 fwy=self.nav.fwy_state(), crossings=[a - r.at for a in r.stops if a > r.at]))
-    self.lane_line = (r, now + LANE_LINE_EVERY, [] if line is None else line.round(1).tolist())
-    return self.lane_line[2]
-
-  def _set_nav_desire(self, desire: str):
-    if desire:
-      self.params.put("NavDesire", desire)
-    else:
-      self.params.remove("NavDesire")
-
-  def _update_buttons(self, state: dict):
-    """The plugin's keys stand in for the cruise buttons: engage sets when disengaged and cancels when engaged, and the
-    speed keys are resume/accel and set/decel, which step the set speed while engaged (to the next multiple of 5 with
-    shift)."""
-    commands = {"speedUpPresses": "cruise_up", "speedDownPresses": "cruise_down", "speedUp5Presses": "cruise_up5",
-                "speedDown5Presses": "cruise_down5"}
-    self._track(state)
-    marks = state.get("markPresses")
-    if marks is not None:
-      new = marks - self.presses.get("markPresses", marks)
-      self.presses["markPresses"] = marks
-      if new > 0:  # a reloaded core counts from 0 again
-        self._mark(state)
-    for key in ("engagePresses", *commands):
-      presses = state.get(key)
-      if presses is None:
-        continue
-      new = presses - self.presses.get(key, presses)
-      self.presses[key] = presses
-      for _ in range(max(0, min(new, 5))):
-        if key == "engagePresses":
-          self._engage_key()
-        else:
-          self.q.put(control_cmd_gen(commands[key]))
-
-  def _engage_key(self):
-    """Disengages whichever pilot is engaged, else engages the pilot, or openpilot where it can't (the map driver
-    without a route). While expert mode is on the key is openpilot's alone."""
-    pilots = list(dict.fromkeys([self.openpilot] if self.expert.on else [self.pilot, self.openpilot]))
-    for p in pilots:
-      if p.engaged:
-        p.disengage("the driver pressed the engage key")
-        return
-    for p in pilots:
-      if p.engage(self.route):
-        return
-
-  def _track(self, state: dict):
-    """The car's recent track and the line it was to follow, for marks; marks whose MARK_AFTER has passed are written."""
-    now = time.monotonic()
-    pos = state.get("pos")
-    if pos and (not self.track or now - self.track[-1][0] >= TRACK_EVERY):
-      self.track.append([round(now, 2), round(float(pos[0]), 2), round(float(pos[1]), 2), round(float(state.get("vEgo") or 0.0), 2)])
-      line = getattr(self, "lane_line", None)
-      if line and line[2] and (not self.lane_lines or now - self.lane_lines[-1][0] >= 2.0):
-        self.lane_lines.append((now, line[2][:200]))
-    while self.marks_due and now >= self.marks_due[0][0]:
-      self._write_mark(self.marks_due.pop(0)[1])
-
-  def _mark(self, state: dict):
-    """A bookmark (the plugin's mark key): where and when, what drove and what it was doing, the recording's segment and
-    frame, the line it was following (the map driver's plan, nav's lane line from MARK_BEFORE on) and the route about
-    it; written to MARKS MARK_AFTER s later with the car's track from MARK_BEFORE s before to then. openpilot's
-    userBookmark goes now, so loggerd keeps the segment."""
-    now = time.monotonic()
-    r, md, rec = self.route, self._map_driver(), self.recorder
-    seg = rec.segment if rec is not None else None
-    plan = None
-    if md is not None and md.path is not None:
-      k = (md.s_path >= md.s - PLAN_BEHIND) & (md.s_path <= md.s + PLAN_AHEAD)
-      plan = md.path[k][::2].round(2).tolist()
-    route_line = None
-    if r is not None:
-      k = (r.along >= r.at - PLAN_BEHIND) & (r.along <= r.at + PLAN_AHEAD)
-      route_line = r.points[k][:, :2].round(2).tolist()
-    early = next((ln for t, ln in self.lane_lines if t >= now - MARK_BEFORE), None)
-    mark = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "mono": round(now, 3), "t_game": state.get("t"),
-            "pos": [round(float(c), 2) for c in state.get("pos") or []], "heading": state.get("heading"), "vEgo": state.get("vEgo"),
-            "street": state.get("street"), "lane": state.get("lane"), "indicator": state.get("indicator"),
-            "driver": self._driver_name(), "map": md.info() if md is not None else None,
-            "route": None if r is None else {"at": round(float(r.at), 1), "length": round(float(r.length), 1),
-                                             "dest": [round(float(c), 1) for c in r.points[-1][:2]]},
-            "segment": seg.path.name if seg is not None else None, "frame": len(seg.rows) if seg is not None else None,
-            "recording": rec.route_name if rec is not None else None,
-            "plan": plan, "route_line": route_line, "lane_line_before": early,
-            "lane_line": (getattr(self, "lane_line", None) or (None, None, None))[2]}
-    if self.bookmark_pm is None:
-      self.bookmark_pm = messaging.PubMaster(["userBookmark"])
-    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
-    print(f"gta5: mark at {mark['pos'][:2]} {mark['street']!r} ({mark['driver']}, segment {mark['segment']} f{mark['frame']})", flush=True)
-    self.marks_due.append((now + MARK_AFTER, mark))
-
-  def _flush_marks(self):
-    for _, mark in self.marks_due:  # with the track as far as it got
-      self._write_mark(mark)
-    self.marks_due = []
-
-  def _write_mark(self, mark: dict):
-    mark["track"] = [p for p in self.track if mark["mono"] - MARK_BEFORE <= p[0]]  # [mono, x, y, v], to MARK_AFTER on
-    try:
-      Path(MARKS).parent.mkdir(parents=True, exist_ok=True)
-      with open(MARKS, "a") as f:
-        f.write(json.dumps(mark) + "\n")
-    except OSError as e:
-      print(f"gta5: mark not saved: {e}", flush=True)
-
-  def _set_blinkers(self, simulator_state: SimulatorState):
-    # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between
-    simulator_state.left_blinker, simulator_state.right_blinker = self.driver.blinkers(self.nav.blinker_gap(time.monotonic()))
+      matcher.update(x, y, g.bearingDeg, g.bearingAccuracyDeg, g.speed, self.gnss.profile.latency)
 
   def read_cameras(self):
     pass
@@ -883,15 +458,17 @@ class GTA5World(World):
     self._send({"type": "control", "active": False})
 
   def close(self, reason: str):
-    self._flush_marks()
+    if self.brain is not None:
+      self.brain.close()
+      if self.brain.map_view is not None:
+        self.brain.map_view.close()
+    if self.link is not None:
+      self.link.close()
     if self.stall is not None:
       self.stall.stop()
     self._send({"type": "control", "active": False})
     if self.pinner is not None:
       self.pinner.terminate()
-    if self.map_view is not None:
-      self.map_view.close()
-    self.overlay.close()
     self.exit_event.set()
     # the camera thread waits for each game frame, and none come once the game connection is gone; wake it so the bridge
     # process can exit, handing it a blank frame rather than the shared memory freed below

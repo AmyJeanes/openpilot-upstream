@@ -326,9 +326,13 @@ class Map:
   def __init__(self, map_dir: str, router: str | None, cache: str):
     from openpilot.tools.sim.bridge.gta5 import gta5_world
     from openpilot.tools.sim.bridge.gta5.map.router import Router
-    w = gta5_world.GTA5World.__new__(gta5_world.GTA5World)
+    if hasattr(gta5_world, "LocalIO"):  # the brain split out of the world (gta5_brain.py)
+      from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
+      w = Brain.__new__(Brain)
+    else:
+      w = gta5_world.GTA5World.__new__(gta5_world.GTA5World)
     w.navigator = SimpleNamespace(router=Router(router or "http://127.0.0.1:1"), refresh=lambda: None)
-    w.lane_matcher, w.junction_areas, w.gnss = None, None, None
+    w.lane_matcher, w.junction_areas, w.gnss, w.match = None, None, None, False
     w._load_paths(os.path.join(map_dir, "paths.jsonl"))
     self.paths, self.osm = w.navigator.router.paths, w.navigator.router.osm
     self.lane_matcher, self.junction_areas = w.lane_matcher, w.junction_areas
@@ -373,6 +377,61 @@ def _sync(navigator):
 
 
 def _world(head: dict, mp: Map, rec: dict):
+  from openpilot.tools.sim.bridge.gta5 import gta5_world
+  if hasattr(gta5_world, "LocalIO"):
+    return _split_world(head, mp, rec)
+  return _old_world(head, mp, rec)
+
+
+def _split_world(head: dict, mp: Map, rec: dict):
+  """The world after the brain's split (gta5_brain.py): its LocalIO on the stubbed openpilot, and its brain."""
+  from collections import deque
+  from openpilot.tools.sim.bridge.common import QueueMessage  # noqa: F401  (control_cmd_gen's)
+  from openpilot.tools.sim.bridge.gta5 import gta5_brain, gta5_world
+  from openpilot.tools.sim.bridge.gta5.map.router import Navigator
+  from openpilot.tools.sim.lib.common import SimulatorState
+  w = gta5_world.GTA5World.__new__(gta5_world.GTA5World)
+  w.simulator_state = SimulatorState()
+  w.q = SimpleNamespace(put=lambda m: rec["q"].append(str(getattr(m, "data", m))))
+  w.lock = threading.Lock()
+  w.state, w.last_frame_time = None, 0.0
+  w.log, w.recorder, w.link, w.stall, w.curvature, w.gnss, w.match_t = None, None, None, None, 0.0, None, None
+  w._send = lambda obj: rec["cmd"].append(obj)
+  io = w.io = gta5_world.LocalIO.__new__(gta5_world.LocalIO)
+  io.simulator_state, io.q, io.tesla, io.VM = w.simulator_state, w.q, True, None
+  w.model = Model()
+  io.sm = SubMaster({"modelV2": w.model})
+  io.params = Params(head["refresh"], rec["nd"])
+  io.inputs = dict(gta5_world.DEFAULT_INPUTS)
+  io.nav_speed_pm, io.bookmark_pm = SimpleNamespace(send=lambda *a: None), None
+  io.route_writer, io.lanes_writer = Writer(), Writer()
+  br = w.brain = gta5_brain.Brain.__new__(gta5_brain.Brain)
+  br.io, br._send, br.log, br.recorder, br.nav_msgs, br.match = io, w._send, None, None, None, False
+  br.metric, br.next_hud, br.presses = False, 0.0, {}
+  br.track, br.lane_lines, br.marks_due = deque(maxlen=200), deque(maxlen=20), []
+  br._init_nav()
+  tune_cls = type(br.nav.tune)
+  br.nav.tune = tune_cls("")
+  br.nav.tune.values.update(head["tune"])
+  br.blindspot = gta5_brain.BlindSpot()  # the bridge's monitor, from the logged "nearby"
+  br.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None, md_driving=False, on=False)
+  br._init_pilots()
+  br.map_view = MapView(head["dest"])
+  br.navigator = Navigator(mp.router())
+  _sync(br.navigator)
+  br.lane_matcher, br.junction_areas = mp.lane_matcher, mp.junction_areas
+  if gta5_brain.NAV_MATCH:  # routing from navd's map match, on simulated 3X GNSS seeded alike each run
+    from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
+    from openpilot.tools.sim.bridge.gta5.gta5_gnss import Gnss
+    if mp.graph is None:
+      mp.graph = RoadGraph.from_osm(mp.osm)
+    w.gnss = Gnss("qcom3x", seed=0, pm=SimpleNamespace(send=lambda *a: None))
+    br.match, br.matcher = True, MapMatcher(mp.graph)
+  br._overlay = lambda state, v: []
+  return w, True
+
+
+def _old_world(head: dict, mp: Map, rec: dict):
   from openpilot.tools.sim.bridge.common import QueueMessage  # noqa: F401  (control_cmd_gen's)
   from openpilot.tools.sim.bridge.gta5 import gta5_world
   from openpilot.tools.sim.bridge.gta5.map.router import Navigator
@@ -427,17 +486,18 @@ def _world(head: dict, mp: Map, rec: dict):
 
 
 def _turn_points(w, navd: bool):
-  r = w.route
+  core = getattr(w, "brain", None) or w  # nav's parts: the brain's after its split
+  r = core.route
   if r is None or w.state is None:
     return None
-  state = getattr(w, "_replay_state", None)
+  state = getattr(core, "_replay_state", None)
   if state is None or not state.get("route"):
     return None
   route = np.array(state["route"], dtype=float)
   if navd:
-    tp = w.nav.turn_points(route, state.get("forks"), state.get("stops"), state.get("junctions"))
+    tp = core.nav.turn_points(route, state.get("forks"), state.get("stops"), state.get("junctions"))
   else:
-    tp = w.nav.turn_points(route, state)
+    tp = core.nav.turn_points(route, state)
   return None if tp is None else [None if p is None else np.asarray(p).tolist() for p in tp]
 
 
@@ -447,13 +507,14 @@ def replay(path: str, mp: Map, out: str):
     frames = [json.loads(line) for line in f]
   rec = {"cmd": [], "q": [], "nd": []}
   w, navd = _world(head, mp, rec)
+  core, writers = getattr(w, "brain", None) or w, getattr(w, "io", None) or w  # the brain's and LocalIO's after the split
   _patch_clocks()
-  map_route = w._map_route  # the nav state dict, for the turn points: _map_route's result, as nav is given it
+  map_route = core._map_route  # the nav state dict, for the turn points: _map_route's result, as nav is given it
 
   def keep(state, bearing):
-    w._replay_state = map_route(state, bearing)
-    return w._replay_state
-  w._map_route = keep
+    core._replay_state = map_route(state, bearing)
+    return core._replay_state
+  core._map_route = keep
   lines = 0
   with gzip.open(out, "wt") as log:
     log.write(json.dumps({"trip": head["trip"], "navd": navd}) + "\n")
@@ -471,8 +532,8 @@ def replay(path: str, mp: Map, out: str):
       s = w.simulator_state
       step = {"t": fr["mono"], "cmd": rec["cmd"], "q": rec["q"], "nd": rec["nd"], "cap": s.cruise_cap,
               "bl": [s.left_blinker, s.right_blinker], "tq": s.user_torque, "sl": s.speed_limit, "slf": s.speed_limit_follow,
-              "ri": w.route_writer.last, "ls": w.lanes_writer.last, "routes": w.routes, "tp": tp,
-              "out": buf.getvalue().splitlines(), **({"why": w.cap_reason} if hasattr(w, "cap_reason") else {})}
+              "ri": writers.route_writer.last, "ls": writers.lanes_writer.last, "routes": core.routes, "tp": tp,
+              "out": buf.getvalue().splitlines(), **({"why": core.cap_reason} if hasattr(core, "cap_reason") else {})}
       log.write(json.dumps(step) + "\n")
       lines += 1
   return head["trip"], lines

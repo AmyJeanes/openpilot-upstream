@@ -4,9 +4,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import gta5_pilot
-from openpilot.tools.sim.bridge.gta5 import gta5_world as world_mod
 from openpilot.tools.sim.bridge.gta5.gta5_pilot import INACTIVE, ROUTE_GAP, TOOK_OVER, MapPilot, OpenpilotPilot
-from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
+from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
 
 CONTROL = {"type": "control", "active": True, "curvature": 0.0, "accel": 0.5}
 
@@ -66,10 +65,10 @@ def test_openpilot_pilot():
   """The cruise buttons engage and disengage it, the driver's brake or steering cancels it (once per press), and it
   has controls only while engaged."""
   cmds = []
-  sim = SimpleNamespace(is_engaged=False)
-  p = OpenpilotPilot(sim, cmds.append, sm=None, tesla=False)
+  io = SimpleNamespace(engaged=False, cruise=cmds.append, controls=lambda state: None)
+  p = OpenpilotPilot(io)
   assert p.engage(None) and cmds == ["cruise_down"] and p.controls(state()) is None
-  sim.is_engaged = True
+  io.engaged = True
   p.step(state(user={"brake": True}), None, 0.0)
   p.step(state(user={"brake": True}), None, 0.01)
   assert cmds == ["cruise_down", "cruise_cancel"]
@@ -78,17 +77,15 @@ def test_openpilot_pilot():
 
 
 def world(monkeypatch, pilot: str):
-  """A GTA5World with just its pilots, expert mode off."""
+  """A brain with just its pilots, expert mode off, openpilot's cruise buttons kept in cmds."""
   monkeypatch.setattr(gta5_pilot, "MapDriver", FakeMapDriver)
   monkeypatch.setattr(gta5_pilot, "PILOT", pilot)
-  w = GTA5World.__new__(GTA5World)
-  w.simulator_state = SimpleNamespace(is_engaged=False)
+  w = Brain.__new__(Brain)
   w.cmds, w.sent = [], []
-  w.q = SimpleNamespace(put=lambda c: w.cmds.append(c))
-  w.sm, w.tesla, w.log, w._send = None, False, None, w.sent.append
+  w.io = SimpleNamespace(engaged=False, cruise=w.cmds.append, controls=lambda state: None)
+  w.log, w._send = None, w.sent.append
   w.expert = SimpleNamespace(on=False, md_driving=False, update=lambda state, route, engaged: False)
   w.destination = SimpleNamespace(arrived=lambda: w.sent.append("arrived"))
-  monkeypatch.setattr(world_mod, "control_cmd_gen", lambda cmd: cmd)
   w._init_pilots()
   w.route = None
   return w
@@ -96,14 +93,14 @@ def world(monkeypatch, pilot: str):
 
 def test_engage_key_map(monkeypatch):
   """GTA5_PILOT=map: the key engages the map driver along the route and disengages it; without a route it's openpilot's.
-  The world steps whoever drives and takes their controls; arriving hands back and ends the destination."""
+  The brain steps whoever drives and takes their controls; arriving hands back and ends the destination."""
   w = world(monkeypatch, "map")
   w._engage_key()  # no route
   assert w.cmds == ["cruise_down"] and not w.pilot.engaged
-  w.simulator_state.is_engaged = True
+  w.io.engaged = True
   w._engage_key()
   assert w.cmds == ["cruise_down", "cruise_cancel"]
-  w.simulator_state.is_engaged = False
+  w.io.engaged = False
   w.route = np.zeros((2, 2))
   w._engage_key()
   assert w.pilot.engaged and len(w.cmds) == 2
@@ -123,7 +120,7 @@ def test_engage_key_openpilot(monkeypatch):
   assert w.pilot is w.openpilot
   w._engage_key()
   assert w.cmds == ["cruise_down"]
-  w.simulator_state.is_engaged = True
+  w.io.engaged = True
   assert w._step_pilots(state()) is w.openpilot
   w._engage_key()
   assert w.cmds == ["cruise_down", "cruise_cancel"]
