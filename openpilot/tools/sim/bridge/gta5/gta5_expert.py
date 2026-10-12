@@ -37,7 +37,14 @@ always throughout.
 
 driver: "ai" (the default) as above; "map" drives the route with our own map driver (gta5_mapdrive.py, the control
 file's `mapdrive` object sets it up) instead of the game's AI, the AI off; "map+ai" the same, the AI taking over where
-the map driver aborts (marked ai_fallback). `source` says who drives each frame: none, ai, map or ai_fallback."""
+the map driver aborts (marked ai_fallback). `source` says who drives each frame: none, ai, map or ai_fallback.
+
+engage (driver=map): the map driver drives as openpilot would, only while engaged. Turning it on arms it rather than
+starting a drive; then the engage key starts it along whatever route there is (to the game's waypoint or the map view's
+destination; without one the key engages openpilot as usual), and the engage key, the brake, the gas or steering hand
+the car straight back. Arriving (which clears the destination, as nav's arrival does) or an abort ends the drive, still
+armed. A new destination while it drives is spliced in, the last route driven on until the router has it. The bridge
+starts armed with GTA5_DRIVER=map, as if the control file said {"on": true, "driver": "map", "engage": true}."""
 import json
 import math
 import os
@@ -49,7 +56,7 @@ from pathlib import Path
 import numpy as np
 
 from openpilot.selfdrive.navd.maneuvers import Maneuver, maneuvers, route_point
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import USER_STEER, MapDriver
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay
 
 CONTROL = Path("/tmp/gta5_expert.json")
@@ -60,7 +67,7 @@ DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "ag
             "arrive": "task", "stop_before": 15.0, "speed_step": 0.5, "hold_after": 3.0,
             "speed_by_class": None, "decel_fast": 0.0, "unstick": False, "unstick_after": 10.0,
             "unstick_style": 1076369579, "unstick_dist": 30.0, "unstick_for": 20.0, "wrongway": None,
-            "shortcuts": "route", "driver": "ai", "mapdrive": None}
+            "shortcuts": "route", "driver": "ai", "mapdrive": None, "engage": False}
 MAP_DRIVERS = ("map", "map+ai")
 MAP_LOG_EVERY = 0.1  # s between the map driver's rows in the expert log
 STANDSTILL = 0.5  # m/s, below which a ramped cap starts from `launch`
@@ -91,6 +98,7 @@ FORK_PAST = 50.0  # m past a fork or a shortcut link to a target on the route's 
 SHORTCUT_PAST = 30.0  # m past one that UseShortCutLinks stays on
 FAST_CLASSES = {"motorway", "motorway_link", "trunk", "trunk_link", "ramp"}  # the map's and Valhalla's, for shortcuts=forks
 RETASK_MOVE = 2.0  # m a target moves on so the plugin tasks the AI again (it ignores a target under 1 m from the last)
+ROUTE_GAP = 5.0  # s an engaged map driver drives on along its last route while the router has none (a new destination)
 
 
 def control_path() -> Path | None:
@@ -131,9 +139,16 @@ class Expert:
     self.warned = False
     self.seen_ai = False  # a state with the plugin's AI driver in it, since the bridge started
     self.next_guard = 0.0
+    self.engaged = False  # armed (engage) and the engage key has the map driver driving
+    self.arrived_now = False  # an engaged drive arrived, for the bridge to clear the destination
+    self.no_route_since: float | None = None
     self._reset()
     if self.path is not None:
       print(f"gta5: expert mode watches {self.path}", flush=True)
+    if os.getenv("GTA5_DRIVER") == "map":
+      self.cfg, self.on = {**DEFAULTS, "on": True, "driver": "map", "engage": True}, True
+      self.log = open(log_path(), "a", buffering=1)
+      print("gta5: the engage key drives with the map driver (GTA5_DRIVER=map)", flush=True)
 
   def _reset(self):
     self.route = None
@@ -188,13 +203,16 @@ class Expert:
       if not isinstance(e, FileNotFoundError):
         print(f"gta5: expert control file: {e}", flush=True)
       return
-    was = self.on
+    was, was_armed = self.on, self.armed
     self.cfg, self.on = cfg, bool(cfg["on"])
     print(f"gta5: expert {'on' if self.on else 'off'} {json.dumps({k: v for k, v in cfg.items() if k != 'on'})}", flush=True)
-    if self.on and not was:
+    if self.on and (not was or self.armed != was_armed):
+      if self.active:
+        self._stop("expert mode changed")
+      self.engaged = False
       self._reset()
       self.ww = self._wrongway(cfg.get("wrongway"))
-      self.md = self._mapdriver(cfg)
+      self.md = None if self.armed else self._mapdriver(cfg)
       if self.log is None:
         self.log = open(log_path(), "a", buffering=1)
     elif self.active:
@@ -225,6 +243,35 @@ class Expert:
     except (ValueError, TypeError) as e:
       print(f"gta5: expert: bad mapdrive {spec!r}: {e}", flush=True)
       return None
+
+  @property
+  def armed(self) -> bool:
+    """The engage key drives with the map driver (engage), rather than expert mode driving as soon as it's on."""
+    return self.on and bool(self.cfg.get("engage")) and self.cfg.get("driver") == "map"
+
+  def engage_key(self, route, op_engaged: bool) -> bool:
+    """An engage key press: whether it started or stopped the armed map driver, rather than being openpilot's."""
+    if not self.armed:
+      return False
+    if self.engaged:
+      self.engaged = False
+      self._stop("the driver pressed the engage key")
+      return True
+    if route is None or op_engaged:
+      return False
+    md = self._mapdriver(self.cfg)
+    if md is None:
+      return False
+    self._reset()
+    self.md, self.engaged, self.no_route_since = md, True, None
+    if self.log is None:
+      self.log = open(log_path(), "a", buffering=1)
+    print("gta5: expert: the map driver engaged", flush=True)
+    return True
+
+  def take_arrived(self) -> bool:
+    arrived, self.arrived_now = self.arrived_now, False
+    return arrived
 
   @property
   def controls_car(self) -> bool:
@@ -290,6 +337,11 @@ class Expert:
     if not self.on:
       if self.active:
         self._stop("off")
+      self._guard(state.get("ai") or {}, engaged, now)
+      return False
+    if self.armed and not self.engaged:
+      if self.active:
+        self._stop("disengaged")
       self._guard(state.get("ai") or {}, engaged, now)
       return False
     if "ai" not in state:
@@ -396,6 +448,10 @@ class Expert:
     dest = self.cfg.get("dest")
     if route is not None and dest and np.hypot(*(route.points[-1] - np.asarray(dest[:2], dtype=float))) > DEST_NEAR:
       route = None  # the last trip's, still there until the router has the new one
+    if self.engaged:
+      self.no_route_since = None if route is not None else (self.no_route_since or now)
+      if route is None and md.route is not None and now - self.no_route_since < ROUTE_GAP:
+        route = md.route
     if not self.active:
       self.active = True
       self.clear_nav_desire()
@@ -417,6 +473,17 @@ class Expert:
     if state.get("indicator") != self.indicator and now >= self.next_indicator:
       self.next_indicator = now + REQUEST_EVERY
       self.send({"type": "ai", "indicator": self.indicator or "off"})
+    if self.engaged:
+      user = state.get("user") or {}
+      took_over = abs(float(user.get("steer") or 0.0)) > USER_STEER or bool(user.get("brake")) or bool(user.get("gas"))
+      # an abort brakes to a stop, unless the driver has the car
+      why = md.finished or ("no route" if route is None else "driver input" if took_over else None)
+      if why is not None:
+        self.arrived_now = md.finished == "arrived"
+        self._write(state, state.get("ai") or {})
+        self.engaged = False
+        self._stop(f"mapdrive {why}")
+        return False
     if md.finished == "arrived":
       self.arrived = True
       print("gta5: expert arrived", flush=True)

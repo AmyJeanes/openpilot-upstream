@@ -29,6 +29,8 @@
   gta5_cmd.py expert route L1 driver=map [mapdrive='{"seed":3,"preset":"calm"}']
                                                 ... driven by our map driver instead of the game's AI (gta5_mapdrive.py;
                                                 driver=map+ai: the AI takes over where it aborts)
+  gta5_cmd.py expert on driver=map engage=1     the engage key drives with the map driver instead of openpilot, along the
+                                                destination set (or start the bridge with GTA5_DRIVER=map)
   gta5_cmd.py expert status                     the control file
   gta5_cmd.py debug on [layers=edges,dividers,stops,junctions,arrows,crossings,parking,tapers,flags,route,nav,points,fill|all]
              [width=1] [widths=e:2,d:1.5] [dist=120] [grow=40] [ground=1] [lift=0.05] [casing=1] [thin=0] [sides=1] [force=1]

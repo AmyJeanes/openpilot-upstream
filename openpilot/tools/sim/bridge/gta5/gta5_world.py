@@ -318,7 +318,7 @@ class GTA5World(World):
     cluster = self.sm['carState'].vCruiseCluster
     set_kph = self.sm['controlsState'].deprecated.vCruise if cluster == 0.0 else cluster
     self._send({"type": "hud", "setSpeed": set_kph if 0 < set_kph < 255 else 0, "metric": self.metric,
-                "engaged": self.simulator_state.is_engaged})
+                "engaged": self.simulator_state.is_engaged or self.expert.engaged})
 
   def apply_controls(self, steer_angle, throttle_out, brake_out):
     """Sends carControl's desired curvature and acceleration rather than the bridge's steer_angle/throttle/brake:
@@ -445,7 +445,10 @@ class GTA5World(World):
                            pose=(np.array(state["pos"][:2], dtype=float), bearing))
     for msg in self._overlay(state, v):
       self._send(msg)
-    if self.expert.update(state, self.route, self.simulator_state.is_engaged):
+    expert_drives = self.expert.update(state, self.route, self.simulator_state.is_engaged)
+    if self.expert.take_arrived():
+      self.destination.arrived()
+    if expert_drives:
       # the game's AI drives (gta5_expert.py): openpilot stays disengaged, and nav and pull-away wait
       self._set_cap(simulator_state, 0.0, "")
       self._set_blinkers(simulator_state)
@@ -752,6 +755,8 @@ class GTA5World(World):
       self.presses[key] = presses
       for _ in range(max(0, min(new, 5))):
         if key == "engagePresses":
+          if self.expert.engage_key(self.route, self.simulator_state.is_engaged):
+            continue  # the armed map driver's (gta5_expert.py engage)
           cmd = "cruise_cancel" if self.simulator_state.is_engaged else "cruise_down"
         else:
           cmd = commands[key]
