@@ -9,17 +9,22 @@ It writes its own address to the plugin's bridge file; the bridge must then writ
 with GTA5_BRIDGE_FILE=/mnt/c/Users/Public/gta5op-link.txt. A bridge started without that writes its address over the
 relay's and the plugin connects to it directly again.
 
-The relay connects to the bridge first and only then listens for the plugin, as the plugin switches to openpilot's
-camera as soon as it connects: with no bridge, the plugin's connects are refused and the game stays as it is. The
-bridge takes the relay's connection for the game's, so it reports the game connected while the relay waits for it;
-what the bridge sends meanwhile (the debug overlay's settings) waits for the plugin. A plugin that leaves (the game
-closed, its core reloaded) ends the bridge's connection too, so the bridge sees the game go and come back as before.
+The relay keeps a connection to the bridge whenever it can, and listens for the plugin only while there's a bridge or a
+brain to take the game, as the plugin switches to openpilot's camera as soon as it connects: with neither, the plugin's
+connects are refused and the game stays as it is. The bridge takes the relay's connection for the game's, so it reports
+the game connected while the relay waits for it; what the bridge sends meanwhile (the debug overlay's settings) waits
+for the plugin. A plugin that leaves (the game closed, its core reloaded) ends the bridge's connection too, so the bridge
+sees the game go and come back as before.
 
 The brain (gta5_host.py, the bridge's brain on Windows, the bridge in WSL then being the link) connects on the brain
 port: it gets each frame's header (the game state) as a JSON line, the newest only if it falls behind, and its lines go
 to the plugin. Who drives decides whose controls the car takes: the brain says {"type": "owner", "who": "brain"} while
 its own driver drives, and the bridge's control messages (openpilot's) are dropped until it says "link" again, or goes.
 While a brain is connected the bridge's HUD messages are dropped too: the brain sends the HUD.
+
+The game and the brain don't need the bridge: with a brain connected the plugin stays while the bridge is gone (the
+link restarting, or a host run without openpilot), its frames dropped, and a bridge that comes back gets them from the
+next message's start. With no brain, the bridge going ends the plugin's connection, as without a relay.
 Every STATS_EVERY s it logs the frames piped up, MB/s and the longest gap between frames."""
 import argparse
 import json
@@ -29,6 +34,7 @@ import struct
 import sys
 import threading
 import time
+from collections import deque
 
 PORT = 8781
 BRAIN_PORT = 8784
@@ -40,6 +46,7 @@ CHUNK = 4 << 20
 SOCK_BUF = 16 << 20
 WAITING_MAX = 1 << 20  # bytes from the bridge kept for a plugin yet to connect
 STATS_EVERY = 10.0  # s
+CHECK_EVERY = 0.2  # s between looks at whether the game still has a bridge or a brain
 
 
 def log(msg: str):
@@ -72,8 +79,10 @@ class Frames:
     self.last: float | None = None
     self.gap = 0.0
 
-  def feed(self, data: memoryview, now: float):
+  def feed(self, data: memoryview, now: float) -> list[int]:
+    """Where in data messages start."""
     self.bytes += len(data)
+    starts = []
     i = 0
     while i < len(data):
       if self.need:
@@ -90,6 +99,8 @@ class Frames:
         self.need -= n
         i += n
         continue
+      if not self.head:
+        starts.append(i)
       take = min(4 - len(self.head), len(data) - i)
       self.head += bytes(data[i:i + take])
       i += take
@@ -100,6 +111,7 @@ class Frames:
         if self.last is not None:
           self.gap = max(self.gap, now - self.last)
         self.last = now
+    return starts
 
   def take(self) -> tuple[int, int, float]:
     out = (self.count, self.bytes, self.gap)
@@ -207,34 +219,119 @@ class Brain:
       conn.close()
 
 
-def pipe_up(game: socket.socket, bridge: socket.socket, done: threading.Event, frames: Frames):
-  """The plugin's frames to the bridge, as they come."""
+class Bridge:
+  """The relay's connection to the bridge, made again whenever it goes: its lines go to the game, or wait for the
+  plugin (the last WAITING_MAX bytes of them), and the plugin's frames go to it."""
+  def __init__(self, game: Game, link_file: str):
+    self.game = game
+    self.link_file = link_file
+    self.lock = threading.Lock()
+    self.sock: socket.socket | None = None
+    self.gen = 0  # counts connections, for the frames to start each one at a message's start
+    self.waiting: deque[bytes] = deque()
+    self.waiting_bytes = 0
+    self.playing = False  # the plugin is connected: the lines go straight to it
+    threading.Thread(target=self._run, daemon=True).start()
+
+  @property
+  def up(self) -> bool:
+    return self.sock is not None
+
+  def current(self) -> tuple[socket.socket, int] | None:
+    with self.lock:
+      return (self.sock, self.gen) if self.sock is not None else None
+
+  def drop(self, sock: socket.socket | None = None):
+    """Ends the connection (that one, if given); the bridge sees the game go, and the relay connects again."""
+    with self.lock:
+      sock = sock or self.sock
+    if sock is not None:
+      finish(threading.Event(), sock)
+
+  def game_on(self, on: bool):
+    """The plugin came (what the bridge sent meanwhile goes to it first) or went."""
+    with self.lock:
+      self.playing = on
+      lines, self.waiting, self.waiting_bytes = self.waiting, deque(), 0
+      if on:
+        for line in lines:
+          self.game.from_link(line)
+
+  def _connect(self) -> socket.socket:
+    last = None
+    while True:
+      addr = bridge_address(self.link_file)
+      if addr is not None:
+        try:
+          sock = socket.create_connection(addr, timeout=CONNECT_TIMEOUT)
+          sock.settimeout(None)
+          tune(sock)
+          log(f"connected to the bridge at {addr[0]}:{addr[1]}")
+          return sock
+        except OSError as e:
+          why = f"{addr[0]}:{addr[1]}: {e}"
+      else:
+        why = f"no bridge address in {self.link_file}"
+      if why != last:
+        log(f"waiting for the bridge ({why})")
+        last = why
+      time.sleep(RETRY_EVERY)
+
+  def _run(self):
+    while True:
+      sock = self._connect()
+      with self.lock:
+        self.sock, self.gen, self.waiting, self.waiting_bytes = sock, self.gen + 1, deque(), 0
+      try:
+        for line in sock.makefile("rb"):
+          with self.lock:
+            playing = self.playing
+            if not playing:
+              self.waiting.append(line)
+              self.waiting_bytes += len(line)
+              while self.waiting_bytes > WAITING_MAX:
+                self.waiting_bytes -= len(self.waiting.popleft())
+          if playing:
+            self.game.from_link(line)
+      except OSError:  # reset: a bridge shutting down as the relay connected
+        pass
+      with self.lock:
+        self.sock = None
+      sock.close()
+      log("the bridge went")
+
+
+def pipe_up(game: socket.socket, bridge: Bridge, done: threading.Event, frames: Frames):
+  """The plugin's frames to the bridge, as they come; dropped while there's none, and to a new one from the next
+  message's start."""
   buf = bytearray(CHUNK)
   view = memoryview(buf)
+  gen = None  # the bridge connection the frames go to
   try:
     while not done.is_set():
       n = game.recv_into(buf)
       if n == 0:
         break
-      frames.feed(view[:n], time.monotonic())
-      bridge.sendall(view[:n])
+      starts = frames.feed(view[:n], time.monotonic())
+      to = bridge.current()
+      if to is None:
+        gen = None
+        continue
+      sock, g = to
+      start = 0
+      if g != gen:
+        if not starts:
+          continue
+        start, gen = starts[0], g
+      try:
+        sock.sendall(view[start:n])
+      except OSError:
+        bridge.drop(sock)
+        gen = None
   except OSError:
     pass
   finally:
-    finish(done, game, bridge)
-
-
-def pipe_down(bridge: socket.socket, game: Game, done: threading.Event, sock: socket.socket):
-  """The bridge's lines to the plugin, through the owner's filter."""
-  try:
-    for line in bridge.makefile("rb"):
-      if done.is_set():
-        break
-      game.from_link(line)
-  except OSError:
-    pass
-  finally:
-    finish(done, sock, bridge)
+    finish(done, game)
 
 
 def finish(done: threading.Event, *socks: socket.socket):
@@ -246,51 +343,50 @@ def finish(done: threading.Event, *socks: socket.socket):
       pass
 
 
-def connect_bridge(link_file: str) -> socket.socket:
-  last = None
-  while True:
-    addr = bridge_address(link_file)
-    if addr is not None:
-      try:
-        sock = socket.create_connection(addr, timeout=CONNECT_TIMEOUT)
-        sock.settimeout(None)
-        tune(sock)
-        log(f"connected to the bridge at {addr[0]}:{addr[1]}")
-        return sock
-      except OSError as e:
-        why = f"{addr[0]}:{addr[1]}: {e}"
-    else:
-      why = f"no bridge address in {link_file}"
-    if why != last:
-      log(f"waiting for the bridge ({why})")
-      last = why
-    time.sleep(RETRY_EVERY)
+def wanted(game: Game, bridge: Bridge) -> bool:
+  """Whether there's a bridge or a brain to take the game."""
+  return bridge.up or game.brain
 
 
-def wait_for_plugin(bridge: socket.socket, port: int) -> tuple[socket.socket | None, bytes]:
-  """The plugin's connection, and what the bridge sent before it came; None if the bridge went first."""
+def wait_for_plugin(port: int, game: Game, bridge: Bridge) -> socket.socket | None:
+  """The plugin's connection; None once there's neither a bridge nor a brain to take it."""
   srv = socket.create_server(("127.0.0.1", port))
-  waiting = bytearray()
   try:
-    while True:
-      ready, _, _ = select.select([srv, bridge], [], [], 1.0)
-      if bridge in ready:
-        try:
-          data = bridge.recv(65536)
-        except OSError:  # reset: a bridge shutting down as the relay connected
-          data = b""
-        if not data:
-          log("the bridge closed before the game connected")
-          return None, b""
-        waiting += data
-        del waiting[:max(0, len(waiting) - WAITING_MAX)]
-      if srv in ready:
+    while wanted(game, bridge):
+      ready, _, _ = select.select([srv], [], [], CHECK_EVERY)
+      if ready:
         conn, addr = srv.accept()
         tune(conn)
         log(f"game connected from {addr[0]}")
-        return conn, bytes(waiting)
+        return conn
+    return None
   finally:
     srv.close()  # one game at a time; it's open again once this one leaves
+
+
+def play(sock: socket.socket, game: Game, brain: Brain, bridge: Bridge):
+  """The plugin's connection, until it leaves or there's neither a bridge nor a brain."""
+  done, frames = threading.Event(), Frames(brain.on_header)
+  with game.lock:
+    game.sock = sock
+  bridge.game_on(True)
+  try:
+    up = threading.Thread(target=pipe_up, args=(sock, bridge, done, frames), daemon=True)
+    stats = threading.Thread(target=stats_loop, args=(frames, done), daemon=True)
+    up.start()
+    stats.start()
+    while up.is_alive():
+      up.join(CHECK_EVERY)
+      if not wanted(game, bridge) and not done.is_set():
+        log("no bridge and no brain: letting the game go")
+        finish(done, sock)
+  finally:
+    done.set()
+    bridge.game_on(False)
+    with game.lock:
+      game.sock = None
+    sock.close()
+    bridge.drop()
 
 
 def stats_loop(frames: Frames, done: threading.Event):
@@ -312,39 +408,24 @@ def main(argv: list[str] | None = None):
   log(f"the brain connects to 127.0.0.1:{args.brain_port}")
   game = Game()
   brain = Brain(game, args.brain_port)
+  bridge = Bridge(game, args.link_file)
   while True:
-    bridge = connect_bridge(args.link_file)
+    if not wanted(game, bridge):
+      time.sleep(CHECK_EVERY)
+      continue
     try:
-      sock, waiting = wait_for_plugin(bridge, args.port)
+      sock = wait_for_plugin(args.port, game, bridge)
     except OSError as e:  # the relay must outlive anything one connection does
       log(f"waiting for the game: {e}")
-      sock = None
       time.sleep(RETRY_EVERY)
-    if sock is None:
-      bridge.close()
       continue
-    done, frames = threading.Event(), Frames(brain.on_header)
-    with game.lock:
-      game.sock = sock
+    if sock is None:
+      continue
     try:
-      for line in waiting.splitlines(keepends=True):
-        game.from_link(line)
-      up = threading.Thread(target=pipe_up, args=(sock, bridge, done, frames), daemon=True)
-      down = threading.Thread(target=pipe_down, args=(bridge, game, done, sock), daemon=True)
-      stats = threading.Thread(target=stats_loop, args=(frames, done), daemon=True)
-      for t in (up, down, stats):
-        t.start()
-      up.join()
-      down.join()
+      play(sock, game, brain, bridge)
     except OSError as e:
       log(f"pipe: {e}")
-    finally:
-      done.set()
-      with game.lock:
-        game.sock = None
-      sock.close()
-      bridge.close()
-    log("the game or the bridge left; starting over")
+    log("the game left; starting over")
 
 
 if __name__ == "__main__":

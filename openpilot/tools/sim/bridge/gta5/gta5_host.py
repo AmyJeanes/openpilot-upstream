@@ -3,13 +3,18 @@
 brain port) and openpilot through the link (the bridge in WSL run with GTA5_LINK=1, gta5_link.py).
 
   python -m openpilot.tools.sim.bridge.gta5.gta5_host [--brain-port 8784] [--link-file C:\\Users\\Public\\gta5op-link.txt]
+                                                      [--no-link]
 
 Each step (STEP s) it takes the newest game state from the relay and steps the brain with it, which drives the car
 through the relay itself when its own driver drives (the map driver, expert mode), and otherwise leaves the car's
 controls to the link's openpilot: it tells the relay whose they are. It waits for the link's first state before it
 starts, as the brain reads openpilot's params once. The brain's settings are the bridge's environment variables
 (GTA5_MAP, GTA5_ROUTER, GTA5_DRIVER, GTA5_LOG...), as paths on Windows; GTA5_MAP_PORT is 8783 here by default, as WSL's
-localhost forwarding holds 8793 while the link's world could serve it."""
+localhost forwarding holds 8793 while the link's world could serve it.
+
+--no-link runs it without openpilot: the game, the relay and the host alone, no WSL. openpilot is then gta5_opio.NullIO,
+never engaged, and the engage key drives with the map driver alone (whatever GTA5_DRIVER says), doing nothing without
+a destination."""
 import argparse
 import gc
 import json
@@ -19,7 +24,7 @@ import threading
 import time
 
 from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, Brain
-from openpilot.tools.sim.bridge.gta5.gta5_opio import RemoteIO, link_address
+from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO, RemoteIO, link_address
 from openpilot.tools.sim.bridge.gta5.gta5_relay import BRAIN_PORT, LINK_FILE
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 
@@ -94,15 +99,19 @@ def main(argv: list[str] | None = None):
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--brain-port", type=int, default=BRAIN_PORT)
   ap.add_argument("--link-file", default=LINK_FILE)
+  ap.add_argument("--no-link", action="store_true", help="no openpilot: the game, the relay and the host alone")
   args = ap.parse_args(argv)
-  io = RemoteIO(link_address(args.link_file))
+  io = NullIO() if args.no_link else RemoteIO(link_address(args.link_file))
   relay = Relay(args.brain_port)
-  end = time.monotonic() + LINK_WAIT
-  while not io.connected and time.monotonic() < end:
-    time.sleep(0.1)
-  io.update()
-  if not io.connected:
-    print("gta5: no state from the link yet: starting with openpilot's params unknown", flush=True)
+  if isinstance(io, RemoteIO):
+    end = time.monotonic() + LINK_WAIT
+    while not io.connected and time.monotonic() < end:
+      time.sleep(0.1)
+    io.update()
+    if not io.connected:
+      print("gta5: no state from the link yet: starting with openpilot's params unknown", flush=True)
+  else:
+    print("gta5: no link: no openpilot", flush=True)
   log = open(LOG, "a", buffering=1) if LOG else None
   brain = Brain(io, relay.send, log)
   if MAP:

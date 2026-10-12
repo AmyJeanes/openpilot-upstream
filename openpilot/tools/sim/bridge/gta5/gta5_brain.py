@@ -146,9 +146,10 @@ class Brain:
     self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
 
   def _init_drivers(self):
-    """Who drives while engaged (gta5_drivers.py): openpilot, and the engage key's driver (GTA5_DRIVER)."""
+    """Who drives while engaged (gta5_drivers.py): openpilot, and the engage key's driver (GTA5_DRIVER; the map driver
+    without openpilot)."""
     self.openpilot = OpenpilotDriver(self.io)
-    self.driver = driver_from_env(self.openpilot, self._send, self._log_event)
+    self.driver = driver_from_env(self.openpilot, self._send, self._log_event, None if self.io.drives else "map")
     self.driving: Driver | Expert | None = None  # whose controls the car takes, as of the last step
 
   # *** each step ***
@@ -545,8 +546,10 @@ class Brain:
 
   def _engage_key(self):
     """Disengages whichever driver is engaged, else engages the driver, or openpilot where it can't (the map driver
-    without a route). While expert mode is on the key is openpilot's alone."""
-    drivers = list(dict.fromkeys([self.openpilot] if self.expert.on else [self.driver, self.openpilot]))
+    without a route). While expert mode is on the key is openpilot's alone. Without openpilot it's the map driver's
+    alone, and does nothing without a route."""
+    drivers = [self.openpilot] if self.expert.on else [self.driver, self.openpilot]
+    drivers = list(dict.fromkeys(p for p in drivers if p is not self.openpilot or self.io.drives))
     for p in drivers:
       if p.engaged:
         p.disengage("the driver pressed the engage key")
@@ -554,6 +557,8 @@ class Brain:
     for p in drivers:
       if p.engage(self.route):
         return
+    print("gta5: the engage key: no destination for the map driver" if drivers else "gta5: the engage key: expert mode drives",
+          flush=True)
 
   def _track(self, state: dict):
     """The car's recent track and the line it was to follow, for marks; marks whose MARK_AFTER has passed are written."""

@@ -3,9 +3,10 @@
 OpenpilotIO is what the brain reads of openpilot (engaged, the set speed, the model's desires, lane change and lane,
 its params) and what it tells openpilot (cruise buttons, the simulated driver's inputs, nav's desire and speed cap, the
 route input and lane slots, a bookmark), and openpilot's control message for the plugin. LocalIO (gta5_world.py) is
-openpilot in the same process: the bridge in WSL. RemoteIO here makes the same calls from the Windows host (gta5_host.py)
-to the link (the bridge in WSL run with GTA5_LINK=1, gta5_link.LinkServer), which applies them to its LocalIO and sends
-its state back: JSON lines over TCP, the host connecting out (Windows blocks connections from WSL).
+openpilot in the same process: the bridge in WSL. RemoteIO here makes the same calls from the Windows host
+(gta5_host.py) to the link (the bridge in WSL run with GTA5_LINK=1, gta5_link.LinkServer), which applies them to its
+LocalIO and sends its state back: JSON lines over TCP, the host connecting out (Windows blocks connections from WSL).
+NullIO is no openpilot at all: the host run with --no-link.
 
 Standard library only: it runs on Windows' own Python."""
 import json
@@ -29,6 +30,7 @@ PARAM_HOLD = 2.0  # s a param the brain set keeps its value against the link's s
 
 class OpenpilotIO:
   """What the brain needs of openpilot. engaged and set_speed_kph are as of the last update()."""
+  drives = True  # openpilot is there to drive: else only the brain's own drivers can
   engaged = False
   set_speed_kph = 0.0  # the HUD's set speed, km/h; 0 when not set
   params = None  # get(key), get_bool(key), put(key, value), remove(key)
@@ -67,6 +69,34 @@ class OpenpilotIO:
 
   def bookmark(self) -> None:
     """userBookmark, so loggerd keeps the segment."""
+
+
+class MemoryParams:
+  """Params kept here, for no openpilot: a key never put reads as None (False)."""
+  def __init__(self):
+    self.values: dict = {}
+
+  def get(self, key: str):
+    return self.values.get(key)
+
+  def get_bool(self, key: str) -> bool:
+    return bool(self.values.get(key))
+
+  def put(self, key: str, value) -> None:
+    self.values[key] = value
+
+  def remove(self, key: str) -> None:
+    self.values.pop(key, None)
+
+
+class NullIO(OpenpilotIO):
+  """No openpilot (gta5_host.py --no-link): never engaged, no model, its params at their defaults, and what's told it
+  goes nowhere."""
+  drives = False
+  connected = False
+
+  def __init__(self):
+    self.params = MemoryParams()
 
 
 class RemoteParams:

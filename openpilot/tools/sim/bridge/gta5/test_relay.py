@@ -158,3 +158,58 @@ def test_frames_count():
   for i in range(0, len(data), 3):
     f.feed(memoryview(data[i:i + 3]), float(i))
   assert f.take()[:2] == (3, len(data)) and heads == [b"{}", b"", b"head"]
+
+
+def frame_msg(t: float, size: int = 1 << 16) -> bytes:
+  """A plugin message: its header with the game state, then stand-in frames."""
+  header = b'{"views": ["road"], "state": {"t": %.2f, "inVehicle": true}}' % t
+  body = struct.pack("<I", len(header)) + header + b"\0" * size
+  return struct.pack("<I", len(body)) + body
+
+
+def test_relay_no_bridge(tmp_path, monkeypatch):
+  """With no bridge the relay takes the game for a brain: the brain gets the state and the car its controls, the frames
+  dropped. A bridge that comes gets them from the next message's start; one that goes leaves the game to the brain; the
+  brain going too lets the game go."""
+  monkeypatch.setattr(gta5_relay, "RETRY_EVERY", 0.05)
+  relay_port, brain_port = free_port(), free_port()
+  link_file = tmp_path / "link.txt"  # none yet: no bridge
+  threading.Thread(target=gta5_relay.main, args=(["--port", str(relay_port), "--brain-port", str(brain_port), "--plugin-file",
+                                                  str(tmp_path / "plugin.txt"), "--link-file", str(link_file)],), daemon=True).start()
+  time.sleep(0.3)
+  try:
+    socket.create_connection(("127.0.0.1", relay_port), timeout=0.5).close()
+    raise AssertionError("listening with neither a bridge nor a brain")
+  except OSError:
+    pass
+  brain = plugin_connect(brain_port)
+  game = plugin_connect(relay_port)
+  game.sendall(frame_msg(1.0))
+  assert read_lines(brain, b'"t": 1.00')[-1].startswith(b'{"views"')
+  brain.sendall(b'{"type": "owner", "who": "brain"}\n{"type": "control", "active": true, "curvature": 0.1}\n')
+  assert read_lines(game, b"curvature") == [b'{"type": "control", "active": true, "curvature": 0.1}']
+
+  half = frame_msg(2.0)
+  game.sendall(half[:len(half) // 2])  # a message begun before the bridge comes
+  bridge_srv = socket.create_server(("127.0.0.1", 0))
+  link_file.write_text(f"127.0.0.1:{bridge_srv.getsockname()[1]}\n")
+  bridge, _ = bridge_srv.accept()
+  bridge.sendall(b"settings\n")
+  assert recv_n(game, 9) == b"settings\n"
+  time.sleep(0.2)
+  whole = frame_msg(3.0)
+  game.sendall(half[len(half) // 2:] + whole)
+  assert recv_n(bridge, len(whole)) == whole  # from the next message on
+
+  bridge.close()
+  bridge_srv.close()
+  time.sleep(0.3)
+  game.sendall(frame_msg(4.0))
+  assert read_lines(brain, b'"t": 4.00')
+  brain.sendall(b'{"type": "mark"}\n')
+  assert read_lines(game, b"mark") == [b'{"type": "mark"}']  # the game stayed
+
+  brain.close()
+  game.settimeout(5.0)
+  assert game.recv(1) == b""  # neither a bridge nor a brain: the game goes
+  game.close()

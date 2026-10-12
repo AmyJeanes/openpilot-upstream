@@ -7,6 +7,7 @@ import pytest
 from openpilot.tools.sim.bridge.gta5 import gta5_drivers
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE, ROUTE_GAP, TOOK_OVER, MapDriver, OpenpilotDriver
 from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
+from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO
 
 CONTROL = {"type": "control", "active": True, "curvature": 0.0, "accel": 0.5}
 
@@ -83,7 +84,7 @@ def world(monkeypatch, driver: str):
   monkeypatch.setattr(gta5_drivers, "DRIVER", driver)
   w = Brain.__new__(Brain)
   w.cmds, w.sent = [], []
-  w.io = SimpleNamespace(engaged=False, cruise=w.cmds.append, controls=lambda state: None)
+  w.io = SimpleNamespace(engaged=False, drives=True, cruise=w.cmds.append, controls=lambda state: None)
   w.log, w._send = None, w.sent.append
   w.expert = SimpleNamespace(on=False, md_driving=False, update=lambda state, route, engaged: False)
   w.destination = SimpleNamespace(arrived=lambda: w.sent.append("arrived"))
@@ -133,3 +134,24 @@ def test_old_setting(monkeypatch):
   monkeypatch.delenv("GTA5_DRIVER", raising=False)
   with pytest.raises(ValueError, match="GTA5_DRIVER"):
     gta5_drivers.driver_from_env(OpenpilotDriver(SimpleNamespace()), lambda m: None)
+
+
+def test_no_openpilot(monkeypatch):
+  """Without openpilot (NullIO, the host's --no-link) the engage key's driver is the map driver whatever GTA5_DRIVER
+  says, and without a route the key does nothing rather than engage openpilot."""
+  monkeypatch.setattr(gta5_drivers, "MapDrive", FakeMapDrive)
+  monkeypatch.setattr(gta5_drivers, "DRIVER", "openpilot")
+  w = Brain.__new__(Brain)
+  w.sent, w.io, w.log, w.route = [], NullIO(), None, None
+  w._send = w.sent.append
+  w.expert = SimpleNamespace(on=False, md_driving=False, update=lambda state, route, engaged: False)
+  w.destination = SimpleNamespace(arrived=lambda: None)
+  w._init_drivers()
+  assert isinstance(w.driver, MapDriver) and not w.openpilot.engaged
+  w._engage_key()
+  assert not w.driver.engaged and w.sent == []
+  w.route = np.zeros((2, 2))
+  w._engage_key()
+  assert w.driver.engaged and w._step_drivers(state()) is w.driver and w.driver.controls(state()) == CONTROL
+  w._engage_key()
+  assert not w.driver.engaged

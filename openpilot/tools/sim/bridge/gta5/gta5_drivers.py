@@ -169,12 +169,15 @@ class MapDriver(Driver):
     return self.on and self.md is not None and self.md.phase not in ("abort", "wait", "")
 
 
-def driver_from_env(openpilot: OpenpilotDriver, send, event=None) -> Driver:
+def driver_from_env(openpilot: OpenpilotDriver, send, event=None, which: str | None = None) -> Driver:
+  """The engage key's driver: `which` where given, else GTA5_DRIVER's."""
   if os.getenv("GTA5_PILOT") is not None and os.getenv("GTA5_DRIVER") is None:
     raise ValueError("GTA5_PILOT is GTA5_DRIVER now")
-  if DRIVER not in DRIVERS:
-    raise ValueError(f"GTA5_DRIVER={DRIVER}: one of {', '.join(DRIVERS)}")
-  if DRIVER == "map":
-    print("gta5: the engage key drives with the map driver (GTA5_DRIVER=map)", flush=True)
+  which = which or DRIVER
+  if which not in DRIVERS:
+    raise ValueError(f"GTA5_DRIVER={which}: one of {', '.join(DRIVERS)}")
+  if which == "map":
+    print(f"gta5: the engage key drives with the map driver ({'GTA5_DRIVER=map' if DRIVER == 'map' else 'no openpilot'})",
+          flush=True)
     return MapDriver(send, event=event)
   return openpilot
