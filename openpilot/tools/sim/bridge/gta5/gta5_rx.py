@@ -18,7 +18,7 @@ import numpy as np
 
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.tools.sim.bridge.gta5 import gta5_stacks
-from openpilot.tools.sim.lib.camerad import W, H
+from openpilot.tools.sim.lib.common import W, H
 
 VIEWS = ("road", "wide")
 SLOTS = 8  # the bridge may lag a few frames behind when its threads are busy; a slot written over while it is read mixes frames

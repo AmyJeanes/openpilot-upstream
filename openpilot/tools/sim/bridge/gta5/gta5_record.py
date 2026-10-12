@@ -210,7 +210,7 @@ class Segment:
 class Recorder:
   def __init__(self, root: str, world=None, synthetic: bool = False):
     from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-    from openpilot.tools.sim.lib.camerad import W, H
+    from openpilot.tools.sim.lib.common import W, H
     stride, y_height, uv_height, _ = get_nv12_info(W, H)
     self.size = (W, H, stride, y_height, uv_height)
     self.data = Path(root) / "data"
