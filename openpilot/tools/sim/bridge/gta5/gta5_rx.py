@@ -261,6 +261,8 @@ class Receiver:
     self.seq += 1
     if self.latest is not None:
       self.latest.value = self.seq - 1
+    if "hostSeq" in head and isinstance(head["state"], dict):  # the Windows relay's number for the frame (gta5_relay.stamp)
+      head["state"]["hostSeq"] = head["hostSeq"]
     self.frames.send((slot, list(head["views"]), head["state"], self.seq - 1))
 
   def serve(self, port: int, ready: Connection) -> None:

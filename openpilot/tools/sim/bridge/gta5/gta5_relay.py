@@ -2,7 +2,7 @@
 """The game's connection on Windows: the plugin connects to this relay on localhost, and the relay pipes it to the
 bridge in WSL, so the game never needs WSL's address. Standard library only: it runs on Windows' own Python.
 
-  py gta5_relay.py [--port 8781] [--brain-port 8784] [--plugin-file C:\\Users\\Public\\gta5op-bridge.txt]
+  py gta5_relay.py [--port 8781] [--brain-port 8784] [--frames-port 8785] [--plugin-file C:\\Users\\Public\\gta5op-bridge.txt]
                    [--link-file C:\\Users\\Public\\gta5op-link.txt]
 
 It writes its own address to the plugin's bridge file; the bridge must then write its address elsewhere, so start it
@@ -25,8 +25,13 @@ While a brain is connected the bridge's HUD messages are dropped too: the brain 
 The game and the brain don't need the bridge: with a brain connected the plugin stays while the bridge is gone (the
 link restarting, or a host run without openpilot), its frames dropped, and a bridge that comes back gets them from the
 next message's start. With no brain, the bridge going ends the plugin's connection, as without a relay.
-Every STATS_EVERY s it logs the frames piped up, MB/s and the longest gap between frames."""
+
+Each frame's header goes up with the relay's number for the frame first ("hostSeq", counting on across connections), by
+which the link's model tap and the host's recorder find the same frame. The host's recorder (gta5_record.RelayFrames)
+connects on the frames port and gets the plugin's messages as the bridge does, bridge or not, the newest only if it
+falls behind (FrameTap). Every STATS_EVERY s it logs the frames piped up, MB/s and the longest gap between frames."""
 import argparse
+import itertools
 import json
 import select
 import socket
@@ -38,6 +43,7 @@ from collections import deque
 
 PORT = 8781
 BRAIN_PORT = 8784
+FRAMES_PORT = 8785
 PLUGIN_FILE = r"C:\Users\Public\gta5op-bridge.txt"
 LINK_FILE = r"C:\Users\Public\gta5op-link.txt"
 CONNECT_TIMEOUT = 1.0  # s
@@ -47,6 +53,7 @@ SOCK_BUF = 16 << 20
 WAITING_MAX = 1 << 20  # bytes from the bridge kept for a plugin yet to connect
 STATS_EVERY = 10.0  # s
 CHECK_EVERY = 0.2  # s between looks at whether the game still has a bridge or a brain
+TAP_BUFFERS = 3  # the frames port's message buffers kept for reuse: one filling, one waiting, one sending
 
 
 def log(msg: str):
@@ -67,51 +74,39 @@ def bridge_address(link_file: str) -> tuple[str, int] | None:
     return None
 
 
+def stamp(header: bytes, seq: int) -> bytes:
+  """A frame's header JSON with the relay's number for the frame first; one that isn't a JSON object goes unchanged."""
+  if header[:1] != b"{":
+    return header
+  rest = header[1:].lstrip()
+  return b'{"hostSeq":%d%s' % (seq, b"" if rest[:1] == b"}" else b",") + rest
+
+
+def recv_exact(sock: socket.socket, n: int) -> bytes | None:
+  """n bytes, None if the connection ends first."""
+  buf = bytearray(n)
+  view = memoryview(buf)
+  while len(view):
+    k = sock.recv_into(view)
+    if k == 0:
+      return None
+    view = view[k:]
+  return bytes(buf)
+
+
 class Frames:
-  """The plugin's messages as they're piped (each a 4-byte little-endian size, then that many bytes: a 4-byte header
-  size, the header JSON, the frames): counted, and each one's header handed to on_header."""
-  def __init__(self, on_header=None):
-    self.on_header = on_header
-    self.need, self.head = 0, b""  # bytes left of the message, else the size bytes read so far
-    self.body = bytearray()  # the message's first bytes, while its header is wanted
-    self.want = 0  # bytes of the message wanted for its header (4 + its size once known), 0 once it's had
+  """The plugin's messages as they're piped: counted, with their bytes and the longest gap between them."""
+  def __init__(self):
     self.count = self.bytes = 0
     self.last: float | None = None
     self.gap = 0.0
 
-  def feed(self, data: memoryview, now: float) -> list[int]:
-    """Where in data messages start."""
-    self.bytes += len(data)
-    starts = []
-    i = 0
-    while i < len(data):
-      if self.need:
-        n = min(self.need, len(data) - i)
-        if self.want:
-          n = min(n, self.want - len(self.body))
-          self.body += data[i:i + n]
-          if self.want == 4 and len(self.body) == 4:
-            self.want = 4 + struct.unpack("<I", self.body)[0]
-          if len(self.body) == self.want:
-            if self.on_header is not None:
-              self.on_header(bytes(self.body[4:]))
-            self.want = 0
-        self.need -= n
-        i += n
-        continue
-      if not self.head:
-        starts.append(i)
-      take = min(4 - len(self.head), len(data) - i)
-      self.head += bytes(data[i:i + take])
-      i += take
-      if len(self.head) == 4:
-        self.need, self.head = struct.unpack("<I", self.head)[0], b""
-        self.body, self.want = bytearray(), 4 if self.need >= 4 else 0
-        self.count += 1
-        if self.last is not None:
-          self.gap = max(self.gap, now - self.last)
-        self.last = now
-    return starts
+  def add(self, size: int, now: float):
+    self.count += 1
+    self.bytes += size
+    if self.last is not None:
+      self.gap = max(self.gap, now - self.last)
+    self.last = now
 
   def take(self) -> tuple[int, int, float]:
     out = (self.count, self.bytes, self.gap)
@@ -219,6 +214,90 @@ class Brain:
       conn.close()
 
 
+class Copy:
+  """One message as it's piped, for the frames port."""
+  __slots__ = ("buf", "size", "n")
+
+  def __init__(self, buf: bytearray, size: int):
+    self.buf, self.size, self.n = buf, size, 0
+
+  def write(self, data):
+    k = len(data)
+    self.buf[self.n:self.n + k] = data
+    self.n += k
+
+
+class FrameTap:
+  """The frames port, for the host's recorder (gta5_record.RelayFrames): the plugin's messages as the bridge gets them.
+  Each is copied as it's piped and handed over whole by the tap's own thread, the newest only if the recorder falls
+  behind, so it never holds up the bridge's stream; nothing is copied while no recorder is connected. One recorder at a
+  time, a new one replacing the last."""
+  def __init__(self, port: int):
+    self.cv = threading.Condition()
+    self.sock: socket.socket | None = None
+    self.ready: Copy | None = None  # the newest whole message, waiting to go
+    self.free: list[bytearray] = []
+    self.srv = socket.create_server(("127.0.0.1", port))
+    threading.Thread(target=self._serve, daemon=True).start()
+    threading.Thread(target=self._sender, daemon=True).start()
+
+  def begin(self, size: int) -> Copy | None:
+    with self.cv:
+      if self.sock is None:
+        return None
+      buf = next((b for b in self.free if len(b) >= size), None)
+      if buf is not None:
+        self.free.remove(buf)
+    return Copy(buf if buf is not None else bytearray(size), size)
+
+  def end(self, copy: Copy):
+    with self.cv:
+      if copy.n != copy.size or self.sock is None:
+        self._reuse(copy.buf)
+        return
+      if self.ready is not None:
+        self._reuse(self.ready.buf)
+      self.ready = copy
+      self.cv.notify()
+
+  def _reuse(self, buf: bytearray):
+    if len(self.free) < TAP_BUFFERS:
+      self.free.append(buf)
+
+  def _sender(self):
+    while True:
+      with self.cv:
+        while self.ready is None or self.sock is None:
+          self.cv.wait()
+        copy, sock, self.ready = self.ready, self.sock, None
+      try:
+        sock.sendall(memoryview(copy.buf)[:copy.n])
+      except OSError:
+        pass  # its reader sees it go
+      with self.cv:
+        self._reuse(copy.buf)
+
+  def _serve(self):
+    while True:
+      conn, _ = self.srv.accept()
+      tune(conn)
+      with self.cv:
+        old, self.sock = self.sock, conn
+      if old is not None:
+        finish(threading.Event(), old)
+      log("the recorder connected for the frames")
+      try:
+        while conn.recv(4096):  # it sends nothing: this only waits for it to go
+          pass
+      except OSError:
+        pass
+      with self.cv:
+        if self.sock is conn:
+          self.sock, self.ready = None, None
+          log("the recorder went")
+      conn.close()
+
+
 class Bridge:
   """The relay's connection to the bridge, made again whenever it goes: its lines go to the game, or wait for the
   plugin (the last WAITING_MAX bytes of them), and the plugin's frames go to it."""
@@ -227,7 +306,6 @@ class Bridge:
     self.link_file = link_file
     self.lock = threading.Lock()
     self.sock: socket.socket | None = None
-    self.gen = 0  # counts connections, for the frames to start each one at a message's start
     self.waiting: deque[bytes] = deque()
     self.waiting_bytes = 0
     self.playing = False  # the plugin is connected: the lines go straight to it
@@ -237,9 +315,9 @@ class Bridge:
   def up(self) -> bool:
     return self.sock is not None
 
-  def current(self) -> tuple[socket.socket, int] | None:
+  def current(self) -> socket.socket | None:
     with self.lock:
-      return (self.sock, self.gen) if self.sock is not None else None
+      return self.sock
 
   def drop(self, sock: socket.socket | None = None):
     """Ends the connection (that one, if given); the bridge sees the game go, and the relay connects again."""
@@ -281,7 +359,7 @@ class Bridge:
     while True:
       sock = self._connect()
       with self.lock:
-        self.sock, self.gen, self.waiting, self.waiting_bytes = sock, self.gen + 1, deque(), 0
+        self.sock, self.waiting, self.waiting_bytes = sock, deque(), 0
       try:
         for line in sock.makefile("rb"):
           with self.lock:
@@ -301,33 +379,64 @@ class Bridge:
       log("the bridge went")
 
 
-def pipe_up(game: socket.socket, bridge: Bridge, done: threading.Event, frames: Frames):
-  """The plugin's frames to the bridge, as they come; dropped while there's none, and to a new one from the next
-  message's start."""
+def pipe_up(game: socket.socket, bridge: Bridge, done: threading.Event, frames: Frames, on_header=None,
+            tap: FrameTap | None = None, seqs=None):
+  """The plugin's frames to the bridge: each message's header stamped with the next of seqs (stamp), the rest as it
+  comes. A message goes whole to the bridge connection there was at its start, so a new one gets them from the next
+  message's start, and none while there's none. Each header goes to on_header, and the messages to the frames port's
+  tap, bridge or not. A message without a frame's header goes unchanged."""
   buf = bytearray(CHUNK)
   view = memoryview(buf)
-  gen = None  # the bridge connection the frames go to
+  seqs = seqs if seqs is not None else itertools.count()
+
+  def send(sock: socket.socket | None, data) -> socket.socket | None:
+    if sock is None:
+      return None
+    try:
+      sock.sendall(data)
+      return sock
+    except OSError:
+      bridge.drop(sock)
+      return None
+
   try:
     while not done.is_set():
-      n = game.recv_into(buf)
-      if n == 0:
+      size = recv_exact(game, 4)
+      if size is None:
         break
-      starts = frames.feed(view[:n], time.monotonic())
-      to = bridge.current()
-      if to is None:
-        gen = None
-        continue
-      sock, g = to
-      start = 0
-      if g != gen:
-        if not starts:
-          continue
-        start, gen = starts[0], g
-      try:
-        sock.sendall(view[start:n])
-      except OSError:
-        bridge.drop(sock)
-        gen = None
+      rest = struct.unpack("<I", size)[0]
+      head = size
+      if rest >= 4:
+        head_len = recv_exact(game, 4)
+        if head_len is None:
+          break
+        n = struct.unpack("<I", head_len)[0]
+        rest -= 4
+        head += head_len
+        if n <= rest:
+          header = recv_exact(game, n)
+          if header is None:
+            break
+          rest -= n
+          header = stamp(header, next(seqs))
+          head = struct.pack("<II", 4 + len(header) + rest, len(header)) + header
+          if on_header is not None:
+            on_header(header)
+      to = send(bridge.current(), head)
+      frames.add(len(head) + rest, time.monotonic())
+      copy = tap.begin(len(head) + rest) if tap is not None else None
+      if copy is not None:
+        copy.write(head)
+      while rest:
+        k = game.recv_into(view[:min(CHUNK, rest)])
+        if k == 0:
+          return
+        to = send(to, view[:k])
+        if copy is not None:
+          copy.write(view[:k])
+        rest -= k
+      if copy is not None:
+        tap.end(copy)
   except OSError:
     pass
   finally:
@@ -364,14 +473,14 @@ def wait_for_plugin(port: int, game: Game, bridge: Bridge) -> socket.socket | No
     srv.close()  # one game at a time; it's open again once this one leaves
 
 
-def play(sock: socket.socket, game: Game, brain: Brain, bridge: Bridge):
+def play(sock: socket.socket, game: Game, brain: Brain, bridge: Bridge, tap: FrameTap | None = None, seqs=None):
   """The plugin's connection, until it leaves or there's neither a bridge nor a brain."""
-  done, frames = threading.Event(), Frames(brain.on_header)
+  done, frames = threading.Event(), Frames()
   with game.lock:
     game.sock = sock
   bridge.game_on(True)
   try:
-    up = threading.Thread(target=pipe_up, args=(sock, bridge, done, frames), daemon=True)
+    up = threading.Thread(target=pipe_up, args=(sock, bridge, done, frames, brain.on_header, tap, seqs), daemon=True)
     stats = threading.Thread(target=stats_loop, args=(frames, done), daemon=True)
     up.start()
     stats.start()
@@ -399,15 +508,23 @@ def main(argv: list[str] | None = None):
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--port", type=int, default=PORT)
   ap.add_argument("--brain-port", type=int, default=BRAIN_PORT)
+  ap.add_argument("--frames-port", type=int, default=FRAMES_PORT)
   ap.add_argument("--plugin-file", default=PLUGIN_FILE)
   ap.add_argument("--link-file", default=LINK_FILE)
   args = ap.parse_args(argv)
   with open(args.plugin_file, "w") as f:
     f.write(f"127.0.0.1:{args.port}\n")
   log(f"the plugin connects to 127.0.0.1:{args.port} ({args.plugin_file}); the bridge's address from {args.link_file}")
-  log(f"the brain connects to 127.0.0.1:{args.brain_port}")
+  log(f"the brain connects to 127.0.0.1:{args.brain_port}, its recorder to 127.0.0.1:{args.frames_port}")
   game = Game()
   brain = Brain(game, args.brain_port)
+  try:
+    tap = FrameTap(args.frames_port)
+  except OSError as e:  # the game and the link matter more than recording
+    log(f"no frames port for a recorder: {e}")
+    tap = None
+  # numbered on from the wall clock's second, so a restarted relay's numbers don't meet its last ones'
+  seqs = itertools.count(int(time.time()) * 1000)  # noqa: TID251
   bridge = Bridge(game, args.link_file)
   while True:
     if not wanted(game, bridge):
@@ -422,7 +539,7 @@ def main(argv: list[str] | None = None):
     if sock is None:
       continue
     try:
-      play(sock, game, brain, bridge)
+      play(sock, game, brain, bridge, tap, seqs)
     except OSError as e:
       log(f"pipe: {e}")
     log("the game left; starting over")
