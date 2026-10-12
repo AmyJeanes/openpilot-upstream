@@ -75,6 +75,28 @@ def test_relay(tmp_path, monkeypatch):
   bridge_srv.close()
 
 
+def test_relay_bridge_reset(tmp_path, monkeypatch):
+  """A bridge that resets the relay's connection before the game comes (one shutting down as the relay connected) has
+  the relay start over, not stop."""
+  monkeypatch.setattr(gta5_relay, "RETRY_EVERY", 0.05)
+  relay_port = free_port()
+  bridge_srv = socket.create_server(("127.0.0.1", 0))
+  link_file = tmp_path / "link.txt"
+  link_file.write_text(f"127.0.0.1:{bridge_srv.getsockname()[1]}\n")
+  threading.Thread(target=gta5_relay.main, args=(["--port", str(relay_port), "--plugin-file", str(tmp_path / "plugin.txt"),
+                                                  "--link-file", str(link_file)],), daemon=True).start()
+  first, _ = bridge_srv.accept()
+  first.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+  first.close()  # a reset, not a clean close
+  second, _ = bridge_srv.accept()
+  game = plugin_connect(relay_port)
+  second.sendall(b"hi")
+  assert recv_n(game, 2) == b"hi"
+  game.close()
+  second.close()
+  bridge_srv.close()
+
+
 def test_frames_count():
   """Message counting across chunks split anywhere, the size bytes included."""
   f = gta5_relay.Frames()

@@ -136,7 +136,10 @@ def wait_for_plugin(bridge: socket.socket, port: int) -> tuple[socket.socket | N
     while True:
       ready, _, _ = select.select([srv, bridge], [], [], 1.0)
       if bridge in ready:
-        data = bridge.recv(65536)
+        try:
+          data = bridge.recv(65536)
+        except OSError:  # reset: a bridge shutting down as the relay connected
+          data = b""
         if not data:
           log("the bridge closed before the game connected")
           return None, b""
@@ -168,7 +171,12 @@ def main(argv: list[str] | None = None):
   log(f"the plugin connects to 127.0.0.1:{args.port} ({args.plugin_file}); the bridge's address from {args.link_file}")
   while True:
     bridge = connect_bridge(args.link_file)
-    game, waiting = wait_for_plugin(bridge, args.port)
+    try:
+      game, waiting = wait_for_plugin(bridge, args.port)
+    except OSError as e:  # the relay must outlive anything one connection does
+      log(f"waiting for the game: {e}")
+      game = None
+      time.sleep(RETRY_EVERY)
     if game is None:
       bridge.close()
       continue
