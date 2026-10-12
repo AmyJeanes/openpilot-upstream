@@ -327,7 +327,7 @@ class Map:
     from openpilot.tools.sim.bridge.gta5 import gta5_world
     from openpilot.tools.sim.bridge.gta5.map.router import Router
     w = gta5_world.GTA5World.__new__(gta5_world.GTA5World)
-    w.navigator = SimpleNamespace(router=Router(router or "http://127.0.0.1:1"))
+    w.navigator = SimpleNamespace(router=Router(router or "http://127.0.0.1:1"), refresh=lambda: None)
     w.lane_matcher, w.junction_areas, w.gnss = None, None, None
     w._load_paths(os.path.join(map_dir, "paths.jsonl"))
     self.paths, self.osm = w.navigator.router.paths, w.navigator.router.osm
@@ -367,7 +367,8 @@ def _sync(navigator):
     if navigator.busy:
       return
     navigator.busy, navigator.next_try = True, now + navigator.RETRY
-    navigator._route(pos.copy(), bearing, dest.copy(), z)
+    # the map version the route is made with, where the navigator has one (it routes again for a newer map)
+    navigator._route(pos.copy(), bearing, dest.copy(), z, *([navigator.map_version] if hasattr(navigator, "map_version") else []))
   navigator._start = start
 
 
@@ -401,7 +402,10 @@ def _world(head: dict, mp: Map, rec: dict):
   tune_cls = type(w.nav.tune)
   w.nav.tune = tune_cls("")
   w.nav.tune.values.update(head["tune"])
-  w.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None)
+  w.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None, md_driving=False, on=False, take_arrived=lambda: False, engage_key=lambda route, engaged: False)
+  if hasattr(gta5_world, "MARKS"):  # the mark key's track and its marks
+    from collections import deque
+    w.track, w.lane_lines, w.marks_due, w.bookmark_pm = deque(maxlen=200), deque(maxlen=20), [], None
   if hasattr(gta5_world, "BlindSpot"):
     w.blindspot = gta5_world.BlindSpot()  # the bridge's monitor, from the logged "nearby"
   w.map_view = MapView(head["dest"])
