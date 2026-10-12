@@ -13,7 +13,8 @@
   gta5_cmd.py vehicle premier [colours=random|keep] [primary=111 secondary=0 pearl=5 wheel=156 dirt=2] [force=1]
              [interior=white|black|12] [chrome=0|1]
                                                 swap the player's car for a new one where it is (model3, a car of
-                                                `vehicle list`, any model name or 0x hash; random picks one), coloured;
+                                                `vehicle list`, any model name or 0x hash; random picks one; mine is
+                                                Amy's test car, gta5_scene.MY_CAR), coloured;
                                                 interior, chrome: the Model 3's interior colour and trim, after the swap
   gta5_cmd.py trim interior=134 [dashboard=0] [chrome=0|1]
                                                 the car's interior and dashboard colours (palette indices; the Model 3's
@@ -163,9 +164,12 @@ def vehicle(argv: list[str]) -> None:
   opts = options(argv[1:])
   seed = opts.pop("seed", None)
   rng = random.Random(None if seed is None else int(seed))
-  car = gta5_scene.pick_car(rng, float(opts.pop("model_share", 0))) if argv[0] == "random" else argv[0]
+  mine = argv[0] == "mine"
+  car = gta5_scene.MY_CAR["car"] if mine else gta5_scene.pick_car(rng, float(opts.pop("model_share", 0))) if argv[0] == "random" else argv[0]
   cmd = {"type": "vehicle", "model": gta5_scene.model_for(car)}
-  if opts.pop("colours", "random") == "random":
+  if mine:
+    cmd.update({k: v for k, v in gta5_scene.MY_CAR.items() if k != "car"})
+  elif opts.pop("colours", "random") == "random":
     cmd.update({k: v for k, v in gta5_scene.pick_colours(rng, car).items() if k != "group"})
   trim = {k: opts.pop(k) for k in ("interior", "chrome") if k in opts}
   if "interior" in trim:

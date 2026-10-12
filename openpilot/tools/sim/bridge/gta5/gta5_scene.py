@@ -110,6 +110,8 @@ WHEEL = 156  # the game's default alloy colour
 INTERIORS = {"black": (65, 12), "white": (35, 134)}
 # its window trim, door handles and mirrors: chrome until 2020, the matte black chrome delete since
 TRIMS = {"black": 60, "chrome": 40}
+# Amy's own test car (gta5_cmd.py vehicle mine): the Model 3 in metallic black steel, as she painted it
+MY_CAR = {"car": "model3", "primary": 2, "secondary": 97, "pearl": 5, "wheel": 156}
 
 WEATHERS = {"EXTRASUNNY": 25, "CLEAR": 22, "CLOUDS": 18, "OVERCAST": 12, "SMOG": 5, "FOGGY": 5, "CLEARING": 4, "RAIN": 7, "THUNDER": 2}
 TRAFFIC_LEVELS = {0.3: 15, 0.6: 25, 1.0: 40, 1.5: 20}  # vehicle density multipliers
