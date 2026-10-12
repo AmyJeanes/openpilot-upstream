@@ -272,6 +272,14 @@ check the lines sit on the road from the player's camera at a few known places (
 then `gta5_cmd.py snap /tmp/dbg` and record a minute (`GTA5_RECORD`) and look through the road and wide frames: no
 coloured lines, markers, minimap or GPS line may show in any of them.
 
+## Pilots
+Whoever drives the car while it's engaged is a pilot (`gta5_pilot.py`): openpilot, or our map driver (`gta5_mapdrive.py`)
+with `GTA5_PILOT=map` on terminal 2. Either way the engage key engages and disengages it, the HUD shows it engaged, and
+the brake or steering hands the car back. The map driver drives the route to the destination set (the game map's
+waypoint, or the map view's); without one the engage key engages openpilot instead. It also hands back on the gas,
+arrives as nav does (the destination ends), and follows a new destination set while it drives. Expert mode below drives
+with a map driver of its own.
+
 ## AI expert driver
 The game's own traffic AI can drive the car, as expert driving to record. `gta5_cmd.py ai on` tasks the player as the
 driver of its car (to the map's waypoint, else wandering; `x= y= z=` for a point, `speed=` m/s cap, `style=` driving style

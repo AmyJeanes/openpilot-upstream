@@ -152,8 +152,8 @@ def test_mark_key(monkeypatch, tmp_path):
   w.presses, w.q = {}, SimpleNamespace(put=lambda c: None)
   w.track, w.lane_lines, w.marks_due = world_mod.deque(maxlen=200), world_mod.deque(maxlen=20), []
   w.lane_line = (None, 0.0, [[0.0, 0.0], [1.0, 1.0]])
-  w.simulator_state = SimpleNamespace(is_engaged=True)
-  w.expert = SimpleNamespace(md=None, active=False, source="none")
+  w.openpilot = w.pilot = w.driving = SimpleNamespace(name="openpilot")
+  w.expert = SimpleNamespace(md=None, md_driving=False, source="none")
   pts = np.array([[0.0, float(y), 0.0] for y in range(0, 1001, 10)])
   w.route = SimpleNamespace(at=500.04, length=1000.0, points=pts, along=pts[:, 1].copy())
   w.recorder = SimpleNamespace(segment=SimpleNamespace(path=world_mod.Path("/rec/data/6acb00000012"), rows=[0] * 345),
@@ -179,7 +179,7 @@ def test_mark_key(monkeypatch, tmp_path):
   assert abs(t[0, 0] - (m["mono"] - world_mod.MARK_BEFORE)) < 0.25 and abs(t[-1, 0] - (m["mono"] + world_mod.MARK_AFTER)) < 0.25
   drive(0.05, markPresses=0)
   md = SimpleNamespace(info=lambda: {"phase": "drive"}, s=400.0, s_path=np.arange(0.0, 1000.0), path=np.c_[np.zeros(1000), np.arange(1000.0)])
-  w.expert = SimpleNamespace(md=md, active=True, source="map")
+  w.expert = w.driving = SimpleNamespace(md=md, md_driving=True, source="map")
   w.recorder = None
   drive(0.05, markPresses=1)
   w._flush_marks()  # as the bridge closes: a mark still waiting is written with the track it has

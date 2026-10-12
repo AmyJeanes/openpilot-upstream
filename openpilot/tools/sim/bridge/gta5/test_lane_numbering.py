@@ -394,7 +394,7 @@ def bridge_line(r: Route, lane) -> np.ndarray:
   from openpilot.tools.sim.bridge.gta5.gta5_world import GTA5World
   w = GTA5World.__new__(GTA5World)
   w.nav, w.route, w.lane_line = Planner(), r, (None, 0.0, [])
-  w.expert = SimpleNamespace(md=None, md_fallback=False)  # no map driver driving
+  w.expert, w.pilot = SimpleNamespace(md_driving=False), None  # no map driver driving
   return np.array(w._lane_line({"lane": lane}, 0.0))
 
 

@@ -260,61 +260,6 @@ def test_recheck():
   print(f"recheck: ok, {rep['trips_before']} -> {rep['trips_after']} trips")
 
 
-class FakeMapDriver:
-  """Stands in for gta5_mapdrive.MapDriver: drives whatever route it's given, finishing when told."""
-  def __init__(self):
-    self.route, self.finished, self.phase, self.indicator, self.label, self.c = None, None, "drive", None, "none", {}
-    self.routes = []
-
-  def step(self, route, state, t, collisions=0):
-    self.route = route
-    self.routes.append(route)
-    return {"type": "control", "active": True, "curvature": 0.0, "accel": 0.5}
-
-  def take_events(self):
-    return []
-
-  def info(self):
-    return {"phase": self.phase}
-
-
-def test_engage():
-  """engage: armed, the engage key starts and stops the map driver along the route there is, openpilot keeping the key
-  without one; the driver's input, arriving and a lost route hand the car back, still armed."""
-  sent, mds = [], []
-  e = Expert(sent.append, lambda: None, lambda: None)
-  e.log = io.StringIO()
-  e.cfg, e.on = {**e.cfg, "on": True, "driver": "map", "engage": True}, True
-  real_md, real_clock = Expert._mapdriver, gta5_expert.time.monotonic
-  clock = [0.0]
-  Expert._mapdriver = staticmethod(lambda cfg: mds.append(FakeMapDriver()) or mds[-1])
-  gta5_expert.time.monotonic = lambda: clock[0]
-  route = straight()
-
-  def step(r=route, **kw):
-    clock[0] += 0.05
-    return e.update({"t": clock[0], "pos": [0.0, 0.0, 0.0], "vEgo": 10.0, "heading": 270.0, "ai": {"on": False}, **kw}, r, False)
-  try:
-    assert e.armed and not step() and not e.active and not mds
-    assert not e.engage_key(None, False) and not e.engage_key(route, True)  # openpilot's: engages it, or cancels it
-    assert e.engage_key(route, False) and e.engaged and step() and e.controls_car and sent[-1]["type"] == "control"
-    n = 0
-    while step(None):  # a new destination: the last route until the router has one
-      n += 1
-      assert mds[-1].routes[-1] is route
-    assert abs(n * 0.05 - gta5_expert.ROUTE_GAP) < 0.1 and not e.engaged and e.armed and not e.active
-    assert {"type": "control", "active": False} in sent[-3:]
-    assert e.engage_key(route, False) and step() and not step(user={"brake": True}) and not e.engaged and e.armed
-    assert e.engage_key(route, False) and step() and e.engage_key(route, False) and not e.engaged and e.armed
-    assert e.engage_key(route, False) and step() and not e.take_arrived()
-    mds[-1].finished = "arrived"
-    assert not step() and not e.engaged and e.armed and e.take_arrived() and not e.take_arrived()
-    assert len(mds) == 4  # a fresh map driver for each drive
-  finally:
-    Expert._mapdriver, gta5_expert.time.monotonic = real_md, real_clock
-  print("engage: ok")
-
-
 if __name__ == "__main__":
   test_plain_route_unchanged()
   test_shortcut_link()
@@ -323,4 +268,3 @@ if __name__ == "__main__":
   test_sharp_turns()
   test_router_avoids_uturns()
   test_recheck()
-  test_engage()

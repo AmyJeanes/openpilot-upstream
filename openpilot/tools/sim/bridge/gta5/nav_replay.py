@@ -406,6 +406,8 @@ def _world(head: dict, mp: Map, rec: dict):
   if hasattr(gta5_world, "MARKS"):  # the mark key's track and its marks
     from collections import deque
     w.track, w.lane_lines, w.marks_due, w.bookmark_pm = deque(maxlen=200), deque(maxlen=20), [], None
+  if hasattr(w, "_init_pilots"):
+    w._init_pilots()
   if hasattr(gta5_world, "BlindSpot"):
     w.blindspot = gta5_world.BlindSpot()  # the bridge's monitor, from the logged "nearby"
   w.map_view = MapView(head["dest"])

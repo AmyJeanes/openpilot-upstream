@@ -895,7 +895,7 @@ def test_expert_drives_with_map_driver():
   e._write_control = written.append
   e.cfg = {**e.cfg, "on": True, "driver": "map", "mapdrive": json.dumps({"seed": 4})}
   e.on = True
-  e.md = e._mapdriver(e.cfg)
+  e.map = e._map_pilot(e.cfg)
   route = ms.junction_turn("left", lead=300.0, stop="stop")
   car = ms.LagCar(*ms.start_pose(route, 1.0))
   rec = Recorder.__new__(Recorder)
@@ -911,9 +911,9 @@ def test_expert_drives_with_map_driver():
         break
       srcs.add(e.source)
       rec._map_row(e, i)
-      ctl = [m for m in sent if m.get("type") == "control"]
+      ctl = e.controls(st)
       assert e.controls_car and not e.ai_drives
-      car.control(ctl[-1])
+      car.control(ctl)
       for _ in range(5):  # the bridge steps at 100 Hz between the 20 Hz frames
         st2 = car.state()
         e.update(st2, route, False)
@@ -949,7 +949,7 @@ def test_expert_ai_unchanged():
   from openpilot.tools.sim.bridge.gta5.gta5_expert import DEFAULTS, Expert
   assert DEFAULTS["driver"] == "ai"
   e = Expert(lambda m: None, lambda: None, lambda: None)
-  assert e._mapdriver({**DEFAULTS, "on": True}) is None
+  assert e._map_pilot({**DEFAULTS, "on": True}) is None
   e.active = True
   assert e.ai_drives and e.source == "ai" and e.drives_route and not e.controls_car
   print("expert ai unchanged: ok")

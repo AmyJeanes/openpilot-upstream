@@ -13,9 +13,7 @@ from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
 import numpy as np
-from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
-from opendbc.car.tesla.values import CarControllerParams as TeslaParams
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.route_input import RouteInputWriter
 from openpilot.selfdrive.navd.lane_slots import PREVIEW_LEN, lane_slots_path, preview
@@ -31,6 +29,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
+from openpilot.tools.sim.bridge.gta5.gta5_pilot import INACTIVE, MapPilot, OpenpilotPilot, Pilot, pilot_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
@@ -177,7 +176,6 @@ class GTA5World(World):
     self.tesla = is_tesla()
     self.metric = Params().get_bool("IsMetric")
     self.next_hud = 0.0
-    self.VM: VehicleModel | None = None
     self.last_status = 0.0
     self.presses: dict[str, int] = {}
     self.bookmark_pm = None  # made on the first mark
@@ -185,8 +183,6 @@ class GTA5World(World):
     self.lane_lines: deque = deque(maxlen=int(MARK_BEFORE / 2) + 2)  # (mono, the line ahead then), every 2 s
     self.marks_due: list[tuple[float, dict]] = []  # marks waiting for MARK_AFTER s more of the track
     self.curvature = 0.0  # what the steering is set for
-    self.steering = False  # whether the driver was steering
-    self.braking = False
     self.pinner: subprocess.Popen | None = None
     self.log = open(LOG, "a", buffering=1) if LOG else None
     self.params = Params()
@@ -195,6 +191,7 @@ class GTA5World(World):
     self.gnss = gta5_gnss.from_env()
     self.publishes_gps = self.gnss is not None
     self.expert = Expert(self._send, lambda: self.q.put(control_cmd_gen("cruise_cancel")), lambda: self._set_nav_desire(""))
+    self._init_pilots()
     self.map_view: MapView | None = None  # made once rx has forked: a socket it inherited would outlive this process
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
     self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
@@ -259,6 +256,12 @@ class GTA5World(World):
     self.match_t: float | None = None
     self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
 
+  def _init_pilots(self):
+    """Who drives while engaged (gta5_pilot.py): openpilot, and the engage key's pilot (GTA5_PILOT)."""
+    self.openpilot = OpenpilotPilot(self.simulator_state, lambda cmd: self.q.put(control_cmd_gen(cmd)), self.sm, self.tesla)
+    self.pilot = pilot_from_env(self.openpilot, self._send, self._log_event)
+    self.driving: Pilot | Expert | None = None  # whose controls the car takes, as of the last step
+
   def _nav_drives(self) -> bool:
     """Navigate on openpilot: nav drives, rather than only guiding."""
     if NOO != "param":
@@ -318,42 +321,28 @@ class GTA5World(World):
     cluster = self.sm['carState'].vCruiseCluster
     set_kph = self.sm['controlsState'].deprecated.vCruise if cluster == 0.0 else cluster
     self._send({"type": "hud", "setSpeed": set_kph if 0 < set_kph < 255 else 0, "metric": self.metric,
-                "engaged": self.simulator_state.is_engaged or self.expert.engaged})
+                "engaged": self.pilot.engaged or self.openpilot.engaged})
 
   def apply_controls(self, steer_angle, throttle_out, brake_out):
-    """Sends carControl's desired curvature and acceleration rather than the bridge's steer_angle/throttle/brake:
-    those are shaped for the simulated Honda, not for the game car."""
+    """Sends the controls of whoever drives (gta5_pilot.py; openpilot's are carControl's curvature and acceleration),
+    rather than the bridge's steer_angle/throttle/brake: those are shaped for the simulated Honda, not for the game car."""
     self.sm.update(0)
-    if self.VM is None and self.sm.seen['carParams']:
-      self.VM = VehicleModel(self.sm['carParams'])
+    self.openpilot.update_model()
     with self.lock:
       state = self.state
     if state is None or not state.get("inVehicle"):
       return
     self._send_hud()
-    if self.expert.controls_car:
-      return  # a wrong-way clip's controller or the map driver sends the controls (gta5_wrongway.py, gta5_mapdrive.py)
-    if not self.simulator_state.is_engaged:
-      self._send({"type": "control", "active": False})
-      return
-    actuators = self.sm['carControl'].actuators
-    # openpilot's curvature is right-positive (controlsd negates the vehicle model's); the plugin takes left-positive
-    curvature = -actuators.curvature
-    accel = float(actuators.accel)
-    if self.tesla and self.VM is not None and self.sm.seen['carOutput']:
-      # What a Model 3 executes: the angle after the car controller's rate and lateral jerk limits, through the car's
-      # vehicle model, and the acceleration within its limits
-      angle = self.sm['carOutput'].actuatorsOutput.steeringAngleDeg
-      curvature = self.VM.calc_curvature(math.radians(angle), max(abs(state['vEgo']), 1.0), state.get("bank", 0.0))
-      accel = float(np.clip(accel, TeslaParams.ACCEL_MIN, TeslaParams.ACCEL_MAX))
-    self._send({"type": "control", "active": True, "curvature": curvature, "accel": accel})
+    driving = self.driving
+    msg = driving.controls(state) if driving is not None else None
+    self._send(msg if msg is not None else INACTIVE)
 
     now = time.monotonic()
-    if DEBUG and now - self.last_status > 1.0:
+    if DEBUG and driving is self.openpilot and msg is not None and now - self.last_status > 1.0:
       self.last_status = now
       out = state.get("out", {})
-      print(f"gta5: v={state['vEgo']:5.2f} curvature cmd={curvature:+.4f} meas={self.curvature:+.4f} " +
-            f"accel cmd={actuators.accel:+.2f} meas={state['aMeas']:+.2f} | steer={out.get('steer', 0):+.2f} " +
+      print(f"gta5: v={state['vEgo']:5.2f} curvature cmd={msg['curvature']:+.4f} meas={self.curvature:+.4f} " +
+            f"accel cmd={msg['accel']:+.2f} meas={state['aMeas']:+.2f} | steer={out.get('steer', 0):+.2f} " +
             f"thr={out.get('throttle', 0):.2f} brk={out.get('brake', 0):.2f} latI={out.get('latI', 0):+.3f} lonI={out.get('lonI', 0):+.2f}",
             flush=True)
 
@@ -384,11 +373,12 @@ class GTA5World(World):
     # the plugin reports the curvature the car follows, standing in for a steering angle sensor
     self.curvature = state.get("steerCurvature", yaw_rate / v if v > 2.0 else 0.0)
     grade, bank = state.get("grade", 0.0), state.get("bank", 0.0)  # radians: nose up, right side down (NED roll)
-    if self.VM is not None:
+    vm = self.openpilot.VM
+    if vm is not None:
       # The angle for the curvature the car follows, through the car's own fixed vehicle model (carParams', with no
       # offset), as a real sensor measures a physical angle: paramsd then learns the car's values, as on a real Model 3.
       # An angle through paramsd's learned model would confirm whatever it learned, letting its estimates wander.
-      steer = self.VM.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), bank)
+      steer = vm.get_steer_from_curvature(self.curvature, max(abs(v), 1.0), bank)
       simulator_state.steering_angle = math.degrees(steer)
     else:
       simulator_state.steering_angle = math.degrees(self.curvature * OP_WHEELBASE * OP_STEER_RATIO)
@@ -408,16 +398,8 @@ class GTA5World(World):
         self._match(fix, v, yaw_rate)
 
     user = state.get("user") or {}
-    # driver input while engaged: gas overrides; the brake and steering disengage, since the game's steering has no torque
-    # for openpilot to blend with, and fighting it soon trips the excessive actuation lockout
     simulator_state.user_gas = 1.0 if user.get("gas") else 0.0
     simulator_state.user_brake = 1.0 if user.get("brake") else 0.0
-    steering = abs(user.get("steer", 0)) > 0.02
-    braking = bool(user.get("brake"))
-    # the simulated car's cruise stays on through a brake press otherwise, and openpilot re-engages on its release
-    if (steering and not self.steering or braking and not self.braking) and self.simulator_state.is_engaged:
-      self.q.put(control_cmd_gen("cruise_cancel"))
-    self.steering, self.braking = steering, braking
     simulator_state.speed_limit = speed_limit(state.get("street", ""))
     desire = self.sm['modelV2'].meta.desireState
     turns = {"left": desire[log.Desire.turnLeft], "right": desire[log.Desire.turnRight], "keepLeft": desire[log.Desire.keepLeft],
@@ -445,15 +427,13 @@ class GTA5World(World):
                            pose=(np.array(state["pos"][:2], dtype=float), bearing))
     for msg in self._overlay(state, v):
       self._send(msg)
-    expert_drives = self.expert.update(state, self.route, self.simulator_state.is_engaged)
-    if self.expert.take_arrived():
-      self.destination.arrived()
-    if expert_drives:
-      # the game's AI drives (gta5_expert.py): openpilot stays disengaged, and nav and pull-away wait
+    self.driving = self._step_pilots(state)
+    if self.driving is not None and self.driving is not self.openpilot:
+      # expert mode or another pilot drives: openpilot stays disengaged, and nav and pull-away wait
       self._set_cap(simulator_state, 0.0, "")
       self._set_blinkers(simulator_state)
       self._update_buttons(state)
-      if self.expert.md is not None:
+      if self._map_driver() is not None:
         self._lane_line(state, v)  # the map driver's path, for recordings and the overlay, whether drawn or not
       self._update_map(state, bearing, v)
       simulator_state.valid = True
@@ -475,6 +455,41 @@ class GTA5World(World):
     self._update_buttons(state)
     self._update_map(state, bearing, v)
     simulator_state.valid = True
+
+  def _step_pilots(self, state: dict) -> Pilot | Expert | None:
+    """Steps whoever drives (expert mode first, while it's on), handing the car back where the pilot says so: who
+    drives now, None for the player."""
+    now = time.monotonic()
+    self.openpilot.step(state, self.route, now)
+    p = self.pilot
+    if self.expert.update(state, self.route, self.openpilot.engaged):
+      if p is not self.openpilot and p.engaged:
+        p.disengage("expert mode drives")
+      return self.expert
+    if p is not self.openpilot and p.engaged:
+      why = p.step(state, self.route, now)
+      if why is not None:
+        p.disengage(why)
+        if why == "arrived":
+          self.destination.arrived()
+      return p if p.engaged else None
+    return self.openpilot if self.openpilot.engaged else None
+
+  def _map_driver(self):
+    """The map driver driving now (expert mode's, or the engage key's), else None."""
+    if self.expert.md_driving:
+      return self.expert.md
+    return self.pilot.md if isinstance(self.pilot, MapPilot) and self.pilot.engaged else None
+
+  def _driver_name(self) -> str:
+    """Who drives now, for marks: expert mode's source (ai, map, ...), the pilot's name, or user."""
+    if self.driving is self.expert:
+      return self.expert.source
+    return self.driving.name if self.driving is not None else "user"
+
+  def _log_event(self, what: str, **kw):
+    if self.log:
+      self.log.write(json.dumps({"mono": round(time.monotonic(), 3), "event": what, **kw}) + "\n")
 
   def _model_lane(self) -> list | None:
     """The driving model's lane for nav (modelV2.laneHead): [index from the left of ours, count, probability], None
@@ -702,7 +717,7 @@ class GTA5World(World):
       "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
                  "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
-      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.simulator_state.is_engaged else ''}",
+      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.pilot.engaged or self.openpilot.engaged else ''}",
       "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),
               "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
     })
@@ -711,8 +726,8 @@ class GTA5World(World):
     """The route in the lanes nav aims for, for the map; while the map driver drives, the path it drives (its intent,
     without the in-lane wander), so the ribbon is what's driven."""
     r, now = self.route, time.monotonic()
-    md = self.expert.md
-    if md is not None and md.path is not None and not self.expert.md_fallback:
+    md = self._map_driver()
+    if md is not None and md.path is not None:
       if r is not self.lane_line[0] or now >= self.lane_line[1]:
         self.lane_line = (r, now + LANE_LINE_EVERY, md.intent_line())
       return self.lane_line[2]
@@ -756,12 +771,21 @@ class GTA5World(World):
       self.presses[key] = presses
       for _ in range(max(0, min(new, 5))):
         if key == "engagePresses":
-          if self.expert.engage_key(self.route, self.simulator_state.is_engaged):
-            continue  # the armed map driver's (gta5_expert.py engage)
-          cmd = "cruise_cancel" if self.simulator_state.is_engaged else "cruise_down"
+          self._engage_key()
         else:
-          cmd = commands[key]
-        self.q.put(control_cmd_gen(cmd))
+          self.q.put(control_cmd_gen(commands[key]))
+
+  def _engage_key(self):
+    """Disengages whichever pilot is engaged, else engages the pilot, or openpilot where it can't (the map driver
+    without a route). While expert mode is on the key is openpilot's alone."""
+    pilots = list(dict.fromkeys([self.openpilot] if self.expert.on else [self.pilot, self.openpilot]))
+    for p in pilots:
+      if p.engaged:
+        p.disengage("the driver pressed the engage key")
+        return
+    for p in pilots:
+      if p.engage(self.route):
+        return
 
   def _track(self, state: dict):
     """The car's recent track and the line it was to follow, for marks; marks whose MARK_AFTER has passed are written."""
@@ -781,10 +805,10 @@ class GTA5World(World):
     it; written to MARKS MARK_AFTER s later with the car's track from MARK_BEFORE s before to then. openpilot's
     userBookmark goes now, so loggerd keeps the segment."""
     now = time.monotonic()
-    r, md, rec = self.route, self.expert.md, self.recorder
+    r, md, rec = self.route, self._map_driver(), self.recorder
     seg = rec.segment if rec is not None else None
     plan = None
-    if md is not None and self.expert.active and md.path is not None:
+    if md is not None and md.path is not None:
       k = (md.s_path >= md.s - PLAN_BEHIND) & (md.s_path <= md.s + PLAN_AHEAD)
       plan = md.path[k][::2].round(2).tolist()
     route_line = None
@@ -795,8 +819,7 @@ class GTA5World(World):
     mark = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "mono": round(now, 3), "t_game": state.get("t"),
             "pos": [round(float(c), 2) for c in state.get("pos") or []], "heading": state.get("heading"), "vEgo": state.get("vEgo"),
             "street": state.get("street"), "lane": state.get("lane"), "indicator": state.get("indicator"),
-            "driver": self.expert.source if self.expert.active else "openpilot" if self.simulator_state.is_engaged else "user",
-            "map": md.info() if md is not None and self.expert.active else None,
+            "driver": self._driver_name(), "map": md.info() if md is not None else None,
             "route": None if r is None else {"at": round(float(r.at), 1), "length": round(float(r.length), 1),
                                              "dest": [round(float(c), 1) for c in r.points[-1][:2]]},
             "segment": seg.path.name if seg is not None else None, "frame": len(seg.rows) if seg is not None else None,

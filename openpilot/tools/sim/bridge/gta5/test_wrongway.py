@@ -172,13 +172,13 @@ def test_expert(map_lane: bool = False, collide_in_recovery: bool = False):
       car.collisions = 1
     if not e.update(s, route, False):
       break
-    ctl = [m for m in sent if m.get("type") == "control"]
+    ctl = e.controls(s)
     if e.ww.phase == "approach":
       assert not e.ai_drives and e.ww_driving
     if ai_on_at is None and any(m.get("type") == "ai" and m.get("on") == 1 for m in sent):
       ai_on_at = e.ww.phase
     if e.ww_driving:
-      car.move(ctl[-1]["curvature"], ctl[-1]["accel"])
+      car.move(ctl["curvature"], ctl["accel"])
     else:
       car.ai_drive(0, 10.0)
     if e.ww is None or e.ww.finished:
