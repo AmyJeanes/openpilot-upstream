@@ -574,8 +574,8 @@ def game_heading(theta: float) -> float:
   return wrap(math.degrees(theta) - 90.0)
 
 
-class MapDriver:
-  """One trip's map driver. step() each bridge step returns the plugin control message (resent between frames);
+class MapDrive:
+  """One trip's drive along the map, which the map driver (gta5_drivers.MapDriver) drives with. step() each bridge step returns the plugin control message (resent between frames);
   `phase`, `events` (since last taken), `indicator`/`label` (the desire it signals) and `finished` (None, "arrived" or
   "abort: <why>") for expert mode."""
   def __init__(self, cfg: dict | None = None, tune=None):
@@ -973,7 +973,7 @@ class MapDriver:
     """The first key whose lane lies outside the lanes the road has for it (_lanes_about): {"s", "lane", "lanes"};
     None where all are inside."""
     for i, (s, lane) in enumerate(keys):
-      lanes = MapDriver._lanes_about(route, keys, i)
+      lanes = MapDrive._lanes_about(route, keys, i)
       if lanes and not -0.5 < lane < lanes - 0.5:
         return {"s": round(s, 1), "lane": round(lane, 2), "lanes": lanes}
     return None
@@ -1272,7 +1272,7 @@ class MapDriver:
   def _retarget_chain(keys, a: int, b: int, lane: float) -> list[tuple[float, float]]:
     """A change's keys (a to b) ending in `lane` instead, at the same places: its ramps scaled, its renumbering steps
     kept."""
-    moved = MapDriver._chain_lanes(keys, a, b)
+    moved = MapDrive._chain_lanes(keys, a, b)
     scale = (moved - (keys[b][1] - lane)) / moved
     out = [keys[a]]
     for j in range(a, b):
@@ -1604,7 +1604,7 @@ class MapDriver:
   def _corner_hit(c: dict, pos, theta: float, body: tuple[float, float, float] = (FRONT, FRONT, HALF_WIDTH)) -> float | None:
     """How deep (m) the car (its origin at pos, heading theta radians from east; body: m to its front, rear and side)
     reaches into a corner's kerb block, the block's corner rounded by its radius; None where it doesn't."""
-    d = MapDriver._corner_hits(c, np.asarray(pos, float)[None, :2], np.array([theta], float), body)[0]
+    d = MapDrive._corner_hits(c, np.asarray(pos, float)[None, :2], np.array([theta], float), body)[0]
     return None if np.isnan(d) else float(d)
 
   @staticmethod

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LANE_W, PED_BOX, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LANE_W, PED_BOX, MapDrive
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, RouteLanes, Section, Span
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
@@ -448,7 +448,7 @@ def trip_route(spec: str, router_url: str = "http://127.0.0.1:8002", at_pose: bo
 
 @dataclass
 class Trip:
-  md: MapDriver
+  md: MapDrive
   car: LagCar
   rows: list = field(default_factory=list)  # per frame, as COLS
   events: list = field(default_factory=list)
@@ -482,7 +482,7 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
                peds=peds, ped_list=ped_list, brake=brake, walls=walls, probe=probe)
   route.at, route.seg = 0.0, 0
   route.locate(np.array(pose[:2], float), None, pose[2], search=route.length)
-  md = MapDriver({"seed": 1, **(cfg or {})})
+  md = MapDrive({"seed": 1, **(cfg or {})})
   trip = Trip(md, car)
   faults = faults or {}
   pushed = False

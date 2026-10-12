@@ -10,7 +10,8 @@ MODULES = [
   *(f"{GTA5}.map.{m}" for m in ("osm_pbf", "osm_lanes", "paths", "gta5_map", "router", "dest_snap", "stop_lines", "junctions",
                                 "lane_match", "map_view")),
   *(f"{GTA5}.{m}" for m in ("gta5_mapdrive", "gta5_wrongway", "gta5_blindspot", "gta5_scene", "gta5_expert", "gta5_overlay",
-                            "gta5_driver", "gta5_relay", "gta5_cmd", "gta5_stacks", "gta5_record", "gta5_rx")),
+                            "gta5_driver", "gta5_drivers", "gta5_navd", "gta5_opio", "gta5_brain", "gta5_host", "gta5_relay", "gta5_cmd",
+                            "gta5_stacks", "gta5_record", "gta5_rx")),
   *(f"openpilot.selfdrive.navd.{m}" for m in ("planner", "maneuvers", "lane_slots", "route_input", "inputs", "map_match")),
 ]
 IMPORT_BLOCKED = """

@@ -18,7 +18,7 @@ from openpilot.cereal import log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot, BlindSpotTune, footprint
-from openpilot.tools.sim.bridge.gta5.gta5_driver import NUDGE_TIMEOUT, NUDGE_TORQUE, Driver
+from openpilot.tools.sim.bridge.gta5.gta5_driver import NUDGE_TIMEOUT, NUDGE_TORQUE, HumanDriver
 from openpilot.tools.sim.bridge.gta5.test_nav import Clock, Drive, route_to_turn
 from openpilot.tools.sim.lib.common import SimulatorState, vec3
 
@@ -194,7 +194,7 @@ def test_openpilot_lane_change_waits_for_the_blind_spot():
   # (modeld's lane change state), as selfdrived alerts on it
   clock = Clock()
   driver_mod.time = clock
-  c, dh, drv = Car(), DesireHelper(), Driver(lambda m: None, lambda: None)
+  c, dh, drv = Car(), DesireHelper(), HumanDriver(lambda m: None, lambda: None)
   c.state.left_blinker = True
   states, blocked_alert = [], []
   for k in range(200):  # 10 s
@@ -217,7 +217,7 @@ def test_openpilot_lane_change_waits_for_the_blind_spot():
 def test_driver_nudges_once_clear_for_its_timeout():
   clock = Clock()
   driver_mod.time = clock
-  d = Driver(lambda m: None, lambda: None)
+  d = HumanDriver(lambda m: None, lambda: None)
   assert d.stalk("right", 0.0, 0.0, LaneChangeState.preLaneChange, False, True) == 0
   clock.t += 20.0
   assert d.stalk("right", 0.0, 0.0, LaneChangeState.preLaneChange, False, True) == 0

@@ -2,7 +2,7 @@ import numpy as np
 
 import openpilot.selfdrive.navd.planner as nav_mod
 from openpilot.selfdrive.navd.planner import Fork, Planner, find_turn, lane_plan
-from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
+from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_navd import nav_inputs
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -30,7 +30,7 @@ class Drive:
     self.sent, self.desires, self.events = [], [], []
     self.indicator = None
     self.nav = Planner()
-    self.driver = Driver(self._send, lambda: None)
+    self.human = HumanDriver(self._send, lambda: None)
     self.lane, self.v = lane, v
     self.drives = True  # Navigate on openpilot
 
@@ -38,7 +38,7 @@ class Drive:
     """A step from the bridge's state, as the world takes it: the driver's game commands to `sent`, NavDesire to
     `desires`, and the game's waypoint off on arriving."""
     out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
-    self.driver.act(out)
+    self.human.act(out)
     self.desires += out.desires
     self.events += out.events
     self.reason = out.cap_reason

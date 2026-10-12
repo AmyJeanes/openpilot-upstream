@@ -4,7 +4,7 @@ import pytest
 
 import openpilot.tools.sim.bridge.gta5.gta5_driver as driver_mod
 from openpilot.selfdrive.navd.inputs import NavOutputs
-from openpilot.tools.sim.bridge.gta5.gta5_driver import GO_GAS, NUDGE_TIMEOUT, NUDGE_TORQUE, Driver, LaneChangeState, PullAway
+from openpilot.tools.sim.bridge.gta5.gta5_driver import GO_GAS, NUDGE_TIMEOUT, NUDGE_TORQUE, HumanDriver, LaneChangeState, PullAway
 from openpilot.tools.sim.bridge.gta5.gta5_navd import CANCELLED_FROM, Destination
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 
@@ -20,7 +20,7 @@ class Clock:
 
 def driver():
   sent = []
-  return Driver(sent.append, lambda: sent.append("cancel")), sent
+  return HumanDriver(sent.append, lambda: sent.append("cancel")), sent
 
 
 def test_nudge_held_every_step_until_the_timeout():

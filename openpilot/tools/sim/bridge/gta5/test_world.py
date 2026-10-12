@@ -168,7 +168,7 @@ def test_mark_key(monkeypatch, tmp_path):
   w.presses = {}
   w.track, w.lane_lines, w.marks_due = brain_mod.deque(maxlen=200), brain_mod.deque(maxlen=20), []
   w.lane_line = (None, 0.0, [[0.0, 0.0], [1.0, 1.0]])
-  w.openpilot = w.pilot = w.driving = SimpleNamespace(name="openpilot")
+  w.openpilot = w.driver = w.driving = SimpleNamespace(name="openpilot")
   w.expert = SimpleNamespace(md=None, md_driving=False, source="none")
   pts = np.array([[0.0, float(y), 0.0] for y in range(0, 1001, 10)])
   w.route = SimpleNamespace(at=500.04, length=1000.0, points=pts, along=pts[:, 1].copy())

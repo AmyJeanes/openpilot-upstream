@@ -1,9 +1,10 @@
 """The bridge's brain: what decides how the car is driven and what's shown, with none of openpilot's machinery, so the
 same brain runs in the bridge in WSL (gta5_world.py, openpilot in process) and on Windows (gta5_host.py, openpilot behind
 the link). Each step takes the newest game state: the destination and our route to it, the car's lane by the map, nav's
-planner and the simulated driver for openpilot, the pilots (gta5_pilot.py) and expert mode, the debug overlay, the map
-view and the mark key's bookmarks. openpilot is an OpenpilotIO (gta5_opio.py): its state in; cruise buttons, the
-simulated driver's inputs, nav's desire and speed cap, the route input and lane slots out. Plugin commands go to send()."""
+planner and the simulated person at the wheel for openpilot (gta5_driver.HumanDriver), the drivers (gta5_drivers.py)
+and expert mode, the debug overlay, the map view and the mark key's bookmarks. openpilot is an OpenpilotIO
+(gta5_opio.py): its state in; cruise buttons, the human driver's inputs, nav's desire and speed cap, the route input and
+lane slots out. Plugin commands go to send()."""
 import json
 import math
 import os
@@ -21,13 +22,13 @@ from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
 from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
 from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
-from openpilot.tools.sim.bridge.gta5.gta5_driver import Driver
+from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
 from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
-from openpilot.tools.sim.bridge.gta5.gta5_pilot import INACTIVE, MapPilot, OpenpilotPilot, Pilot, pilot_from_env
+from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE, Driver, MapDriver, OpenpilotDriver, driver_from_env
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
@@ -98,7 +99,7 @@ def on_path(p, line: np.ndarray, near: float = ON_PATH):
 
 class Brain:
   def __init__(self, io: OpenpilotIO, send, log=None, match: bool = False):
-    """send(cmd) sends the plugin a command; log is a file for nav's and the pilots' events (GTA5_LOG); match: routing
+    """send(cmd) sends the plugin a command; log is a file for nav's and the drivers' events (GTA5_LOG); match: routing
     from navd's map match of the GNSS (NAV_MATCH, with the bridge's GNSS), which the bridge feeds."""
     self.io = io
     self._send = send
@@ -116,7 +117,7 @@ class Brain:
     self._init_nav()
     self.blindspot = BlindSpot()
     self.expert = Expert(self._send, lambda: self.io.cruise("cruise_cancel"), lambda: self._set_nav_desire(""))
-    self._init_pilots()
+    self._init_drivers()
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
     self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
     self.junction_areas: JunctionAreas | None = None
@@ -126,10 +127,10 @@ class Brain:
     self.gps = GpsRoute()  # our route on the game map, while the plugin asks for it
 
   def _init_nav(self):
-    """navd's planner, and the GTA layer's parts around it: the simulated driver and the destination."""
+    """navd's planner, and the GTA layer's parts around it: the simulated person at the wheel and the destination."""
     self.io.params.remove("NavDesire")  # a killed bridge can leave one
     self.nav = Planner(Tune(os.getenv("GTA5_NAVTUNE")), refresh=self.io.params.get_bool("TurnDesireRefresh"))
-    self.driver = Driver(self._send, lambda: self.io.cruise("cruise_cancel"))
+    self.human = HumanDriver(self._send, lambda: self.io.cruise("cruise_cancel"))
     self.destination = Destination(self.io.params, self._send, ends=NOO != "on")
     self.next_map = 0.0
     self.lane_line: tuple = (None, 0.0, [])  # the route it's for, until when, and the line
@@ -144,16 +145,16 @@ class Brain:
     self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
     self.good_lane: tuple[list[int] | None, float] = (None, 0.0)  # the last lane read by the map's lanes, and when
 
-  def _init_pilots(self):
-    """Who drives while engaged (gta5_pilot.py): openpilot, and the engage key's pilot (GTA5_PILOT)."""
-    self.openpilot = OpenpilotPilot(self.io)
-    self.pilot = pilot_from_env(self.openpilot, self._send, self._log_event)
-    self.driving: Pilot | Expert | None = None  # whose controls the car takes, as of the last step
+  def _init_drivers(self):
+    """Who drives while engaged (gta5_drivers.py): openpilot, and the engage key's driver (GTA5_DRIVER)."""
+    self.openpilot = OpenpilotDriver(self.io)
+    self.driver = driver_from_env(self.openpilot, self._send, self._log_event)
+    self.driving: Driver | Expert | None = None  # whose controls the car takes, as of the last step
 
   # *** each step ***
 
   def step(self, state: dict):
-    """A bridge step, the player in the car and the game's state fresh: nav, the pilots, the overlay, the map view."""
+    """A bridge step, the player in the car and the game's state fresh: nav, the drivers, the overlay, the map view."""
     v = state["vEgo"]
     bearing = (-state["heading"]) % 360  # the game's heading is counterclockwise from north; a bearing is clockwise
     model = self.io.model() or {}
@@ -171,7 +172,7 @@ class Brain:
     inputs.update(left_blindspot=left, right_blindspot=right)
     state = {**state, "blindspot": [left, right]}
     indicator = state.get("indicator")
-    inputs["user_torque"] = self.driver.stalk(indicator, state["heading"], state["yawRate"], model.get("lane_change", 0),
+    inputs["user_torque"] = self.human.stalk(indicator, state["heading"], state["yawRate"], model.get("lane_change", 0),
                                               self.nav.signaling, left if indicator == "left" else right if indicator == "right" else False)
     self.io.set_inputs(**inputs)
     if self.nav_msgs is not None:
@@ -180,13 +181,13 @@ class Brain:
                            pose=(np.array(state["pos"][:2], dtype=float), bearing))
     for msg in self._overlay(state, v):
       self._send(msg)
-    self.driving = self._step_pilots(state)
+    self.driving = self._step_drivers(state)
     if self.driving is not None and self.driving is not self.openpilot:
-      # expert mode or another pilot drives: openpilot stays disengaged, and nav and pull-away wait
+      # expert mode or another driver drives: openpilot stays disengaged, and nav and pull-away wait
       self._set_cap(0.0, "")
       self._set_blinkers()
       self._update_buttons(state)
-      if self._map_driver() is not None:
+      if self._map_drive() is not None:
         self._lane_line(state, v)  # the map driver's path, for recordings and the overlay, whether drawn or not
       self._update_map(state, bearing, v)
       return
@@ -194,7 +195,7 @@ class Brain:
     drives = self._nav_drives()
     out = self.nav.update(nav_inputs(state, self.openpilot.engaged, state.get("indicator"), model.get("turns") or {},
                                      time.monotonic(), drives))
-    self.driver.act(out)
+    self.human.act(out)
     for e in out.events:  # map errors nav found, in the state log as the map driver's anomalies are in its own
       if self.log:
         self.log.write(json.dumps({"mono": round(time.monotonic(), 3), **e}) + "\n")
@@ -204,7 +205,7 @@ class Brain:
     self._set_blinkers()
     if out.arrived:
       self.destination.arrived()
-    self.driver.pull_away.update(state, self.openpilot.engaged)
+    self.human.pull_away.update(state, self.openpilot.engaged)
     self._update_buttons(state)
     self._update_map(state, bearing, v)
 
@@ -214,14 +215,14 @@ class Brain:
     return msg if msg is not None else INACTIVE
 
   def hud(self):
-    """The game's HUD: the set speed as openpilot's UI shows it (km/h; 0 when not set), and whether a pilot is engaged."""
+    """The game's HUD: the set speed as openpilot's UI shows it (km/h; 0 when not set), and whether a driver is engaged."""
     now = time.monotonic()
     if now < self.next_hud:
       return
     self.next_hud = now + HUD_EVERY
     set_kph = self.io.set_speed_kph
     self._send({"type": "hud", "setSpeed": set_kph if 0 < set_kph < 255 else 0, "metric": self.metric,
-                "engaged": self.pilot.engaged or self.openpilot.engaged})
+                "engaged": self.driver.engaged or self.openpilot.engaged})
 
   def close(self):
     self._flush_marks()
@@ -248,7 +249,7 @@ class Brain:
 
   def _set_blinkers(self):
     # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between
-    left, right = self.driver.blinkers(self.nav.blinker_gap(time.monotonic()))
+    left, right = self.human.blinkers(self.nav.blinker_gap(time.monotonic()))
     self.io.set_inputs(left_blinker=left, right_blinker=right)
 
   def _set_nav_desire(self, desire: str):
@@ -285,7 +286,7 @@ class Brain:
         self._route_encoder(route, lanes=False)
     self.io.lane_slots(vec)
 
-  # *** nav, the map and the pilots ***
+  # *** nav, the map and the drivers ***
 
   def _nav_drives(self) -> bool:
     """Navigate on openpilot: nav drives, rather than only guiding."""
@@ -300,12 +301,12 @@ class Brain:
         self.noo = True
     return self.noo
 
-  def _step_pilots(self, state: dict) -> Pilot | Expert | None:
-    """Steps whoever drives (expert mode first, while it's on), handing the car back where the pilot says so: who
+  def _step_drivers(self, state: dict) -> Driver | Expert | None:
+    """Steps whoever drives (expert mode first, while it's on), handing the car back where the driver says so: who
     drives now, None for the player."""
     now = time.monotonic()
     self.openpilot.step(state, self.route, now)
-    p = self.pilot
+    p = self.driver
     if self.expert.update(state, self.route, self.openpilot.engaged):
       if p is not self.openpilot and p.engaged:
         p.disengage("expert mode drives")
@@ -319,14 +320,14 @@ class Brain:
       return p if p.engaged else None
     return self.openpilot if self.openpilot.engaged else None
 
-  def _map_driver(self):
-    """The map driver driving now (expert mode's, or the engage key's), else None."""
+  def _map_drive(self):
+    """The MapDrive of the map driver driving now (expert mode's, or the engage key's), else None."""
     if self.expert.md_driving:
       return self.expert.md
-    return self.pilot.md if isinstance(self.pilot, MapPilot) and self.pilot.engaged else None
+    return self.driver.md if isinstance(self.driver, MapDriver) and self.driver.engaged else None
 
   def _driver_name(self) -> str:
-    """Who drives now, for marks: expert mode's source (ai, map, ...), the pilot's name, or user."""
+    """Who drives now, for marks: expert mode's source (ai, map, ...), the driver's name, or user."""
     if self.driving is self.expert:
       return self.expert.source
     return self.driving.name if self.driving is not None else "user"
@@ -490,7 +491,7 @@ class Brain:
       "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
                  "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
-      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.pilot.engaged or self.openpilot.engaged else ''}",
+      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.driver.engaged or self.openpilot.engaged else ''}",
       "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),
               "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
     })
@@ -499,7 +500,7 @@ class Brain:
     """The route in the lanes nav aims for, for the map; while the map driver drives, the path it drives (its intent,
     without the in-lane wander), so the ribbon is what's driven."""
     r, now = self.route, time.monotonic()
-    md = self._map_driver()
+    md = self._map_drive()
     if md is not None and md.path is not None:
       if r is not self.lane_line[0] or now >= self.lane_line[1]:
         self.lane_line = (r, now + LANE_LINE_EVERY, md.intent_line())
@@ -543,14 +544,14 @@ class Brain:
           self.io.cruise(commands[key])
 
   def _engage_key(self):
-    """Disengages whichever pilot is engaged, else engages the pilot, or openpilot where it can't (the map driver
+    """Disengages whichever driver is engaged, else engages the driver, or openpilot where it can't (the map driver
     without a route). While expert mode is on the key is openpilot's alone."""
-    pilots = list(dict.fromkeys([self.openpilot] if self.expert.on else [self.pilot, self.openpilot]))
-    for p in pilots:
+    drivers = list(dict.fromkeys([self.openpilot] if self.expert.on else [self.driver, self.openpilot]))
+    for p in drivers:
       if p.engaged:
         p.disengage("the driver pressed the engage key")
         return
-    for p in pilots:
+    for p in drivers:
       if p.engage(self.route):
         return
 
@@ -572,7 +573,7 @@ class Brain:
     it; written to MARKS MARK_AFTER s later with the car's track from MARK_BEFORE s before to then. openpilot's
     userBookmark goes now, so loggerd keeps the segment."""
     now = time.monotonic()
-    r, md, rec = self.route, self._map_driver(), self.recorder
+    r, md, rec = self.route, self._map_drive(), self.recorder
     seg = rec.segment if rec is not None else None
     plan = None
     if md is not None and md.path is not None:

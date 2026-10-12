@@ -37,8 +37,8 @@ always throughout.
 
 driver: "ai" (the default) as above; "map" drives the route with our own map driver (gta5_mapdrive.py, the control
 file's `mapdrive` object sets it up) instead of the game's AI, the AI off; "map+ai" the same, the AI taking over where
-the map driver aborts (marked ai_fallback), unless the driver took over. The map driver drives through a MapPilot
-(gta5_pilot.py), as the engage key's does with GTA5_PILOT=map. `source` says who drives each frame: none, ai, map or
+the map driver aborts (marked ai_fallback), unless the driver took over. The map driver is a MapDriver
+(gta5_drivers.py), as the engage key's is with GTA5_DRIVER=map. `source` says who drives each frame: none, ai, map or
 ai_fallback. Expert mode doesn't send the plugin its controls itself: the bridge sends `controls()` each step."""
 import json
 import math
@@ -47,17 +47,14 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 
 from openpilot.selfdrive.navd.maneuvers import Maneuver, maneuvers, route_point
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_drivers import TOOK_OVER, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDrive
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay
 from openpilot.tools.sim.bridge.gta5.map.router import Router
-
-if TYPE_CHECKING:  # gta5_pilot imports opendbc, which the Windows host lacks: the map driver imports it when it starts
-  from openpilot.tools.sim.bridge.gta5.gta5_pilot import MapPilot
 
 CONTROL = Path(tempfile.gettempdir()) / "gta5_expert.json"
 POLL_EVERY = 0.5  # s
@@ -176,7 +173,7 @@ class Expert:
     self.ww_msg: dict | None = None  # its control message this step
     self.ww_ai = False  # the game's AI was started for its recovery
     self.ww_map_lane: dict | None = None  # the map's lane reading (lane_match) on the clip's last frame, for recordings
-    self.map: MapPilot | None = None  # the map driver (gta5_mapdrive.py), with driver=map or map+ai
+    self.map: MapDriver | None = None  # the map driver (gta5_mapdrive.py), with driver=map or map+ai
     self.md_fallback = False  # it aborted and the game's AI drives on (map+ai)
     self.md_logged = 0.0  # when its last row went to the expert log
 
@@ -202,7 +199,7 @@ class Expert:
     if self.on and not was:
       self._reset()
       self.ww = self._wrongway(cfg.get("wrongway"))
-      self.map = self._map_pilot(cfg)
+      self.map = self._map_driver(cfg)
       if self.log is None:
         self.log = open(log_path(), "a", buffering=1)
     elif self.active:
@@ -220,8 +217,7 @@ class Expert:
       print(f"gta5: expert: bad wrongway {spec!r}: {e}", flush=True)
       return None
 
-  def _map_pilot(self, cfg: dict) -> "MapPilot | None":
-    from openpilot.tools.sim.bridge.gta5.gta5_pilot import MapPilot
+  def _map_driver(self, cfg: dict) -> MapDriver | None:
     if str(cfg.get("driver") or "ai") not in MAP_DRIVERS:
       return None
     spec = cfg.get("mapdrive") or {}
@@ -229,15 +225,15 @@ class Expert:
       spec = json.loads(spec) if isinstance(spec, str) else dict(spec)
       if cfg.get("driver") == "map+ai":
         spec.setdefault("on_abort", "ai")
-      MapDriver(spec)  # a bad spec is told now, not once the trip starts
+      MapDrive(spec)  # a bad spec is told now, not once the trip starts
     except (ValueError, TypeError) as e:
       print(f"gta5: expert: bad mapdrive {spec!r}: {e}", flush=True)
       return None
-    return MapPilot(self.send, spec, event=self._event, wait_for_route=True)
+    return MapDriver(self.send, spec, event=self._event, wait_for_route=True)
 
   @property
-  def md(self) -> MapDriver | None:
-    """The map driver of the trip (its last drive's after it ends), with driver=map or map+ai."""
+  def md(self) -> MapDrive | None:
+    """The map driver's drive of the trip (its last one after it ends), with driver=map or map+ai."""
     return self.map.md if self.map is not None else None
 
   @property
@@ -414,7 +410,7 @@ class Expert:
   def _map_update(self, state: dict, route, now: float) -> bool:
     """A step of the map driver: it steers and sets the speed on every bridge step, its control resent between game
     frames."""
-    from openpilot.tools.sim.bridge.gta5.gta5_pilot import TOOK_OVER
+
     mp = self.map
     dest = self.cfg.get("dest")
     if route is not None and dest and np.hypot(*(route.points[-1] - np.asarray(dest[:2], dtype=float))) > DEST_NEAR:

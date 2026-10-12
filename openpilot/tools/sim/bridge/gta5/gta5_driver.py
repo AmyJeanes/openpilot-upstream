@@ -38,7 +38,7 @@ class LaneChangeState(IntEnum):  # cereal's log.LaneChangeState, without cereal
   laneChangeFinishing = 3
 
 
-class Driver:
+class HumanDriver:
   def __init__(self, send, cancel):
     self.send = send  # to the plugin
     self.cancel = cancel  # cruise cancel, as the driver's button

@@ -1,33 +1,34 @@
-"""Pilots: who drives the car while it's engaged.
+"""Drivers: who drives the car while it's engaged.
 
-The engage key engages the bridge's pilot (GTA5_PILOT: openpilot, the default, or map) and disengages it, and the HUD's
-engaged state, the driver's hand-back and arrival go through it, whichever it is. Each bridge step the brain
-(gta5_brain.py) steps the pilot driving with the game state and the route, then sends the plugin its control message.
-- OpenpilotPilot: openpilot, through the OpenpilotIO (gta5_opio.py): engaged with the simulated car's cruise buttons, its
-  controls carControl's.
-- MapPilot: our map driver (gta5_mapdrive.py) along the route. Without a route it can't engage, and the engage key
-  engages openpilot instead. Expert mode (gta5_expert.py) drives with a MapPilot of its own.
-A pilot hands the car back at once on the driver's brake, gas or steering."""
+The engage key engages the bridge's driver (GTA5_DRIVER: openpilot, the default, or map) and disengages it, and the
+HUD's engaged state, the hand-back to the player and arrival go through it, whichever it is. Each bridge step the brain
+(gta5_brain.py) steps the driver driving with the game state and the route, then sends the plugin its control message.
+- OpenpilotDriver: openpilot, through the OpenpilotIO (gta5_opio.py): engaged with the simulated car's cruise buttons,
+  its controls carControl's.
+- MapDriver: our map drive (gta5_mapdrive.py) along the route. Without a route it can't engage, and the engage key
+  engages openpilot instead. Expert mode (gta5_expert.py) drives with a MapDriver of its own.
+A driver hands the car back at once on the player's brake, gas or steering. The simulated person in the seat who works
+the stalk for openpilot is gta5_driver.HumanDriver, not one of these."""
 import os
 
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import USER_STEER, MapDriver
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import USER_STEER, MapDrive
 from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 
-PILOT = os.getenv("GTA5_PILOT", "openpilot")
-PILOTS = ("openpilot", "map")
+DRIVER = os.getenv("GTA5_DRIVER", "openpilot")
+DRIVERS = ("openpilot", "map")
 INACTIVE = {"type": "control", "active": False}
-TOOK_OVER = "abort: driver input"  # why a pilot hands back to the driver, as the map driver's own abort has it
+TOOK_OVER = "abort: driver input"  # why a driver hands back to the player, as the map drive's own abort has it
 ROUTE_GAP = 5.0  # s an engaged map driver drives on along its last route while there's none (routing a new destination)
 INDICATOR_EVERY = 2.0  # s between asking the plugin again for the indicator its state doesn't show
 
 
 def took_over(state: dict) -> bool:
-  """The driver's brake, gas or steering."""
+  """The player's brake, gas or steering."""
   user = state.get("user") or {}
   return abs(float(user.get("steer") or 0.0)) > USER_STEER or bool(user.get("brake")) or bool(user.get("gas"))
 
 
-class Pilot:
+class Driver:
   name = ""
 
   @property
@@ -42,7 +43,7 @@ class Pilot:
     raise NotImplementedError
 
   def step(self, state: dict, route, now: float) -> str | None:
-    """A bridge step: why it hands the car back now (the world then disengages it; "arrived" ends the destination too),
+    """A bridge step: why it hands the car back now (the brain then disengages it; "arrived" ends the destination too),
     else None."""
     return None
 
@@ -51,14 +52,14 @@ class Pilot:
     return None
 
 
-class OpenpilotPilot(Pilot):
+class OpenpilotDriver(Driver):
   """openpilot drives: the cruise buttons engage it, and its controls (carControl's curvature and acceleration) go to
   the car."""
   name = "openpilot"
 
   def __init__(self, io: OpenpilotIO):
     self.io = io
-    self.steering = False  # whether the driver was steering
+    self.steering = False  # whether the player was steering
     self.braking = False
 
   @property
@@ -87,8 +88,8 @@ class OpenpilotPilot(Pilot):
     return self.io.controls(state)
 
 
-class MapPilot(Pilot):
-  """Our map driver drives the route: a new MapDriver (its plan made where the car is) each time it engages.
+class MapDriver(Driver):
+  """Our map drive along the route: a new MapDrive (its plan made where the car is) each time it engages.
 
   wait_for_route (expert mode's trips): it engages before the route comes, holding the car until it does, and drives on
   whatever happens to the route; else it needs one to engage, and hands back after ROUTE_GAP s without one."""
@@ -97,9 +98,9 @@ class MapPilot(Pilot):
   def __init__(self, send, spec: dict | None = None, event=None, wait_for_route: bool = False):
     self.send = send
     self.spec = dict(spec or {})
-    self.event = event  # event(what, **detail): the map driver's events, for a log
+    self.event = event  # event(what, **detail): the map drive's events, for a log
     self.wait_for_route = wait_for_route
-    self.md: MapDriver | None = None  # the last drive's, kept after it ends for what it did
+    self.md: MapDrive | None = None  # the last drive's, kept after it ends for what it did
     self.on = False
     self.msg: dict | None = None
     self.indicator: str | None = None
@@ -114,7 +115,7 @@ class MapPilot(Pilot):
   def engage(self, route) -> bool:
     if route is None and not self.wait_for_route:
       return False
-    self.md = MapDriver(dict(self.spec))
+    self.md = MapDrive(dict(self.spec))
     self.on, self.msg, self.indicator, self.label, self.no_route_since = True, None, None, "none", None
     self.send({"type": "ai", "on": 0, "indicator": "off"})  # our controls drive, not the game's AI
     print("gta5: the map driver drives", flush=True)
@@ -168,10 +169,12 @@ class MapPilot(Pilot):
     return self.on and self.md is not None and self.md.phase not in ("abort", "wait", "")
 
 
-def pilot_from_env(openpilot: OpenpilotPilot, send, event=None) -> Pilot:
-  if PILOT not in PILOTS:
-    raise ValueError(f"GTA5_PILOT={PILOT}: one of {', '.join(PILOTS)}")
-  if PILOT == "map":
-    print("gta5: the engage key drives with the map driver (GTA5_PILOT=map)", flush=True)
-    return MapPilot(send, event=event)
+def driver_from_env(openpilot: OpenpilotDriver, send, event=None) -> Driver:
+  if os.getenv("GTA5_PILOT") is not None and os.getenv("GTA5_DRIVER") is None:
+    raise ValueError("GTA5_PILOT is GTA5_DRIVER now")
+  if DRIVER not in DRIVERS:
+    raise ValueError(f"GTA5_DRIVER={DRIVER}: one of {', '.join(DRIVERS)}")
+  if DRIVER == "map":
+    print("gta5: the engage key drives with the map driver (GTA5_DRIVER=map)", flush=True)
+    return MapDriver(send, event=event)
   return openpilot

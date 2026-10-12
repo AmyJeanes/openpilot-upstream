@@ -21,7 +21,7 @@ import time
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (LANE_W, MAPX_COLUMNS, SOURCES, MapDriver, chains, lane_at, lc_seconds,
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (LANE_W, MAPX_COLUMNS, SOURCES, MapDrive, chains, lane_at, lc_seconds,
                                                            pick_style, shaped, wander)
 
 # real routes from the overnight recordings (segment, route index): turns in the city, and freeway trips with lane changes
@@ -172,7 +172,7 @@ def test_lane_change_for_turn():
 def test_lane_change_takes_its_time():
   """A change is timed by the speed it's driven at: pulling away from a standstill, or nav's ramp across a whole window
   (the city's too slow drift seen in game), it takes the style's time (+-25 %), not the ramp's length."""
-  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDrive
   r = ms.junction_turn("left", lead=400.0, stop=None)
   for seed in (1, 4):
     for v0 in (0.0, 12.0):
@@ -189,7 +189,7 @@ def test_lane_change_takes_its_time():
   assert fitted[2] == (330.0, 0.0) and fitted[1][0] > 240.0, fitted
   # a change with a renumbering step inside keeps the step at its place
   keys = [(0.0, 1.0), (200.0, 1.0), (280.0, 0.5), (280.0, 1.5), (330.0, 1.0), (400.0, 1.0)]
-  out = MapDriver._replace_chain(keys, 1, 4, 270.0, 330.0)
+  out = MapDrive._replace_chain(keys, 1, 4, 270.0, 330.0)
   assert len([k for k in out if k[0] == 280.0]) == 2 and out[0] == (270.0, 1.0) and out[-1] == (330.0, 1.0), out
   print("lane changes take their time: ok")
 
@@ -264,14 +264,14 @@ def test_lane_change_kept_off_a_jog():
   out = md.off_jogs(r, keys)
   assert out[2][0] <= spans[0][0] + 1e-6 and abs((out[2][0] - out[1][0]) - 45.0) < 1e-6, out
   # driven with nav's change across it, a surge at the jog: tracked without saturating (the profile slows for the S)
-  orig = g.MapDriver.off_jogs
-  g.MapDriver.off_jogs = lambda self, route, k: k
+  orig = g.MapDrive.off_jogs
+  g.MapDrive.off_jogs = lambda self, route, k: k
   try:
-    real = g.MapDriver.nav_keys
-    g.MapDriver.nav_keys = lambda self, route, lane: [(route.at, 1.0), (185.0, 1.0), (225.0, 0.0), (400.0, 0.0)]
+    real = g.MapDrive.nav_keys
+    g.MapDrive.nav_keys = lambda self, route, lane: [(route.at, 1.0), (185.0, 1.0), (225.0, 0.0), (400.0, 0.0)]
     trip = ms.drive(r, {"seed": 2, "retime": False, "fit_durations": False}, lane=1, tau=0.18, faults={"surge": (190.0, 4.5)})
   finally:
-    g.MapDriver.off_jogs, g.MapDriver.nav_keys = orig, real
+    g.MapDrive.off_jogs, g.MapDrive.nav_keys = orig, real
   s_, dev, v = trip.col(9), trip.col(8), trip.col(4)
   m = (s_ > 170) & (s_ < 260)
   assert trip.finished == "arrived" and dev[m].max() < 0.6, (trip.finished, dev[m].max())
@@ -282,7 +282,7 @@ def test_lane_change_kept_off_a_jog():
 def test_corner_kerb():
   """A junction's inside corner kerb from its legs' cross-sections: a car over it is a kerb_contact, the plan's own
   line isn't."""
-  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDrive
   r = ms.junction_turn("right", stop=None)  # north 200 m, right (east); two lanes each way, 5.5 m
   trip = ms.drive(r, {"seed": 3, "bias_max": 0, "wander": 0}, lane=1)
   md = trip.md
@@ -290,25 +290,25 @@ def test_corner_kerb():
   c = md.corners[0]
   assert np.allclose(c["corner"], [11.0, 189.0], atol=0.2), c["corner"]
   diag = math.radians(-45.0 + 90.0)  # heading south-east, round the turn
-  assert MapDriver._corner_hit(c, np.array([14.0, 186.0]), diag) > 1.0  # its middle over the corner
-  assert MapDriver._corner_hit(c, np.array([9.5, 190.5]), diag) is None  # inside the kerb's rounding
-  assert MapDriver._corner_hit(c, np.array([5.0, 195.0]), diag) is None
+  assert MapDrive._corner_hit(c, np.array([14.0, 186.0]), diag) > 1.0  # its middle over the corner
+  assert MapDrive._corner_hit(c, np.array([9.5, 190.5]), diag) is None  # inside the kerb's rounding
+  assert MapDrive._corner_hit(c, np.array([5.0, 195.0]), diag) is None
   print("corner kerb: ok")
 
 
 def without_clamp():
-  """MapDriver._clamp left out, as before it (a context manager)."""
+  """MapDrive._clamp left out, as before it (a context manager)."""
   from contextlib import contextmanager
   from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
 
   @contextmanager
   def off():
-    real = g.MapDriver._clamp
-    g.MapDriver._clamp = lambda self, route, keys, intent: (intent, np.full(len(intent), 0.45), np.full(len(intent), 0.45))
+    real = g.MapDrive._clamp
+    g.MapDrive._clamp = lambda self, route, keys, intent: (intent, np.full(len(intent), 0.45), np.full(len(intent), 0.45))
     try:
       yield
     finally:
-      g.MapDriver._clamp = real
+      g.MapDrive._clamp = real
   return off()
 
 
@@ -376,7 +376,7 @@ def test_far_corner_beside_the_flank():
   # corner of the car is in the block
   tip = np.array([0.0, 0.7])
   c = {"ka": tip, "na": np.array([-1.0, 1.0]) / math.sqrt(2), "kb": tip, "nb": np.array([1.0, 1.0]) / math.sqrt(2), "radius": 0.0}
-  side_hit = MapDriver._corner_hit(c, np.zeros(2), 0.0, (2.4, 2.4, 1.0))
+  side_hit = MapDrive._corner_hit(c, np.zeros(2), 0.0, (2.4, 2.4, 1.0))
   out = Section([Span(Lane(FORWARD, 3.4), -3.4 + k * 3.4, k * 3.4, 1) for k in range(2)], (-3.4, 3.4))
   r = ms.junction_turn("left", stop=None, angle=94.0, sec=ms.section(1, 1, 6.1), out=out)
   cfg = {"seed": 3, "bias_max": 0, "wander": 0}
@@ -386,7 +386,7 @@ def test_far_corner_beside_the_flank():
     g.FAR_RADIUS, g.BODY_STEP = far, step
     g._outline.cache_clear()
     try:
-      return ms.drive(r, cfg, lane=0, seconds=80.0), MapDriver._corner_hit(c, np.zeros(2), 0.0, (2.4, 2.4, 1.0))
+      return ms.drive(r, cfg, lane=0, seconds=80.0), MapDrive._corner_hit(c, np.zeros(2), 0.0, (2.4, 2.4, 1.0))
     finally:
       g.FAR_RADIUS, g.BODY_STEP = real
       g._outline.cache_clear()
@@ -628,7 +628,7 @@ def test_live_starts():
     route, pose = got
     md = ms.drive(route, {"seed": seed}, pose=pose, seconds=3.0).md
     assert not md.aborts and md.plans and min(lane for _, lane in md.keys) >= 0, (name, md.aborts)
-    assert MapDriver._outside_lanes(route, md.keys) is None and not kinds(md, "plan_lane_range"), (name, md.keys)
+    assert MapDrive._outside_lanes(route, md.keys) is None and not kinds(md, "plan_lane_range"), (name, md.keys)
     assert name.startswith("FX") or kinds(md, "sharp_corner"), name
     live += 1
   print(f"live starts: ok ({live} replanned)" if live else "live starts: skipped (no live map or router)")
@@ -652,14 +652,14 @@ def test_follow_slots():
   right lane 41 m before a turn wanting the left, the second fix started before the first move, undoing it, and the
   third held lane 0.877 for 300 m. Now: a turn's renumbering step is nav's, a lane the road hasn't is no fix (nor a
   plan), a fix doesn't start before the move before it, and finishes late rather than not at all, MIN_LC_M long."""
-  md = MapDriver({"seed": 3})
+  md = MapDrive({"seed": 3})
   r = ms.junction_turn("left", stop=None, out=ms.section(1, 1))  # north 200 m, two lanes each way; left onto one each way
   keys = [(0.0, 1.0), (200.0, 1.0), (200.0, 0.0)]
   for turn in (True, False):
     out = md.follow_slots(r, keys, [{"s": 170.0, "move": 200.0, "end": 170.0, "want": [0]}], FakeSlots((200.0, turn)))
     assert lane_at(out, 175.0) == 0.0 and lane_at(out, 199.0) == 0.0 and min(lane for _, lane in out) == 0.0, (turn, out)
-    assert MapDriver._outside_lanes(r, out) is None
-  assert MapDriver._outside_lanes(r, keys[:2] + [(200.0, -1.0), (300.0, -1.0)]) == {"s": 200.0, "lane": -1.0, "lanes": 1}
+    assert MapDrive._outside_lanes(r, out) is None
+  assert MapDrive._outside_lanes(r, keys[:2] + [(200.0, -1.0), (300.0, -1.0)]) == {"s": 200.0, "lane": -1.0, "lanes": 1}
   r = ms.straight(600)
   slots = FakeSlots((321.8, False), (363.0, True))
   nav = [(0.0, 0.0), (90.0, 0.0), (218.0, 1.0), (309.0, 0.0), (600.0, 0.0)]
@@ -692,7 +692,7 @@ def test_lane_fixes_by_the_moves():
   from types import SimpleNamespace
   from openpilot.tools.sim.bridge.gta5 import gta5_mapdrive as g
   from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import CROSSING_CLEAR, MIN_LC_M
-  md = MapDriver({"seed": 3})
+  md = MapDrive({"seed": 3})
 
   def change_list(keys):
     return [(keys[a][0], keys[b][0]) for a, b in chains(keys) if abs(keys[b][1] - keys[a][1]) > 0.4]
@@ -734,13 +734,13 @@ def test_lane_fixes_by_the_moves():
       continue
     from openpilot.selfdrive.navd.lane_slots import LaneSlots
     route, pose, v = got
-    md = MapDriver({"seed": seed})
+    md = MapDrive({"seed": seed})
     assert md._make_plan(route, {"pos": [pose[0], pose[1], 0.0], "heading": pose[2], "vEgo": v}, 0.0), (seg, md.aborts)
     keys = md.keys
-    assert not md.plan["slot_check"]["mismatches"] and MapDriver._outside_lanes(route, keys) is None, (seg, md.plan["slot_check"])
+    assert not md.plan["slot_check"]["mismatches"] and MapDrive._outside_lanes(route, keys) is None, (seg, md.plan["slot_check"])
     slots = LaneSlots(route, True)
     for m in slots.moves:
-      good, _ = MapDriver._slot_lanes(route, slots, m.along - 3.0, md._speed_at(route, m.along))
+      good, _ = MapDrive._slot_lanes(route, slots, m.along - 3.0, md._speed_at(route, m.along))
       if m.need and good and m.along > route.at + 5.0:
         assert round(lane_at(keys, m.along - 1.0)) in good, (seg, m.along, lane_at(keys, m.along - 1.0), good)
     for s0, s1 in change_list(keys):
@@ -761,7 +761,7 @@ def test_lane_end_past_a_junction():
   that lane isn't one of them."""
   from types import SimpleNamespace
   from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import CROSSING_CLEAR, MIN_LC_M
-  md = MapDriver({"seed": 3})
+  md = MapDrive({"seed": 3})
   r = ms.straight(800, ours=3, junctions=[62, 67])  # junction nodes at 620 (the turn) and 670 (through)
   nav = [(0.0, 2.0), (615.0, 2.0), (615.0, 2.0), (670.0, 2.0), (670.07, 1.0), (670.07, 1.0), (670.07, 0.0), (700.0, 0.0), (800.0, 0.0)]
 
@@ -783,7 +783,7 @@ def test_lane_end_past_a_junction():
     return
   for seed in range(10):
     route, pose = ms.trip_route(LANE_END_TRIP)
-    md = MapDriver({"seed": seed})
+    md = MapDrive({"seed": seed})
     assert md._make_plan(route, {"pos": [pose[0], pose[1], 0.0], "heading": pose[2], "vEgo": 0.0}, 0.0), (seed, md.aborts)
     keys = md.keys
     assert not [a for a in md.anomalies if a["kind"] == "plan_lane_range"], (seed, md.anomalies)
@@ -807,7 +807,7 @@ def test_body_from_dims():
   """Our car's front, rear and half width from the plugin's nearby.dims (a van here), else the constants: the stop
   sign's mark is the van's front bumper margin short of the line."""
   from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import FRONT, HALF_WIDTH
-  md = MapDriver()
+  md = MapDrive()
   assert md.body == (FRONT, FRONT, HALF_WIDTH)
   md._body({"nearby": {"dims": [-1.25, 1.2, -2.9, 3.1], "v": []}})
   assert md.body == (3.1, 2.9, 1.25)
@@ -840,7 +840,7 @@ def test_aborts():
     assert trip.finished is not None and trip.finished.startswith("abort") and why in trip.finished, (faults, trip.finished)
     assert trip.car.v < 0.3 and trip.md.aborts
   # a plan the slots disagree with is only an event by default
-  assert MapDriver().c["plan_check"] == "fix"
+  assert MapDrive().c["plan_check"] == "fix"
   print("aborts: ok")
 
 
@@ -895,7 +895,7 @@ def test_expert_drives_with_map_driver():
   e._write_control = written.append
   e.cfg = {**e.cfg, "on": True, "driver": "map", "mapdrive": json.dumps({"seed": 4})}
   e.on = True
-  e.map = e._map_pilot(e.cfg)
+  e.map = e._map_driver(e.cfg)
   route = ms.junction_turn("left", lead=300.0, stop="stop")
   car = ms.LagCar(*ms.start_pose(route, 1.0))
   rec = Recorder.__new__(Recorder)
@@ -949,7 +949,7 @@ def test_expert_ai_unchanged():
   from openpilot.tools.sim.bridge.gta5.gta5_expert import DEFAULTS, Expert
   assert DEFAULTS["driver"] == "ai"
   e = Expert(lambda m: None, lambda: None, lambda: None)
-  assert e._map_pilot({**DEFAULTS, "on": True}) is None
+  assert e._map_driver({**DEFAULTS, "on": True}) is None
   e.active = True
   assert e.ai_drives and e.source == "ai" and e.drives_route and not e.controls_car
   print("expert ai unchanged: ok")

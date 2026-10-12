@@ -415,7 +415,8 @@ def _split_world(head: dict, mp: Map, rec: dict):
   br.nav.tune.values.update(head["tune"])
   br.blindspot = gta5_brain.BlindSpot()  # the bridge's monitor, from the logged "nearby"
   br.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None, md_driving=False, on=False)
-  br._init_pilots()
+  (br._init_drivers if hasattr(br, "_init_drivers") else br._init_pilots)()  # pilots: before their rename to drivers
+
   br.map_view = MapView(head["dest"])
   br.navigator = Navigator(mp.router())
   _sync(br.navigator)

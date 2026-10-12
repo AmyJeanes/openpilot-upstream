@@ -272,9 +272,9 @@ check the lines sit on the road from the player's camera at a few known places (
 then `gta5_cmd.py snap /tmp/dbg` and record a minute (`GTA5_RECORD`) and look through the road and wide frames: no
 coloured lines, markers, minimap or GPS line may show in any of them.
 
-## Pilots
-Whoever drives the car while it's engaged is a pilot (`gta5_pilot.py`): openpilot, or our map driver (`gta5_mapdrive.py`)
-with `GTA5_PILOT=map` on terminal 2. Either way the engage key engages and disengages it, the HUD shows it engaged, and
+## Drivers
+Whoever drives the car while it's engaged is a driver (`gta5_drivers.py`): openpilot, or our map driver, which drives
+with the map drive (`gta5_mapdrive.py`), with `GTA5_DRIVER=map` on terminal 2. Either way the engage key engages and disengages it, the HUD shows it engaged, and
 the brake or steering hands the car back. The map driver drives the route to the destination set (the game map's
 waypoint, or the map view's); without one the engage key engages openpilot instead. It also hands back on the gas,
 arrives as nav does (the destination ends), and follows a new destination set while it drives. Expert mode below drives
@@ -413,4 +413,4 @@ Windows' `.pyc` files out of the checkout:
 $env:PYTHONPATH = '\\wsl.localhost\Ubuntu\home\<you>\<checkout>'; $env:PYTHONPYCACHEPREFIX = "$env:TEMP\gta5op-pycache"
 cd $env:TEMP; python -m pytest -q -p no:cacheprovider --rootdir . //wsl.localhost/Ubuntu/home/<you>/<checkout>/openpilot/tools/sim/bridge/gta5/test_portable.py
 ```
-Tests that import `gta5_world`, `gta5_nav_msgs`, `gta5_pilot` or cereal fail or skip there.
+Tests that import `gta5_world`, `gta5_nav_msgs` or cereal fail or skip there.

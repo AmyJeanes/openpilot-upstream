@@ -33,7 +33,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, DEADLOCK_WAIT, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR,
-                                                           NUDGE_MARGIN, NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDriver)
+                                                           NUDGE_MARGIN, NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDrive)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -357,12 +357,12 @@ def test_crossing():
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[crosser(0.0)], reach=REACH, seconds=90)
   assert trip.finished == "arrived" and trip.car.collisions == 0 and phases(trip, "yield"), (trip.finished, trip.car.collisions)
   assert trip.col(13).min() > 2.0, trip.col(13).min()
-  real = MapDriver._crossing
-  MapDriver._crossing = lambda self, t, v: None
+  real = MapDrive._crossing
+  MapDrive._crossing = lambda self, t, v: None
   try:  # without the hold, it hits us
     assert ms.drive(r, {"seed": 2}, lane=1, vehicles=[crosser(0.0)], reach=REACH, seconds=90).car.collisions
   finally:
-    MapDriver._crossing = real
+    MapDrive._crossing = real
   for meet in (-5.0, 5.0, 8.0):  # through first, or after
     trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[crosser(meet)], reach=REACH, seconds=90)
     assert trip.finished == "arrived" and not phases(trip, "yield") and trip.car.collisions == 0, (meet, trip.finished)
@@ -472,12 +472,12 @@ def test_pedestrian_at_the_kerb():
 
   def walker(early: float) -> ms.Vehicle:
     return ms.pedestrian(11.5, 302.0, 90.0, 0.0, start=t_at - early, accel=2.0, until=0.9)
-  real = MapDriver._ped_kerb
-  MapDriver._ped_kerb = lambda self, t, v, look: None
+  real = MapDrive._ped_kerb
+  MapDrive._ped_kerb = lambda self, t, v, look: None
   try:  # standing at the kerb he counts for nothing until he steps out: too late to stop then, as in the game
     blind = ms.drive(r, cfg, lane=1, v0=15.5, peds=[walker(2.5)], reach=REACH, seconds=60, brake=3.3)
   finally:
-    MapDriver._ped_kerb = real
+    MapDrive._ped_kerb = real
   hit = float(blind.col(0)[np.argmax(blind.col(13) <= 0.0)]) - (t_at - 2.5)
   assert blind.finished == "abort: collision" and 2.8 < hit < 3.8, (blind.finished, hit)
   for early in (1.8, 2.5, 3.3, 6.0):

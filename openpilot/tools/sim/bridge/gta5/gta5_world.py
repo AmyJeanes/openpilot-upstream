@@ -1,7 +1,7 @@
 """The GTA V bridge's world (openpilot's tools/sim World): the game's frames to openpilot's cameras, its state to the
 simulated car's sensors, and the plugin's controls from whoever drives.
 
-The decisions (nav, the pilots, expert mode, the overlay, the map view, marks) are the brain's (gta5_brain.py), which
+The decisions (nav, the drivers, expert mode, the overlay, the map view, marks) are the brain's (gta5_brain.py), which
 talks to openpilot through LocalIO here. Run with GTA5_LINK=1 the world is the link instead: no brain, openpilot's side
 of the Windows host (gta5_host.py), which runs the brain and reaches this LocalIO through gta5_link.LinkServer."""
 import gc
@@ -30,7 +30,7 @@ from openpilot.tools.sim.bridge.gta5 import gta5_gnss, gta5_stacks
 from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, NAV_SPEED, Brain, speed_limit
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_opio import INPUTS, PARAMS, OpenpilotIO
-from openpilot.tools.sim.bridge.gta5.gta5_pilot import INACTIVE
+from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_rx import NV12_SIZE, SLOTS, VIEWS, rx_main
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
@@ -319,7 +319,7 @@ class GTA5World(World):
   # *** World interface ***
 
   def apply_controls(self, steer_angle, throttle_out, brake_out):
-    """Sends the controls of whoever drives (the brain's pilots; openpilot's are carControl's curvature and acceleration),
+    """Sends the controls of whoever drives (the brain's drivers; openpilot's are carControl's curvature and acceleration),
     rather than the bridge's steer_angle/throttle/brake: those are shaped for the simulated Honda, not for the game car.
     As the link, openpilot's, which the host's relay passes on only while openpilot drives."""
     self.io.update()

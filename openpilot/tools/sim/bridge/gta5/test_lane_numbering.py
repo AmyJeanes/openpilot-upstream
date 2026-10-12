@@ -394,7 +394,7 @@ def bridge_line(r: Route, lane) -> np.ndarray:
   from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
   w = Brain.__new__(Brain)
   w.nav, w.route, w.lane_line = Planner(), r, (None, 0.0, [])
-  w.expert, w.pilot = SimpleNamespace(md_driving=False), None  # no map driver driving
+  w.expert, w.driver = SimpleNamespace(md_driving=False), None  # no map driver driving
   return np.array(w._lane_line({"lane": lane}, 0.0))
 
 
