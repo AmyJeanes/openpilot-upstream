@@ -17,9 +17,9 @@ limits, and arrive=gentle brings it to a stop stop_before m short of the route's
 task's own arrival. A ramp wants task=coord, as the longrange task doesn't take a raised cap until it's re-tasked, and a
 lead of about 3, as the AI settles 1-2 m/s under its cap. `dest` ignores a route that doesn't end near it, as the last
 trip's. Off the map's routes the AI drives to the game's waypoint, or wanders. Each game state appends a JSON line to
-the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else /tmp/gta5_expert.jsonl): the AI's state, the target,
-the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can be
-filtered later. speed_by_class ("residential:10,primary:14,motorway:18", classes as Valhalla names them, ramp for
+the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else gta5_expert.jsonl in the temp folder): the AI's state,
+the target, the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can
+be filtered later. speed_by_class ("residential:10,primary:14,motorway:18", classes as Valhalla names them, ramp for
 ramps, default for the rest) caps the speed by the road's class, slowing ahead for a lower one, and decel_fast is the
 slowing rate above 12 m/s. unstick: stopped unstick_after s not at a light, the AI drives with unstick_style
 (steering round a parked car) until it has moved unstick_dist m or unstick_for s have passed. The engage key stops
@@ -43,19 +43,23 @@ ai_fallback. Expert mode doesn't send the plugin its controls itself: the bridge
 import json
 import math
 import os
+import tempfile
 import threading
 import time
-import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from openpilot.selfdrive.navd.maneuvers import Maneuver, maneuvers, route_point
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDriver
-from openpilot.tools.sim.bridge.gta5.gta5_pilot import TOOK_OVER, MapPilot
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay
+from openpilot.tools.sim.bridge.gta5.map.router import Router
 
-CONTROL = Path("/tmp/gta5_expert.json")
+if TYPE_CHECKING:  # gta5_pilot imports opendbc, which the Windows host lacks: the map driver imports it when it starts
+  from openpilot.tools.sim.bridge.gta5.gta5_pilot import MapPilot
+
+CONTROL = Path(tempfile.gettempdir()) / "gta5_expert.json"
 POLL_EVERY = 0.5  # s
 DEFAULTS = {"on": False, "speed": 12.0, "style": 1076369579, "ability": 1.0, "aggr": 0.0, "task": "longrange", "limits": True,
             "need_route": False, "dest": None, "ahead_min": 60.0, "ahead_max": 120.0, "past": 25.0, "targets": "junction",
@@ -108,7 +112,7 @@ def log_path() -> str:
     return os.environ["GTA5_EXPERT_LOG"]
   if os.getenv("GTA5_LOG"):
     return str(Path(os.environ["GTA5_LOG"]).with_name("expert.jsonl"))
-  return "/tmp/gta5_expert.jsonl"
+  return os.path.join(tempfile.gettempdir(), "gta5_expert.jsonl")
 
 
 def wrap(deg: float) -> float:
@@ -121,6 +125,7 @@ class Expert:
     self.cancel_engagement = cancel_engagement
     self.clear_nav_desire = clear_nav_desire
     self.path = control_path()
+    self.router = Router(ROUTER, timeout=5.0) if ROUTER else None
     self.started = time.time()  # noqa: TID251  # compared with the control file's mtime, a wall clock time
     self.mtime = 0.0
     self.next_poll = 0.0
@@ -215,7 +220,8 @@ class Expert:
       print(f"gta5: expert: bad wrongway {spec!r}: {e}", flush=True)
       return None
 
-  def _map_pilot(self, cfg: dict) -> MapPilot | None:
+  def _map_pilot(self, cfg: dict) -> "MapPilot | None":
+    from openpilot.tools.sim.bridge.gta5.gta5_pilot import MapPilot
     if str(cfg.get("driver") or "ai") not in MAP_DRIVERS:
       return None
     spec = cfg.get("mapdrive") or {}
@@ -408,6 +414,7 @@ class Expert:
   def _map_update(self, state: dict, route, now: float) -> bool:
     """A step of the map driver: it steers and sets the speed on every bridge step, its control resent between game
     frames."""
+    from openpilot.tools.sim.bridge.gta5.gta5_pilot import TOOK_OVER
     mp = self.map
     dest = self.cfg.get("dest")
     if route is not None and dest and np.hypot(*(route.points[-1] - np.asarray(dest[:2], dtype=float))) > DEST_NEAR:
@@ -449,7 +456,7 @@ class Expert:
 
   def _new_route(self, route):
     self.route, self.target, self.anchor, self.final, self.done = route, None, None, False, set()
-    if route is not None and self._class_caps() and ROUTER:
+    if route is not None and self._class_caps() and self.router is not None:
       threading.Thread(target=self._fetch_classes, args=(route,), daemon=True).start()
     if route is None:
       self.mans, self.events, self.parts, self.shortcut_spans = [], [], [], []
@@ -628,8 +635,7 @@ class Expert:
              "shape_match": "walk_or_snap", "costing": "auto",
              "filters": {"attributes": ["edge.road_class", "edge.use", "edge.begin_shape_index", "edge.end_shape_index",
                                         "matched.edge_index"], "action": "include"}}
-      http = urllib.request.Request(f"{ROUTER}/trace_attributes", json.dumps(req).encode(), {"Content-Type": "application/json"})
-      trace = json.loads(urllib.request.urlopen(http, timeout=5).read())
+      trace = self.router.trace_attributes(req)
     except (OSError, ValueError) as e:
       print(f"gta5: expert: no road classes: {e}", flush=True)
       return

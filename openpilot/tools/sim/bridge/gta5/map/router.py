@@ -596,6 +596,10 @@ class Router:
     with urllib.request.urlopen(req, timeout=self.timeout) as r:
       return json.loads(r.read())
 
+  def trace_attributes(self, request: dict) -> dict:
+    """Valhalla's attributes of the edges along a shape (its trace_attributes request)."""
+    return self._post('trace_attributes', request)
+
   def snap(self, dest: np.ndarray) -> Snap | None:
     """Where on the map's roads to arrive for dest (dest_snap.py); None without the map's roads."""
     roads = self.roads if self.roads is not None else self.osm
@@ -754,7 +758,7 @@ class Router:
     """The map's speed limit (m/s, 0 where it has none) along each segment of a route's shape."""
     out = np.zeros(max(n - 1, 0))
     try:
-      trace = self._post('trace_attributes', {
+      trace = self.trace_attributes({
         'encoded_polyline': shape, 'shape_match': 'walk_or_snap', 'costing': 'auto',
         'filters': {'attributes': ['edge.speed_limit', 'edge.begin_shape_index', 'edge.end_shape_index', 'matched.edge_index'],
                     'action': 'include'},
