@@ -732,6 +732,7 @@ void OnVehicleChanged(Vehicle v) {
   g_m.resets = resets + 1;
   g_indicator = 0;
   if (!v) return;
+  SET_VEHICLE_RADIO_ENABLED(v, FALSE);
   g_veh.model = GET_ENTITY_MODEL(v);
   for (const char *c = GET_DISPLAY_NAME_FROM_VEHICLE_MODEL(g_veh.model); c && *c; c++)
     if (isalnum(static_cast<unsigned char>(*c)) || *c == '_' || *c == ' ') g_veh.name += *c;

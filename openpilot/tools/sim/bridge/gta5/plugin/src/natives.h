@@ -115,6 +115,8 @@ inline void SET_VEHICLE_EXTRA_COLOUR_6(Vehicle v, int color) { Invoke(0x6089CDF6
 inline void SET_VEHICLE_EXTRA(Vehicle v, int extraId, BOOL disable) { Invoke(0x7EE3A3C5E4A40CC9, v, extraId, disable); }
 inline BOOL DOES_EXTRA_EXIST(Vehicle v, int extraId) { return Invoke<BOOL>(0x1262D55792428154, v, extraId); }
 inline BOOL IS_VEHICLE_EXTRA_TURNED_ON(Vehicle v, int extraId) { return Invoke<BOOL>(0xD2E6822DBFD6C8BD, v, extraId); }
+// FALSE turns the car's radio off and keeps it off (mission scores aren't radio, so they still play)
+inline void SET_VEHICLE_RADIO_ENABLED(Vehicle v, BOOL on) { Invoke(0x3B988190C0AA6C0B, v, on); }
 inline void SET_VEHICLE_CUSTOM_SECONDARY_COLOUR(Vehicle v, int r, int g, int b) { Invoke(0x36CED73BFED89754, v, r, g, b); }
 inline void SET_VEHICLE_FORWARD_SPEED(Vehicle v, float s) { Invoke(0xAB54A438726D25D5, v, s); }
 // palette indices (DurtyFree's vehicleColors.json): primary and secondary, then pearlescent and wheel
