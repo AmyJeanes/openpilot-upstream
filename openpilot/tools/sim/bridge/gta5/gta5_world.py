@@ -191,7 +191,8 @@ class LocalIO(OpenpilotIO):
   def bookmark(self):
     if self.bookmark_pm is None:
       self.bookmark_pm = messaging.PubMaster(["userBookmark"])
-    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
+    # new messages default to invalid, and selfdrived alerts on an invalid userBookmark until a valid one comes
+    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark", valid=True))
 
   def gnss_fix(self, msg, profile):
     """A GNSS fix gta5_gnss published, for navd's map match: the brain's here, or the host's through the status."""
