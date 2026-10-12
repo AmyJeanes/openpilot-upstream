@@ -52,7 +52,11 @@ def make_world(head: dict, mp, rec: dict, wait_maps: bool = False):
   process = getattr(gta5_overlay, "OverlayProcess", None)
   core.overlay = process(wait_maps=wait_maps) if process is not None and gta5_overlay.PROCESS else gta5_overlay.Overlay()
   core.gps = gta5_overlay.GpsRoute()
-  core.nav_msgs = NavMessages(pm=SimpleNamespace(send=lambda *a: None))
+  try:  # the messages built from their content apart (gta5_nav_pub.py)
+    from openpilot.tools.sim.bridge.gta5.gta5_nav_pub import NavPublisher
+    core.nav_msgs = NavMessages(NavPublisher(pm=SimpleNamespace(send=lambda *a: None)))
+  except ImportError:
+    core.nav_msgs = NavMessages(pm=SimpleNamespace(send=lambda *a: None))
   w.overlay, w.navigator = core.overlay, core.navigator  # what the bench reads and times
   return w
 

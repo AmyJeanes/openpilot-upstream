@@ -25,6 +25,7 @@ os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 from openpilot.cereal import log, messaging
 from openpilot.selfdrive.navd import lane_slots
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages, heading_at, point_at
+from openpilot.tools.sim.bridge.gta5.gta5_nav_pub import NavPublisher
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, oneway_of
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -251,7 +252,7 @@ def main():
 
   op = Openpilot()
   op.engaged = not args.disengaged
-  nav = NavMessages()
+  nav = NavMessages(NavPublisher())
   gui_app.init_window("nav ui demo", fps=args.fps)
   layout = MainLayout()
   ui_nav = layout._layouts[MainState.ONROAD].nav

@@ -144,8 +144,9 @@ road here it marks the model's lane (`modelV2.laneHead`, outlined, its P(index) 
 lane (a green mark).
 `GTA5_NAV_MSGS=1` also publishes openpilot's `navInstruction` and `navRoute` for that route (`gta5_nav_msgs.py`: the
 next maneuver, its lanes, the time and distance left, the route and the map's roads near it), which the onroad UI shows
-beside the camera view while a route is active. `nav_ui_demo.py` shows that view offline, with screenshots of each scene,
-from a route it finds over the map itself (its docstring says how).
+beside the camera view while a route is active. With the Windows host it's set on the host, which makes the messages'
+content and hands it to the link to build and publish (`gta5_nav_pub.py`). `nav_ui_demo.py` shows that view offline,
+with screenshots of each scene, from a route it finds over the map itself (its docstring says how).
 nav's speed cap reaches openpilot as `navSpeed` (cereal's custom.capnp: the cap and why, a turn either way, a bend, a
 lower limit ahead, a lane change, a turn bay or the arrival), and openpilot's longitudinal planner drives the lower of it
 and the set speed, as sunnypilot's map curve speed control does: the set speed stays the car's (the arrow keys), and the
@@ -167,7 +168,8 @@ alert), and a map page beside the driving view (swipe right, or tap the driving 
 videos, touches, checks). With the game, either:
 
 - openpilot's own UI as the mici one: on a checkout with this UI, put `SCALE=2` (no `BIG=1`) in `~/gta5test/ui_env` and
-  restart openpilot (`svc.sh restart openpilot`); the bridge needs `GTA5_NAV_MSGS=1` (in `bridge_env`).
+  restart openpilot (`svc.sh restart openpilot`); the bridge needs `GTA5_NAV_MSGS=1` (in `bridge_env`, or the Windows
+  host's environment).
 - or a second window beside the 3X UI, which publishes nothing (a second publisher would take the running UI's
   `uiDebug` and bookmark sockets away): `OPENPILOT_PREFIX=gta5 SCALE=2 python selfdrive/ui/tests/mici_nav_player.py
   --watch` from the checkout with this UI. Its road button and slide to end act for real: they set

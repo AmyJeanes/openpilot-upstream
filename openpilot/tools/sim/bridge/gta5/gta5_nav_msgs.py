@@ -1,10 +1,13 @@
-"""openpilot's navInstruction and navRoute messages (cereal log.capnp) from the bridge's route, for the onroad UI's
-navigation view. Nothing here is GTA's: it reads a router.Route over the map, its lane slots, the map's roads and the
-car's place on the route, and writes the map's own lat/lon, as a navigation service on a real map would.
+"""What goes in openpilot's navInstruction and navRoute messages (cereal log.capnp) for the bridge's route, for the
+onroad UI's navigation view. Nothing here is GTA's: it reads a router.Route over the map, its lane slots, the map's
+roads and the car's place on the route, and writes the map's own lat/lon, as a navigation service on a real map would.
 
 navInstruction: the next maneuver (OSRM's type and modifier words, as upstream navd sent), the lanes for it, the time
 and distance left, and the car's position and heading. navRoute: the route, and the roads near the route ahead
-simplified for a small map (fork fields), from a background thread since gathering them takes tens of ms."""
+simplified for a small map (fork fields), from a background thread since gathering them takes tens of ms.
+
+The content is plain data, so the brain makes it wherever it runs (on Windows too) and hands it to its OpenpilotIO's
+nav_instruction and nav_route; gta5_nav_pub.py builds the messages from it and publishes them where openpilot is."""
 import threading
 import time
 from collections.abc import Callable
@@ -12,12 +15,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.cereal import log, messaging
 from openpilot.selfdrive.navd.maneuvers import junction_maneuvers
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, LEFTS, RIGHTS
-
-Direction = log.NavInstruction.Direction
 
 INSTRUCTION_EVERY = 0.1  # s
 ROUTE_EVERY = 2.0  # s, for a UI that starts after the route was sent
@@ -173,38 +173,35 @@ def lane_guide(slots, s: float, v: float, car_lane: list[int] | None) -> LaneGui
   return LaneGuide(lanes, True, 0.0 if inside else max(target.end - s, 0.0), opens)
 
 
-def fill_instruction(ni, route, at: float, v: float, project=to_lat_lon, lanes: LaneGuide = NO_LANES,
-                     pose: tuple | None = None) -> None:
-  """A navInstruction for the car `at` m along `route`. `pose` is the car's own position (map metres) and heading
-  (deg clockwise from north), as the car's localizer has them; without it, its place on the route stands in."""
-  ni.valid = True
+def instruction(route, at: float, v: float, project=to_lat_lon, lanes: LaneGuide = NO_LANES,
+                pose: tuple | None = None) -> dict:
+  """A navInstruction's fields for the car `at` m along `route`, by their names in it (gta5_nav_pub.fill_instruction
+  sets them). `pose` is the car's own position (map metres) and heading (deg clockwise from north), as the car's
+  localizer has them; without it, its place on the route stands in."""
+  ni: dict = {}
   ahead = [m for m in maneuvers(route) if m.along > at]
   if ahead:
     m = ahead[0]
-    ni.maneuverType, ni.maneuverModifier = m.type, m.modifier
-    ni.maneuverPrimaryText = m.primary or (destination_name(route) if m.type == "arrive" else "")
-    ni.maneuverSecondaryText = m.secondary
-    ni.maneuverDistance = m.along - at
-    ni.init("allManeuvers", min(len(ahead), 5))
-    for out, a in zip(ni.allManeuvers, ahead, strict=False):
-      out.distance, out.type, out.modifier, out.primaryText = a.along - at, a.type, a.modifier, a.primary
-  ni.distanceRemaining = max(route.length - at, 0.0)
-  ni.timeRemaining = ni.timeRemainingTypical = time_remaining(route, at)
+    ni.update(maneuverType=m.type, maneuverModifier=m.modifier,
+              maneuverPrimaryText=m.primary or (destination_name(route) if m.type == "arrive" else ""),
+              maneuverSecondaryText=m.secondary, maneuverDistance=float(m.along - at),
+              allManeuvers=[{"distance": float(a.along - at), "type": a.type, "modifier": a.modifier, "primaryText": a.primary}
+                            for a in ahead[:5]])
+  ni["distanceRemaining"] = float(max(route.length - at, 0.0))
+  ni["timeRemaining"] = ni["timeRemainingTypical"] = float(time_remaining(route, at))
   k = int(np.clip(np.searchsorted(route.along, at, side="right") - 1, 0, max(len(route.limit_list) - 1, 0)))
-  ni.speedLimit = float(route.limit_list[k]) if route.limit_list else 0.0
-  ni.speedLimitSign = "mutcd"
-  ni.destinationName = destination_name(route)
+  ni["speedLimit"] = float(route.limit_list[k]) if route.limit_list else 0.0
+  ni["speedLimitSign"] = "mutcd"
+  ni["destinationName"] = destination_name(route)
   xy, bearing = (pose[0], pose[1]) if pose is not None else (point_at(route, at), heading_at(route, at))
   lat, lon = project(float(xy[0]), float(xy[1]))
-  ni.position.latitude, ni.position.longitude = float(lat), float(lon)
-  ni.bearingDeg = float(bearing) % 360
-  ni.showFull = lanes.show
-  ni.laneDistance, ni.laneOpenDistance = lanes.distance, lanes.opens
-  ni.init("lanes", len(lanes.lanes))
-  for out, lane in zip(ni.lanes, lanes.lanes, strict=True):
-    out.directions = lane["directions"]
-    out.active, out.activeDirection = lane["active"], lane["activeDirection"]
-    out.oncoming, out.current = lane["oncoming"], lane["current"]
+  ni["position"] = {"latitude": float(lat), "longitude": float(lon)}
+  ni["bearingDeg"] = float(bearing) % 360
+  ni["showFull"] = bool(lanes.show)
+  ni["laneDistance"], ni["laneOpenDistance"] = float(lanes.distance), float(lanes.opens)
+  ni["lanes"] = [{"directions": list(lane["directions"]), "active": bool(lane["active"]), "activeDirection": lane["activeDirection"],
+                  "oncoming": bool(lane["oncoming"]), "current": bool(lane["current"])} for lane in lanes.lanes]
+  return ni
 
 
 def simplify(points: np.ndarray, tolerance: float) -> np.ndarray:
@@ -296,38 +293,34 @@ class Roads:
     return out
 
 
-def route_message(route, roads: list[tuple[np.ndarray, float]], project: Callable = to_lat_lon):
-  """A navRoute: the route simplified, and the roads near it; empty without a route."""
-  msg = messaging.new_message("navRoute", valid=True)
+def route_content(route, roads: list[tuple[np.ndarray, float]], project: Callable = to_lat_lon) -> dict:
+  """A navRoute's: the route simplified, and the roads near it, as [lat, lon] points; empty without a route."""
   if route is None or len(route.points) < 2:
-    return msg
+    return {"coordinates": [], "roads": []}
   pts = simplify(np.asarray(route.points, float), ROUTE_TOLERANCE)
-  _coordinates(msg.navRoute.init("coordinates", len(pts)), pts, project)
-  for r, (line, width) in zip(msg.navRoute.init("roads", len(roads)), roads, strict=True):
-    _coordinates(r.init("coordinates", len(line)), line, project)
-    r.width = width
-  return msg
+  return {"coordinates": _coordinates(pts, project),
+          "roads": [{"coordinates": _coordinates(line, project), "width": float(width)} for line, width in roads]}
 
 
-def _coordinates(out, pts: np.ndarray, project: Callable):
+def _coordinates(pts: np.ndarray, project: Callable) -> list[list[float]]:
   lat, lon = project(pts[:, 0], pts[:, 1])
-  for c, a, o in zip(out, np.asarray(lat, float).tolist(), np.asarray(lon, float).tolist(), strict=True):
-    c.latitude, c.longitude = a, o
+  return np.stack([np.asarray(lat, float), np.asarray(lon, float)], axis=1).tolist()
 
 
 class NavMessages:
-  """Publishes navInstruction every INSTRUCTION_EVERY (valid=false without a route) and navRoute for the bridge's
-  route. A new route goes out at once without its roads; a thread gathers them and builds the full navRoute, which is
-  sent once ready and again every ROUTE_EVERY, so the bridge's loop never builds the big message itself.
-  `slots_for(route)` gives the route's LaneSlots, or None."""
-  def __init__(self, pm=None, project: Callable = to_lat_lon):
-    self.pm = pm or messaging.PubMaster(["navInstruction", "navRoute"])
+  """navInstruction's content every INSTRUCTION_EVERY (None without a route) and navRoute's for the bridge's route, to
+  out.nav_instruction and out.nav_route (an OpenpilotIO). A new route goes out at once without its roads; a thread
+  gathers them and makes the full navRoute's, which goes once ready, so the bridge's loop never gathers them itself.
+  The navRoute's goes again every ROUTE_EVERY, the same object while it's unchanged. `slots_for(route)` gives the
+  route's LaneSlots, or None."""
+  def __init__(self, out, project: Callable = to_lat_lon):
+    self.out = out
     self.project = project
     self.next_instruction = 0.0
     self.next_route = 0.0
     self.route = None  # the route of the navRoute last sent
-    self.route_bytes = route_message(None, []).to_bytes()  # that navRoute
-    self.ready: tuple | None = None  # from the thread: (route, m along it the roads are about, its navRoute or None once sent)
+    self.content = route_content(None, [])  # that navRoute's
+    self.ready: tuple | None = None  # from the thread: (route, m along it the roads are about, its navRoute's or None once sent)
     self.road_index: Roads | None = None
     self.osm = None
     self.busy = False
@@ -339,28 +332,27 @@ class NavMessages:
     now = time.monotonic() if now is None else now
     if now >= self.next_instruction:
       self.next_instruction = now + INSTRUCTION_EVERY
-      self.pm.send("navInstruction", self.instruction(route, v, slots_for, pose))
+      self.out.nav_instruction(self.instruction(route, v, slots_for, pose))
 
     if route is not self.route:
-      self.route_bytes = route_message(route, [], self.project).to_bytes()  # the route alone: a few hundred points
+      self.content = route_content(route, [], self.project)  # the route alone: a few hundred points
       self.next_route = 0.0
     with self.lock:
       ready = self.ready
       if ready is not None and ready[0] is route and ready[2] is not None:
-        self.route_bytes, self.next_route = ready[2], 0.0
+        self.content, self.next_route = ready[2], 0.0
         self.ready = (ready[0], ready[1], None)
     if now >= self.next_route:
       self.route, self.next_route = route, now + ROUTE_EVERY
-      self.pm.send("navRoute", self.route_bytes)
+      self.out.nav_route(self.content)
     if route is not None and osm is not None and not self.busy:
       if ready is None or ready[0] is not route or route.at - ready[1] >= CORRIDOR_AGAIN:
         self.busy = True
         threading.Thread(target=self._gather, args=(route, route.at, osm), daemon=True).start()
 
-  def instruction(self, route, v: float, slots_for: Callable | None = None, pose: tuple | None = None):
-    msg = messaging.new_message("navInstruction", valid=True)
+  def instruction(self, route, v: float, slots_for: Callable | None = None, pose: tuple | None = None) -> dict | None:
     if route is None or len(route.points) < 2:
-      return msg
+      return None
     slots = None
     if slots_for is not None:
       try:
@@ -372,18 +364,17 @@ class NavMessages:
     except Exception as e:
       print(f"nav msgs: lanes: {e!r}")
       guide = NO_LANES
-    fill_instruction(msg.navInstruction, route, route.at, v, self.project, guide, pose)
-    return msg
+    return instruction(route, route.at, v, self.project, guide, pose)
 
   def _gather(self, route, at: float, osm):
-    """On a thread: the roads near the route ahead of `at`, and the navRoute with them."""
+    """On a thread: the roads near the route ahead of `at`, and the navRoute's content with them."""
     try:
       if self.road_index is None or self.osm is not osm:
         self.road_index, self.osm = Roads(osm), osm
       s = np.arange(max(at - CORRIDOR_BEHIND, 0.0), min(at + CORRIDOR_AHEAD, route.length), CORRIDOR_STEP)
       line = np.stack([np.interp(s, route.along, route.points[:, 0]), np.interp(s, route.along, route.points[:, 1])], axis=1)
       roads = self.road_index.near(line) if len(line) >= 2 else []
-      out = route_message(route, roads, self.project).to_bytes()
+      out = route_content(route, roads, self.project)
     except Exception as e:  # only the UI's map: it mustn't stop the bridge
       print(f"nav msgs: roads: {e!r}")
       out = None

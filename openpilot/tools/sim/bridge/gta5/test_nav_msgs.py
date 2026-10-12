@@ -1,5 +1,6 @@
 """The nav messages (gta5_nav_msgs.py) on the map fixtures, and the UI's reading of them (selfdrive/ui/nav/nav_state.py).
 No pytest needed: `python test_nav_msgs.py` runs them all."""
+import json
 import time
 
 import numpy as np
@@ -7,7 +8,7 @@ import numpy as np
 from openpilot.cereal import messaging
 from openpilot.selfdrive.ui.nav.nav_state import NavState, card_lanes, format_distance, instruction_guidance
 from openpilot.selfdrive.navd import lane_slots as ls
-from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
+from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm, gta5_nav_pub as npub
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M
 from openpilot.tools.sim.bridge.gta5.test_lane_slots import DEST, LEFT, START, TWO_EACH_WAY, fixture, osm_map, route
@@ -56,7 +57,7 @@ def test_time_remaining():
 def test_instruction():
   _, r, slots = bay_route()
   msg = messaging.new_message('navInstruction')
-  nm.fill_instruction(msg.navInstruction, r, 20.0, 10.0, lanes=nm.lane_guide(slots, 20.0, 10.0, [1, 2]))
+  npub.fill_instruction(msg.navInstruction, nm.instruction(r, 20.0, 10.0, lanes=nm.lane_guide(slots, 20.0, 10.0, [1, 2])))
   ni = msg.navInstruction
   assert ni.valid and ni.maneuverType == "turn" and ni.maneuverModifier == "left" and ni.maneuverPrimaryText == "Bay Rd"
   assert abs(ni.maneuverDistance - (r.along[2] - 20.0)) < 1e-3
@@ -107,7 +108,7 @@ def test_plain_road_lanes_for_lanes_always():
   g = nm.lane_guide(ls.LaneSlots(r), 100.0, 10.0, [1, 2])
   assert [lane["oncoming"] for lane in g.lanes] == [True, True, False, False] and not g.show
   msg = messaging.new_message("navInstruction")
-  nm.fill_instruction(msg.navInstruction, r, 100.0, 10.0, lanes=g)
+  npub.fill_instruction(msg.navInstruction, nm.instruction(r, 100.0, 10.0, lanes=g))
   ui = instruction_guidance(msg.navInstruction)
   assert card_lanes(ui) == ([], None) and len(card_lanes(ui, always=True)[0]) == 2
 
@@ -146,18 +147,31 @@ def test_roads_near():
 def test_route_message():
   osm, r, _ = bay_route()
   roads = nm.Roads(osm).near(r.points)
-  msg = nm.route_message(r, roads)
+  msg = npub.route_message(nm.route_content(r, roads))
   coords = msg.navRoute.coordinates
   xy = np.array([to_game(c.latitude, c.longitude) for c in coords])
   assert np.allclose(xy[0], r.points[0], atol=0.01) and np.allclose(xy[-1], r.points[-1], atol=0.01)
   assert len(msg.navRoute.roads) == len(roads) and msg.navRoute.roads[0].width == roads[0][1]
-  assert len(nm.route_message(None, []).navRoute.coordinates) == 0
+  assert len(npub.route_message(nm.route_content(None, [])).navRoute.coordinates) == 0
+
+
+def test_content_crosses_the_wire():
+  """The content is plain data: after a JSON round trip (the Windows host to the link) it builds the same messages."""
+  osm, r, slots = bay_route()
+  content = nm.route_content(r, nm.Roads(osm).near(r.points))
+  wired = json.loads(json.dumps(content))
+  assert npub.route_message(wired).navRoute.to_dict() == npub.route_message(content).navRoute.to_dict()
+  ni = nm.instruction(r, 20.0, 10.0, lanes=nm.lane_guide(slots, 20.0, 10.0, [1, 2]))
+  a, b = messaging.new_message('navInstruction'), messaging.new_message('navInstruction')
+  npub.fill_instruction(a.navInstruction, ni)
+  npub.fill_instruction(b.navInstruction, json.loads(json.dumps(ni)))
+  assert a.navInstruction.to_dict() == b.navInstruction.to_dict() and a.navInstruction.lanes[2].active
 
 
 def test_publishing():
   osm, r, slots = bay_route()
   pm = PM()
-  pub = nm.NavMessages(pm)
+  pub = nm.NavMessages(npub.NavPublisher(pm))
   pub.update(None, 0.0, osm, now=0.0)
   assert not pm.last('navInstruction').valid and len(pm.last('navRoute').coordinates) == 0
   r.at = 20.0
@@ -169,6 +183,10 @@ def test_publishing():
       break
     time.sleep(0.02)
   pub.update(r, 10.0, osm, lambda route: slots, now=0.2)
+  for _ in range(100):  # the message with them built on a thread of its own
+    if len(pm.last('navRoute').roads):
+      break
+    time.sleep(0.02)
   assert pm.last('navInstruction').valid and len(pm.last('navRoute').roads) > 0  # then the roads, once gathered
   sent = len(pm.sent)
   pub.update(r, 10.0, osm, lambda route: slots, now=0.25)
@@ -180,7 +198,7 @@ def test_publishing():
 def test_ui_reads_them():
   osm, r, slots = bay_route()
   pm = PM()
-  pub = nm.NavMessages(pm)
+  pub = nm.NavMessages(npub.NavPublisher(pm))
   r.at = 20.0
   pub.update(r, 10.0, osm, lambda route: slots, now=1.0)
   nav = NavState()

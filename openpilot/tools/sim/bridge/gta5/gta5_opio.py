@@ -20,7 +20,8 @@ LINK_PORT = 8796  # the link's control port, on the address the link writes to i
 INPUTS = ("user_torque", "left_blinker", "right_blinker", "left_blindspot", "right_blindspot", "speed_limit",
           "speed_limit_follow", "cruise_cap", "cap_set_speed")
 PARAMS = ("IsMetric", "NavigateOnOpenpilot", "TurnDesireRefresh", "NavDestination")  # the params the brain reads
-OPS = ("cruise", "set_inputs", "nav_desire", "nav_speed", "route_input", "lane_slots", "bookmark", "param_put", "param_remove")
+OPS = ("cruise", "set_inputs", "nav_desire", "nav_speed", "route_input", "lane_slots", "bookmark", "param_put", "param_remove",
+       "nav_instruction", "nav_route")
 STATUS_EVERY = 0.05  # s between the link's states
 VECTOR_EVERY = 0.05  # s between route input or lane slot vectors sent, the newest when it changed
 CONNECT_TIMEOUT = 1.0  # s
@@ -69,6 +70,12 @@ class OpenpilotIO:
 
   def bookmark(self) -> None:
     """userBookmark, so loggerd keeps the segment."""
+
+  def nav_instruction(self, content: dict | None) -> None:
+    """navInstruction for the onroad UI, from gta5_nav_msgs' content (None: no route)."""
+
+  def nav_route(self, content: dict) -> None:
+    """navRoute for the onroad UI, from gta5_nav_msgs' content; the same object again when it's to be sent again."""
 
 
 class MemoryParams:
@@ -139,6 +146,7 @@ class RemoteIO(OpenpilotIO):
     self.status_t = 0.0
     self.sent_inputs: dict = {}
     self.vectors: dict[str, tuple] = {}  # op: (the newest vector, sent yet, when one was last sent)
+    self.nav_route_sent: dict | None = None  # the navRoute content the link has
     self.connected = False
     threading.Thread(target=self._run, daemon=True).start()
 
@@ -182,6 +190,14 @@ class RemoteIO(OpenpilotIO):
   def bookmark(self) -> None:
     self.send("bookmark")
 
+  def nav_instruction(self, content: dict | None) -> None:
+    self.send("nav_instruction", content)
+
+  def nav_route(self, content: dict) -> None:
+    # thousands of points: the link keeps the last, and None has it send that again
+    if self.send("nav_route", None if content is self.nav_route_sent else content):
+      self.nav_route_sent = content
+
   def _vector(self, op: str, vec):
     vec = [round(float(v), 5) for v in vec]
     old = self.vectors.get(op)
@@ -207,6 +223,7 @@ class RemoteIO(OpenpilotIO):
       if self.sock is sock:
         self.sock, self.connected = None, False
         self.sent_inputs = {}  # a new link starts from its defaults
+        self.nav_route_sent = None
         self.vectors = {op: (vec, False, t) for op, (vec, _, t) in self.vectors.items()}
     close(sock)
 

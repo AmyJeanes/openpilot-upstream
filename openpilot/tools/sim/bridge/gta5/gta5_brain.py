@@ -24,6 +24,7 @@ from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
 from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
+from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
 from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
 from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
@@ -71,6 +72,8 @@ NAV_SPEED_EVERY = 0.05  # s
 # pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
 # lane for the car is wrong (replays ask for needless lane changes) until the lane comes from elsewhere.
 NAV_MATCH = os.getenv("GTA5_NAV_MATCH") == "1"
+# openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
+NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 # GTA has no speed limits; a guess from the street's name, mph: freeways, highways and routes, then anything else
 SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
 CITY_SPEED_LIMIT = 35
@@ -107,7 +110,7 @@ class Brain:
     self.match = match
     self.recorder = None  # gta5_record.Recorder, in the bridge in WSL; marks and the overlay read its state
     self.map_view = None  # map_view.MapView, made by whoever runs the brain
-    self.nav_msgs = None  # gta5_nav_msgs.NavMessages (openpilot's navInstruction and navRoute), in the bridge in WSL
+    self.nav_msgs = NavMessages(io) if NAV_MSGS else None  # openpilot's navInstruction and navRoute, through io
     self.metric = bool(io.params.get_bool("IsMetric"))
     self.next_hud = 0.0
     self.presses: dict[str, int] = {}

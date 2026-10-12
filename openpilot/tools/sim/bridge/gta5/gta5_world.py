@@ -45,8 +45,6 @@ LOG = os.getenv("GTA5_LOG")  # a file to record the game state and the controls 
 CAMLOG = os.getenv("GTA5_CAMLOG")  # a file to record each camera frame handed to openpilot: its seq and rx's newest
 MAP_PORT = int(os.getenv("GTA5_MAP_PORT", "8793"))
 MODEL_STALE = 0.5  # s: the model's lane (modelV2.laneHead) for nav from a message no older
-# openpilot's navInstruction and navRoute for the onroad UI's navigation view (gta5_nav_msgs.py), on our router's route
-NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 LINK = os.getenv("GTA5_LINK") == "1"  # the link: no brain here, the Windows host's (gta5_host.py)
 # the plugin reads the bridge's address from here when its gta5op.ini doesn't set one
 BRIDGE_FILE = Path(os.getenv("GTA5_BRIDGE_FILE", "/mnt/c/Users/Public/gta5op-bridge.txt"))
@@ -106,6 +104,7 @@ class LocalIO(OpenpilotIO):
     self.bookmark_pm = None  # made on the first bookmark
     self.route_writer: RouteInputWriter | None = None  # made on the first vector
     self.lanes_writer: RouteInputWriter | None = None
+    self.nav_pub = None  # gta5_nav_pub.NavPublisher, made on the first nav message
 
   @property
   def engaged(self) -> bool:
@@ -190,6 +189,18 @@ class LocalIO(OpenpilotIO):
       self.bookmark_pm = messaging.PubMaster(["userBookmark"])
     self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
 
+  def nav_instruction(self, content: dict | None):
+    self._nav_pub().nav_instruction(content)
+
+  def nav_route(self, content: dict | None):
+    self._nav_pub().nav_route(content)
+
+  def _nav_pub(self):
+    if self.nav_pub is None:
+      from openpilot.tools.sim.bridge.gta5.gta5_nav_pub import NavPublisher
+      self.nav_pub = NavPublisher()
+    return self.nav_pub
+
   def status(self) -> dict:
     """What the link sends the host (gta5_opio.RemoteIO) of openpilot's state."""
     params = {}
@@ -244,9 +255,6 @@ class GTA5World(World):
       self.link = LinkServer(self.io)
     else:
       self.brain = Brain(self.io, self._send, self.log, match=NAV_MATCH and self.gnss is not None)
-      if NAV_MSGS:
-        from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
-        self.brain.nav_msgs = NavMessages()
       if RECORD:
         self.recorder = self.brain.recorder = Recorder(RECORD, self.brain)
 

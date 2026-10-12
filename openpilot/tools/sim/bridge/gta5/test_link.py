@@ -91,7 +91,19 @@ def test_link_round_trip(monkeypatch):
   assert remote.params.get("NavDestination") == {"latitude": 1.0, "longitude": 2.0}
   until(lambda: ("put", "NavDestination", {"latitude": 1.0, "longitude": 2.0}) in local.calls, link)
 
+  route = {"coordinates": [[34.0, -118.0], [34.1, -118.1]], "roads": []}
+  remote.nav_instruction({"distanceRemaining": 120.0})
+  remote.nav_route(route)
+  remote.nav_route(route)  # again, unchanged: the link sends the one it has
+  until(lambda: len([c for c in local.calls if c[0] == "nav_route"]) == 2, link)
+  nav = [c for c in local.calls if c[0] in ("nav_instruction", "nav_route")]
+  assert nav == [("nav_instruction", {"distanceRemaining": 120.0}), ("nav_route", route), ("nav_route", None)]
+
   remote._drop(remote.sock)
   until(lambda: ("reset",) in local.calls, link)
   assert local.inputs == {}
+  until(lambda: remote.connected, link)
+  remote.nav_route(route)  # a new connection: the link may be new too, so it's sent whole
+  until(lambda: len([c for c in local.calls if c[0] == "nav_route"]) == 3, link)
+  assert local.calls[-1] == ("nav_route", route)
   link.close()
