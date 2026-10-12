@@ -9,6 +9,7 @@ import os
 import queue
 import socket
 import struct
+import tempfile
 import threading
 import time
 from multiprocessing.connection import Connection
@@ -18,13 +19,13 @@ import numpy as np
 
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.tools.sim.bridge.gta5 import gta5_stacks
+from openpilot.tools.sim.bridge.gta5.gta5_ports import DEBUG_PORT
 from openpilot.tools.sim.lib.common import W, H
 
 VIEWS = ("road", "wide")
 SLOTS = 8  # the bridge may lag a few frames behind when its threads are busy; a slot written over while it is read mixes frames
 NV12_SIZE = get_nv12_info(W, H)[3]
 FRAME_BYTES = W * H * 3 // 2  # one view as the plugin sends it: Y rows, then interleaved UV rows, unpadded
-DEBUG_PORT = 8792
 # Plugin settings that reset when its core reloads (a DLL swap, a GTA restart), which reconnects it: the receiver keeps
 # the last sent and sets them again on each connection. Each command type's key in the plugin's state, and the settings
 # the state reports as the command takes them.
@@ -156,11 +157,11 @@ class Receiver:
 
   def command(self, cmd: dict) -> None:
     if cmd.get("type") == "snap":
-      self.snap_path = cmd.get("path", "/tmp/gta5")
+      self.snap_path = cmd.get("path", os.path.join(tempfile.gettempdir(), "gta5"))
     elif cmd.get("type") == "state":
-      self.state_path = cmd.get("path", "/tmp/gta5state.json")
+      self.state_path = cmd.get("path", os.path.join(tempfile.gettempdir(), "gta5state.json"))
     elif cmd.get("type") == "burst":
-      self.burst_path, self.burst_left = cmd.get("path", "/tmp/gta5burst"), int(cmd.get("count", 40))
+      self.burst_path, self.burst_left = cmd.get("path", os.path.join(tempfile.gettempdir(), "gta5burst")), int(cmd.get("count", 40))
     elif cmd.get("type") in DISPLAY:
       with self.display_lock:
         # the plugin keeps a setting a command leaves out, so the one to set again is all of them merged

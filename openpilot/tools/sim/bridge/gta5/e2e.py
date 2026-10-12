@@ -68,7 +68,7 @@ os.environ.setdefault("OPENPILOT_PREFIX", "spgta5" if _SP else "gta5")
 
 import numpy as np
 
-from openpilot.tools.sim.bridge.gta5.gta5_rx import DEBUG_PORT
+from openpilot.tools.sim.bridge.gta5.gta5_ports import DEBUG_PORT
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.router import HEADING_TOLERANCE, decode_polyline
 

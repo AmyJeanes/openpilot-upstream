@@ -61,19 +61,20 @@ import os
 import random
 import socket
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay, gta5_scene
 from openpilot.tools.sim.bridge.gta5.gta5_expert import CONTROL, control_path
-from openpilot.tools.sim.bridge.gta5.gta5_rx import DEBUG_PORT
+from openpilot.tools.sim.bridge.gta5.gta5_ports import DEBUG_PORT
 
 TRIPS = os.getenv("GTA5_TRIPS", os.path.expanduser("~/gta5test/e2e/*.txt"))
 MAP_VIEW = f"http://localhost:{os.getenv('GTA5_MAP_PORT', '8793')}"
 SETUP_WAIT = 6.0  # s: the plugin places the car about 3.5 s after the setup command
 SWAP_WAIT = 3.0  # s: a car swap waits for its model to load, well under a second for a car already streamed
-STATE_FILE = "/tmp/gta5state.json"
+STATE_FILE = os.path.join(tempfile.gettempdir(), "gta5state.json")
 # GENERATE_DIRECTIONS_TO_COORD's direction (alloc8or's native DB)
 GTA_DIRECTIONS = {0: "announce", 1: "calculating", 2: "proceed", 3: "left", 4: "right", 5: "straight", 6: "sharp left",
                   7: "sharp right", 8: "recalculating"}
@@ -315,9 +316,9 @@ def main(argv: list[str]) -> None:
     return
   cmd: dict = {"type": argv[0]}
   if argv[0] == "snap":
-    cmd["path"] = argv[1] if len(argv) > 1 else "/tmp/gta5"
+    cmd["path"] = argv[1] if len(argv) > 1 else os.path.join(tempfile.gettempdir(), "gta5")
   elif argv[0] == "burst":
-    cmd["path"] = argv[1] if len(argv) > 1 else "/tmp/gta5burst"
+    cmd["path"] = argv[1] if len(argv) > 1 else os.path.join(tempfile.gettempdir(), "gta5burst")
     cmd["count"] = int(argv[2]) if len(argv) > 2 else 40
   elif argv[0] == "ai" and len(argv) > 1 and argv[1] in ("on", "off"):
     cmd.update({"on": int(argv[1] == "on"), **options(argv[2:])})
