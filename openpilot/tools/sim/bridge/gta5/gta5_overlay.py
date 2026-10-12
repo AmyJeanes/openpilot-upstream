@@ -1519,8 +1519,9 @@ def main(argv=None):
   ap.add_argument("--key", help="the key the bridge asked for (default: from the files)")
   ap.add_argument("--left", action="store_true", help="traffic drives on the left")
   args = ap.parse_args(argv)
-  with contextlib.suppress(OSError):
-    os.nice(10)  # behind the bridge, which is waiting on frames
+  if hasattr(os, "nice"):  # not on Windows
+    with contextlib.suppress(OSError):
+      os.nice(10)  # behind the bridge, which is waiting on frames
   t = time.monotonic()
   paths, osm = Paths(args.paths), OsmLanes.load(args.osm, to_game, drive_on_right=not args.left)
   key = args.key or marks_key(paths, osm)
