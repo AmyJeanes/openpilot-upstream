@@ -466,6 +466,8 @@ class GTA5World(World):
         self.camlog.write(f"{time.monotonic():.4f} {name} {seq} {self.rx_latest.value}\n")
     if self.recorder is not None:
       self.recorder.add(wide, frame, state, arrived)
+    if self.link is not None and not wide:
+      self.link.camera(state.get("hostSeq") if slot is not None and state else None)
     return frame
 
   def tick(self):

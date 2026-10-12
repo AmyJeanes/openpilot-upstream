@@ -14,7 +14,10 @@ localhost forwarding holds 8793 while the link's world could serve it.
 
 --no-link runs it without openpilot: the game, the relay and the host alone, no WSL. openpilot is then gta5_opio.NullIO,
 never engaged, and the engage key drives with the map driver alone (whatever GTA5_DRIVER says), doing nothing without
-a destination."""
+a destination.
+
+GTA5_RECORD=<folder> records here (gta5_record.py): the frames from the relay's frames port (--frames-port), modeld's
+outputs from the link's model tap (none with --no-link), the encoder GTA5_RECORD_FFMPEG's (else ffmpeg on the PATH)."""
 import argparse
 import gc
 import json
@@ -25,7 +28,8 @@ import time
 
 from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, Brain
 from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO, RemoteIO, link_address
-from openpilot.tools.sim.bridge.gta5.gta5_relay import BRAIN_PORT, LINK_FILE
+from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, Recorder, RelayFrames
+from openpilot.tools.sim.bridge.gta5.gta5_relay import BRAIN_PORT, FRAMES_PORT, LINK_FILE
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
 
 STEP = 0.01  # s: the bridge's 100 Hz
@@ -98,6 +102,7 @@ class Relay:
 def main(argv: list[str] | None = None):
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--brain-port", type=int, default=BRAIN_PORT)
+  ap.add_argument("--frames-port", type=int, default=FRAMES_PORT)
   ap.add_argument("--link-file", default=LINK_FILE)
   ap.add_argument("--no-link", action="store_true", help="no openpilot: the game, the relay and the host alone")
   args = ap.parse_args(argv)
@@ -114,6 +119,10 @@ def main(argv: list[str] | None = None):
     print("gta5: no link: no openpilot", flush=True)
   log = open(LOG, "a", buffering=1) if LOG else None
   brain = Brain(io, relay.send, log, match=NAV_MATCH and not args.no_link)  # the fixes are the link's
+  if RECORD:
+    brain.recorder = Recorder(RECORD, brain, host=True)
+    io.model_tap(brain.recorder.on_link)
+    RelayFrames(args.frames_port, brain.recorder)
   if MAP:
     brain.map_view = MapView(os.path.join(MAP, "roads.json"), MAP_PORT, host="127.0.0.1")  # 0.0.0.0 asks the firewall
     print(f"gta5: map view on http://localhost:{MAP_PORT}/", flush=True)
@@ -151,6 +160,8 @@ def main(argv: list[str] | None = None):
   finally:
     relay.send({"type": "owner", "who": "link"})
     brain.close()
+    if brain.recorder is not None:
+      brain.recorder.close()
     if brain.map_view is not None:
       brain.map_view.close()
 

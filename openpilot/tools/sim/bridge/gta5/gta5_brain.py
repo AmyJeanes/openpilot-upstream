@@ -108,7 +108,7 @@ class Brain:
     self._send = send
     self.log = log
     self.match = match
-    self.recorder = None  # gta5_record.Recorder, in the bridge in WSL; marks and the overlay read its state
+    self.recorder = None  # gta5_record.Recorder, with GTA5_RECORD; marks and the overlay read its state
     self.map_view = None  # map_view.MapView, made by whoever runs the brain
     self.nav_msgs = NavMessages(io) if NAV_MSGS else None  # openpilot's navInstruction and navRoute, through io
     self.metric = bool(io.params.get_bool("IsMetric"))

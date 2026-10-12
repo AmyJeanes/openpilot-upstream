@@ -150,3 +150,41 @@ def test_link_round_trip(monkeypatch):
   until(lambda: len([c for c in local.calls if c[0] == "nav_route"]) == 3, link)
   assert local.calls[-1] == ("nav_route", route)
   link.close()
+
+
+def test_model_tap(monkeypatch):
+  """Once the host asks, the link sends camerad's frame id for each of the relay's frames it hands on and modeld's records,
+  their arrays exact; nothing before it asks, or for a blank frame; the host gets {"type": "link"} on each connection and
+  asks again, and the link stops when the host goes."""
+  import numpy as np
+  from openpilot.tools.sim.bridge.gta5.gta5_record import model_record_from_json
+  monkeypatch.setattr(gta5_opio, "RETRY_EVERY", 0.05)
+  port = free_port()
+  taps = []
+  local = FakeLocalIO()
+  link = LinkServer(local, port, model_tap=lambda on_record: taps.append(on_record) or object())
+  remote = RemoteIO(lambda: ("127.0.0.1", port))
+  until(lambda: remote.connected, link)
+  link.camera(100)  # before the host asks: counted, not sent
+  got = []
+  remote.model_tap(got.append)
+  until(lambda: link.tap_on, link)
+  assert len(taps) == 1
+  link.camera(101)
+  link.camera(None)  # a blank frame: counted, not sent
+  link.camera(102)
+  rec = {"time": 1.5, "nav": "turnLeft", "left_blinker": True, "desire_pulse": None,
+         "desire_input": np.eye(8, dtype=np.float32)[3], "raw": np.linspace(-2, 2, 50).astype(np.float16)}
+  taps[0](1, rec)
+  until(lambda: len(got) >= 3, link)
+  assert got[:2] == [{"type": "camera", "seq": 101, "frame_id": 1}, {"type": "camera", "seq": 102, "frame_id": 3}]
+  assert got[2]["type"] == "model" and got[2]["frame_id"] == 1
+  back = model_record_from_json(got[2]["rec"])
+  assert back.keys() == rec.keys() and all(np.array_equal(back[k], v) and np.asarray(back[k]).dtype == np.asarray(v).dtype
+                                           for k, v in rec.items() if isinstance(v, np.ndarray))
+  assert {k: v for k, v in back.items() if not isinstance(v, np.ndarray)} == {k: v for k, v in rec.items() if not isinstance(v, np.ndarray)}
+
+  remote._drop(remote.sock)  # the host reconnects: told so, and asks again
+  until(lambda: ("reset",) in local.calls and {"type": "link"} in got and link.tap_on, link)
+  assert len(taps) == 1  # the tap is made once
+  link.close()

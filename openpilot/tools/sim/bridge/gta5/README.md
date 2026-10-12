@@ -307,6 +307,14 @@ camera's offset from the car's origin, which the poses are moved to (1,0.6 by de
 car). `python -m openpilot.tools.sim.bridge.gta5.gta5_record finalize <segment>` remakes a segment's safetensors from its
 `gta5.npz`, and `replay` makes a synthetic segment from a `GTA5_LOG`, for testing loaders.
 
+With the brain in the Windows host (`gta5_host.py`), `GTA5_RECORD=<Windows folder>` goes on the host instead, and the
+link's `GTA5_RECORD` is unused. The host takes the plugin's frames from the relay's frames port (8785, `--frames-port`
+on both), and the link streams back modeld's records and the camerad frame id each frame got, which `SEND_RAW_PRED=1`
+in openpilot fills as before. The segments are the same files, plus `host_seq` in `gta5.npz` (the relay's number for
+each frame). Frames openpilot didn't get have a NaN `frame_id` and no model columns, so a map driver's recording works
+with openpilot down, or with the host run with `--no-link`. The encoder is `GTA5_RECORD_FFMPEG`, else `ffmpeg` on the PATH, which needs libx265 (or
+`GTA5_RECORD_ENCODER=hevc_nvenc`).
+
 The camera's mount comes from the plugin's state when it reports one (`GTA5_RECORD_MOUNT` is then unused): `gta5.json`
 has it as `mount` (forward, up) and `mount_detail` (with x right, pitch and yaw, which the poses include), and the scene
 at the segment's start as `scene` (the car, weather and time, traffic density). A change of mount ends the segment.

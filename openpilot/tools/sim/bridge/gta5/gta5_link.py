@@ -11,7 +11,11 @@ It also stands in for the host in WSL, where gta5_cmd.py and the harnesses drive
 changes while a host is connected go to it (gta5_opio.COMMANDS), and what the host's expert mode writes to its control
 file is written to this one, so a harness waiting for a trip's end sees it; a destination posted to its map view
 (gta5_cmd.py expert route, the map view on WSL's GTA5_MAP_PORT, which takes destinations alone here) goes to the host
-too. A host can't listen where WSL reaches it: Windows' firewall blocks connections from WSL."""
+too. A host can't listen where WSL reaches it: Windows' firewall blocks connections from WSL.
+
+For the host's recorder the link is a model tap, while the host asks for it (op model_tap): modeld's record for each
+frame (gta5_record.ModelTap) as {"type": "model", "frame_id", "rec"}, and for each road frame handed to camerad its
+frame id and the relay's number for the frame, {"type": "camera", "seq", "frame_id"}."""
 import json
 import os
 import queue
@@ -21,15 +25,19 @@ import time
 from pathlib import Path
 
 from openpilot.tools.sim.bridge.gta5.gta5_opio import LINK_PORT, OPS, STATUS_EVERY, close
+from openpilot.tools.sim.bridge.gta5.gta5_record import ModelTap, model_record_to_json
 
 CONTROL_EVERY = 0.5  # s between looks at the expert control file
+TAP_BACKLOG = 400  # lines waiting for the host past which the model tap's are dropped (about 10 s of them)
 
 
 class LinkServer:
-  def __init__(self, io, port: int = LINK_PORT, control: Path | None = None):
-    """io: the world's LocalIO; control: the expert control file to pass on."""
+  def __init__(self, io, port: int = LINK_PORT, control: Path | None = None, model_tap=ModelTap):
+    """io: the world's LocalIO; control: the expert control file to pass on; model_tap(on_record) starts modeld's
+    records, the first time the host asks for them."""
     self.io = io
     self.calls: queue.SimpleQueue = queue.SimpleQueue()  # (op, args) from the host, None when it went
+    self.lines: queue.SimpleQueue = queue.SimpleQueue()  # messages for the host, sent in order on their own thread
     self.lock = threading.Lock()
     self.conn: socket.socket | None = None
     self.next_status = 0.0
@@ -38,8 +46,13 @@ class LinkServer:
     self.next_control = 0.0
     self.view = None  # map_view.MapView, for the destinations posted to it
     self.out: list[dict] = []  # COMMANDS for the host, sent with the next status
+    self.make_tap = model_tap
+    self.tap = None
+    self.tap_on = False  # the host's recorder wants the model tap
+    self.road_id = 0  # camerad's id for the next road frame: one per camera_yuv call, as camerad counts them
     self.srv = socket.create_server(("0.0.0.0", port), reuse_port=True)
     threading.Thread(target=self._serve, daemon=True).start()
+    threading.Thread(target=self._sender, daemon=True).start()
     print(f"gta5: the link waits for the host on port {port}", flush=True)
 
   def _serve(self):
@@ -69,6 +82,18 @@ class LinkServer:
           print("gta5: the host went", flush=True)
       close(conn)
 
+  def _sender(self):
+    while True:
+      msg = self.lines.get()
+      with self.lock:
+        conn = self.conn
+      if conn is None:
+        continue
+      try:
+        conn.sendall((json.dumps(msg) + "\n").encode())
+      except OSError:
+        pass  # the reader sees it go
+
   def step(self):
     """The host's calls since the last step, then openpilot's state to it when due."""
     while True:
@@ -78,6 +103,7 @@ class LinkServer:
         break
       if call is None:
         self.io.reset()
+        self.tap_on = False
         continue
       op, args = call
       try:
@@ -97,10 +123,8 @@ class LinkServer:
       return
     self.next_status = now + STATUS_EVERY
     out, self.out = self.out, []
-    try:
-      conn.sendall("".join(json.dumps(m) + "\n" for m in [*out, self.io.status()]).encode())
-    except OSError:
-      pass  # the reader sees it go
+    for msg in [*out, self.io.status()]:
+      self.lines.put(msg)
 
   def _poll_control(self, now: float):
     if self.control is None or now < self.next_control:
@@ -140,8 +164,28 @@ class LinkServer:
       self.io.params.put(args[0], args[1])
     elif op == "param_remove":
       self.io.params.remove(args[0])
+    elif op == "model_tap":
+      self.tap_on = bool(args[0])
+      if self.tap_on and self.tap is None:
+        self.tap = self.make_tap(self._model)
     else:
       getattr(self.io, op)(*args)
+
+  # *** the model tap ***
+
+  def camera(self, seq: int | None):
+    """A road frame handed to camerad, from the camera thread: seq the relay's number for it (None for a blank one)."""
+    frame_id, self.road_id = self.road_id, self.road_id + 1
+    if self.tap_on and seq is not None:
+      self._tap({"type": "camera", "seq": seq, "frame_id": frame_id})
+
+  def _model(self, frame_id: int, rec: dict):
+    if self.tap_on:
+      self._tap({"type": "model", "frame_id": frame_id, "rec": model_record_to_json(rec)})
+
+  def _tap(self, msg: dict):
+    if self.lines.qsize() < TAP_BACKLOG:  # a host that stops reading mustn't grow the queue without end
+      self.lines.put(msg)
 
   def close(self):
     self.srv.close()

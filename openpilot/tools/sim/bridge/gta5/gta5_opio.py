@@ -22,7 +22,7 @@ INPUTS = ("user_torque", "left_blinker", "right_blinker", "left_blindspot", "rig
           "speed_limit_follow", "cruise_cap", "cap_set_speed")
 PARAMS = ("IsMetric", "NavigateOnOpenpilot", "TurnDesireRefresh", "NavDestination")  # the params the brain reads
 OPS = ("cruise", "set_inputs", "nav_desire", "nav_speed", "route_input", "lane_slots", "bookmark", "param_put", "param_remove",
-       "nav_instruction", "nav_route", "expert_control")
+       "nav_instruction", "nav_route", "expert_control", "model_tap")
 COMMANDS = ("expert", "destination")  # what the link passes on to the brain from WSL (take_commands)
 STATUS_EVERY = 0.05  # s between the link's states
 VECTOR_EVERY = 0.05  # s between route input or lane slot vectors sent, the newest when it changed
@@ -92,6 +92,9 @@ class OpenpilotIO:
 
   def expert_control(self, cfg: dict) -> None:
     """What expert mode writes to its control file, for the WSL one (the link's)."""
+
+  def model_tap(self, on_message: Callable[[dict], None]) -> None:
+    """modeld's per-frame records for a recorder elsewhere (RemoteIO's, from the link); none here."""
 
 
 class MemoryParams:
@@ -166,7 +169,14 @@ class RemoteIO(OpenpilotIO):
     self.fix_seq: int | None = None  # the link's last GNSS fix taken
     self.commands: deque[dict] = deque()
     self.connected = False
+    self.on_tap: Callable[[dict], None] | None = None  # the recorder's, for the link's model tap
     threading.Thread(target=self._run, daemon=True).start()
+
+  def model_tap(self, on_message: Callable[[dict], None]) -> None:
+    """Asks the link for its model tap (gta5_link.py), now and on each connection: on_message gets its messages, modeld's
+    records and camerad's frame ids, on the connection's thread, and {"type": "link"} as each connection starts."""
+    self.on_tap = on_message
+    self.send("model_tap", True)
 
   # *** openpilot's state ***
 
@@ -285,13 +295,23 @@ class RemoteIO(OpenpilotIO):
       last = None
       with self.lock:
         self.sock = sock
+      on_tap = self.on_tap
+      if on_tap is not None:
+        on_tap({"type": "link"})
+        self.send("model_tap", True)
       try:
         for line in sock.makefile("r", encoding="utf-8"):
           msg = json.loads(line)
-          if msg.get("type") == "status":
+          kind = msg.get("type")
+          if kind == "status":
             self.status, self.status_t, self.connected = msg, time.monotonic(), True
-          elif msg.get("type") in COMMANDS:
+          elif kind in COMMANDS:
             self.commands.append(msg)
+          elif kind in ("model", "camera") and self.on_tap is not None:
+            try:
+              self.on_tap(msg)
+            except Exception as e:  # the recorder's trouble mustn't cost the brain openpilot
+              print(f"gta5: the link's model tap: {e!r}", flush=True)
       except (OSError, ValueError):
         pass
       self._drop(sock)
