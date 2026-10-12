@@ -20,6 +20,7 @@ libx265 on the CPU, niced: about 1.3 cores per camera."""
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -33,6 +34,9 @@ RECORD = os.getenv("GTA5_RECORD")
 ENCODER = os.getenv("GTA5_RECORD_ENCODER", "libx265")  # or hevc_nvenc
 # the system's: openpilot's venv puts an ffmpeg without libx265 first on PATH
 FFMPEG = os.getenv("GTA5_RECORD_FFMPEG", "/usr/bin/ffmpeg" if os.name == "posix" and os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
+# the encoders and finalize below the bridge's priority: nice on Linux, a priority class on Windows (with no console window)
+NICE = ["nice", "-n", "10"] if os.name == "posix" else []
+LOW_PRIORITY = {} if os.name == "posix" else {"creationflags": subprocess.BELOW_NORMAL_PRIORITY_CLASS | subprocess.CREATE_NO_WINDOW}
 CRF = int(os.getenv("GTA5_RECORD_CRF", "21"))
 # the camera's mount on the car, m forward of and above the car's origin, which the game's pose is for, when the plugin's
 # state has none
@@ -116,7 +120,7 @@ def encoder_args(path: Path, width: int, height: int, stride: int, y_height: int
            if ENCODER == "hevc_nvenc" else
            ["-c:v", "libx265", "-preset", "ultrafast", "-crf", str(CRF), "-x265-params",
             f"bframes=0:keyint={KEYINT}:min-keyint={KEYINT}:scenecut=0:pools=4:info=0:log-level=error"])
-  return ["nice", "-n", "10", FFMPEG,"-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
+  return [*NICE, FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
           "-s", f"{stride}x{y_height}", "-r", "20", "-i", "pipe:0", "-vf", f"crop={width}:{height}:0:0", "-fps_mode", "passthrough",
           *codec, "-f", "hevc", str(path)]
 
@@ -127,7 +131,7 @@ class Video:
     self.path = path
     self.frame_bytes = stride * (y_height + uv_height)
     self.proc = subprocess.Popen(encoder_args(path, width, height, stride, y_height), stdin=subprocess.PIPE,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **LOW_PRIORITY)
     try:
       import fcntl
       fcntl.fcntl(self.proc.stdin.fileno(), 1031, 4 << 20)  # F_SETPIPE_SZ: fewer, larger writes
@@ -234,6 +238,8 @@ class Recorder:
     if world is not None:
       threading.Thread(target=self._model_loop, daemon=True).start()
     print(f"gta5: recording to {self.data}", flush=True)
+    if shutil.which(FFMPEG) is None:
+      print(f"gta5: recording: no ffmpeg at {FFMPEG!r} (GTA5_RECORD_FFMPEG)", flush=True)
 
   @property
   def recording(self) -> bool:
@@ -267,7 +273,12 @@ class Recorder:
     if not ok or (seg is not None and t == self.last_t):  # camerad sometimes sends a game frame twice; the loaders need new times
       return
     if seg is None:
-      seg = self.segment = self._start(frame_id, state)
+      try:
+        seg = self.segment = self._start(frame_id, state)
+      except OSError as e:  # no encoder to start
+        self.failed = True
+        print(f"gta5: recording stopped: {e}", flush=True)
+        return
     if not seg.road.add(frame):
       seg.broken = "road encoder behind"
       if not seg.road.thread.is_alive():  # it failed: don't start another each frame
@@ -425,8 +436,8 @@ class Recorder:
     (seg.path / "gta5.json").write_text(json.dumps(seg.info, indent=1))
     # the frame index means reading the whole video back: done apart from the bridge's process
     with open(seg.path / "finalize.log", "w") as log:
-      subprocess.Popen(["nice", "-n", "10", sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_record", "finalize", str(seg.path)],
-                       stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+      subprocess.Popen([*NICE, sys.executable, "-m", "openpilot.tools.sim.bridge.gta5.gta5_record", "finalize", str(seg.path)],
+                       stdin=subprocess.DEVNULL, stdout=log, stderr=log, **LOW_PRIORITY)
 
   def close(self):
     self.stopped = True
@@ -602,7 +613,7 @@ def frame_info(seg: Path, frame_t: np.ndarray, width: int, height: int) -> tuple
 
 
 def finalize(seg: Path) -> None:
-  from openpilot.tools.sim.lib.camerad import W, H
+  from openpilot.tools.sim.lib.common import W, H
   info = json.loads((seg / "gta5.json").read_text())
   npz = dict(np.load(seg / "gta5.npz"))
   loc = localizer(npz, info)

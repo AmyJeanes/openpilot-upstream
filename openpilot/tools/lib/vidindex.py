@@ -4,8 +4,6 @@ import os
 import struct
 from enum import IntEnum
 
-from openpilot.tools.lib.filereader import FileReader
-
 DEBUG = int(os.getenv("DEBUG", "0"))
 
 # compare to ffmpeg parsing
@@ -259,8 +257,13 @@ def get_hevc_slice_type(dat: bytes, nal_unit_start: int, nal_unit_type: HevcNalU
   return slice_type, is_first_slice
 
 def hevc_index(hevc_file_name: str, allow_corrupt: bool=False) -> tuple[list, int, bytes]:
-  with FileReader(hevc_file_name) as f:
-    dat = f.read()
+  if os.path.isfile(hevc_file_name):  # FileReader's URL support needs urllib3, which a local file doesn't
+    with open(hevc_file_name, "rb") as f:
+      dat = f.read()
+  else:
+    from openpilot.tools.lib.filereader import FileReader
+    with FileReader(hevc_file_name) as f:
+      dat = f.read()
 
   if len(dat) < NAL_UNIT_START_CODE_SIZE + 1:
     raise VideoFileInvalid("data is too short")

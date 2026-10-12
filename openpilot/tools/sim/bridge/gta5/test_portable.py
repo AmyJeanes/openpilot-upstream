@@ -13,6 +13,8 @@ MODULES = [
                             "gta5_driver", "gta5_drivers", "gta5_navd", "gta5_nav_msgs", "gta5_opio", "gta5_brain", "gta5_host",
                             "gta5_relay", "gta5_cmd", "gta5_stacks", "gta5_record", "gta5_rx")),
   *(f"openpilot.selfdrive.navd.{m}" for m in ("planner", "maneuvers", "lane_slots", "route_input", "inputs", "map_match")),
+  # the recorder's finalize
+  "openpilot.tools.lib.vidindex", "openpilot.common.transformations.coordinates", "openpilot.common.transformations.orientation",
 ]
 IMPORT_BLOCKED = """
 import importlib, sys
