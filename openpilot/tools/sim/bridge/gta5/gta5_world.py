@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
@@ -68,6 +69,9 @@ OFF_ROUTE_INPUT = 15.0  # m off the route: no route input, as gta5-train's label
 # route input v2's lane slots (navd/lane_slots.py; also in the model's route input), to their own file for watch_route.py
 LANE_SLOTS = os.getenv("GTA5_LANE_SLOTS", "1") != "0"
 MARKS = os.path.expanduser(os.getenv("GTA5_MARKS", "~/gta5test/marks.jsonl"))  # the mark key's bookmarks, a JSON line each
+MARK_BEFORE, MARK_AFTER = 30.0, 5.0  # s of the car's track a mark keeps before and after the press (a press comes late)
+TRACK_EVERY = 0.2  # s between the track's points
+PLAN_BEHIND, PLAN_AHEAD = 300.0, 80.0  # m of the plan about the car a mark keeps
 # the car's set speed follows the map's speed limits along the route (GTA5_FOLLOW_LIMIT=1, as before navSpeed, for A/B runs);
 # off, the set speed is the driver's alone and nav caps the speed at the limit (navSpeed, reason speedLimit)
 FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT") == "1"
@@ -177,6 +181,9 @@ class GTA5World(World):
     self.last_status = 0.0
     self.presses: dict[str, int] = {}
     self.bookmark_pm = None  # made on the first mark
+    self.track: deque = deque(maxlen=int(MARK_BEFORE / TRACK_EVERY) + 10)  # [mono, x, y, v], for marks
+    self.lane_lines: deque = deque(maxlen=int(MARK_BEFORE / 2) + 2)  # (mono, the line ahead then), every 2 s
+    self.marks_due: list[tuple[float, dict]] = []  # marks waiting for MARK_AFTER s more of the track
     self.curvature = 0.0  # what the steering is set for
     self.steering = False  # whether the driver was steering
     self.braking = False
@@ -730,6 +737,7 @@ class GTA5World(World):
     shift)."""
     commands = {"speedUpPresses": "cruise_up", "speedDownPresses": "cruise_down", "speedUp5Presses": "cruise_up5",
                 "speedDown5Presses": "cruise_down5"}
+    self._track(state)
     marks = state.get("markPresses")
     if marks is not None:
       new = marks - self.presses.get("markPresses", marks)
@@ -749,12 +757,36 @@ class GTA5World(World):
           cmd = commands[key]
         self.q.put(control_cmd_gen(cmd))
 
+  def _track(self, state: dict):
+    """The car's recent track and the line it was to follow, for marks; marks whose MARK_AFTER has passed are written."""
+    now = time.monotonic()
+    pos = state.get("pos")
+    if pos and (not self.track or now - self.track[-1][0] >= TRACK_EVERY):
+      self.track.append([round(now, 2), round(float(pos[0]), 2), round(float(pos[1]), 2), round(float(state.get("vEgo") or 0.0), 2)])
+      line = getattr(self, "lane_line", None)
+      if line and line[2] and (not self.lane_lines or now - self.lane_lines[-1][0] >= 2.0):
+        self.lane_lines.append((now, line[2][:200]))
+    while self.marks_due and now >= self.marks_due[0][0]:
+      self._write_mark(self.marks_due.pop(0)[1])
+
   def _mark(self, state: dict):
-    """A bookmark (the plugin's mark key): where and when, what drove and what it was doing, and the recording's segment
-    and frame, appended to MARKS for review; openpilot's userBookmark too, so loggerd keeps the segment."""
+    """A bookmark (the plugin's mark key): where and when, what drove and what it was doing, the recording's segment and
+    frame, the line it was following (the map driver's plan, nav's lane line from MARK_BEFORE on) and the route about
+    it; written to MARKS MARK_AFTER s later with the car's track from MARK_BEFORE s before to then. openpilot's
+    userBookmark goes now, so loggerd keeps the segment."""
+    now = time.monotonic()
     r, md, rec = self.route, self.expert.md, self.recorder
     seg = rec.segment if rec is not None else None
-    mark = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "mono": round(time.monotonic(), 3), "t_game": state.get("t"),
+    plan = None
+    if md is not None and self.expert.active and md.path is not None:
+      k = (md.s_path >= md.s - PLAN_BEHIND) & (md.s_path <= md.s + PLAN_AHEAD)
+      plan = md.path[k][::2].round(2).tolist()
+    route_line = None
+    if r is not None:
+      k = (r.along >= r.at - PLAN_BEHIND) & (r.along <= r.at + PLAN_AHEAD)
+      route_line = r.points[k][:, :2].round(2).tolist()
+    early = next((ln for t, ln in self.lane_lines if t >= now - MARK_BEFORE), None)
+    mark = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "mono": round(now, 3), "t_game": state.get("t"),
             "pos": [round(float(c), 2) for c in state.get("pos") or []], "heading": state.get("heading"), "vEgo": state.get("vEgo"),
             "street": state.get("street"), "lane": state.get("lane"), "indicator": state.get("indicator"),
             "driver": self.expert.source if self.expert.active else "openpilot" if self.simulator_state.is_engaged else "user",
@@ -762,17 +794,28 @@ class GTA5World(World):
             "route": None if r is None else {"at": round(float(r.at), 1), "length": round(float(r.length), 1),
                                              "dest": [round(float(c), 1) for c in r.points[-1][:2]]},
             "segment": seg.path.name if seg is not None else None, "frame": len(seg.rows) if seg is not None else None,
-            "recording": rec.route_name if rec is not None else None}
+            "recording": rec.route_name if rec is not None else None,
+            "plan": plan, "route_line": route_line, "lane_line_before": early,
+            "lane_line": (getattr(self, "lane_line", None) or (None, None, None))[2]}
+    if self.bookmark_pm is None:
+      self.bookmark_pm = messaging.PubMaster(["userBookmark"])
+    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
+    print(f"gta5: mark at {mark['pos'][:2]} {mark['street']!r} ({mark['driver']}, segment {mark['segment']} f{mark['frame']})", flush=True)
+    self.marks_due.append((now + MARK_AFTER, mark))
+
+  def _flush_marks(self):
+    for _, mark in self.marks_due:  # with the track as far as it got
+      self._write_mark(mark)
+    self.marks_due = []
+
+  def _write_mark(self, mark: dict):
+    mark["track"] = [p for p in self.track if mark["mono"] - MARK_BEFORE <= p[0]]  # [mono, x, y, v], to MARK_AFTER on
     try:
       Path(MARKS).parent.mkdir(parents=True, exist_ok=True)
       with open(MARKS, "a") as f:
         f.write(json.dumps(mark) + "\n")
     except OSError as e:
       print(f"gta5: mark not saved: {e}", flush=True)
-    if self.bookmark_pm is None:
-      self.bookmark_pm = messaging.PubMaster(["userBookmark"])
-    self.bookmark_pm.send("userBookmark", messaging.new_message("userBookmark"))
-    print(f"gta5: mark at {mark['pos'][:2]} {mark['street']!r} ({mark['driver']}, segment {mark['segment']} f{mark['frame']})", flush=True)
 
   def _set_blinkers(self, simulator_state: SimulatorState):
     # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between
@@ -811,6 +854,7 @@ class GTA5World(World):
     self._send({"type": "control", "active": False})
 
   def close(self, reason: str):
+    self._flush_marks()
     if self.stall is not None:
       self.stall.stop()
     self._send({"type": "control", "active": False})

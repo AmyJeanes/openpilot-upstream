@@ -139,31 +139,51 @@ def test_nav_speed_cap(monkeypatch):
 
 
 def test_mark_key(monkeypatch, tmp_path):
-  """Each new mark press is a line in GTA5_MARKS (where, what drove, the recording's segment and frame) and a userBookmark;
-  the first state seen and a reloaded core's count from 0 again are no mark."""
+  """Each new mark press sends a userBookmark at once and, MARK_AFTER s later, is a line in GTA5_MARKS: where, what drove,
+  the recording's segment and frame, the map driver's plan and the route about the car, and the car's track from
+  MARK_BEFORE s before the press; the first state seen and a reloaded core's count from 0 again are no mark."""
   import json
+  now = [1000.0]
+  monkeypatch.setattr(world_mod.time, "monotonic", lambda: now[0])
   marks = tmp_path / "marks.jsonl"
   monkeypatch.setattr(world_mod, "MARKS", str(marks))
   sent = []
   w = GTA5World.__new__(GTA5World)
   w.presses, w.q = {}, SimpleNamespace(put=lambda c: None)
+  w.track, w.lane_lines, w.marks_due = world_mod.deque(maxlen=200), world_mod.deque(maxlen=20), []
+  w.lane_line = (None, 0.0, [[0.0, 0.0], [1.0, 1.0]])
   w.simulator_state = SimpleNamespace(is_engaged=True)
   w.expert = SimpleNamespace(md=None, active=False, source="none")
-  w.route = SimpleNamespace(at=120.04, length=900.0, points=np.array([[0.0, 0.0, 0.0], [10.0, 20.0, 0.0]]))
+  pts = np.array([[0.0, float(y), 0.0] for y in range(0, 1001, 10)])
+  w.route = SimpleNamespace(at=500.04, length=1000.0, points=pts, along=pts[:, 1].copy())
   w.recorder = SimpleNamespace(segment=SimpleNamespace(path=world_mod.Path("/rec/data/6acb00000012"), rows=[0] * 345),
                                route_name="2026-10-12--15-00-00")
   w.bookmark_pm = SimpleNamespace(send=lambda s, m: sent.append(s))
   state = {"t": 5.0, "pos": [1.234, 2.0, 30.0], "heading": 90.0, "vEgo": 8.0, "street": "Elgin Ave", "markPresses": 3}
-  w._update_buttons(state)
+
+  def drive(seconds, **kw):
+    for _ in range(int(seconds / 0.05)):
+      now[0] += 0.05
+      w._update_buttons({**state, "pos": [0.0, (now[0] - 1000.0) * 8.0, 30.0], **kw})
+
+  drive(40.0)
   assert not marks.exists() and not sent
-  w._update_buttons({**state, "markPresses": 4})
+  drive(0.05, markPresses=4)
+  assert sent == ["userBookmark"] and not marks.exists()
+  drive(world_mod.MARK_AFTER + 0.1, markPresses=4)
   m = json.loads(marks.read_text())
-  assert sent == ["userBookmark"] and m["pos"] == [1.23, 2.0, 30.0] and m["driver"] == "openpilot" and m["street"] == "Elgin Ave"
-  assert m["segment"] == "6acb00000012" and m["frame"] == 345 and m["route"] == {"at": 120.0, "length": 900.0, "dest": [10.0, 20.0]}
-  w._update_buttons({**state, "markPresses": 0})
-  w.expert = SimpleNamespace(md=SimpleNamespace(info=lambda: {"phase": "drive"}), active=True, source="map")
+  assert m["driver"] == "openpilot" and m["street"] == "Elgin Ave" and m["segment"] == "6acb00000012" and m["frame"] == 345
+  assert m["route"] == {"at": 500.0, "length": 1000.0, "dest": [0.0, 1000.0]} and m["plan"] is None
+  assert len(m["route_line"]) == 38 and m["route_line"][0] == [0.0, 210.0] and m["lane_line"] == [[0.0, 0.0], [1.0, 1.0]]
+  t = np.array(m["track"])
+  assert abs(t[0, 0] - (m["mono"] - world_mod.MARK_BEFORE)) < 0.25 and abs(t[-1, 0] - (m["mono"] + world_mod.MARK_AFTER)) < 0.25
+  drive(0.05, markPresses=0)
+  md = SimpleNamespace(info=lambda: {"phase": "drive"}, s=400.0, s_path=np.arange(0.0, 1000.0), path=np.c_[np.zeros(1000), np.arange(1000.0)])
+  w.expert = SimpleNamespace(md=md, active=True, source="map")
   w.recorder = None
-  w._update_buttons({**state, "markPresses": 1})
+  drive(0.05, markPresses=1)
+  w._flush_marks()  # as the bridge closes: a mark still waiting is written with the track it has
   lines = marks.read_text().splitlines()
   m = json.loads(lines[-1])
   assert len(lines) == 2 and m["driver"] == "map" and m["map"] == {"phase": "drive"} and m["segment"] is None
+  assert m["plan"][0] == [0.0, 100.0] and m["plan"][-1] == [0.0, 480.0]
