@@ -13,8 +13,8 @@ starts, as the brain reads openpilot's params once. The brain's settings are the
 localhost forwarding holds 8793 while the link's world could serve it.
 
 --no-link runs it without openpilot: the game, the relay and the host alone, no WSL. openpilot is then gta5_opio.NullIO,
-never engaged, and the engage key drives with the map driver alone (whatever GTA5_DRIVER says), doing nothing without
-a destination.
+never engaged, and the engage key drives with the map driver alone (whatever GTA5_DRIVER says); without a destination
+it cruises on along the road (map/cruise.py, with GTA5_ROUTER), and does nothing without a router.
 
 GTA5_RECORD=<folder> records here (gta5_record.py): the frames from the relay's frames port (--frames-port), modeld's
 outputs from the link's model tap (none with --no-link), the encoder GTA5_RECORD_FFMPEG's (else ffmpeg on the PATH)."""

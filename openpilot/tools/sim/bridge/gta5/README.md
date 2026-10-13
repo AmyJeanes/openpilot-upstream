@@ -285,6 +285,19 @@ waypoint, or the map view's); without one the engage key engages openpilot inste
 arrives as nav does (the destination ends), and follows a new destination set while it drives. Expert mode below drives
 with a map driver of its own.
 
+Without openpilot (the Windows host run with `--no-link`, where the map driver is the only driver) and with a router
+(`GTA5_ROUTER`), the map driver cruises when there's no destination, as openpilot drives without one: the engage key
+engages it as soon as it has the road ahead (a second or two; a press while it waits cancels), and it drives on along
+the road, keeping its lane and stopping for lights and stop signs as on any route. At each junction it carries on the
+way a driver would: where its lane only turns (the map's turn arrows) that turn at the first junction, else on along
+the road it's on (the same name, or class, turning up to 60 degrees), else the way turning least; never against a
+one-way, a U-turn, a move the map's turn restrictions forbid or a lane closed to cars, and away from dead ends and
+service roads while there's another way. The cruise route (`map/cruise.py`) runs 1.5 km ahead and is walked on well
+before the car gets near its end, so it only stops where the road itself ends. A destination set while it cruises is
+driven to; reaching it the car stops there and hands back as before, and clearing it carries on cruising. The map view
+shows `cruising (no destination)`; in the game the HUD shows it engaged, as for a destination. With openpilot (the link
+on, or the bridge in WSL) the engage key without a destination engages openpilot, as before.
+
 ## AI expert driver
 The game's own traffic AI can drive the car, as expert driving to record. `gta5_cmd.py ai on` tasks the player as the
 driver of its car (to the map's waypoint, else wandering; `x= y= z=` for a point, `speed=` m/s cap, `style=` driving style

@@ -58,6 +58,12 @@ ALTERNATES = 2
 UTURN_INTO = 8.0  # m
 
 
+def location(p, **kw) -> dict:
+  """A point (game metres) as a Valhalla location, with kw's options."""
+  lat, lon = to_lat_lon(float(p[0]), float(p[1]))
+  return {'lat': lat, 'lon': lon, **kw}
+
+
 def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float]]:
   """Google's encoded polyline, as Valhalla returns shapes: (lat, lon) pairs."""
   out, index, lat, lon = [], 0, 0, 0
@@ -136,6 +142,7 @@ class Route:
     self.misaligned = 0.0  # deg between the car's heading and the route's there
     self.elsewhere = False  # on another level or heading the other way, where right and seg are from before
     self.uturns_avoided = False  # Router took another route for the one first found, which had a U-turn
+    self.cruise = False  # a cruise route (cruise.py): on along the road, with no destination
     n = len(points)
     self.z = np.full(n, np.nan)
     self.links: list[Link | None] = [None] * max(n - 1, 0)
@@ -612,12 +619,9 @@ class Router:
       self._snapped = (key, self._snapper.snap(dest))
     return self._snapped[1]
 
-  def route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None = None) -> Route:
-    """From the car, setting off the way it faces (bearing clockwise from north), to dest. Given the car's height,
-    from the road it's on, not one passing over or under it."""
-    def location(p, **kw):
-      lat, lon = to_lat_lon(float(p[0]), float(p[1]))
-      return {'lat': lat, 'lon': lon, **kw}
+  def _start(self, pos: np.ndarray, bearing: float, z: float | None) -> tuple[dict, dict, tuple | None]:
+    """Where a route from the car starts (bearing clockwise from north): its location for Valhalla, the car's own,
+    and the road it's on at its height (Paths.snap) where known."""
     start = at_car = location(pos, heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)
     snapped = self.paths.snap(pos, z, -bearing) if self.paths is not None and z is not None else None
     if snapped is not None:
@@ -625,12 +629,42 @@ class Router:
       # point on the road could find another passing over or under it nearer; the route then starts back at the car
       start = location(self.paths.xy[snapped[2]], heading=round(-snapped[1]) % 360, heading_tolerance=SNAP_TOLERANCE,
                        node_snap_tolerance=1.0)
-    request = {
+    return start, at_car, snapped
+
+  @staticmethod
+  def _request() -> dict:
+    return {
       'costing': 'auto',
       # car parks, alleys and drives (GTA's nodes off for traffic or without GPS), which the model doesn't take for roads
       'costing_options': {'auto': {'service_penalty': SERVICE_PENALTY, 'service_factor': SERVICE_FACTOR}},
       'directions_options': {'units': 'kilometers'},
     }
+
+  def via(self, start: tuple[np.ndarray, float], through: list[tuple[np.ndarray, float]], end: tuple[np.ndarray, float]) -> Route:
+    """From `start` through each of `through` in turn and on to `end`, each a point on a road (game metres) and the
+    bearing it's driven at there (clockwise from north): the route along roads the caller chose (cruise.py), as
+    Valhalla's rules allow. Not through a U-turn at any of them."""
+    def on_road(p, b, **kw):
+      return location(p, heading=round(b) % 360, heading_tolerance=HEADING_TOLERANCE, node_snap_tolerance=0, **kw)
+    locations = [on_road(*start), *(on_road(p, b, type='through') for p, b in through), on_road(*end)]
+    trip = self._post('route', {**self._request(), 'locations': locations})['trip']
+    points, maneuvers = self._shape(trip, None)
+    limits = self._trip_limits(trip, len(points))
+    roads = self.osm if self.osm is not None else self.roads
+    if roads is not None and len(points) > 2:
+      # the through locations are shape points part way along a link: off the map's nodes, which a route's lanes and
+      # GTA's links are found by (ways_from_nodes, Paths.route_nodes), so its link is left as one segment
+      keep = np.array([0, *(k for k in range(1, len(points) - 1) if roads.nodes_at(points[k])), len(points) - 1])
+      maneuvers = [{**m, 'begin_shape_index': int(np.searchsorted(keep, m['begin_shape_index'], side='right')) - 1}
+                   for m in maneuvers]
+      points, limits = points[keep], np.asarray(limits)[keep[:-1]] if len(limits) else limits
+    return Route(points, maneuvers, self.paths, limits, self.osm)
+
+  def route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None = None) -> Route:
+    """From the car, setting off the way it faces (bearing clockwise from north), to dest. Given the car's height,
+    from the road it's on, not one passing over or under it."""
+    start, at_car, snapped = self._start(pos, bearing, z)
+    request = self._request()
     # the road the destination faces, arriving its way, else on that road either way, else the router's nearest road
     snap = self.snap(dest)
     ends = [location(dest)]

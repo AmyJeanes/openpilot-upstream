@@ -30,6 +30,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE, Driver, MapDriver, OpenpilotDriver, driver_from_env
+from openpilot.tools.sim.bridge.gta5.map.cruise import Cruise
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
@@ -78,6 +79,7 @@ NAV_MSGS = os.getenv("GTA5_NAV_MSGS") == "1"
 SPEED_LIMITS = ((('Fwy', 'Freeway'), 65), (('Hwy', 'Highway', 'Route'), 55))
 CITY_SPEED_LIMIT = 35
 HUD_EVERY = 0.2  # s
+CRUISE_WAIT = 10.0  # s the engage key waits for a cruise route before giving up
 
 
 def speed_limit(street: str) -> float:
@@ -123,6 +125,7 @@ class Brain:
                          wrote=self.io.expert_control)
     self._init_drivers()
     self.navigator = Navigator(Router(ROUTER)) if ROUTER else None
+    self._init_cruise()
     self.lane_matcher: LaneMatcher | None = None  # the map's lanes, for the car's lane by them (with its lane tags)
     self.junction_areas: JunctionAreas | None = None
     if self.navigator is not None and MAP and os.path.exists(os.path.join(MAP, "paths.jsonl")):
@@ -157,6 +160,14 @@ class Brain:
     self.openpilot = OpenpilotDriver(self.io)
     self.driver = driver_from_env(self.openpilot, self._send, self._log_event, None if self.io.drives else "map")
     self.driving: Driver | Expert | None = None  # whose controls the car takes, as of the last step
+    # the map driver's route without a destination, where it's the only driver (no openpilot): map/cruise.py
+    self.cruise: Cruise | None = None
+    self.cruise_asked: float | None = None  # when the engage key asked to cruise, until its route comes
+
+  def _init_cruise(self):
+    """Cruising (map/cruise.py) needs the router, and is only for the map driver driving alone: with openpilot (the
+    link, or in process) the engage key without a destination engages openpilot instead."""
+    self.cruise = Cruise(self.navigator.router, lambda: self.lane_matcher) if self.navigator is not None and not self.io.drives else None
 
   # *** each step ***
 
@@ -408,6 +419,8 @@ class Brain:
     dest = self.destination.update(state.get("waypoint"), pos, picked, (state.get("mission") or {}).get("dest"))
     match = self.matcher.match if self.matcher is not None else None
     route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
+    if self.cruise is not None:
+      route = self._cruise_route(route, pos, bearing, state["pos"][2])
     self.routes += route is not None and route is not self.route
     self.route = route
     self._write_route_input(state)
@@ -424,6 +437,25 @@ class Brain:
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None,
             "beside": self.route.beside() if on else None, "besideLanes": self.route.beside_lanes() if on else None}
+
+  def _cruise_route(self, route: Route | None, pos: np.ndarray, bearing: float, z: float) -> Route | None:
+    """The route the map driver drives where it's the only driver: the destination's, else (while it drives, or the
+    engage key waits for one) a cruise route, which also stands in while a new destination is routed. The engage key's
+    wait ends here, engaging it once the car is on its cruise route."""
+    now = time.monotonic()
+    if route is not None or not (self.driver.engaged or self.cruise_asked is not None):
+      self.cruise.reset()
+      return route
+    cruise = self.cruise.update(pos, bearing, now, z)
+    if self.cruise_asked is not None and not self.driver.engaged:
+      if cruise is not None and cruise.on_road():
+        self.cruise_asked = None
+        if self.driver.engage(cruise):
+          print("gta5: the map driver cruises: no destination, on along the road", flush=True)
+      elif now - self.cruise_asked > CRUISE_WAIT:
+        self.cruise_asked = None
+        print("gta5: the engage key: no road to cruise on", flush=True)
+    return cruise
 
   def _car_lane(self, lane: list[int] | None, frac: float | None, plugin: list[int] | None, map_lane: dict | None,
                 now: float) -> tuple[list[int] | None, float | None]:
@@ -520,14 +552,16 @@ class Brain:
     self.next_map = now + MAP_EVERY
     waypoint = state.get("waypoint")
     speed = f"{v * 3.6:.0f} km/h" if self.metric else f"{v / 0.44704:.0f} mph"
+    cruising = self.route is not None and self.route.cruise
     self.map_view.update({
       "t": now,
       "car": {"x": state["pos"][0], "y": state["pos"][1], "z": round(state["pos"][2] - CAR_HEIGHT, 1), "bearing": bearing},
       "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
                  "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
-      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.driver.engaged or self.openpilot.engaged else ''}",
-      "nav": {"routes": self.routes, "length": None if self.route is None else round(self.route.length, 1),
+      "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.driver.engaged or self.openpilot.engaged else ''}" +
+              ("  cruising (no destination)" if cruising else ""),
+      "nav": {"routes": self.routes, "cruise": cruising, "length": None if self.route is None else round(self.route.length, 1),
               "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
     })
 
@@ -581,9 +615,14 @@ class Brain:
   def _engage_key(self):
     """Disengages whichever driver is engaged, else engages the driver, or openpilot where it can't (the map driver
     without a route). While expert mode is on the key is openpilot's alone. Without openpilot it's the map driver's
-    alone, and does nothing without a route."""
+    alone: without a destination it cruises (_cruise_route) where there's a router, once its route comes, and a press
+    while it waits for that cancels it; with no router it does nothing."""
     drivers = [self.openpilot] if self.expert.on else [self.driver, self.openpilot]
     drivers = list(dict.fromkeys(p for p in drivers if p is not self.openpilot or self.io.drives))
+    if self.cruise_asked is not None:
+      self.cruise_asked = None
+      print("gta5: the engage key: not cruising after all", flush=True)
+      return
     for p in drivers:
       if p.engaged:
         p.disengage("the driver pressed the engage key")
@@ -591,6 +630,10 @@ class Brain:
     for p in drivers:
       if p.engage(self.route):
         return
+    if drivers and self.cruise is not None:
+      self.cruise_asked = time.monotonic()
+      print("gta5: the engage key: no destination for the map driver: it cruises once it has the road ahead", flush=True)
+      return
     print("gta5: the engage key: no destination for the map driver" if drivers else "gta5: the engage key: expert mode drives",
           flush=True)
 

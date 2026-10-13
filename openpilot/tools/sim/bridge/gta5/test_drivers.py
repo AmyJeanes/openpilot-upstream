@@ -155,3 +155,80 @@ def test_no_openpilot(monkeypatch):
   assert w.driver.engaged and w._step_drivers(state()) is w.driver and w.driver.controls(state()) == CONTROL
   w._engage_key()
   assert not w.driver.engaged
+
+
+class FakeCruise:
+  """Stands in for map/cruise.Cruise: its route whatever's set, and how often it was reset."""
+  def __init__(self):
+    self.route, self.resets, self.updates = None, 0, 0
+
+  def update(self, pos, bearing, now, z=None):
+    self.updates += 1
+    return self.route
+
+  def reset(self):
+    self.resets += 1
+
+
+def test_cruising_is_for_the_map_driver_alone(monkeypatch):
+  """A brain with a router cruises only without openpilot (NullIO, the host's --no-link); with openpilot, in process
+  or through the link, the engage key without a destination engages openpilot as before."""
+  for io, cruises in ((NullIO(), True), (SimpleNamespace(drives=True), False)):
+    w = Brain.__new__(Brain)
+    w.io, w.navigator, w.lane_matcher = io, SimpleNamespace(router=SimpleNamespace(osm=None, roads=None)), None
+    w._init_cruise()
+    assert (w.cruise is not None) == cruises
+    w.navigator = None
+    w._init_cruise()
+    assert w.cruise is None
+
+
+def test_no_openpilot_cruises(monkeypatch):
+  """Without openpilot, with no destination the engage key waits for the cruise route and engages the map driver on it
+  once the car's on it. A destination's route takes over from it, and once that's gone the cruise route is back;
+  stopped at a cruise route's end it hands back without ending a destination. A press while it waits cancels it, and
+  with no cruise route in CRUISE_WAIT s it gives up."""
+  from openpilot.tools.sim.bridge.gta5 import gta5_brain
+  monkeypatch.setattr(gta5_drivers, "MapDrive", FakeMapDrive)
+  clock = [100.0]
+  monkeypatch.setattr(gta5_brain.time, "monotonic", lambda: clock[0])
+  w = Brain.__new__(Brain)
+  w.sent, w.io, w.log, w.route = [], NullIO(), None, None
+  w._send = w.sent.append
+  w.expert = SimpleNamespace(on=False, md_driving=False, update=lambda state, route, engaged: False)
+  w.destination = SimpleNamespace(arrived=lambda: w.sent.append("arrived"))
+  w._init_drivers()
+  w.cruise = FakeCruise()
+  pos = np.zeros(2)
+  assert w._cruise_route(None, pos, 0.0, 0.0) is None and w.cruise.updates == 0  # not asked: no cruising
+  w._engage_key()
+  assert not w.driver.engaged and w.cruise_asked is not None
+  assert w._cruise_route(None, pos, 0.0, 0.0) is None and not w.driver.engaged
+  cruise = SimpleNamespace(cruise=True, on_road=lambda: False)
+  w.cruise.route = cruise
+  assert w._cruise_route(None, pos, 0.0, 0.0) is cruise and not w.driver.engaged  # the car isn't on it yet
+  cruise.on_road = lambda: True
+  w.route = w._cruise_route(None, pos, 0.0, 0.0)
+  assert w.route is cruise and w.driver.engaged and w.cruise_asked is None
+  assert w._step_drivers(state()) is w.driver and w.driver.md.route is cruise
+  dest = SimpleNamespace(cruise=False)
+  resets = w.cruise.resets
+  assert w._cruise_route(dest, pos, 0.0, 0.0) is dest and w.cruise.resets == resets + 1  # a destination: its route
+  w.route = dest
+  w._step_drivers(state())
+  assert w.driver.md.route is dest
+  assert w._cruise_route(None, pos, 0.0, 0.0) is cruise  # the destination cleared: cruising again
+  w.route = cruise
+  w._step_drivers(state())
+  w.driver.md.finished = "arrived"  # stopped at the end of the cruise route (a dead end)
+  assert w._step_drivers(state()) is None and not w.driver.engaged and "arrived" not in w.sent
+  w.route = w._cruise_route(None, pos, 0.0, 0.0)
+  assert w.route is None
+  w._engage_key()
+  w._engage_key()  # cancelled while it waited
+  assert w.cruise_asked is None and not w.driver.engaged
+  w.cruise.route = None
+  w._engage_key()
+  clock[0] += gta5_brain.CRUISE_WAIT + 0.1
+  w._cruise_route(None, pos, 0.0, 0.0)
+  assert w.cruise_asked is None and not w.driver.engaged  # gave up

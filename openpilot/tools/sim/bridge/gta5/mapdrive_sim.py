@@ -521,3 +521,84 @@ def drive(route: Route, cfg: dict | None = None, pose=None, lane: float | None =
       break
     car.advance(FRAME)
   return trip
+
+
+# *** cruising ***
+
+@dataclass
+class CruiseTrip:
+  """A cruise (map/cruise.py) driven on the lagged car: the trip, each cruise route it was given, the car's lane
+  readings by the map's lanes where they said it was in an oncoming lane or against a one-way (outside junctions:
+  [t, x, y, kind]), and its U-turns ([t, x, y]: its heading reversed within UTURN_SPAN m of track)."""
+  trip: Trip
+  routes: list = field(default_factory=list)
+  wrong_way: list = field(default_factory=list)
+  uturns: list = field(default_factory=list)
+  driven: float = 0.0  # m
+
+
+UTURN_SPAN, UTURN_TURN = 60.0, 150.0  # m of track, deg
+
+
+def cruise(pose, router, distance: float = 3000.0, cfg: dict | None = None, seconds: float = 600.0, wrong_way_s: float = 1.0,
+           areas=None, lane: int | None = None) -> CruiseTrip:
+  """Cruises from `pose` (x, y, heading on the live map's road; with `lane`, moved into that lane of its road, from the
+  left, the rightmost for a bigger one) for `distance` m of track: the Cruise's routes made in
+  step with the car (Cruise.make, as its thread would, as the route nears its end), each driven on by the map driver as
+  a new route. The car's lane by the map's lanes (LaneMatcher) is its state's laneMap, as the bridge's, outside the map's
+  junction areas (`areas`, lane_match.JunctionAreas); a reading in an oncoming lane or against a one-way held
+  wrong_way_s s counts."""
+  from openpilot.tools.sim.bridge.gta5.map.cruise import EXTEND_AT, SWAP_BY, Cruise
+  c = Cruise(router)
+  matcher = c._matcher()
+  if lane is not None:
+    found = matcher.lane_centre(pose[0], pose[1], math.radians(pose[2] + 90.0), lane)
+    if found is not None:
+      pose = (found[0], found[1], math.degrees(found[2]) - 90.0)
+  car = LagCar(*pose)
+  md = MapDrive({"seed": 1, **(cfg or {})})
+  trip = Trip(md, car)
+  out = CruiseTrip(trip)
+  bearing = lambda: (-car.h) % 360  # noqa: E731
+  route, walk = c.make(np.array([car.x, car.y]), bearing(), None)
+  assert route is not None, "no cruise route"
+  route.locate(np.array([car.x, car.y]), None, car.h, search=200.0)
+  out.routes.append(route)
+  track = [(car.t, car.x, car.y, car.h, 0.0)]
+  pending = None  # the route walked on, swapped in once the car's clear of a junction, as Cruise.update does
+  wrong_since = None
+  while car.t < seconds and out.driven < distance:
+    st = car.state()
+    pos = np.array(st["pos"][:2])
+    route.locate(pos, None, st["heading"])
+    if pending is None and route.length - route.at < EXTEND_AT and not walk.ended:
+      new, walk = c.make(pos, bearing(), None, walk)
+      pending = new
+    if pending is not None and (not c._at_junction(route) or route.length - route.at < SWAP_BY):
+      pending.locate(pos, None, st["heading"], search=200.0)
+      route, pending = pending, None
+      out.routes.append(route)
+    r = matcher.match(float(pos[0]), float(pos[1]), math.radians(st["heading"] + 90.0))
+    inside = areas is not None and areas.inside(float(pos[0]), float(pos[1]), None)
+    st["laneMap"] = None if r is None or inside else {"lane": r.lane, "lanes": r.lanes, "kind": r.kind}
+    wrong = st["laneMap"] is not None and st["laneMap"]["kind"] in ("oncoming", "wrong-way")
+    wrong_since = (wrong_since if wrong_since is not None else car.t) if wrong else None
+    if wrong_since is not None and car.t - wrong_since >= wrong_way_s and (not out.wrong_way or out.wrong_way[-1][0] < wrong_since):
+      out.wrong_way.append([round(car.t, 2), round(car.x, 1), round(car.y, 1), st["laneMap"]["kind"]])
+    msg = md.step(route, st, car.t, car.collisions)
+    trip.events += md.take_events()
+    car.control(msg)
+    trip.rows.append((car.t, car.x, car.y, car.h, car.v, car.k * car.v, md.kappa, md.a, md.dev, md.s, route.right,
+                      {"left": -1, "right": 1}.get(md.indicator, 0), md.lead_gap, math.inf))
+    if md.finished is not None:
+      break
+    car.advance(FRAME)
+    step = math.hypot(car.x - track[-1][1], car.y - track[-1][2])
+    if step >= 2.0:
+      out.driven += step
+      track.append((car.t, car.x, car.y, car.h, out.driven))
+      back = next((p for p in reversed(track) if out.driven - p[4] >= UTURN_SPAN), None)
+      if back is not None and abs((car.h - back[3] + 180) % 360 - 180) > UTURN_TURN and \
+         (not out.uturns or car.t - out.uturns[-1][0] > 10.0):
+        out.uturns.append([round(car.t, 2), round(car.x, 1), round(car.y, 1)])
+  return out

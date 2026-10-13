@@ -6,7 +6,8 @@ HUD's engaged state, the hand-back to the player and arrival go through it, whic
 - OpenpilotDriver: openpilot, through the OpenpilotIO (gta5_opio.py): engaged with the simulated car's cruise buttons,
   its controls carControl's.
 - MapDriver: our map drive (gta5_mapdrive.py) along the route. Without a route it can't engage, and the engage key
-  engages openpilot instead. Expert mode (gta5_expert.py) drives with a MapDriver of its own.
+  engages openpilot instead; without openpilot (gta5_host.py --no-link) the brain gives it a cruise route instead, on
+  along the road (map/cruise.py). Expert mode (gta5_expert.py) drives with a MapDriver of its own.
 A driver hands the car back at once on the player's brake, gas or steering. The simulated person in the seat who works
 the stalk for openpilot is gta5_driver.HumanDriver, not one of these."""
 import os
@@ -19,6 +20,7 @@ DRIVERS = ("openpilot", "map")
 INACTIVE = {"type": "control", "active": False}
 TOOK_OVER = "abort: driver input"  # why a driver hands back to the player, as the map drive's own abort has it
 ROUTE_GAP = 5.0  # s an engaged map driver drives on along its last route while there's none (routing a new destination)
+ROAD_ENDS = "the road ends"  # why the map driver hands back at a cruise route's end, which only a road's end leaves short
 INDICATOR_EVERY = 2.0  # s between asking the plugin again for the indicator its state doesn't show
 
 
@@ -152,6 +154,8 @@ class MapDriver(Driver):
       if self.event is not None:
         self.event(what, **e)
     self._indicator(md.indicator, md.label, state, now)
+    if md.finished == "arrived" and getattr(md.route, "cruise", False):
+      return ROAD_ENDS  # stopped at the end of a cruise route: no destination to end
     return md.finished
 
   def _indicator(self, side: str | None, label: str, state: dict, now: float):
