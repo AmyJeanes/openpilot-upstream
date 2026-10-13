@@ -103,6 +103,9 @@ double g_nextState = 0;
 
 std::atomic<int> g_engagePresses{0}, g_leftPresses{0}, g_rightPresses{0};
 std::atomic<int> g_markPresses{0};  // a running count; the bridge logs each new one
+std::atomic<int> g_leftCount{0}, g_rightCount{0};  // the arrow keys' running counts, for the bridge
+// the bridge takes the arrow keys as its own (the map driver's prompts) and sets the indicator itself
+std::atomic<bool> g_bridgeArrows{false};
 
 // cruise speed buttons: a press, then repeats while held, as a car's stalk steps the set speed
 struct HeldKey {
@@ -1042,8 +1045,14 @@ void SetIndicator(int indicator) {
   }
 }
 
+void PressArrow(bool right) {
+  (right ? g_rightPresses : g_leftPresses)++;
+  (right ? g_rightCount : g_leftCount)++;
+}
+
 void UpdateIndicator() {
   int left = g_leftPresses.exchange(0), right = g_rightPresses.exchange(0);
+  if (g_bridgeArrows) return;
   int indicator = g_indicator;
   if (left) indicator = indicator == 1 ? 0 : 1;
   if (right) indicator = indicator == 2 ? 0 : 2;
@@ -2265,7 +2274,8 @@ std::string MountState() {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"speedUpPresses\":" << g_speedUp.presses
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"leftPresses\":" << g_leftCount.load()
+    << ",\"rightPresses\":" << g_rightCount.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
   if (inVehicle) {
@@ -2994,7 +3004,7 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "latlog") {
     g_latLogUntil = now + MsgNum(m, "secs", 10);
   } else if (type == "indicator") {
-    (MsgStr(m, "side") == "right" ? g_rightPresses : g_leftPresses)++;  // as if the indicator key were pressed
+    PressArrow(MsgStr(m, "side") == "right");  // as if the indicator key were pressed
   } else if (type == "steergain") {
     // schedule=0 goes back to one gain for all speeds (for A/B tests); either way the fit starts over
     ResetCurvGain(MsgBool(m, "schedule", true));
@@ -3055,6 +3065,7 @@ void HandleMessage(const Message &m, double now) {
       g_ai.target.z = static_cast<float>(MsgNum(m, "z", g_m.pos.z));
       g_ai.hasTarget = true;
     }
+    if (m.count("arrows")) g_bridgeArrows = MsgStr(m, "arrows") == "bridge";
     if (m.count("indicator")) {
       std::string side = MsgStr(m, "indicator");
       SetIndicator(side == "left" ? 1 : side == "right" ? 2 : 0);
@@ -3353,6 +3364,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
 
   ReadDriver(now);
   if (g_engagePresses.load() && !connected) g_engagePresses = 0;
+  if (!connected) g_bridgeArrows = false;
   if (v) {
     UpdateIndicator();
     Measure(dt);
@@ -3389,8 +3401,8 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
 
 extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   if (static_cast<int>(key) == g_cfg.keyEngage) (g_aiOn ? g_aiAbortPresses : g_engagePresses)++;
-  else if (static_cast<int>(key) == g_cfg.keyLeft) g_leftPresses++;
-  else if (static_cast<int>(key) == g_cfg.keyRight) g_rightPresses++;
+  else if (static_cast<int>(key) == g_cfg.keyLeft) PressArrow(false);
+  else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
   else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
   else if (static_cast<int>(key) == g_cfg.keyMark) g_markPresses++;
 }
