@@ -8,6 +8,7 @@ HUD's engaged state, the hand-back to the player and arrival go through it, whic
 - MapDriver: our map drive (gta5_mapdrive.py) along the route. Without a route it can't engage, and the engage key
   engages openpilot instead; without openpilot (gta5_host.py --no-link) the brain gives it a cruise route instead, on
   along the road (map/cruise.py). Expert mode (gta5_expert.py) drives with a MapDriver of its own.
+While the map driver drives, the arrow keys are the player's prompts to it (the brain's), not the plugin's indicator.
 A driver hands the car back at once on the player's brake, gas or steering. The simulated person in the seat who works
 the stalk for openpilot is gta5_driver.HumanDriver, not one of these."""
 import os
@@ -119,7 +120,7 @@ class MapDriver(Driver):
       return False
     self.md = MapDrive(dict(self.spec))
     self.on, self.msg, self.indicator, self.label, self.no_route_since = True, None, None, "none", None
-    self.send({"type": "ai", "on": 0, "indicator": "off"})  # our controls drive, not the game's AI
+    self.send({"type": "ai", "on": 0, "indicator": "off", "arrows": "bridge"})  # our controls drive, not the game's AI
     print("gta5: the map driver drives", flush=True)
     return True
 
@@ -128,7 +129,7 @@ class MapDriver(Driver):
       return
     self.on, self.msg = False, None
     self.send(INACTIVE)
-    self.send({"type": "ai", "indicator": "off"})
+    self.send({"type": "ai", "indicator": "off", "arrows": "plugin"})
     self.indicator, self.label = None, "none"
     print(f"gta5: the map driver hands back ({why})", flush=True)
 
@@ -166,6 +167,13 @@ class MapDriver(Driver):
 
   def controls(self, state: dict) -> dict | None:
     return self.msg if self.on else None
+
+  def ask_lane(self, side: str, now: float) -> str:
+    """An arrow key's lane change (MapDrive.ask_lane), "no_lane" while it isn't driving."""
+    return self.md.ask_lane(side, now) if self.on and self.md is not None else "no_lane"
+
+  def take_prompts(self) -> list[tuple[str, str]]:
+    return self.md.take_prompts() if self.md is not None else []
 
   @property
   def drives_route(self) -> bool:

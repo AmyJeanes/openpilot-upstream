@@ -279,6 +279,45 @@ def test_lane_change_kept_off_a_jog():
   print("lane change kept off a jog: ok")
 
 
+def test_asked_lane_change():
+  """An arrow key's lane change: into the lane beside at once where it's clear, signalled first; none where there's no
+  lane that side; with a car alongside in it, waiting for it, given up after ASK_WAIT s; the other arrow cancels."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import ASK_WAIT
+
+  def run(trip, route, secs, beside=False):
+    car, md = trip.car, trip.md
+    end = car.t + secs
+    while car.t < end:
+      car.advance(ms.FRAME)
+      for o in car.others if beside else ():  # kept alongside
+        o.y, o.speed = car.y, car.v
+      st = car.state()
+      route.locate(np.array(st["pos"][:2]), None, st["heading"])
+      car.control(md.step(route, st, car.t, car.collisions))
+
+  r = ms.straight(1500.0)
+  trip = ms.drive(r, {"seed": 1}, lane=1, v0=15.0, seconds=3.0, until_done=False)
+  md = trip.md
+  assert r.lane()[0] == 1 and md.ask_lane("right", trip.car.t) == "no_lane"
+  assert md.ask_lane("left", trip.car.t) == "ok"
+  run(trip, r, 0.2)
+  assert md.take_prompts() == [("lane", "left")] and md.indicator == "left" and md.changes
+  run(trip, r, 12.0)
+  assert r.lane()[0] == 0 and md.finished is None and md.indicator is None
+  assert md.ask_lane("left", trip.car.t) == "no_lane"
+  # a car alongside in the left lane: waited for, then given up
+  x, y, h = ms.start_pose(r, 0, 0.0)
+  trip = ms.drive(r, {"seed": 1}, lane=1, v0=15.0, seconds=0.1, until_done=False, vehicles=[ms.Vehicle(x, y, h, 15.0)])
+  md = trip.md
+  run(trip, r, 3.0, beside=True)
+  assert md.ask_lane("left", trip.car.t) == "ok"
+  run(trip, r, 0.5, beside=True)
+  assert md.take_prompts() == [("wait", "left")] and not md.changes
+  run(trip, r, ASK_WAIT, beside=True)
+  assert md.take_prompts() == [("blocked", "left")] and md.asked is None and r.lane()[0] == 1
+  assert md.ask_lane("left", trip.car.t) == "ok" and md.ask_lane("right", trip.car.t) == "cancel" and md.asked is None
+
+
 def test_corner_kerb():
   """A junction's inside corner kerb from its legs' cross-sections: a car over it is a kerb_contact, the plan's own
   line isn't."""
@@ -951,7 +990,7 @@ def test_expert_drives_with_map_driver():
       car.advance(ms.FRAME)
   finally:
     gta5_expert.time.monotonic = real
-  assert sent[0] == {"type": "ai", "on": 0, "indicator": "off"}, sent[0]
+  assert sent[0] == {"type": "ai", "on": 0, "indicator": "off", "arrows": "bridge"}, sent[0]
   assert not any(m.get("type") == "ai" and m.get("on") == 1 for m in sent)
   assert any(m.get("type") == "ai" and m.get("indicator") == "left" for m in sent)
   assert srcs == {"map"}, srcs

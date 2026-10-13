@@ -26,7 +26,11 @@ round), and the walk taken again from there; one of GTA's shortcut links across 
 (Router.crossings) is banned likewise.
 
 The route walked on is swapped in once the car is clear of a junction (JUNCTION_SPAN), so the map driver splices it
-into its path on a straight rather than in a turn."""
+into its path on a straight rather than in a turn.
+
+The player's arrow keys steer it (Cruise.prompt): the next junction within PROMPT_SECS s with a way out that side (at a
+fork, every way out within FORK_TURN, the one furthest that way) is taken that way, walked on from there and routed
+again; one nearer than PROMPT_NEAR_S s is too late. The other arrow undoes it, walked on from there as before."""
 import math
 import threading
 import urllib.error
@@ -57,6 +61,11 @@ JUNCTION_SPAN = (-15.0, 30.0)  # m about a junction (behind, ahead of the car) a
 SWAP_BY = 400.0  # m left of the route when the next is swapped in all the same
 ROAM_MIN = 2000.0  # m of road a set of links a car can drive round for ever has, not to be a pocket
 ROUNDS = 6  # routes again after the walk is changed (a ban, a junction to go through), at most
+PROMPT_SECS = 8.0  # s of driving ahead an arrow key's turn may be at, and PROMPT_MIN m at the least
+PROMPT_MIN = 80.0
+PROMPT_NEAR_S = 5.0  # s of driving a turn must be beyond, and PROMPT_NEAR m: room to route it and change lanes for it
+PROMPT_NEAR = 50.0
+FORK_TURN = 45.0  # deg: a junction whose ways out all turn less than this is a fork, where an arrow keeps to its side
 
 
 def turned(h_in: float, h_out: float) -> float:
@@ -332,6 +341,14 @@ class Walker:
     carried = [e for e in cands if abs(e.turn) <= SAME_ROAD_TURN and same(e)]
     return min(carried or cands, key=lambda e: abs(e.turn))
 
+  def side_exit(self, side: str, exits: list[Exit], cands: list[Exit]) -> tuple[Exit | None, bool]:
+    """The way out an arrow key (`side`) asks for among cands, and whether it's a fork's: at a fork the one furthest
+    that way, else the turn that way turning least; None for none."""
+    if len(cands) > 1 and all(abs(e.turn) < FORK_TURN for e in cands):
+      return (max if side == 'left' else min)(cands, key=lambda e: e.turn), True
+    ours = [e for e in cands if self.move(e, exits) == side]
+    return (min(ours, key=lambda e: abs(e.turn)) if ours else None), False
+
 
 class Walk:
   """A walk along the map's roads: its nodes, m along it to each, and the junctions it chose a way out of among others
@@ -404,6 +421,33 @@ class Walk:
         self._add(n)
       if len(cands) > 1:
         self.choices.append((at, len(self.nodes) - 1))
+
+  def force(self, k: int, e: Exit):
+    """Back to its junction at node k, taking way out e there."""
+    self.cut(k)
+    for n in e.path[1:]:
+      self._add(n)
+    self.choices.append((k, len(self.nodes) - 1))
+
+  def has(self, link: tuple[int, int]) -> bool:
+    return any(self.nodes[k] == link[0] and self.nodes[k + 1] == link[1] for k in range(len(self.nodes) - 1))
+
+  def junctions(self, k0: int, upto: float) -> list[tuple[int, list[Exit], list[Exit], Exit | None]]:
+    """The junctions it passes from node k0 (> 0) to `upto` m along: (the index in nodes of the junction's node, its
+    ways out, those it may take, the one it takes)."""
+    w, out, k = self.walker, [], max(k0, 1)
+    while k < len(self.nodes) - 1 and self.along[k] <= upto:
+      prev, j = self.nodes[k - 1], self.nodes[k]
+      if sum(m != prev and w.drivable(j, m) for m in self.osm.links.get(j, ())) < 2:
+        k += 1
+        continue
+      head = _copy(self, w)
+      head.cut(k)
+      exits = w.exits(prev, j, head.heading_in(), head.ways)
+      taken = next((e for e in exits if self.nodes[k:k + len(e.path)] == e.path), None)
+      out.append((k, exits, w.candidates(w.way(prev, j), exits), taken))
+      k += len(taken.path) - 1 if taken is not None else 1
+    return out
 
   def cut(self, k: int):
     """Back to node k (its first link kept), the walk's choices past it undone."""
@@ -531,9 +575,11 @@ class Cruise:
     self.banned: set[tuple[int, int]] = set()
     self.off_since: float | None = None
     self.next_try = 0.0
-    self.busy = False
-    self.epoch = 0  # reset() moves it on: a route being made before is dropped
+    self.busy = 0  # routes being made on their threads
+    self.epoch = 0  # reset() and an arrow key move it on: a route being made before is dropped
     self.lock = threading.Lock()
+    self.forced: dict | None = None  # the arrow key's turn the walk takes: side, node (the junction's), link, road
+    self.notes: list[tuple[str, str, str]] = []  # (kind, side, road) of an arrow key's turn that couldn't be routed
 
   @property
   def osm(self) -> OsmLanes | None:
@@ -545,6 +591,7 @@ class Cruise:
       if self.route is None and self.walk is None and self.off_since is None and self.pending is None:
         return
       self.route, self.walk, self.off_since, self.next_try, self.pending = None, None, None, 0.0, None
+      self.forced, self.notes = None, []
       self.epoch += 1
 
   def update(self, pos: np.ndarray, bearing: float, now: float, z: float | None = None):
@@ -579,7 +626,7 @@ class Cruise:
   def _start(self, pos: np.ndarray, bearing: float, z: float | None, now: float, fresh: bool):
     if self.busy:
       return
-    self.busy, self.next_try = True, now + self.RETRY
+    self.busy, self.next_try = self.busy + 1, now + self.RETRY
     threading.Thread(target=self._make, args=(np.array(pos, float), bearing, z, fresh, self.epoch), daemon=True).start()
 
   def _matcher(self) -> LaneMatcher:
@@ -600,12 +647,110 @@ class Cruise:
           self.pending = route, walk  # walked on: swapped in once the car's clear of a junction (update)
         elif epoch == self.epoch and route is not None:
           self.route, self.walk, self.off_since, self.pending = route, walk, None, None
+          self.forced = None  # walked afresh
         elif epoch == self.epoch and walk is not None and walk.ended:
           self.walk = walk  # the road ends: no further to walk
     except (OSError, ValueError, KeyError) as e:
       print(f"cruise: {e}")
     finally:
-      self.busy = False
+      with self.lock:
+        self.busy -= 1
+
+  def prompt(self, side: str, pos: np.ndarray, bearing: float, z: float | None, v: float) -> tuple[str, str]:
+    """An arrow key (`side`: 'left' or 'right') while cruising, the car at pos (bearing clockwise from north) at v m/s:
+    (kind, road), kind one of
+    - 'turn' or 'keep': the next junction (or fork) within PROMPT_SECS s with a way out that side is taken that way (or
+      already was), routed on its thread; road is the way out's name;
+    - 'cancel': the other side's turn undone, the walk taking its junction as it would have;
+    - 'late': the only such junctions are nearer than PROMPT_NEAR_S s; 'forbidden': only turn restrictions or dead ends
+      that way; 'none': no junction that way ahead, nor a route to steer (a lane change instead)."""
+    with self.lock:
+      walk = self.pending[1] if self.pending is not None else self.walk
+      if walk is None or self.route is None or self.osm is None:
+        return 'none', ''
+      walker = Walker(self.osm, self.banned, Restrictions.of(self.osm), Roaming.of(self.osm))
+      walk = _copy(walk, walker)
+      k, at = walk.locate(np.asarray(pos[:2], float))
+      k = min(k, len(walk.nodes) - 2)
+      at -= walk.along[k]
+      walk.trim(k)
+      forced = self.forced
+      if forced is not None:
+        ahead = [i for i in range(1, len(walk.nodes) - 1) if walk.nodes[i] == forced['node'] and walk.along[i] > at]
+        if not ahead:
+          forced = self.forced = None  # passed
+        elif forced['side'] != side:
+          walk.cut(ahead[0])  # walked on from the junction as it would have been
+          self.forced = None
+          self._prompt(walk, at, None, pos, bearing, z)
+          return 'cancel', forced['road']
+      upto, near = at + max(PROMPT_MIN, PROMPT_SECS * v), at + max(PROMPT_NEAR, PROMPT_NEAR_S * v)
+      late = forbidden = False
+      for kj, exits, cands, taken in walk.junctions(1, upto):
+        if walk.along[kj] < at:
+          continue
+        e, fork = walker.side_exit(side, exits, cands)
+        if e is None:
+          forbidden = forbidden or self._ruled_out(walk, kj, side, cands)
+          continue
+        road = walker.name(walker.way(*e.edge))
+        if taken is not None and e.edge == taken.edge:
+          if fork:
+            continue  # keeping to that side already: a junction further on, or a lane change
+          return 'turn', road
+        if walk.along[kj] < near:
+          late = True
+          continue
+        walk.force(kj, e)
+        self.forced = {'side': side, 'node': walk.nodes[kj], 'link': e.edge, 'road': road}
+        self._prompt(walk, at, e.edge, pos, bearing, z)
+        return ('keep' if fork else 'turn'), road
+      return ('late' if late else 'forbidden' if forbidden else 'none'), ''
+
+  @staticmethod
+  def _ruled_out(walk: Walk, k: int, side: str, cands: list[Exit]) -> bool:
+    """Whether junction k has a way out `side` (not a minor road) that turn restrictions or a dead end rule out."""
+    w = walk.walker
+    free = Walker(w.osm, roaming=w.roaming)
+    head = _copy(walk, free)
+    head.cut(k)
+    exits = free.exits(walk.nodes[k - 1], walk.nodes[k], head.heading_in(), head.ways)
+    ok = {e.edge for e in cands}
+    return any(e.edge not in ok and free.move(e, exits) == side and not w.minor(w.way(*e.edge)) for e in exits)
+
+  def take_notes(self) -> list[tuple[str, str, str]]:
+    with self.lock:
+      notes, self.notes = self.notes, []
+    return notes
+
+  def _prompt(self, walk: Walk, at: float, keep: tuple[int, int] | None, pos, bearing: float, z: float | None):
+    """Routes an arrow key's walk (forced at its junction, or cut back to it) on its own thread, in place of any route
+    being made (the lock held)."""
+    self.epoch += 1
+    self.pending, self.busy = None, self.busy + 1
+    threading.Thread(target=self._make_prompt, args=(walk, at, keep, np.array(pos, float), bearing, z, self.epoch),
+                     daemon=True).start()
+
+  def _make_prompt(self, walk: Walk, at: float, keep: tuple[int, int] | None, pos: np.ndarray, bearing: float,
+                   z: float | None, epoch: int):
+    route = None
+    try:
+      route, walk = self._route(walk, at, AHEAD, 0, keep)
+      if route is not None:
+        route.locate(pos, z, -bearing)
+    except (OSError, ValueError, KeyError, urllib.error.URLError) as e:
+      print(f"cruise: {e}")
+    finally:
+      with self.lock:
+        self.busy -= 1
+        if epoch == self.epoch and route is not None:
+          if self.route is not None and self._at_junction(self.route):
+            self.pending = route, walk  # swapped in once the car's clear of the junction it's at (update)
+          else:
+            self.route, self.walk, self.off_since, self.pending = route, walk, None, None
+        elif epoch == self.epoch and keep is not None and self.forced is not None:
+          self.notes.append(('forbidden', self.forced['side'], self.forced['road']))
+          self.forced = None
 
   def make(self, pos: np.ndarray, bearing: float, z: float | None, walk: Walk | None = None):
     """A cruise route from the car (pos, bearing clockwise from north, height z): along a new walk, or along `walk`
@@ -626,7 +771,11 @@ class Cruise:
       k = min(k, len(walk.nodes) - 2)
       at -= walk.along[k]
       walk.trim(k)
-    known = 0 if fresh else len(walk.nodes)  # an extension's nodes so far
+    return self._route(walk, at, ahead, 0 if fresh else len(walk.nodes))  # an extension's nodes so far
+
+  def _route(self, walk: Walk, at: float, ahead: float, known: int, keep: tuple[int, int] | None = None):
+    """The walk walked on to `ahead` m past the car (`at` m along it) and routed: (route, walk); (None, walk) where none
+    can be made, it's no further on than `known` nodes, or it no longer takes the link `keep`."""
     pinned: set[int] = set()  # nodes the route was made to go through as it left the walk there
     grow = True
     for _ in range(ROUNDS):
@@ -651,6 +800,8 @@ class Cruise:
         continue
       k = strays(route.points, walk.points())
       if k is None:
+        if keep is not None and not walk.has(keep):
+          return None, walk
         route.cruise = True
         return route, walk
       # Valhalla left the walk: at a junction it chose at, the way out is one it can't take from there (the turn

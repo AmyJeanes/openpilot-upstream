@@ -17,6 +17,15 @@ class FakeMapDrive:
   def __init__(self, spec):
     self.spec, self.route, self.routes, self.finished, self.phase = spec, None, [], None, "drive"
     self.indicator, self.label = None, "none"
+    self.asks, self.answer, self.prompts = [], "ok", []  # ask_lane's sides, its answer, and take_prompts'
+
+  def ask_lane(self, side, t):
+    self.asks.append(side)
+    return self.answer
+
+  def take_prompts(self):
+    p, self.prompts = self.prompts, []
+    return p
 
   def step(self, route, state, t, collisions=0):
     self.route = route
@@ -33,13 +42,14 @@ def state(**kw) -> dict:
 
 def test_map_driver(monkeypatch):
   """It needs a route to engage, drives on along its last route for ROUTE_GAP s without one, hands back at once on the
-  driver's input, says when it arrived, and keeps the plugin's indicator as its map driver has it."""
+  driver's input, says when it arrived, and keeps the plugin's indicator as its map driver has it; the arrow keys are
+  the bridge's while it drives, the plugin's again once it hands back."""
   monkeypatch.setattr(gta5_drivers, "MapDrive", FakeMapDrive)
   sent = []
   p = MapDriver(sent.append)
   route = object()
   assert not p.engage(None) and not p.engaged and p.controls(state()) is None
-  assert p.engage(route) and p.engaged and sent == [{"type": "ai", "on": 0, "indicator": "off"}]
+  assert p.engage(route) and p.engaged and sent == [{"type": "ai", "on": 0, "indicator": "off", "arrows": "bridge"}]
   assert p.step(state(), route, 0.0) is None and p.controls(state()) == CONTROL
   t = 0.0
   while p.step(state(), None, t) is None:  # a new destination: the last route until the router has one
@@ -48,6 +58,8 @@ def test_map_driver(monkeypatch):
   assert abs(t - ROUTE_GAP) < 0.1 and p.step(state(), None, t) == "abort: no route"
   p.disengage("abort: no route")
   assert not p.engaged and p.controls(state()) is None and INACTIVE in sent[-2:]
+  assert sent[-1] == {"type": "ai", "indicator": "off", "arrows": "plugin"}
+  assert p.ask_lane("left", 0.0) == "no_lane"
   assert p.engage(route) and p.step(state(user={"brake": True}), route, 0.0) == TOOK_OVER
   assert p.engage(route)
   p.md.indicator = "left"

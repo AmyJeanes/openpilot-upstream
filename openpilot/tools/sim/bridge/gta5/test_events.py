@@ -7,7 +7,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5 import gta5_drivers, gta5_events
 from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import TOOK_OVER, took_over
-from openpilot.tools.sim.bridge.gta5.gta5_events import REFUSE_WAIT, SECS, event
+from openpilot.tools.sim.bridge.gta5.gta5_events import REFUSE_WAIT, SECS, event, prompt
 from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO
 from openpilot.tools.sim.bridge.gta5.test_drivers import FakeMapDrive, state
 
@@ -42,6 +42,10 @@ def test_event():
   }
   for why, short in gave_up.items():
     assert event("handback", "map", why) == ("warning", f"Map driver gave up: {short}"), why
+
+  assert prompt("turn", "left", "Row 1") == ("", "Next left: Row 1") and prompt("turn", "right") == ("", "Next right")
+  assert prompt("keep", "left") == ("", "Keeping left") and prompt("lane", "right") == ("", "Changing lane right")
+  assert prompt("late", "right") == ("refuse", "Too late for that right") and prompt("none", "left") == ("refuse", "No left here")
 
 
 def brain(monkeypatch, driver: str, io=None) -> Brain:
@@ -118,6 +122,52 @@ def test_map_driver(monkeypatch):
   w.route = None  # no route for too long: gave up
   step(w)
   assert not w.driver.engaged and events(w) == [("warning", "Map driver gave up: no route")]
+
+
+def test_arrow_keys(monkeypatch):
+  """While the map driver drives, an arrow key cruising asks the cruise for its turn, and with none that way ahead (or
+  with a destination) the map drive for a lane change; what they do, and what becomes of them later, on the HUD. Not
+  while it's disengaged, nor in expert mode."""
+  w = brain(monkeypatch, "map", NullIO())
+  w.presses, w._track = {}, lambda s: None
+  turns, notes = [("turn", "Row 1"), ("none", ""), ("none", "")], []
+  asked = []
+  w.cruise = SimpleNamespace(prompt=lambda side, pos, bearing, z, v: (asked.append(side), turns.pop(0))[1],
+                             take_notes=lambda: [notes.pop() for _ in list(notes)])
+  presses = {"leftPresses": 0, "rightPresses": 0}
+
+  def press(key):
+    presses[key] += 1
+    w._update_buttons(state(**presses))
+
+  w._update_buttons(state(**presses))  # the counts so far
+  press("leftPresses")  # disengaged: the plugin's indicator
+  assert asked == [] and events(w) == []
+  w.route = SimpleNamespace(cruise=True)
+  w._engage_key()
+  step(w)
+  events(w)
+  md = w.driver.md
+  press("leftPresses")
+  assert asked == ["left"] and md.asks == [] and events(w) == [(None, "Next left: Row 1")]
+  press("rightPresses")  # no right turn ahead: a lane change, made a step later
+  assert asked == ["left", "right"] and md.asks == ["right"] and events(w) == []
+  md.prompts.append(("lane", "right"))
+  w._update_buttons(state(**presses))
+  assert events(w) == [(None, "Changing lane right")]
+  md.answer = "no_lane"
+  press("rightPresses")
+  assert events(w) == [("refuse", "No right here")]
+  notes.append(("forbidden", "left", "Row 1"))  # a turn that couldn't be routed
+  w._update_buttons(state(**presses))
+  assert events(w) == [("refuse", "Can't turn left there")]
+  w.route = SimpleNamespace(cruise=False)  # a destination: lane changes alone
+  md.answer = "ok"
+  press("leftPresses")
+  assert len(asked) == 3 and md.asks == ["right", "right", "left"]
+  w.expert.on = True
+  press("leftPresses")
+  assert md.asks == ["right", "right", "left"]
 
 
 def test_openpilot(monkeypatch):

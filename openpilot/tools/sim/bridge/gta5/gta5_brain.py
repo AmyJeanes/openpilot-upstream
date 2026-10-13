@@ -598,7 +598,7 @@ class Brain:
   def _update_buttons(self, state: dict):
     """The plugin's keys stand in for the cruise buttons: engage sets when disengaged and cancels when engaged, and the
     speed keys are resume/accel and set/decel, which step the set speed while engaged (to the next multiple of 5 with
-    shift)."""
+    shift). The arrow keys prompt the map driver while it drives (_arrow)."""
     commands = {"speedUpPresses": "cruise_up", "speedDownPresses": "cruise_down", "speedUp5Presses": "cruise_up5",
                 "speedDown5Presses": "cruise_down5"}
     self._track(state)
@@ -619,6 +619,42 @@ class Brain:
           self._engage_key()
         else:
           self.io.cruise(commands[key])
+    for key, side in (("leftPresses", "left"), ("rightPresses", "right")):
+      presses = state.get(key)
+      if presses is None:
+        continue
+      new = presses - self.presses.get(key, presses)
+      self.presses[key] = presses
+      if new > 0:  # one prompt however many presses came in a step
+        self._arrow(side, state)
+    self._prompt_news()
+
+  def _arrow(self, side: str, state: dict):
+    """An arrow key while the map driver drives (the plugin's indicator otherwise): cruising, the turn that way at the
+    next junction or fork within a few seconds (Cruise.prompt); else, or with none ahead, a change into the lane beside
+    (MapDrive.ask_lane); on the HUD, what it does or why it can't."""
+    d = self.driver
+    if self.expert.on or not isinstance(d, MapDriver) or not d.engaged:
+      return
+    kind, road = "none", ""
+    if self.cruise is not None and self.route is not None and self.route.cruise:
+      kind, road = self.cruise.prompt(side, np.array(state["pos"][:2], float), (-state["heading"]) % 360, state["pos"][2],
+                                      float(state.get("vEgo") or 0.0))
+    if kind == "none":
+      asked = d.ask_lane(side, time.monotonic())
+      kind = {"ok": None, "cancel": "lane_cancel"}.get(asked, asked)
+    if kind is not None:
+      self.announcer.prompt(kind, side, road)
+    print(f"gta5: the {side} arrow: {kind or 'a lane change'}" + (f" ({road})" if road else ""), flush=True)
+
+  def _prompt_news(self):
+    """What became of the arrow keys' prompts since: a turn that couldn't be routed, a lane change made or given up."""
+    if self.cruise is not None:
+      for kind, side, road in self.cruise.take_notes():
+        self.announcer.prompt(kind, side, road)
+    if isinstance(self.driver, MapDriver):
+      for kind, side in self.driver.take_prompts():
+        self.announcer.prompt(kind, side)
 
   def _engage_key(self):
     """Disengages whichever driver is engaged, else engages the driver, or openpilot where it can't (the map driver

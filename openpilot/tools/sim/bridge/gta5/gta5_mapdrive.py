@@ -124,6 +124,13 @@ MIN_LC_M = 20.0  # m a lane change takes at the least
 SPLICE_BACK = 150.0  # m short of where a new route leaves the old one's roads the old path is kept to
 SAME_LINE = 1.5  # m between two routes' lines on the same roads
 SPLICE_GAP = 0.3  # m between the kept path's end and the new one closed as a lane change
+ASK_WAIT = 5.0  # s a lane change the player asks for waits for the lane beside to be clear, at most
+ASK_KEEP_S = 10.0  # s of driving (and ASK_KEEP m at the least) nav mustn't want back out of the lane asked for within
+ASK_KEEP = 150.0
+ASK_BEHIND = 8.0  # m behind our rear bumper a vehicle in the lane beside keeps it from being clear, and ASK_CLOSE s of
+ASK_AHEAD = 4.0  # its closing speed more; ahead of our front bumper likewise
+ASK_CLOSE = 3.0
+ASK_PHASES = ("drive", "follow")
 LC_A_LAT = 0.6  # x the style's lateral acceleration, a lane change's peak at most
 LC_MAX_S = 9.0  # s a change takes at the most
 LC_SHORTEST = 12.0  # m a change re-timed to its time takes at the least, a lane (pulling away, slowly)
@@ -650,6 +657,9 @@ class MapDrive:
     self.kerb_logged = -math.inf  # when the pedestrian kerb cap last held the car back
     self.obst: list[dict] = []  # static things ahead the plugin's probes hit, as bodies in the world (_obstacles)
     self.obst_rows = None
+    self.asked: dict | None = None  # the lane change the player asked for, waiting for the lane beside: side, t, waited
+    self.prompts: list[tuple[str, str]] = []  # (kind, side) of what became of it, since last taken (ask_lane)
+    self.last_v = 0.0  # m/s at the last step
 
   def _body(self, state: dict):
     """Our car's body from the plugin's nearby.dims (its model's bounds: min x, max x, min y, max y)."""
@@ -696,6 +706,10 @@ class MapDrive:
       return []
     i = max(int(self.s / STEP) - 2, 0)
     return self.intent[i::step].round(1).tolist()
+
+  def take_prompts(self) -> list[tuple[str, str]]:
+    p, self.prompts = self.prompts, []
+    return p
 
   def take_events(self) -> list[dict]:
     e, self.events = self.events, []
@@ -997,7 +1011,9 @@ class MapDrive:
     ahead = [route.lanes.section_at(x, segment_of(route, x)) for x in s + np.arange(10.0, LANE_RANGE_AHEAD + 1.0, 10.0)]
     return max([sec.lanes] + [a.lanes for a in ahead if a is not None])
 
-  def _make_plan(self, route, state: dict, t: float) -> bool:
+  def _make_plan(self, route, state: dict, t: float, shift: int = 0) -> bool:
+    """The plan from the car; with `shift` (-1 left, 1 right) nav's from the lane beside, after a change into it the
+    player asked for (_asked_keys)."""
     lanes = route.lanes
     if lanes is None:
       self._abort("plan: no lanes on the route", t, state.get("pos"))
@@ -1019,8 +1035,10 @@ class MapDrive:
       self._event("mapdrive_warning", t, why=f"lane slots: {e!r}")
       slots = None
     self.moves_along = sorted(m.along for m in slots.moves) if slots is not None else []
-    nav = self.nav_keys(route, lane)
+    nav = self.nav_keys(route, [lane[0] + shift, lane[1]] if shift else lane)
     keys = self.retime(route, nav, slots) if self.c["retime"] else nav
+    if shift:
+      keys = self._asked_keys(route, keys, lane, float(state.get("vEgo") or 0.0))
     check = self.slot_check(route, keys, slots)
     fixed = []
     for _ in range(4 if self.c["plan_check"] == "fix" else 0):  # a fix can leave the next move wanting another lane
@@ -1074,6 +1092,12 @@ class MapDrive:
     self.changes = self._changes(keys)  # each lane change on the path: (path m from, to, side, m across)
     self._plan_anomalies(route, t)
     return True
+
+  def _asked_keys(self, route, keys: list[tuple[float, float]], lane, v: float) -> list[tuple[float, float]]:
+    """keys (nav's from the lane beside) after a change into it from the car's lane, signal_lead s on."""
+    s0 = route.at + self.style["signal_lead"] * max(v, 3.0)
+    s1 = s0 + max(lc_seconds(self.style, 1.0) * max(v, 5.0), MIN_LC_M)
+    return [(route.at, float(lane[0])), (s0, float(lane[0])), (s1, keys[0][1])] + [k for k in keys if k[0] > s1 + EPS]
 
   def _build(self, route, keys: list[tuple[float, float]], lane, state: dict, t: float):
     """The path for keys from the car (_derive's): (intent, sharp bends eased, wander knots, bias), None (an abort)
@@ -1799,13 +1823,17 @@ class MapDrive:
             need[i] = d
     return need, near
 
-  def _splice(self, route, state: dict, t: float):
+  def _splice(self, route, state: dict, t: float, shift: int = 0):
     """A new route under way: the old path kept past the lane change under way and 3 s on, or where the new route runs
     on along the old one's roads (a cruise route walked on, a reroute that differs only far ahead) to SPLICE_BACK m short
     of where it leaves them, past any lane change there; then the new plan's, the gap to it closed as a lane change
-    would."""
+    would. With `shift`, the same route planned again with the lane change the player asked for (_make_plan), the old
+    path kept only 0.5 s on, as its signal comes on at once."""
     old_path, old_s, s, v = self.path, self.s_path, self.s, float(state.get("vEgo") or 0.0)
-    cut = max(s + max(3.0 * v, 10.0), self._same_roads(route) - SPLICE_BACK)
+    if shift:
+      cut = s + max(0.5 * v, 3.0)
+    else:
+      cut = max(s + max(3.0 * v, 10.0), self._same_roads(route) - SPLICE_BACK)
     for _ in range(2):  # a lane change past the cut can end where another begins
       for s0, s1, *_ in self.changes:
         if s0 <= s <= s1 or s0 <= cut <= s1:
@@ -1815,7 +1843,7 @@ class MapDrive:
         cut = max(cut, g["end"])
     part = (old_s >= s - 2.0) & (old_s <= cut)  # from the car on: the new route starts there
     keep, old_intent = old_path[part], self.intent[part]
-    if not self._make_plan(route, state, t):
+    if not self._make_plan(route, state, t, shift):
       return
     if len(keep) >= 2:
       j, d = project(self.path, self.s_path, keep[-1], 0.0, window=self.s_path[-1])
@@ -1839,6 +1867,89 @@ class MapDrive:
       self.changes = self._changes(self.keys)
       self.splices.append({"t": round(t, 3), "cut": round(cut, 1), "gap": round(float(d), 2), "pos": [round(float(keep[-1][0]), 1), round(float(keep[-1][1]), 1)]})
       self._event("mapdrive", t, phase=self.phase, splice=self.splices[-1])
+
+  # *** lane changes the player asks for ***
+
+  def ask_lane(self, side: str, t: float) -> str:
+    """The player's arrow key asking for a change into the lane beside (`side`: 'left' or 'right'): 'ok' (made once
+    that lane is clear, within ASK_WAIT s: what becomes of it comes in take_prompts(): 'lane' as it starts, 'wait' while
+    the lane beside isn't clear, 'blocked' as it gives up, or why it can't), or why it can't now: 'busy' (a lane change
+    under way or signalled), 'no_lane' (no lane our way that side, or the car's lane isn't known), 'lane_no' (nav would
+    want back out of it soon: it turns off, ends, or the route needs this lane). The other side's arrow while one waits
+    cancels it ('cancel')."""
+    if self.asked is not None:
+      if self.asked["side"] == side:
+        return "ok"
+      self.asked = None
+      return "cancel"
+    why = self._ask_check(side)
+    if why is None:
+      self.asked = {"side": side, "t": t, "waited": False}
+    return why or "ok"
+
+  def _ask_check(self, side: str) -> str | None:
+    route = self.route
+    if route is None or self.path is None or self.phase not in ASK_PHASES or not route.on_road():
+      return "no_lane"
+    v = self.last_v
+    if any(s0 - self.style["signal_lead"] * max(v, 3.0) <= self.s <= s1 for s0, s1, *_ in self.changes):
+      return "busy"
+    lane = route.lane()
+    if lane is None or lane[0] < 0:
+      return "no_lane"
+    i = lane[0] + (-1 if side == "left" else 1)
+    if not 0 <= i < lane[1]:
+      return "no_lane"
+    reach = route.at + max(ASK_KEEP, ASK_KEEP_S * v)
+    keys = self.nav_keys(route, [i, lane[1]])
+    for (s0, l0), (s1, l1) in zip(keys, keys[1:], strict=False):
+      if s0 > reach:
+        break
+      if s1 - s0 > EPS and (l1 - l0) * (lane[0] - i) > 0:
+        return "lane_no"  # a change back towards the car's lane (not a renumbering, which is a step)
+    return None
+
+  def _lane_clear(self, side: str, state: dict) -> bool:
+    """Whether no vehicle is in the lane beside (`side`) from ASK_BEHIND m behind us to ASK_AHEAD m ahead, each more by
+    its closing speed: by the plugin's nearby as it reports them (from the car), as one keeping pace with us leaves its
+    report unchanged and _vehicles' places in the world behind."""
+    v = float(state.get("vEgo") or 0.0)
+    sign = -1.0 if side == "left" else 1.0
+    for row in (state.get("nearby") or {}).get("v") or []:
+      if len(row) < 9:
+        continue
+      x, y, rel, _, vy, mnx, mxx, mny, mxy = (float(a) for a in row[:9])
+      c, s_ = math.cos(math.radians(rel)), math.sin(math.radians(rel))
+      body = [(x + cx * c - cy * s_, y + cx * s_ + cy * c) for cx, cy in ((mnx, mny), (mxx, mny), (mxx, mxy), (mnx, mxy))]
+      xs, ys = [sign * p[0] for p in body], [p[1] for p in body]
+      if max(xs) < 0.5 * LANE_W or min(xs) > 1.5 * LANE_W:
+        continue
+      closing = vy - v
+      if max(ys) > -(self.rear + ASK_BEHIND + max(closing, 0.0) * ASK_CLOSE) and          min(ys) < self.front + ASK_AHEAD + max(-closing, 0.0) * ASK_CLOSE:
+        return False
+    return True
+
+  def _ask_step(self, route, state: dict, t: float):
+    """The lane change asked for: made once the lane beside is clear, given up after ASK_WAIT s."""
+    a = self.asked
+    side = a["side"]
+    if t - a["t"] > ASK_WAIT:
+      self.asked = None
+      self.prompts.append(("blocked", side))
+      return
+    if not self._lane_clear(side, state):
+      if not a["waited"]:
+        a["waited"] = True
+        self.prompts.append(("wait", side))
+      return
+    self.asked = None
+    why = self._ask_check(side)
+    if why is not None:
+      self.prompts.append((why, side))
+      return
+    self._splice(route, state, t, shift=-1 if side == "left" else 1)
+    if self.phase != "abort":
+      self.prompts.append(("lane", side))
 
   def _same_roads(self, route) -> float:
     """Path m (the old path's) to where a new route stops running along the old route's line on from the car (within
@@ -2456,6 +2567,9 @@ class MapDrive:
       return self._abort_msg(v, t)
     self._vehicles(state, t)
     self._obstacles(state, t)
+    self.last_v = v
+    if self.asked is not None:
+      self._ask_step(route, state, t)
     self._checks(route, state, t, collisions, v)
     if self.phase == "abort":
       return self._abort_msg(v, t)

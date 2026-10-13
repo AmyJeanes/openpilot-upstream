@@ -1,13 +1,14 @@
 """Cruising (cruise.py): the walk's way out of each junction and the rolling route, on small hand-made maps; and cruises
 driven on the live map where it and the router are here."""
 import math
+import time
 import urllib.error
 import urllib.request
 
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map import cruise as cr
-from openpilot.tools.sim.bridge.gta5.map.cruise import MAX_THROUGH, Cruise, Restrictions, Roaming, Walk, Walker, start_link
+from openpilot.tools.sim.bridge.gta5.map.cruise import MAX_THROUGH, Cruise, Exit, Restrictions, Roaming, Walk, Walker, start_link
 from openpilot.tools.sim.bridge.gta5.map.lane_match import LaneReading
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, Section
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
@@ -219,6 +220,78 @@ def test_cruise_updates(monkeypatch):
   assert calls[-1] is True and c.route.points[-1][0] == 40.0
   c.reset()
   assert c.route is None and c.walk is None
+
+
+def grid():
+  """Main St north along x = 0 (way 2000 + 200 + row) between West Ave and East Ave (x = -400, 400), a street across
+  every 300 m (Row 0 to Row 7, west and east halves) but for Row 2's west half: every road leads on round the grid, so
+  none is a pocket. Node 100 * column + row."""
+  nodes = {100 * c + r: (400.0 * (c - 2), 300.0 * r) for c in (1, 2, 3) for r in range(8)}
+  names = {1: 'West Ave', 2: 'Main St', 3: 'East Ave'}
+  ways = {2000 + 100 * c + r: ({**MAIN, 'name': names[c]}, [100 * c + r, 100 * c + r + 1]) for c in (1, 2, 3) for r in range(7)}
+  for r in range(8):
+    if r != 2:
+      ways[1000 + 10 * r + 1] = ({**SIDE, 'name': f'Row {r}'}, [100 + r, 200 + r])
+    ways[1000 + 10 * r + 2] = ({**SIDE, 'name': f'Row {r}'}, [200 + r, 300 + r])
+  return make_map(nodes, ways)
+
+
+def cruising(monkeypatch, osm, y: float) -> Cruise:
+  """A cruise from Main St at y heading north, along it."""
+  monkeypatch.setattr(cr, "strays", lambda points, line, *a, **kw: None)
+  c = Cruise(FakeRouter(osm))
+  c.route, c.walk = c.make(np.array([0.0, y]), 0.0, None)
+  assert all(abs(osm.node_xy(n)[0]) < 1e-6 for n in c.walk.nodes)  # straight on along Main St
+  return c
+
+
+def routed(c: Cruise):
+  for _ in range(500):
+    if not c.busy:
+      return
+    time.sleep(0.01)
+  raise AssertionError("not routed")
+
+
+def test_side_exit():
+  """At a fork (every way out within FORK_TURN) an arrow keeps to its side; elsewhere it's the turn that way, if any."""
+  w = Walker(make_map({1: (0.0, 0.0), 2: (0.0, 1.0)}, {}))
+  fork = [Exit(15.0, [0, 1]), Exit(-20.0, [0, 2])]
+  assert w.side_exit('left', fork, fork) == (fork[0], True) and w.side_exit('right', fork, fork) == (fork[1], True)
+  tee = [Exit(-2.0, [0, 1]), Exit(-90.0, [0, 2])]
+  assert w.side_exit('left', tee, tee) == (None, False) and w.side_exit('right', tee, tee) == (tee[1], False)
+
+
+def test_prompt_turns(monkeypatch):
+  """An arrow key turns at the next junction with a way out that side within PROMPT_SECS s (PROMPT_MIN m), routed
+  again from there, not one nearer than PROMPT_NEAR_S s; the other arrow undoes it; a junction with no way out that side
+  is passed by (a lane change instead), and one the turn restrictions forbid is said to be."""
+  osm = grid()
+  c = cruising(monkeypatch, osm, 200.0)
+  pos = np.array([0.0, 200.0])
+  assert c.prompt('left', pos, 0.0, None, 10.0) == ('none', '')  # Row 1 100 m on: beyond 80 m at 10 m/s
+  assert c.prompt('left', pos, 0.0, None, 15.0) == ('turn', 'Row 1')
+  routed(c)
+  k = c.walk.nodes.index(201)
+  assert c.walk.nodes[k + 1] == 101 and c.route.cruise and c.forced['side'] == 'left'
+  assert c.prompt('left', pos, 0.0, None, 15.0) == ('turn', 'Row 1')  # already: nothing new
+  assert not c.busy
+  assert c.prompt('right', pos, 0.0, None, 15.0) == ('cancel', 'Row 1')
+  routed(c)
+  k = c.walk.nodes.index(201)
+  assert c.walk.nodes[k + 1] == 202 and c.forced is None
+  assert c.prompt('right', pos, 0.0, None, 15.0) == ('turn', 'Row 1')
+  routed(c)
+  assert c.walk.nodes[c.walk.nodes.index(201) + 1] == 301
+  c = cruising(monkeypatch, osm, 250.0)  # 50 m short of Row 1: too late at 15 m/s
+  assert c.prompt('left', np.array([0.0, 250.0]), 0.0, None, 15.0) == ('late', '')
+  c = cruising(monkeypatch, osm, 500.0)  # Row 2 has no west half: no left there
+  assert c.prompt('left', np.array([0.0, 500.0]), 0.0, None, 15.0) == ('none', '')
+  rules = Restrictions({1: ({'type': 'restriction', 'restriction': 'no_left_turn'},
+                            [('w', 2200, 'from'), ('n', 201, 'via'), ('w', 1011, 'to')])})
+  monkeypatch.setattr(Restrictions, "of", classmethod(lambda cls, osm: rules))
+  c = cruising(monkeypatch, osm, 200.0)
+  assert c.prompt('left', np.array([0.0, 200.0]), 0.0, None, 15.0) == ('forbidden', '')
 
 
 def live():

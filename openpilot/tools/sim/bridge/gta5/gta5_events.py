@@ -11,6 +11,9 @@ speed, sent as {"type": "event", "sound": ..., "text": ..., "secs": ...}, either
   waiting for it), or openpilot doesn't engage within REFUSE_WAIT s.
 While the engage key waits to cruise there's text alone ("Looking for the road ahead"), and pressing it again cancels
 with the disengage sound ("Not cruising").
+The arrow keys' prompts to the map driver (gta5_brain, Cruise.prompt, MapDrive.ask_lane) get text alone as they're
+taken ("Next left: Vinewood Blvd", "Keeping right", "Changing lane left") and the refuse sound with why where they
+can't be ("No left here", "Too late for that right").
 Expert mode's drives are silent. GTA5_SOUNDS=0 leaves out the sounds (for recording runs), GTA5_HUD_EVENTS=0 the text."""
 import os
 
@@ -60,6 +63,22 @@ def event(kind: str, who: str = "", why: str = "", cruise: bool = False) -> tupl
   return "warning", f"Map driver gave up: {short(why)}"
 
 
+PROMPTS = {  # an arrow key's prompt: kind -> (sound, text), {side} and {road} filled in
+  "turn": ("", "Next {side}{road}"), "keep": ("", "Keeping {side}{road}"), "cancel": ("", "Turn cancelled"),
+  "late": ("refuse", "Too late for that {side}"), "forbidden": ("refuse", "Can't turn {side} there"),
+  "none": ("refuse", "No {side} here"), "no_lane": ("refuse", "No {side} here"),
+  "lane": ("", "Changing lane {side}"), "wait": ("", "Waiting to change lane {side}"),
+  "blocked": ("refuse", "Lane {side} not clear"), "busy": ("refuse", "Already changing lane"),
+  "lane_no": ("refuse", "Can't change lane {side} here"), "lane_cancel": ("", "Lane change cancelled"),
+}
+
+
+def prompt(kind: str, side: str, road: str = "") -> tuple[str, str]:
+  """The (sound, text) for an arrow key's prompt to the map driver: what it does, or why it can't."""
+  sound, text = PROMPTS[kind]
+  return sound, text.format(side=side, road=f": {road}" if road else "")
+
+
 class Announcer:
   """Follows who's engaged step by step and sends the plugin an event as that changes, with why from the brain."""
   def __init__(self, send):
@@ -85,6 +104,11 @@ class Announcer:
   def refused(self, why: str):
     if not self.quiet:
       self._send(*event("refuse", why=why))
+
+  def prompt(self, kind: str, side: str, road: str = ""):
+    """What an arrow key's prompt to the map driver does (events.prompt)."""
+    if not self.quiet:
+      self._send(*prompt(kind, side, road))
 
   def status(self, kind: str):
     """The engage key's wait to cruise: "wait" or "cancel"."""
