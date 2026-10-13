@@ -9,16 +9,20 @@ junction's short straight links crossed), it takes:
 1. at the first junction, where the car's lane is turn-only (its turn:lanes arrows have no through), that turn;
 2. else the road it's on carried on (the same name, or unnamed the same class) turning no more than SAME_ROAD_TURN;
 3. else the way out turning least.
-Ways out it never takes: against a one-way, U-turns (more than MOVE_U_TURN), lanes the map closes to cars, banned ones
-(below), and while there's another, dead ends (no LEADS_ON m of road beyond) and minor roads (service roads, tracks,
-GTA's switched-off and off-road links) off a road that isn't one.
+Ways out it never takes: against a one-way, U-turns (more than MOVE_U_TURN), lanes the map closes to cars, moves the
+map's turn restrictions forbid (Restrictions), banned ones (below), and while there's another, dead ends (no LEADS_ON m
+of road beyond) and minor roads (service roads, tracks, GTA's switched-off and off-road links) off a road that isn't one.
 
-Valhalla then routes the walk (Router.via): from the car through a location just past each junction where the walk had
-more than one way out to choose from, and to its end. That keeps the route on the walk's roads while Valhalla's own
-rules hold: its turn restrictions (the map's no-left, no-right and no-U-turn ones, through medians too), and its
-maneuvers, speed limits and the rest of a route as the bridge routes a destination. Where Valhalla's route leaves the
-walk (a move the restrictions forbid), or the walk takes one of GTA's shortcut links across a painted separation
-(Router.crossings), that way out is banned and the walk taken again from there."""
+Valhalla then routes the walk (Router.via): from the car's place on it through a location just past each junction where
+the walk had more than one way out to choose from, and to its end. That keeps the route on the walk's roads, as a route
+Valhalla would drive (its own turn restrictions and costs), with its maneuvers, speed limits and the rest of a route as
+the bridge routes a destination. Where Valhalla's route still leaves the walk, the way out it refused is banned (at a
+junction the walk chose at) or the junction is given a location to go through (elsewhere, where Valhalla found a way
+round), and the walk taken again from there; one of GTA's shortcut links across a painted separation the walk takes
+(Router.crossings) is banned likewise.
+
+The route walked on is swapped in once the car is clear of a junction (JUNCTION_SPAN), so the map driver splices it
+into its path on a straight rather than in a turn."""
 import math
 import threading
 import urllib.error
@@ -40,7 +44,7 @@ LEADS_ON_STEPS = 2000  # nodes looked at for that at most, beyond which it leads
 MINOR_CLASSES = frozenset({'service', 'track'})
 MINOR_TAGS = ('gta:switched_off', 'gta:no_gps', 'gta:offroad')
 DIVERGE = 15.0  # m Valhalla's route may stray from the walk's roads
-DIVERGE_FROM = 30.0  # m along the route before that counts: Valhalla starts at the road's next node, as Router.route
+DIVERGE_FROM = 30.0  # m along the route before that counts
 JUNCTION_NEAR = 40.0  # m along the walk between where Valhalla leaves it and the junction whose way out it refused
 THROUGH_MIN = 3.0  # m: a through location goes on the first link this long from the way out on
 THROUGH_AHEAD = 5.0  # m past the car a through location goes at the least
@@ -377,25 +381,25 @@ def start_link(osm: OsmLanes, walker: Walker, pos: np.ndarray, heading: float, z
   from north), at its height where known; and the turn its lane only turns, by the map's turn:lanes (None for none, or
   for through). None off the map's roads, or driving against a one-way."""
   reading = matcher.match(float(pos[0]), float(pos[1]), math.radians(heading + 90.0), z)
-  if reading is not None:
-    refs = osm.ways[reading.way][1]
-    pts = osm.way_points(reading.way)
-    a, ab = pts[:-1], np.diff(pts, axis=0)
-    t = np.clip(np.einsum('ij,ij->i', pos - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
-    i = int(np.argmin(np.hypot(*(a + ab * t[:, None] - pos).T)))
-    u, v = (refs[i], refs[i + 1]) if reading.direction == FORWARD else (refs[i + 1], refs[i])
-    if not walker.drivable(u, v):
-      return None
-    end = refs[-1] if reading.direction == FORWARD else refs[0]
-    sec = osm.end_section(reading.way, end, reading.direction)
-    turn = None
-    if sec.lanes and 0 <= reading.lane:
-      arrows = sec.turns[min(sec.lane(reading.right), sec.lanes - 1)] if sec.lanes else frozenset()
-      if arrows and 'through' not in arrows:
-        lefts, rights = bool(arrows & LEFTS), bool(arrows & RIGHTS)
-        turn = 'left' if lefts and not rights else 'right' if rights and not lefts else None
-    return u, v, turn
-  return None
+  if reading is None:
+    return None
+  refs = osm.ways[reading.way][1]
+  pts = osm.way_points(reading.way)
+  a, ab = pts[:-1], np.diff(pts, axis=0)
+  t = np.clip(np.einsum('ij,ij->i', pos - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0.0, 1.0)
+  i = int(np.argmin(np.hypot(*(a + ab * t[:, None] - pos).T)))
+  u, v = (refs[i], refs[i + 1]) if reading.direction == FORWARD else (refs[i + 1], refs[i])
+  if not walker.drivable(u, v):
+    return None
+  # the car's lane's arrows where they're painted, at its way's end (the car's offset there, the way's line the same)
+  sec = osm.end_section(reading.way, refs[-1] if reading.direction == FORWARD else refs[0], reading.direction)
+  turn = None
+  if sec.lanes and reading.lane >= 0:
+    arrows = sec.turns[min(sec.lane(reading.right), sec.lanes - 1)]
+    if arrows and 'through' not in arrows:
+      lefts, rights = bool(arrows & LEFTS), bool(arrows & RIGHTS)
+      turn = 'left' if lefts and not rights else 'right' if rights and not lefts else None
+  return u, v, turn
 
 
 def strays(points: np.ndarray, line: np.ndarray, start: float = DIVERGE_FROM, far: float = DIVERGE) -> int | None:
