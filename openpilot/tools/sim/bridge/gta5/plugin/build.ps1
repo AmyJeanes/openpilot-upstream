@@ -26,5 +26,8 @@ if ($Install) {
   catch { Write-Warning "gta5op.asi is in use; it only changes at game start anyway" }
   Copy-Item "$build\gta5op_core.dll" $dir -Force
   if (-not (Test-Path "$dir\gta5op.ini")) { Copy-Item "$PSScriptRoot\gta5op.ini" $dir }
+  # openpilot's sounds, which the bridge has the plugin play as the car engages and hands back
+  New-Item -ItemType Directory -Force "$dir\sounds" | Out-Null
+  Copy-Item "$PSScriptRoot\..\..\..\..\..\selfdrive\assets\sounds\*.wav" "$dir\sounds" -Force
   Write-Host "installed into $GameDir"
 }

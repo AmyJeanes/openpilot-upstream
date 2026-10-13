@@ -1,6 +1,7 @@
 // gta5op_core.dll: the openpilot camera, vehicle state and controls, run once per game frame by the loader.
 #include <winsock2.h>
 #include <windows.h>
+#include <mmsystem.h>
 #include <share.h>
 #include <Xinput.h>
 
@@ -14,6 +15,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -28,6 +30,7 @@
 #include "script_hook.h"
 
 #pragma comment(lib, "xinput.lib")
+#pragma comment(lib, "winmm.lib")
 
 shv::Api shv::api;
 
@@ -70,6 +73,8 @@ struct Config {
   float roadVfov = 30.0f, wideVfov = 116.0f;
   float wideDelay = 0.025f;  // s from the road view to the wide view; 0 is the next frame
   bool model3Chrome = false;  // the Model 3's trim: chrome, or its matte black chrome delete
+  bool sounds = true;         // the bridge's engage and disengage sounds
+  float soundVolume = 0.5f;   // of their full scale
 };
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
@@ -256,6 +261,13 @@ struct Hud {
   double t = -1e9;
 } g_hud;
 
+// the bridge's latest event text (an engage, a hand-back and why), below the set speed until it expires
+struct HudEvent {
+  std::string text;
+  double until = 0;
+} g_event;
+constexpr double EVENT_FADE = 0.5;  // s it fades out over
+
 struct Setup {
   int step = 0;  // 0 idle, 1 model loading, 2 waiting for the world to load, 3 placing on the road
   float x = 0, y = 0, z = 0, speed = 0;
@@ -360,6 +372,8 @@ void ReadConfig() {
   c.presentHook = num("present_hook", 1) != 0;
   c.splitViews = num("split_views", 0) != 0;
   c.model3Chrome = num("model3_chrome", 0) != 0;
+  c.sounds = num("sounds", 1) != 0;
+  c.soundVolume = std::clamp(num("sound_volume", c.soundVolume), 0.0f, 1.0f);
   c.roadVfov = num("road_vfov", c.roadVfov);
   c.wideVfov = num("wide_vfov", c.wideVfov);
   g_cfg = c;
@@ -1036,10 +1050,10 @@ void UpdateIndicator() {
   if (indicator != g_indicator) SetIndicator(indicator);
 }
 
-void DrawText(const std::string &text, float x, float y, float scale, int r, int g, int b) {
+void DrawText(const std::string &text, float x, float y, float scale, int r, int g, int b, int a = 255) {
   SET_TEXT_FONT(4);
   SET_TEXT_SCALE(scale, scale);
-  SET_TEXT_COLOUR(r, g, b, 255);
+  SET_TEXT_COLOUR(r, g, b, a);
   SET_TEXT_OUTLINE();
   SET_TEXT_WRAP(0.0f, x);
   SET_TEXT_JUSTIFICATION(2);
@@ -1048,7 +1062,7 @@ void DrawText(const std::string &text, float x, float y, float scale, int r, int
   END_TEXT_COMMAND_DISPLAY_TEXT(0.0f, y, 0);
 }
 
-// the car's speed and openpilot's set speed at the right of the screen, green while engaged
+// the car's speed and openpilot's set speed at the right of the screen, green while engaged, and the bridge's last event
 void DrawSpeed(double now) {
   bool fresh = now - g_hud.t < 1.0;
   float toUnit = g_hud.metric ? 3.6f : 2.23694f;
@@ -1057,6 +1071,56 @@ void DrawSpeed(double now) {
   DrawText(std::to_string(static_cast<int>(std::lround(g_m.v * toUnit))) + (g_hud.metric ? " km/h" : " mph"), 0.985f, 0.74f, 0.9f, r, g, b);
   std::string set = fresh && g_hud.setKph > 0 ? std::to_string(static_cast<int>(std::lround(g_hud.setKph * (g_hud.metric ? 1.0f : 0.621371f)))) : "-";
   DrawText("SET " + set, 0.985f, 0.795f, 0.55f, 200, 200, 200);
+  if (now < g_event.until) {
+    double fade = std::min(1.0, (g_event.until - now) / EVENT_FADE);
+    DrawText(g_event.text, 0.985f, 0.835f, 0.45f, 200, 200, 200, static_cast<int>(255 * fade));
+  }
+}
+
+// scales a 16-bit PCM WAV's samples in place; any other WAV plays as it is
+void ScaleWav(std::vector<char> &wav, float volume) {
+  if (volume >= 1.0f || wav.size() < 12 || memcmp(wav.data(), "RIFF", 4) || memcmp(wav.data() + 8, "WAVE", 4)) return;
+  bool pcm16 = false;
+  for (size_t i = 12; i + 8 <= wav.size();) {
+    uint32_t n;
+    memcpy(&n, wav.data() + i + 4, 4);
+    size_t body = i + 8, end = std::min<size_t>(wav.size(), body + n);
+    if (!memcmp(wav.data() + i, "fmt ", 4) && end - body >= 16) {
+      uint16_t tag, bits;
+      memcpy(&tag, wav.data() + body, 2);
+      memcpy(&bits, wav.data() + body + 14, 2);
+      pcm16 = tag == WAVE_FORMAT_PCM && bits == 16;
+    } else if (!memcmp(wav.data() + i, "data", 4)) {
+      for (size_t k = body; pcm16 && k + 2 <= end; k += 2) {
+        int16_t v;
+        memcpy(&v, wav.data() + k, 2);
+        v = static_cast<int16_t>(std::lround(v * volume));
+        memcpy(wav.data() + k, &v, 2);
+      }
+      return;
+    }
+    i = body + n + (n & 1);
+  }
+}
+
+// one of openpilot's sounds, the gta5op folder's sounds\<name>.wav, at sound_volume through the game's own audio session
+// (so its volume in Windows' mixer applies too); a newer sound cuts off an older one
+void PlayEventSound(const std::string &name) {
+  if (!g_cfg.sounds || name.empty() ||
+      !std::all_of(name.begin(), name.end(), [](char c) { return std::islower(static_cast<unsigned char>(c)) || c == '_'; }))
+    return;
+  // PlaySound reads an async sound's memory while it plays: kept until CoreShutdown stops it
+  static std::unordered_map<std::string, std::vector<char>> cache;
+  auto it = cache.find(name);
+  if (it == cache.end()) {
+    std::ifstream f(g_dir + L"\\sounds\\" + std::wstring(name.begin(), name.end()) + L".wav", std::ios::binary);
+    std::vector<char> wav((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (wav.empty()) Log("sound: no sounds\\" + name + ".wav");
+    ScaleWav(wav, g_cfg.soundVolume);
+    it = cache.emplace(name, std::move(wav)).first;
+  }
+  if (!it->second.empty())
+    PlaySoundW(reinterpret_cast<LPCWSTR>(it->second.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 
 // "Bookmarked" for a moment after each mark, so a press is known to have landed
@@ -2702,6 +2766,12 @@ void HandleMessage(const Message &m, double now) {
     g_hud.metric = MsgBool(m, "metric");
     g_hud.engaged = MsgBool(m, "engaged");
     g_hud.t = now;
+  } else if (type == "event") {
+    // {"type": "event", "sound": a name, "text": ..., "secs": s}, either left out
+    PlayEventSound(MsgStr(m, "sound"));
+    std::string text = MsgStr(m, "text").substr(0, 90);
+    std::erase(text, '~');  // GTA's text formatting
+    if (!text.empty()) g_event = {text, now + std::clamp(MsgNum(m, "secs", 4.0), 0.5, 30.0)};
   } else if (type == "engaged") {
     g_engaged = MsgBool(m, "on");
   } else if (type == "indicatorOff") {
@@ -3297,6 +3367,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   ReleaseTopCam();
   ReleaseCamera();
   RemoveLead();
+  PlaySoundW(nullptr, nullptr, 0);  // its memory goes with this core
   if (g_noTraffic) TrafficSources(true);  // a reloaded core starts with traffic on
   script_hook::Uninstall();
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
