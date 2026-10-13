@@ -570,6 +570,37 @@ def path_lane_offsets(md, route) -> np.ndarray:
   return np.array([r_ - route.section(segment_of(route, a)).offset(lane_at(md.keys, a)) for a, r_ in zip(along, right, strict=True)])
 
 
+def test_splice_on_the_same_roads():
+  """A new route on along the old one's roads (a cruise route walked on) keeps the old path to SPLICE_BACK m short of
+  the old route's end, and the car drives on past that end without slowing for it or stalling (the stall clock counts
+  the new path's metres); a reroute away from the old roads keeps it only 3 s on."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import SPLICE_BACK
+  old = ms.straight(600.0)
+  trip = ms.drive(old, {"seed": 1}, lane=0, seconds=20.0, until_done=False)
+  md, car = trip.md, trip.car
+  new = ms.made_route(ms.line((1500.0, 0.0)), ms.section())
+  st = car.state()
+  new.locate(np.array(st["pos"][:2]), None, st["heading"], search=1500.0)
+  md.step(new, st, car.t + 0.01, car.collisions)
+  sp = md.splices[-1]
+  assert sp["cut"] > 600.0 - SPLICE_BACK - 60.0 and sp["gap"] < 0.2, sp
+  v = []
+  while car.t < 100.0:
+    car.advance(ms.FRAME)
+    st = car.state()
+    new.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(new, st, car.t, car.collisions))
+    v.append(car.v)
+  assert md.finished is None and new.at > 900.0 and min(v[-400:]) > 5.0, (md.finished, new.at)
+  away = ms.made_route(ms.line((80.0, 0.0), (500.0, -90.0), start=(0.0, car.y - 20.0)), ms.section())  # right in 60 m
+  car.advance(ms.FRAME)
+  st = car.state()
+  away.locate(np.array(st["pos"][:2]), None, st["heading"], search=100.0)
+  s, v = md.s, car.v
+  md.step(away, st, car.t, car.collisions)
+  assert len(md.splices) == 2 and md.splices[-1]["cut"] <= s + max(3.0 * v, 10.0) + 1.0, (md.splices[-1], s, v)
+
+
 def test_start_stub_and_join():
   """map1010c 005: the route began with a 0.05 m link back down the road (the car's place just short of the router's
   node), the lane line swept across it from 5 m left of its lane, and the start offset, measured against that sweep,

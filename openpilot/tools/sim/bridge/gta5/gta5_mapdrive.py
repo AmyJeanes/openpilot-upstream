@@ -121,6 +121,9 @@ SIGNAL_TIME, SIGNAL_DIST = 5.0, 50.0  # s, m before a turn (as the AI expert)
 TURN_DONE_HEADING, TURN_DONE_AFTER, TURN_PAST, KEEP_PAST = 20.0, 5.0, 40.0, 30.0
 JOG_LINK, JOG_TURN, JOG_BACK, JOG_PAD = 25.0, 10.0, 12.0, 10.0  # m, deg, deg, m (route_jogs)
 MIN_LC_M = 20.0  # m a lane change takes at the least
+SPLICE_BACK = 150.0  # m short of where a new route leaves the old one's roads the old path is kept to
+SAME_LINE = 1.5  # m between two routes' lines on the same roads
+SPLICE_GAP = 0.3  # m between the kept path's end and the new one closed as a lane change
 LC_A_LAT = 0.6  # x the style's lateral acceleration, a lane change's peak at most
 LC_MAX_S = 9.0  # s a change takes at the most
 LC_SHORTEST = 12.0  # m a change re-timed to its time takes at the least, a lane (pulling away, slowly)
@@ -1351,6 +1354,8 @@ class MapDrive:
     turn = np.degrees(np.abs((np.diff(h) + np.pi) % (2 * np.pi) - np.pi))
     self.unclear = np.sort(np.concatenate((np.asarray(route.junctions, float), route.along[1:-1][turn > BEND_DEG])))
     self.s = 0.0
+    # path m from before a splice mean nothing on the new path: the stall clock runs on from 0 m, a crossing's hold goes
+    self.progress, self.cross_hold = (0.0, self.progress[1]), None
     # stops ahead, as path m
     self.stops = []
     for along, kind in zip(route.stops, route.stop_kinds, strict=False):
@@ -1795,12 +1800,16 @@ class MapDrive:
     return need, near
 
   def _splice(self, route, state: dict, t: float):
-    """A new route under way: the old path kept past the lane change under way and 3 s on, then the new plan's."""
+    """A new route under way: the old path kept past the lane change under way and 3 s on, or where the new route runs
+    on along the old one's roads (a cruise route walked on, a reroute that differs only far ahead) to SPLICE_BACK m short
+    of where it leaves them, past any lane change there; then the new plan's, the gap to it closed as a lane change
+    would."""
     old_path, old_s, s, v = self.path, self.s_path, self.s, float(state.get("vEgo") or 0.0)
-    cut = s + max(3.0 * v, 10.0)
-    for s0, s1, *_ in self.changes:
-      if s0 <= s <= s1:
-        cut = max(cut, s1)
+    cut = max(s + max(3.0 * v, 10.0), self._same_roads(route) - SPLICE_BACK)
+    for _ in range(2):  # a lane change past the cut can end where another begins
+      for s0, s1, *_ in self.changes:
+        if s0 <= s <= s1 or s0 <= cut <= s1:
+          cut = max(cut, s1)
     for g in self.nudge_groups:  # a shift begun kept whole: the new path is from the plan, without it
       if g["start"] <= cut and g["end"] >= s:
         cut = max(cut, g["end"])
@@ -1810,8 +1819,17 @@ class MapDrive:
       return
     if len(keep) >= 2:
       j, d = project(self.path, self.s_path, keep[-1], 0.0, window=self.s_path[-1])
-      tail = self.path[self.s_path > j + 2.0]
-      tail_i = self.intent[self.s_path > j + 2.0]
+      after = self.s_path > j + 2.0
+      tail, tail_i = self.path[after], self.intent[after]
+      if d > SPLICE_GAP and len(tail) >= 2:
+        # the kept path ends beside the new one (another lane): over to it as a lane change, not a step
+        th = headings(tail)
+        right = np.stack([np.sin(th), -np.cos(th)], axis=1)
+        at_j = np.array([np.interp(j, self.s_path, self.path[:, 0]), np.interp(j, self.s_path, self.path[:, 1])])
+        gap = float((keep[-1] - at_j) @ right[0])
+        over = max(MIN_LC_M, lc_seconds(self.style, gap / LANE_W) * max(v, 5.0))
+        shift = gap * (1.0 - quintic(np.clip((self.s_path[after] - j - 2.0) / over, 0.0, 1.0)))
+        tail, tail_i = tail + right * shift[:, None], tail_i + right * shift[:, None]
       joined, _ = resample(np.vstack([keep, tail]))
       joined_i, _ = resample(np.vstack([old_intent, tail_i]))
       n = min(len(joined), len(joined_i))
@@ -1821,6 +1839,29 @@ class MapDrive:
       self.changes = self._changes(self.keys)
       self.splices.append({"t": round(t, 3), "cut": round(cut, 1), "gap": round(float(d), 2), "pos": [round(float(keep[-1][0]), 1), round(float(keep[-1][1]), 1)]})
       self._event("mapdrive", t, phase=self.phase, splice=self.splices[-1])
+
+  def _same_roads(self, route) -> float:
+    """Path m (the old path's) to where a new route stops running along the old route's line on from the car (within
+    SAME_LINE m of it), 0 where it doesn't from the car."""
+    old, new = self.route, route
+    k0 = max(int(np.searchsorted(new.along, new.at, side="right")) - 1, 0)
+    pts = new.points[k0:, :2]
+    if old is None or len(pts) < 2 or len(old.points) < 2:
+      return 0.0
+    a, ab = old.points[:-1, :2], np.diff(old.points[:, :2], axis=0)
+    ab2 = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-9)
+    along = None
+    for p in pts:
+      rel = p - a
+      tt = np.clip(np.einsum("ij,ij->i", rel, ab) / ab2, 0.0, 1.0)
+      d = np.hypot(*(rel - ab * tt[:, None]).T)
+      i = int(np.argmin(d))
+      if d[i] > SAME_LINE or (along is not None and old.along[i] + tt[i] * math.sqrt(ab2[i]) < along - SAME_LINE):
+        break
+      along = float(old.along[i] + tt[i] * math.sqrt(ab2[i]))
+    if along is None or along <= old.at:
+      return 0.0
+    return float(np.interp(along, self.route_s, self.s_path))
 
   # *** vehicles ***
 
