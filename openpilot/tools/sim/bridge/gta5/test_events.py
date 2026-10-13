@@ -161,6 +161,9 @@ def test_arrow_keys(monkeypatch):
   notes.append(("forbidden", "left", "Row 1"))  # a turn that couldn't be routed
   w._update_buttons(state(**presses))
   assert events(w) == [("refuse", "Can't turn left there")]
+  notes.append(("router_busy", "left", "Row 1"))  # the router timed out, twice
+  w._update_buttons(state(**presses))
+  assert events(w) == [("refuse", "Router busy: try left again")]
   w.route = SimpleNamespace(cruise=False)  # a destination: lane changes alone
   md.answer = "ok"
   press("leftPresses")

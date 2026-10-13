@@ -66,6 +66,7 @@ def event(kind: str, who: str = "", why: str = "", cruise: bool = False) -> tupl
 PROMPTS = {  # an arrow key's prompt: kind -> (sound, text), {side} and {road} filled in
   "turn": ("", "Next {side}{road}"), "keep": ("", "Keeping {side}{road}"), "cancel": ("", "Turn cancelled"),
   "late": ("refuse", "Too late for that {side}"), "forbidden": ("refuse", "Can't turn {side} there"),
+  "router_busy": ("refuse", "Router busy: try {side} again"),
   "none": ("refuse", "No {side} here"), "no_lane": ("refuse", "No {side} here"),
   "lane": ("", "Changing lane {side}"), "wait": ("", "Waiting to change lane {side}"),
   "blocked": ("refuse", "Lane {side} not clear"), "busy": ("refuse", "Already changing lane"),

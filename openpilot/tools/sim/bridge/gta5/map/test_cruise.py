@@ -365,6 +365,52 @@ def test_prompt_crossing(monkeypatch):
       assert len(router.requests) == asked
 
 
+def test_prompt_timeout(monkeypatch):
+  """An arrow key's turn whose route timed out is routed again; timing out again, the router's busy (said so), not a
+  turn it can't make: nothing's banned."""
+  osm = grid()
+  for fails, notes in ((1, []), (2, [('router_busy', 'left', 'Row 1')])):
+    c = cruising(monkeypatch, osm, 150.0)
+    via, calls = c.router.via, []
+
+    def slow(start, through, end, via=via, calls=calls, fails=fails):
+      calls.append(start)
+      if len(calls) <= fails:  # timing out connecting, then waiting for the answer
+        raise urllib.error.URLError(TimeoutError('timed out')) if len(calls) == 1 else TimeoutError('timed out')
+      return via(start, through, end)
+    c.router.via = slow
+    assert c.prompt('left', np.array([0.0, 150.0]), 0.0, None, 15.0) == ('turn', 'Row 1')
+    routed(c)
+    assert c.take_notes() == notes and not c.banned and len(calls) == 2
+    if notes:
+      assert c.forced is None
+    else:
+      assert c.forced is not None and c.walk.nodes[c.walk.nodes.index(201) + 1] == 101
+
+
+def test_prompt_ban_expires(monkeypatch):
+  """A way out the router won't take for an arrow key stays banned while the car's near it, so its junction answers at
+  once, and is free again once the car's PROMPT_BAN_AWAY m from it."""
+  osm = grid()
+  c = cruising(monkeypatch, osm, 150.0)
+  route = c._route
+
+  def refuse(walk, at, ahead, known, keep=None):
+    if keep == (201, 101):
+      c.banned.add(keep)
+      return None, walk
+    return route(walk, at, ahead, known, keep)
+  monkeypatch.setattr(c, "_route", refuse)
+  assert c.prompt('left', np.array([0.0, 150.0]), 0.0, None, 15.0) == ('turn', 'Row 1')
+  routed(c)
+  assert c.take_notes() == [('forbidden', 'left', 'Row 1')] and (201, 101) in c.banned
+  assert c.prompt('left', np.array([0.0, 150.0]), 0.0, None, 15.0) == ('forbidden', '')
+  c.update(np.array([0.0, 250.0]), 0.0, -1.0)  # (before its next try: no route walked on meanwhile)
+  assert (201, 101) in c.banned
+  c.update(np.array([0.0, 300.0 + cr.PROMPT_BAN_AWAY + 10.0]), 0.0, -1.0)
+  assert (201, 101) not in c.banned and not c.prompt_bans
+
+
 def test_prompt_too_late(monkeypatch):
   """An arrow key's route goes in with the next update while the car can still make the turn; one that comes after the
   car's nearer than that (routing can take seconds) is dropped, said to be too late."""

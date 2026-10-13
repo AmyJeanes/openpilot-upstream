@@ -34,8 +34,10 @@ again; not by one of GTA's shortcut links across a painted separation, which the
 exits, the hop across the gore to a ramp or collector road already split off). One nearer than the car can still turn
 at is too late (prompt_need: by its speed and the lane changes into a lane for the turn, lanes_over). That route goes in
 at once but for while the car's in a turn, as a city's junctions are too close together to wait for a gap between them.
-The other arrow undoes it, walked on from there as before. Each prompt is logged (Cruise.take_log): the junctions looked
-at and why each was or wasn't taken, the route, and whether the car then took the turn."""
+The other arrow undoes it, walked on from there as before. A route that timed out is asked for again, and timing out
+again it's the router being busy, not a turn it can't make; a way out the router wouldn't take stays banned only while
+the car's near it (PROMPT_BAN_AWAY). Each prompt is logged (Cruise.take_log): the junctions looked at and why each was
+or wasn't taken, the route, and whether the car then took the turn."""
 import math
 import threading
 import time
@@ -83,6 +85,13 @@ FORK_TURN = 45.0  # deg: a junction whose ways out all turn less than this is a 
 PROMPT_TRACE = 250.0  # m ahead the log's trace of a prompt shows junctions to, past those within reach
 WATCH_PAST = 50.0  # m past a forced turn's junction the car's watched for on either way out (the log's prompt_outcome)
 WATCH_NEAR = 12.0  # m from one of those points the car is on that way out
+PROMPT_TRIES = 2  # routes an arrow key's turn is tried for, where the router times out
+PROMPT_BAN_AWAY = 300.0  # m from a junction its ways out the router wouldn't take for an arrow key stay banned within
+
+
+def timed_out(e: BaseException) -> bool:
+  """Whether a request to the router failed by timing out (connecting, or waiting for its answer)."""
+  return isinstance(e, TimeoutError) or (isinstance(e, urllib.error.URLError) and isinstance(e.reason, TimeoutError))
 
 
 def turned(h_in: float, h_out: float) -> float:
@@ -617,6 +626,7 @@ class Cruise:
     self.walk: Walk | None = None
     self.pending: tuple | None = None  # (route, walk) walked on, waiting for the car to be clear of a junction
     self.banned: set[tuple[int, int]] = set()
+    self.prompt_bans: dict[tuple[int, int], np.ndarray] = {}  # of those, ways out refused for an arrow key: where
     self.off_since: float | None = None
     self.next_try = 0.0
     self.busy = 0  # routes being made on their threads
@@ -646,6 +656,7 @@ class Cruise:
     if self.osm is None:
       return None
     with self.lock:
+      self._unban(pos)
       route, walk, pending = self.route, self.walk, self.pending
       swapped = False
       if pending is not None and pending[0] is self.prompted and self._too_late(pos):
@@ -690,6 +701,15 @@ class Cruise:
       self.notes.append(('late', self.forced['side'], ''))
     self.forced = self.watching = None
     return True
+
+  def _unban(self, pos):
+    """Frees the ways out the router wouldn't take for an arrow key once the car's PROMPT_BAN_AWAY m from them: till
+    then their junction answers at once, and coming back later they're asked for again."""
+    p = np.asarray(pos[:2], float)
+    for link, xy in list(self.prompt_bans.items()):
+      if float(np.hypot(*(p - xy))) > PROMPT_BAN_AWAY:
+        del self.prompt_bans[link]
+        self.banned.discard(link)
 
   def _held(self, route, new) -> bool:
     """Whether a new route waits to be swapped in: one walked on while the car's at a junction (_at_junction); an arrow
@@ -919,23 +939,19 @@ class Cruise:
 
   def _make_prompt(self, walk: Walk, at: float, keep: tuple[int, int] | None, pos: np.ndarray, bearing: float,
                    z: float | None, epoch: int, others: tuple[Walk, int, list[Exit]] | None = None):
-    route, t0, banned0, err = None, time.monotonic(), set(self.banned), None
+    route, t0, banned0, err, slow = None, time.monotonic(), set(self.banned), None, False
+    asked = {keep, *(alt.edge for alt in (others[2] if others is not None else []))}
+    start, first = _copy(walk, walk.walker), keep
     try:
-      route, walk = self._route(walk, at, AHEAD, 0, keep)
-      base, k, alts = others if others is not None else (None, 0, [])
-      for alt in alts:
-        if route is not None:
+      for _ in range(PROMPT_TRIES):
+        try:
+          route, walk, keep = self._route_prompt(_copy(start, start.walker), at, first, epoch, others)
+          slow = False
           break
-        forced = _copy(base, walk.walker)
-        forced.force(k, alt)
-        route, walk = self._route(forced, at, AHEAD, 0, alt.edge)
-        if route is not None:
-          keep = alt.edge
-          with self.lock:
-            if epoch == self.epoch and self.forced is not None:
-              self.forced = {**self.forced, 'link': alt.edge, 'road': walk.walker.name(walk.walker.way(*alt.edge))}
-              w = self.watching or {'need': 0.0, 'late': 0.0}
-              self._watch(base, forced, k, w['need'], w['late'])
+        except OSError as e:
+          if not timed_out(e) or epoch != self.epoch:
+            raise
+          slow, err = True, repr(e)  # the router's busy, not refusing the turn: asked again
       if route is not None:
         route.prompt = True  # the map driver keeps less of its old path: the turn may be only a few s on
         route.locate(pos, z, -bearing)
@@ -946,6 +962,8 @@ class Cruise:
       with self.lock:
         self.busy -= 1
         held = False
+        for link in (self.banned - banned0) & asked:
+          self.prompt_bans[link] = self.osm.node_xy(link[0])
         if epoch == self.epoch and route is not None:
           self.prompted = route
           if self.route is not None:  # swapped in by update, once the car's out of a turn and if it's still in time
@@ -954,12 +972,34 @@ class Cruise:
           else:
             self.route, self.walk, self.off_since, self.pending = route, walk, None, None
         elif epoch == self.epoch and keep is not None and self.forced is not None:
-          self.notes.append(('forbidden', self.forced['side'], self.forced['road']))
+          self.notes.append(('router_busy' if slow else 'forbidden', self.forced['side'], self.forced['road']))
           self.forced = None
           self.watching = None
         self.log.append({'event': 'prompt_route', 'ok': route is not None, 'secs': round(time.monotonic() - t0, 2),
                          'stale': epoch != self.epoch, 'held': held, 'keep': list(keep) if keep else None,
-                         'has_keep': keep is None or walk.has(keep), 'banned': sorted(self.banned - banned0), 'err': err})
+                         'has_keep': keep is None or walk.has(keep), 'banned': sorted(self.banned - banned0), 'err': err,
+                         'timeout': slow})
+
+  def _route_prompt(self, walk: Walk, at: float, keep: tuple[int, int] | None, epoch: int,
+                    others: tuple[Walk, int, list[Exit]] | None):
+    """An arrow key's walk routed, else in turn its junction's other ways out that side (`others`): (route, walk, the
+    way out it takes); (None, walk, keep) where none can be."""
+    route, walk = self._route(walk, at, AHEAD, 0, keep)
+    base, k, alts = others if others is not None else (None, 0, [])
+    for alt in alts:
+      if route is not None:
+        break
+      forced = _copy(base, walk.walker)
+      forced.force(k, alt)
+      route, walk = self._route(forced, at, AHEAD, 0, alt.edge)
+      if route is not None:
+        keep = alt.edge
+        with self.lock:
+          if epoch == self.epoch and self.forced is not None:
+            self.forced = {**self.forced, 'link': alt.edge, 'road': walk.walker.name(walk.walker.way(*alt.edge))}
+            w = self.watching or {'need': 0.0, 'late': 0.0}
+            self._watch(base, forced, k, w['need'], w['late'])
+    return route, walk, keep
 
   def make(self, pos: np.ndarray, bearing: float, z: float | None, walk: Walk | None = None):
     """A cruise route from the car (pos, bearing clockwise from north, height z): along a new walk, or along `walk`
