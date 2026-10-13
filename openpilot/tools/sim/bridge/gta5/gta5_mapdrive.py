@@ -147,6 +147,7 @@ KAPPA_DRIVABLE = 0.1  # 1/m: a tighter bend in the lane line (a jog, a corner wi
 LC_DONE = 0.8  # share of a lane change after which its signal goes off
 CROSSING_CLEAR = 5.0  # m past a stop line or junction node a city lane change may start
 LANE_RANGE_AHEAD = 60.0  # m on from a key the road's most lanes are the lanes it may number (_lanes_about)
+STEP_SPAN = 0.1  # m between a plan's keys that are steps of one renumbering (_outside_lanes)
 TURN_SPAN = 10.0  # m either side of a turn's point held to its turn speed
 # vehicles (the plugin's nearby: their bodies in our frame, read every 0.1 s)
 LEAD_SIDE = 0.4  # m beside our body another's may come along the path before it's in the way
@@ -997,6 +998,14 @@ class MapDrive:
     for i, (s, lane) in enumerate(keys):
       lanes = MapDrive._lanes_about(route, keys, i)
       if lanes and not -0.5 < lane < lanes - 0.5:
+        # nav renumbers across a sliver of a section in steps a few cm apart, none of them driven: the road's lanes
+        # just before the first step count for them all
+        a = i
+        while a > 0 and keys[a][0] - keys[a - 1][0] <= STEP_SPAN:
+          a -= 1
+        before = MapDrive._lanes_about(route, [(keys[a][0] - 0.1, keys[a][1])], 0) if a < i else 0
+        if before and -0.5 < lane < before - 0.5:
+          continue
         return {"s": round(s, 1), "lane": round(lane, 2), "lanes": lanes}
     return None
 

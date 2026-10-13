@@ -674,6 +674,17 @@ def test_splice_prompt_turn():
   assert md.finished is None and turn.at > 100.0 and abs(car.x - x0) > 50.0, (md.finished, turn.at, car.x - x0)
 
 
+def test_renumbering_steps_in_range():
+  """nav renumbers across a sliver of a section (3 lanes into 1) in steps a few cm apart: the steps are judged by the
+  lanes before them, not as a lane the road hasn't (which aborted the plan); a lane kept past the narrowing still is."""
+  from types import SimpleNamespace
+  lanes = SimpleNamespace(section_at=lambda s, seg: SimpleNamespace(lanes=3 if s < 92.86 else 2 if s < 92.907 else 1))
+  route = SimpleNamespace(along=np.array([0.0, 1000.0]), points=np.zeros((2, 3)), lanes=lanes)
+  keys = [(0.0, 0.0), (13.8, 0.0), (13.8, 1.0), (92.86, 1.0), (92.86, 2.0), (92.907, 2.0), (92.907, 0.0), (200.0, 0.0)]
+  assert MapDrive._outside_lanes(route, keys) is None
+  assert MapDrive._outside_lanes(route, keys[:3] + [(150.0, 1.0), (200.0, 1.0)]) == {"s": 150.0, "lane": 1.0, "lanes": 1}
+
+
 def test_start_stub_and_join():
   """map1010c 005: the route began with a 0.05 m link back down the road (the car's place just short of the router's
   node), the lane line swept across it from 5 m left of its lane, and the start offset, measured against that sweep,
