@@ -124,6 +124,11 @@ MIN_LC_M = 20.0  # m a lane change takes at the least
 SPLICE_BACK = 150.0  # m short of where a new route leaves the old one's roads the old path is kept to
 SAME_LINE = 1.5  # m between two routes' lines on the same roads
 SPLICE_GAP = 0.3  # m between the kept path's end and the new one closed as a lane change
+# an arrow key's turn (route.prompt) keeps the old path 3 s on as any new route, but only to PROMPT_ROOM_S s of driving
+# (PROMPT_ROOM m at the least) short of where it turns off, and PROMPT_KEEP_S s at the least: its junction may be near
+PROMPT_KEEP_S = 1.0
+PROMPT_ROOM_S = 3.0
+PROMPT_ROOM = 30.0
 ASK_WAIT = 5.0  # s a lane change the player asks for waits for the lane beside to be clear, at most
 ASK_KEEP_S = 10.0  # s of driving (and ASK_KEEP m at the least) nav mustn't want back out of the lane asked for within
 ASK_KEEP = 150.0
@@ -1828,10 +1833,14 @@ class MapDrive:
     on along the old one's roads (a cruise route walked on, a reroute that differs only far ahead) to SPLICE_BACK m short
     of where it leaves them, past any lane change there; then the new plan's, the gap to it closed as a lane change
     would. With `shift`, the same route planned again with the lane change the player asked for (_make_plan), the old
-    path kept only 0.5 s on, as its signal comes on at once."""
+    path kept only 0.5 s on, as its signal comes on at once; for an arrow key's turn (route.prompt) 3 s on but leaving
+    room before the turn (PROMPT_ROOM_S), down to PROMPT_KEEP_S s."""
     old_path, old_s, s, v = self.path, self.s_path, self.s, float(state.get("vEgo") or 0.0)
     if shift:
       cut = s + max(0.5 * v, 3.0)
+    elif getattr(route, "prompt", False):
+      room = max(PROMPT_ROOM_S * v, PROMPT_ROOM)  # left before where the turn leaves the old roads
+      cut = max(s + max(PROMPT_KEEP_S * v, 3.0), min(s + max(3.0 * v, 10.0), self._same_roads(route) - room))
     else:
       cut = max(s + max(3.0 * v, 10.0), self._same_roads(route) - SPLICE_BACK)
     for _ in range(2):  # a lane change past the cut can end where another begins

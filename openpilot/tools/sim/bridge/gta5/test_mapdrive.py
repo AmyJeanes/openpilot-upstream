@@ -640,6 +640,40 @@ def test_splice_on_the_same_roads():
   assert len(md.splices) == 2 and md.splices[-1]["cut"] <= s + max(3.0 * v, 10.0) + 1.0, (md.splices[-1], s, v)
 
 
+def test_splice_prompt_turn():
+  """An arrow key's turn (route.prompt) a few seconds on keeps the old path only PROMPT_KEEP_S s on, so it's still
+  taken, where 3 s of the old path would carry the car past it; one further off keeps 3 s, as any new route."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import PROMPT_KEEP_S
+  far = ms.drive(ms.straight(600.0), {"seed": 1}, lane=0, seconds=12.0, until_done=False)
+  md, car = far.md, far.car
+  turn = ms.made_route(ms.line((170.0, 0.0), (300.0, -90.0), start=(0.0, car.y - 20.0)), ms.section())  # 150 m on
+  turn.prompt = True
+  st = car.state()
+  turn.locate(np.array(st["pos"][:2]), None, st["heading"], search=100.0)
+  s, v = md.s, car.v
+  md.step(turn, st, car.t, car.collisions)
+  assert md.splices[-1]["cut"] >= s + 3.0 * v - 1.0, (md.splices[-1], s, v)
+  old = ms.straight(600.0)
+  trip = ms.drive(old, {"seed": 1}, lane=0, seconds=12.0, until_done=False)
+  md, car = trip.md, trip.car
+  x0 = car.x
+  turn = ms.made_route(ms.line((60.0, 0.0), (300.0, -90.0), start=(0.0, car.y - 20.0)), ms.section())  # right 40 m on
+  turn.prompt = True
+  st = car.state()
+  turn.locate(np.array(st["pos"][:2]), None, st["heading"], search=100.0)
+  s, v = md.s, car.v
+  assert 40.0 < 3.0 * v + 10.0, v  # the 3 s kept for any other new route would reach the turn
+  md.step(turn, st, car.t, car.collisions)
+  assert md.splices[-1]["cut"] <= s + max(PROMPT_KEEP_S * v, 3.0) + 1.0, (md.splices[-1], s, v)
+  t_end = car.t + 15.0
+  while car.t < t_end and md.finished is None:
+    car.advance(ms.FRAME)
+    st = car.state()
+    turn.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(turn, st, car.t, car.collisions))
+  assert md.finished is None and turn.at > 100.0 and abs(car.x - x0) > 50.0, (md.finished, turn.at, car.x - x0)
+
+
 def test_start_stub_and_join():
   """map1010c 005: the route began with a 0.05 m link back down the road (the car's place just short of the router's
   node), the lane line swept across it from 5 m left of its lane, and the start offset, measured against that sweep,
