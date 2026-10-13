@@ -334,9 +334,10 @@ class Walker:
     return 'left' if e.turn > 0 else 'right'
 
   def candidates(self, approach: int, exits: list[Exit]) -> list[Exit]:
-    """The ways out it may take: not banned, and while there's another, not one the turn restrictions leave no way on
-    from, nor into a pocket (else a dead end), nor (off a road that isn't one) a minor road."""
-    cands = [e for e in exits if e.edge not in self.banned]
+    """The ways out it may take: none across a banned link (inside the junction too), and while there's another, not one
+    the turn restrictions leave no way on from, nor into a pocket (else a dead end), nor (off a road that isn't one) a
+    minor road."""
+    cands = [e for e in exits if not any(link in self.banned for link in zip(e.path, e.path[1:], strict=False))]
     cands = [e for e in cands if e.on] or cands
     on = [e for e in cands if (e.edge in self.roaming if self.roaming is not None else self.leads_on(*e.edge))]
     cands = on or cands

@@ -78,6 +78,19 @@ def test_ways_it_never_takes():
   assert run.allows([10], 2, 10)  # on along the same way is no turn
 
 
+def test_banned_inside_junction():
+  """A banned link inside a junction (a short link across it, before the way out's own) rules out every way out across
+  it, as it does the way out whose own link it is."""
+  nodes = {1: (0.0, -ARM), 2: (0.0, 0.0), 3: (0.0, 8.0), 7: (0.0, 16.0), 4: arm(0.0), 5: arm(-60.0), 6: arm(90.0)}
+  ways = {10: (MAIN, [1, 2]), 11: (MAIN, [2, 3, 7, 4]), 12: (SIDE, [7, 5]), 13: (SIDE, [2, 6])}
+  osm = make_map(nodes, ways)
+  for banned, took in ((set(), 4), ({(3, 7)}, 6)):
+    walk = Walk(Walker(osm, banned), 1, 2)
+    walk.extend(ARM + 50.0, MAX_THROUGH)
+    assert took in walk.nodes and (7 in walk.nodes) == (not banned)
+
+
+
 def test_pockets():
   """A dead end further on than the walk looks for one (LEADS_ON) is a pocket all the same: by the map's roaming links
   it carries on round the loop rather than straight on along its road into the cul-de-sac. Started in the pocket it
