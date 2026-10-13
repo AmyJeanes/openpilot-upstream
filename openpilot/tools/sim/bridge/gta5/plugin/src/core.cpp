@@ -58,7 +58,7 @@ struct Config {
   int keyRight = VK_RIGHT;
   int keySpeedUp = VK_UP;
   int keySpeedDown = VK_DOWN;
-  int keyDebug = VK_DELETE;  // the map debug overlay on and off
+  int keyDebug = VK_DELETE;  // the map debug overlay: off, the route ahead alone, every layer, in turn
   int keyMark = VK_END;  // a bookmark: the bridge logs where and when, for review
   bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
@@ -1172,6 +1172,8 @@ struct DebugOverlay {
   bool thin = false;    // 1-px lines as before the strips
   bool casing = true;   // white and yellow strips edged dark
   std::string layers = "edsjrnmaxptqz";  // layer letters (DebugLayer); f fills junction areas
+  std::string fullLayers = layers;       // the debug key's full level; its path level is the route alone
+  int level = 0;                         // the debug key's: 0 off, 1 the route ahead, 2 every layer
   float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
   float layerWidth[128];  // and each layer's, by its letter
@@ -2872,7 +2874,8 @@ void HandleMessage(const Message &m, double now) {
     // game's ground), lift (m above the road)
     g_debug.on = MsgBool(m, "on", g_debug.on);
     std::string layers = MsgStr(m, "layers");
-    if (!layers.empty()) g_debug.layers = layers;
+    if (!layers.empty()) g_debug.layers = g_debug.fullLayers = layers;
+    g_debug.level = g_debug.on ? 2 : 0;
     g_debug.force = MsgBool(m, "force", g_debug.force);
     g_debug.ground = MsgBool(m, "ground", g_debug.ground);
     g_debug.thin = MsgBool(m, "thin", g_debug.thin);
@@ -3340,10 +3343,13 @@ extern "C" __declspec(dllexport) void CoreTick() {
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0 && (g_top.hud || !g_top.on)) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
-  if (g_debugPresses.exchange(0) % 2) {
-    g_debug.on = !g_debug.on;
-    if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
-    Log(std::string("debug ") + (g_debug.on ? "on" : "off") + " (key)");
+  if (int presses = g_debugPresses.exchange(0)) {
+    static const char *const LEVELS[] = {"off", "route ahead", "full"};
+    g_debug.level = (g_debug.level + presses) % 3;
+    g_debug.on = g_debug.level > 0;
+    g_debug.layers = g_debug.level == 1 ? "r" : g_debug.fullLayers;
+    g_debug.lines.clear(), g_debug.vertices = 0;  // the bridge sends the new level's lines
+    Log(std::string("debug ") + LEVELS[g_debug.level] + " (key)");
   }
   // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
   if (view < 0) {
