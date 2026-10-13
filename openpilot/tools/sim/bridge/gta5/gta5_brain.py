@@ -406,7 +406,7 @@ class Brain:
       self.lane_matcher = LaneMatcher(lanes)
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
-    if self.cruise is not None and lanes is not None:
+    if getattr(self, "cruise", None) is not None and lanes is not None:  # nav_replay loads the map on a bare brain
       Restrictions.of(lanes)  # read now (a few s each), not when the engage key first asks to cruise
       Roaming.of(lanes)
     self.navigator.refresh()
