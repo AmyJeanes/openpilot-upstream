@@ -133,7 +133,7 @@ def test_arrow_keys(monkeypatch):
   turns, notes = [("turn", "Row 1"), ("none", ""), ("none", "")], []
   asked = []
   w.cruise = SimpleNamespace(prompt=lambda side, pos, bearing, z, v: (asked.append(side), turns.pop(0))[1],
-                             take_notes=lambda: [notes.pop() for _ in list(notes)])
+                             take_notes=lambda: [notes.pop() for _ in list(notes)], take_log=list)
   presses = {"leftPresses": 0, "rightPresses": 0}
 
   def press(key):

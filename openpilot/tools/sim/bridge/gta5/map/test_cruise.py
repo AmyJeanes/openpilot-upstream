@@ -4,6 +4,7 @@ import math
 import time
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -246,8 +247,11 @@ def cruising(monkeypatch, osm, y: float) -> Cruise:
 
 
 def routed(c: Cruise):
+  """Waits for the route being made, and swaps it in as update would (a prompt's waits in pending for update)."""
   for _ in range(500):
     if not c.busy:
+      if c.pending is not None:
+        (c.route, c.walk), c.pending, c.prompted = c.pending, None, None
       return
     time.sleep(0.01)
   raise AssertionError("not routed")
@@ -264,18 +268,20 @@ def test_side_exit():
 
 def test_prompt_turns(monkeypatch):
   """An arrow key turns at the next junction with a way out that side within PROMPT_SECS s (PROMPT_MIN m), routed
-  again from there, not one nearer than PROMPT_NEAR_S s; the other arrow undoes it; a junction with no way out that side
-  is passed by (a lane change instead), and one the turn restrictions forbid is said to be."""
+  again from there, not one nearer than the car can still turn at (prompt_need); the other arrow undoes it; a junction
+  with no way out that side is passed by (a lane change instead), and one the turn restrictions forbid is said to be."""
   osm = grid()
-  c = cruising(monkeypatch, osm, 200.0)
-  pos = np.array([0.0, 200.0])
-  assert c.prompt('left', pos, 0.0, None, 10.0) == ('none', '')  # Row 1 100 m on: beyond 80 m at 10 m/s
+  c = cruising(monkeypatch, osm, 150.0)
+  pos = np.array([0.0, 150.0])
+  assert c.prompt('left', pos, 0.0, None, 9.0) == ('none', '')  # Row 1 150 m on: beyond 120 m at 9 m/s
   assert c.prompt('left', pos, 0.0, None, 15.0) == ('turn', 'Row 1')
   routed(c)
   k = c.walk.nodes.index(201)
   assert c.walk.nodes[k + 1] == 101 and c.route.cruise and c.forced['side'] == 'left'
   assert c.prompt('left', pos, 0.0, None, 15.0) == ('turn', 'Row 1')  # already: nothing new
   assert not c.busy
+  assert c.prompt('right', np.array([0.0, 285.0]), 0.0, None, 10.0) == ('late', '')  # too near to undo
+  assert not c.busy and c.forced is not None
   assert c.prompt('right', pos, 0.0, None, 15.0) == ('cancel', 'Row 1')
   routed(c)
   k = c.walk.nodes.index(201)
@@ -285,6 +291,8 @@ def test_prompt_turns(monkeypatch):
   assert c.walk.nodes[c.walk.nodes.index(201) + 1] == 301
   c = cruising(monkeypatch, osm, 250.0)  # 50 m short of Row 1: too late at 15 m/s
   assert c.prompt('left', np.array([0.0, 250.0]), 0.0, None, 15.0) == ('late', '')
+  c = cruising(monkeypatch, osm, 258.0)  # 42 m short: in time at 4 m/s (its lane unknown: one lane change allowed for)
+  assert c.prompt('left', np.array([0.0, 258.0]), 0.0, None, 4.0) == ('turn', 'Row 1')
   c = cruising(monkeypatch, osm, 500.0)  # Row 2 has no west half: no left there
   assert c.prompt('left', np.array([0.0, 500.0]), 0.0, None, 15.0) == ('none', '')
   rules = Restrictions({1: ({'type': 'restriction', 'restriction': 'no_left_turn'},
@@ -292,6 +300,78 @@ def test_prompt_turns(monkeypatch):
   monkeypatch.setattr(Restrictions, "of", classmethod(lambda cls, osm: rules))
   c = cruising(monkeypatch, osm, 200.0)
   assert c.prompt('left', np.array([0.0, 200.0]), 0.0, None, 15.0) == ('forbidden', '')
+
+
+def test_prompt_other_way_out(monkeypatch):
+  """Where the router won't take the way out an arrow key chose, the junction's next way out that side is tried."""
+  monkeypatch.setattr(cr, "strays", lambda points, line, *a, **kw: None)
+  nodes = {1: (0.0, -ARM), 2: (0.0, 0.0)}
+  ways = {10: (MAIN, [1, 2])}
+  for wid, deg in ((11, 0.0), (12, 50.0), (13, 90.0)):  # on, a slip road right, the street right
+    nodes[wid], nodes[wid + 100] = arm(deg), arm(deg, 1.5 * ARM)
+    ways[wid] = ({**SIDE, 'name': f'Way {wid}'}, [2, wid, wid + 100])
+  osm = make_map(nodes, ways)
+  c = Cruise(FakeRouter(osm))
+  c.route, c.walk = c.make(np.array([0.0, -100.0]), 0.0, None)
+  route = c._route
+
+  def refuse(walk, at, ahead, known, keep=None):
+    if keep == (2, 12):
+      c.banned.add(keep)
+      return None, walk
+    return route(walk, at, ahead, known, keep)
+  monkeypatch.setattr(c, "_route", refuse)
+  assert c.prompt('right', np.array([0.0, -100.0]), 0.0, None, 10.0) == ('turn', 'Way 12')
+  routed(c)
+  assert c.walk.has((2, 13)) and c.forced['link'] == (2, 13) and not c.take_notes()
+
+
+def test_prompt_too_late(monkeypatch):
+  """An arrow key's route goes in with the next update while the car can still make the turn; one that comes after the
+  car's nearer than that (routing can take seconds) is dropped, said to be too late."""
+  osm = grid()
+  for y, late in ((160.0, False), (290.0, True)):
+    c = cruising(monkeypatch, osm, 150.0)
+    assert c.prompt('left', np.array([0.0, 150.0]), 0.0, None, 15.0) == ('turn', 'Row 1')
+    while c.busy:
+      time.sleep(0.01)
+    made = c.pending[0]
+    c.update(np.array([0.0, y]), 0.0, -1.0)  # (before its next try: no route walked on meanwhile)
+    if late:
+      assert c.pending is None and c.route is not made and c.forced is None and c.take_notes() == [('late', 'left', '')]
+    else:
+      assert c.route is made and c.forced is not None and not c.take_notes()
+
+
+def test_prompt_need():
+  """How near a turn may be: by the lane changes into a lane for it (turn:lanes arrows, else the outermost lane that
+  side; a pocket opening on that side counted), and by speed, braking for a turn but not a fork."""
+  approach = {'highway': 'primary', 'oneway': 'yes', 'lanes': '3', 'width': '12', 'turn:lanes': 'left|through|through;right'}
+  nodes = {1: (0.0, -ARM), 2: (0.0, 0.0), 11: arm(-90.0), 12: arm(90.0), 13: arm(0.0)}
+  osm = make_map(nodes, {10: (approach, [1, 2]), 11: (SIDE, [2, 11]), 12: (SIDE, [2, 12]), 13: (SIDE, [2, 13])})
+  walk = Walk(Walker(osm), 1, 2)
+  assert [cr.lanes_over(walk, 1, 'left', [i, 3]) for i in range(3)] == [0, 1, 2]
+  assert [cr.lanes_over(walk, 1, 'right', [i, 3]) for i in range(3)] == [2, 1, 0]
+  assert cr.lanes_over(walk, 1, 'left', [0, 2]) == 1  # the left-turn pocket opens left of the car's lane
+  assert cr.lanes_over(walk, 1, 'left', None) == 1
+  plain = make_map(nodes, {10: ({**approach, 'turn:lanes': ''}, [1, 2]), 11: (SIDE, [2, 11]), 12: (SIDE, [2, 12])})
+  walk = Walk(Walker(plain), 1, 2)
+  assert cr.lanes_over(walk, 1, 'right', [0, 3]) == 2 and cr.lanes_over(walk, 1, 'left', [0, 3]) == 0
+  assert cr.prompt_need(5.0, 0, False) < 30.0 < cr.prompt_need(10.0, 0, False) < cr.prompt_need(10.0, 1, False)
+  assert cr.prompt_need(20.0, 0, True) < cr.prompt_need(20.0, 0, False)
+
+
+def test_prompt_swap():
+  """An arrow key's route waits only while the car's in a turn or in a junction (then dropped should it be too late,
+  test_prompt_too_late); a route walked on waits for the car to be clear of any junction."""
+  c = Cruise(FakeRouter(grid()))
+  prompted, walked = object(), object()
+  c.prompted = prompted
+  ahead = SimpleNamespace(at=100.0, junctions=[125.0], lanes=None, turns=lambda d, behind=0.0: [])  # a junction 25 m on
+  inside = SimpleNamespace(at=100.0, junctions=[105.0], lanes=None, turns=lambda d, behind=0.0: [])
+  turning = SimpleNamespace(at=100.0, junctions=[105.0], lanes=None, turns=lambda d, behind=0.0: [[5.0, 'left', 0.0, 90.0]])
+  assert not c._held(ahead, prompted) and c._held(inside, prompted) and c._held(turning, prompted)
+  assert c._held(ahead, walked)
 
 
 def live():

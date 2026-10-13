@@ -652,6 +652,10 @@ class Brain:
     if self.cruise is not None:
       for kind, side, road in self.cruise.take_notes():
         self.announcer.prompt(kind, side, road)
+      for e in self.cruise.take_log():
+        what = e.pop("event")
+        self._log_event(what, **e)
+        print(f"gta5: cruise {what} {json.dumps(e)}", flush=True)
     if isinstance(self.driver, MapDriver):
       for kind, side in self.driver.take_prompts():
         self.announcer.prompt(kind, side)

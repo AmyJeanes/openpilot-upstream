@@ -451,8 +451,8 @@ class Route:
     opens = self.lanes.openings if self.lanes is not None else []
     return [[float(s - self.at), n] for s, n in opens if -behind < s - self.at < distance]
 
-  def turns(self, distance: float) -> list:
-    """The route's turns within `distance` m (navd planner.find_turn along its own shape, once, so each holds still as
+  def turns(self, distance: float, behind: float = 0.0) -> list:
+    """The route's turns within `distance` m, and `behind` m behind the car (navd planner.find_turn along its own shape, once, so each holds still as
     the car drives on), those within TURN_AT m of a junction or a turn Valhalla calls: [[m ahead, side, exit heading
     (game deg), deg turned]]. A bend of the road alone, however sharp (a hairpin), is no turn."""
     if self._turns is None:
@@ -473,7 +473,7 @@ class Route:
           self._turns.append(turn)
         turn = find_turn(pts, turn.dist + TURN_HOLDS)
     return [[round(t.dist - self.at, 1), t.side, round(float(t.exit_heading), 1), round(float(t.angle), 1)] for t in self._turns
-            if 0.0 < t.dist - self.at < distance]
+            if -behind < t.dist - self.at < distance]
 
   def lane_maps(self, distance: float, here: bool = True) -> list:
     """Where our lanes change within `distance` m (RouteLanes.lane_maps), the lane each before carries on as: [[m ahead,
