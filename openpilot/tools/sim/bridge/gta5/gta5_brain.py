@@ -29,7 +29,8 @@ from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
 from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
-from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE, Driver, MapDriver, OpenpilotDriver, driver_from_env
+from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE, Driver, MapDriver, OpenpilotDriver, driver_from_env, took_over
+from openpilot.tools.sim.bridge.gta5.gta5_events import Announcer
 from openpilot.tools.sim.bridge.gta5.map.cruise import Cruise, Restrictions, Roaming
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
@@ -160,6 +161,7 @@ class Brain:
     self.openpilot = OpenpilotDriver(self.io)
     self.driver = driver_from_env(self.openpilot, self._send, self._log_event, None if self.io.drives else "map")
     self.driving: Driver | Expert | None = None  # whose controls the car takes, as of the last step
+    self.announcer = Announcer(self._send)  # the plugin's sound and HUD text as a driver engages and hands back
     # the map driver's route without a destination, where it's the only driver (no openpilot): map/cruise.py
     self.cruise: Cruise | None = None
     self.cruise_asked: float | None = None  # when the engage key asked to cruise, until its route comes
@@ -203,6 +205,7 @@ class Brain:
     for msg in self._overlay(state, v):
       self._send(msg)
     self.driving = self._step_drivers(state)
+    self.announcer.step(time.monotonic(), self.driver, self.openpilot, took_over(state), self.expert.on, self.route)
     if self.driving is not None and self.driving is not self.openpilot:
       # expert mode or another driver drives: openpilot stays disengaged, and nav and pull-away wait
       self._set_cap(0.0, "")
@@ -335,6 +338,7 @@ class Brain:
     if p is not self.openpilot and p.engaged:
       why = p.step(state, self.route, now)
       if why is not None:
+        self.announcer.handback(why)
         p.disengage(why)
         if why == "arrived":
           self.destination.arrived()
@@ -457,6 +461,7 @@ class Brain:
           print("gta5: the map driver cruises: no destination, on along the road", flush=True)
       elif now - self.cruise_asked > CRUISE_WAIT:
         self.cruise_asked = None
+        self.announcer.refused("no road ahead")
         print("gta5: the engage key: no road to cruise on", flush=True)
     return cruise
 
@@ -622,8 +627,10 @@ class Brain:
     while it waits for that cancels it; with no router it does nothing."""
     drivers = [self.openpilot] if self.expert.on else [self.driver, self.openpilot]
     drivers = list(dict.fromkeys(p for p in drivers if p is not self.openpilot or self.io.drives))
+    self.announcer.pressed(time.monotonic())
     if self.cruise_asked is not None:
       self.cruise_asked = None
+      self.announcer.status("cancel")
       print("gta5: the engage key: not cruising after all", flush=True)
       return
     for p in drivers:
@@ -632,11 +639,16 @@ class Brain:
         return
     for p in drivers:
       if p.engage(self.route):
+        if p is self.openpilot:
+          self.announcer.asked_openpilot(time.monotonic())
         return
     if drivers and self.cruise is not None:
       self.cruise_asked = time.monotonic()
+      self.announcer.status("wait")
       print("gta5: the engage key: no destination for the map driver: it cruises once it has the road ahead", flush=True)
       return
+    if drivers:
+      self.announcer.refused("no route")
     print("gta5: the engage key: no destination for the map driver" if drivers else "gta5: the engage key: expert mode drives",
           flush=True)
 

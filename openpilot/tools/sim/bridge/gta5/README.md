@@ -300,6 +300,14 @@ driven to; reaching it the car stops there and hands back as before, and clearin
 shows `cruising (no destination)`; in the game the HUD shows it engaged, as for a destination. With openpilot (the link
 on, or the bridge in WSL) the engage key without a destination engages openpilot, as before.
 
+As a driver engages or hands back, the plugin plays one of openpilot's sounds and shows what happened below the set speed
+for a few seconds (`gta5_events.py`): engage ("Cruising" with no destination); disengage when the player hands back or
+the map driver arrives; warning when the driver gives up on its own, with why (a map drive's abort, the road ending
+while it cruises, or openpilot disengaging with no input); refuse when the engage key engages nothing (no road ahead to
+cruise on, once it gives up waiting). `GTA5_SOUNDS=0` leaves out the sounds (for recording runs) and `GTA5_HUD_EVENTS=0`
+the text; on the plugin's side `sounds=0` turns them off and `sound_volume=` sets their volume. Expert mode's drives are
+silent.
+
 ## AI expert driver
 The game's own traffic AI can drive the car, as expert driving to record. `gta5_cmd.py ai on` tasks the player as the
 driver of its car (to the map's waypoint, else wandering; `x= y= z=` for a point, `speed=` m/s cap, `style=` driving style

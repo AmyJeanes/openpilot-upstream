@@ -396,7 +396,8 @@ def _split_world(head: dict, mp: Map, rec: dict):
   w.lock = threading.Lock()
   w.state, w.last_frame_time = None, 0.0
   w.log, w.recorder, w.link, w.stall, w.curvature, w.gnss, w.match_t = None, None, None, None, 0.0, None, None
-  w._send = lambda obj: rec["cmd"].append(obj)
+  # the plugin's sounds and HUD texts (gta5_events.py) say what was decided, and aren't decisions
+  w._send = lambda obj: obj.get("type") == "event" or rec["cmd"].append(obj)
   io = w.io = gta5_world.LocalIO.__new__(gta5_world.LocalIO)
   io.simulator_state, io.q, io.tesla, io.VM = w.simulator_state, w.q, True, None
   w.model = Model()

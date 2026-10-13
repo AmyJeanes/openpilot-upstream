@@ -149,7 +149,7 @@ def test_no_openpilot(monkeypatch):
   w._init_drivers()
   assert isinstance(w.driver, MapDriver) and not w.openpilot.engaged
   w._engage_key()
-  assert not w.driver.engaged and w.sent == []
+  assert not w.driver.engaged and [m["type"] for m in w.sent] == ["event"]  # the refusal's sound and text
   w.route = np.zeros((2, 2))
   w._engage_key()
   assert w.driver.engaged and w._step_drivers(state()) is w.driver and w.driver.controls(state()) == CONTROL

@@ -141,11 +141,12 @@ def test_relay_brain(tmp_path, monkeypatch):
   bridge.sendall(b'{"type": "control", "active": true, "curvature": 0.2}\n{"type": "hud", "setSpeed": 30}\n{"type": "mark1"}\n')
   got = read_lines(game, b"mark1")
   assert got == [FRAMES_ON, b'{"type": "control", "active": true, "curvature": 0.2}', b'{"type": "mark1"}']  # a brain: no bridge HUD
-  brain.sendall(b'{"type": "owner", "who": "brain"}\n{"type": "control", "active": true, "curvature": 0.1}\n')
+  event = b'{"type": "event", "sound": "warning", "text": "Map driver gave up: collision", "secs": 4.0}'
+  brain.sendall(b'{"type": "owner", "who": "brain"}\n{"type": "control", "active": true, "curvature": 0.1}\n' + event + b"\n")
   time.sleep(0.2)
   bridge.sendall(b'{"type": "control", "active": false}\n{"type": "mark2"}\n')
   got = read_lines(game, b"mark2")
-  assert got == [b'{"type": "control", "active": true, "curvature": 0.1}', b'{"type": "mark2"}']
+  assert got == [b'{"type": "control", "active": true, "curvature": 0.1}', event, b'{"type": "mark2"}']
 
   brain.close()
   time.sleep(0.3)
