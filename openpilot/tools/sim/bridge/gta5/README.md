@@ -291,9 +291,11 @@ engages it as soon as it has the road ahead (a second or two; a press while it w
 the road, keeping its lane and stopping for lights and stop signs as on any route. At each junction it carries on the
 way a driver would: where its lane only turns (the map's turn arrows) that turn at the first junction, else on along
 the road it's on (the same name, or class, turning up to 60 degrees), else the way turning least; never against a
-one-way, a U-turn, a move the map's turn restrictions forbid or a lane closed to cars, and away from dead ends and
-service roads while there's another way. The cruise route (`map/cruise.py`) runs 1.5 km ahead and is walked on well
-before the car gets near its end, so it only stops where the road itself ends. A destination set while it cruises is
+one-way, a U-turn, a move the map's turn restrictions forbid or a lane closed to cars, and away from service roads and
+from dead ends while there's another way: from anywhere it won't turn into road it couldn't drive out of again without
+a U-turn (found for the whole map as it loads). The cruise route (`map/cruise.py`) runs 1.5 km ahead and is walked on
+well before the car gets near its end, so it only stops where the road itself ends: cruising from inside a dead end it
+drives to the end and hands back ("the road ends"), as the map driver can't turn the car round. A destination set while it cruises is
 driven to; reaching it the car stops there and hands back as before, and clearing it carries on cruising. The map view
 shows `cruising (no destination)`; in the game the HUD shows it engaged, as for a destination. With openpilot (the link
 on, or the bridge in WSL) the engage key without a destination engages openpilot, as before.

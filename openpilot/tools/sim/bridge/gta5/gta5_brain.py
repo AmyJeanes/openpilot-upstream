@@ -30,7 +30,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE, Driver, MapDriver, OpenpilotDriver, driver_from_env
-from openpilot.tools.sim.bridge.gta5.map.cruise import Cruise, Restrictions
+from openpilot.tools.sim.bridge.gta5.map.cruise import Cruise, Restrictions, Roaming
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.lane_match import JunctionAreas, LaneMatcher
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
@@ -407,7 +407,8 @@ class Brain:
     else:
       print("gta5: the map has no lane tags: lanes from GTA's links")
     if self.cruise is not None and lanes is not None:
-      Restrictions.of(lanes)  # read now (a few s), not when the engage key first asks to cruise
+      Restrictions.of(lanes)  # read now (a few s each), not when the engage key first asks to cruise
+      Roaming.of(lanes)
     self.navigator.refresh()
 
   def _map_route(self, state: dict, bearing: float) -> dict:

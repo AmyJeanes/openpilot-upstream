@@ -10,8 +10,12 @@ junction's short straight links crossed), it takes:
 2. else the road it's on carried on (the same name, or unnamed the same class) turning no more than SAME_ROAD_TURN;
 3. else the way out turning least.
 Ways out it never takes: against a one-way, U-turns (more than MOVE_U_TURN), lanes the map closes to cars, moves the
-map's turn restrictions forbid (Restrictions), banned ones (below), and while there's another, dead ends (no LEADS_ON m
-of road beyond) and minor roads (service roads, tracks, GTA's switched-off and off-road links) off a road that isn't one.
+map's turn restrictions forbid (Restrictions), banned ones (below), and while there's another, dead ends and minor
+roads (service roads, tracks, GTA's switched-off and off-road links) off a road that isn't one. A dead end is a pocket
+(Roaming): road from which no drive without a U-turn gets on to road it could drive round for ever (a cul-de-sac, a
+whole estate behind one road in, a car park's loop), found once for the map; where that isn't known, a way out with no
+LEADS_ON m of road beyond. Starting in a pocket, it drives out of it if it can, else to its end: the map driver can't
+turn the car round (no U-turns; the router keeps them off routes for the same reason), so there it stops.
 
 Valhalla then routes the walk (Router.via): from the car's place on it through a location just past each junction where
 the walk had more than one way out to choose from, and to its end. That keeps the route on the walk's roads, as a route
@@ -51,6 +55,7 @@ THROUGH_AHEAD = 5.0  # m past the car a through location goes at the least
 END_BACK = 10.0  # m short of the walk's last node its route ends
 JUNCTION_SPAN = (-15.0, 30.0)  # m about a junction (behind, ahead of the car) a route walked on waits to be swapped in
 SWAP_BY = 400.0  # m left of the route when the next is swapped in all the same
+ROAM_MIN = 2000.0  # m of road a set of links a car can drive round for ever has, not to be a pocket
 ROUNDS = 6  # routes again after the walk is changed (a ban, a junction to go through), at most
 
 
@@ -63,6 +68,92 @@ def bearing(osm: OsmLanes, a: int, b: int) -> float:
   """The bearing (degrees clockwise from north) from node a to node b, as Valhalla takes a location's heading."""
   d = osm.node_xy(b) - osm.node_xy(a)
   return math.degrees(math.atan2(d[0], d[1])) % 360
+
+
+class Roaming:
+  """The links (node, next node) from which a car can drive on for ever without a U-turn, and not round and round a
+  car park: those in a strongly connected set of the map's drivable links (linked where a car can go from one on to the
+  next: into a node and out by another link, turning no more than MOVE_U_TURN, where the turn restrictions at the node
+  allow it) with at least ROAM_MIN m of road. The
+  rest are pockets: dead ends, road that leads only into them, and small loops. Found once per map (a few s)."""
+  _found: dict[int, 'Roaming'] = {}
+
+  def __init__(self, links: set[tuple[int, int]]):
+    self.links = links
+
+  def __contains__(self, link: tuple[int, int]) -> bool:
+    return link in self.links
+
+  @classmethod
+  def of(cls, osm: OsmLanes) -> 'Roaming':
+    if id(osm) not in cls._found:
+      cls._found = {id(osm): cls.find(osm)}  # one map at a time
+    return cls._found[id(osm)]
+
+  @classmethod
+  def find(cls, osm: OsmLanes, restrictions: 'Restrictions | None' = None) -> 'Roaming':
+    walker = Walker(osm)
+    rules = restrictions if restrictions is not None else Restrictions.of(osm)
+    ids: dict[tuple[int, int], int] = {}
+    links: list[tuple[int, int]] = []
+    for a, b in osm.pairs:
+      if walker.drivable(a, b):
+        ids[(a, b)] = len(links)
+        links.append((a, b))
+    heading = [walker.heading(a, b) for a, b in links]
+    length = [float(np.hypot(*(osm.node_xy(b) - osm.node_xy(a)))) for a, b in links]
+    out: list[list[int]] = [[] for _ in links]
+    for k, (a, b) in enumerate(links):
+      for m in osm.links.get(b, ()):
+        j = ids.get((b, m))
+        if j is not None and m != a and abs(turned(heading[k], heading[j])) <= MOVE_U_TURN and \
+           rules.allows([osm.pairs[(a, b)][0]], b, osm.pairs[(b, m)][0]):
+          out[k].append(j)
+    found = set()
+    for comp in strongly_connected(out):
+      if sum(length[k] for k in comp) >= ROAM_MIN:
+        found.update(links[k] for k in comp)
+    return cls(found)
+
+
+def strongly_connected(out: list[list[int]]) -> list[list[int]]:
+  """A directed graph's strongly connected sets (out: each vertex's successors), by Tarjan's algorithm without
+  recursion."""
+  index, low, on, stack, comps = [-1] * len(out), [0] * len(out), [False] * len(out), [], []
+  n = 0
+  for root in range(len(out)):
+    if index[root] >= 0:
+      continue
+    work = [(root, 0)]
+    while work:
+      v, i = work.pop()
+      if i == 0:
+        index[v] = low[v] = n
+        n += 1
+        stack.append(v)
+        on[v] = True
+      for k in range(i, len(out[v])):
+        w = out[v][k]
+        if index[w] < 0:
+          work.append((v, k + 1))
+          work.append((w, 0))
+          break
+        if on[w]:
+          low[v] = min(low[v], index[w])
+      else:
+        if low[v] == index[v]:
+          comp = []
+          while True:
+            w = stack.pop()
+            on[w] = False
+            comp.append(w)
+            if w == v:
+              break
+          comps.append(comp)
+        if work:
+          u = work[-1][0]
+          low[u] = min(low[u], low[v])
+  return comps
 
 
 class Restrictions:
@@ -109,10 +200,13 @@ class Restrictions:
 
 
 class Exit:
-  """A way out of a junction: the nodes from the junction's node to its first node past it, and how far it turns."""
-  def __init__(self, turn: float, path: list[int]):
+  """A way out of a junction: the nodes from the junction's node to its first node past it, how far it turns, and
+  whether there's a way on from its end the turn restrictions allow, by the ways taken to it (some forbid the moves out
+  of a link only for a car that came along a certain way, as through a median)."""
+  def __init__(self, turn: float, path: list[int], on: bool = True):
     self.turn = turn
     self.path = path
+    self.on = on
 
   @property
   def edge(self) -> tuple[int, int]:
@@ -121,10 +215,12 @@ class Exit:
 
 class Walker:
   """The roads a walk may take on a map, and which ways out of a junction it takes (see the module's doc)."""
-  def __init__(self, osm: OsmLanes, banned: set | None = None, restrictions: Restrictions | None = None):
+  def __init__(self, osm: OsmLanes, banned: set | None = None, restrictions: Restrictions | None = None,
+               roaming: Roaming | None = None):
     self.osm = osm
     self.banned: set[tuple[int, int]] = banned if banned is not None else set()  # links (node, next node) never taken
     self.restrictions = restrictions if restrictions is not None else Restrictions({})
+    self.roaming = roaming  # the links off which a car can drive on for ever, where known
     self._open: dict[tuple[int, bool], bool] = {}
 
   def way(self, a: int, b: int) -> int:
@@ -181,7 +277,8 @@ class Walker:
            any(q != n and self.drivable(m, q) for q in self.osm.links.get(m, ())):
           stack.append((m, dist + length, path + [m], on))
         elif abs(t) <= MOVE_U_TURN:
-          out.append(Exit(t, path + [m]))
+          out.append(Exit(t, path + [m], any(q != n and self.drivable(m, q) and self.restrictions.allows(on, m, self.way(m, q))
+                                             for q in self.osm.links.get(m, ()))))
     return out
 
   def leads_on(self, a: int, b: int, reach: float = LEADS_ON) -> bool:
@@ -211,10 +308,11 @@ class Walker:
     return 'left' if e.turn > 0 else 'right'
 
   def candidates(self, approach: int, exits: list[Exit]) -> list[Exit]:
-    """The ways out it may take: not banned, and while there's another, neither a dead end nor (off a road that isn't
-    one) a minor road."""
+    """The ways out it may take: not banned, and while there's another, not one the turn restrictions leave no way on
+    from, nor into a pocket (else a dead end), nor (off a road that isn't one) a minor road."""
     cands = [e for e in exits if e.edge not in self.banned]
-    on = [e for e in cands if self.leads_on(*e.edge)]
+    cands = [e for e in cands if e.on] or cands
+    on = [e for e in cands if (e.edge in self.roaming if self.roaming is not None else self.leads_on(*e.edge))]
     cands = on or cands
     if not self.minor(approach):
       cands = [e for e in cands if not self.minor(self.way(*e.edge))] or cands
@@ -513,7 +611,7 @@ class Cruise:
     """A cruise route from the car (pos, bearing clockwise from north, height z): along a new walk, or along `walk`
     walked on past the car's place on it; and its walk. (None, walk) where none can be made."""
     osm = self.osm
-    walker = Walker(osm, self.banned, Restrictions.of(osm))
+    walker = Walker(osm, self.banned, Restrictions.of(osm), Roaming.of(osm))
     fresh = walk is None
     if fresh:
       found = start_link(osm, walker, pos[:2], -bearing, z, self._matcher())

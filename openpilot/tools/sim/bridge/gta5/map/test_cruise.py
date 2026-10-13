@@ -7,7 +7,7 @@ import urllib.request
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map import cruise as cr
-from openpilot.tools.sim.bridge.gta5.map.cruise import MAX_THROUGH, Cruise, Restrictions, Walk, Walker, start_link
+from openpilot.tools.sim.bridge.gta5.map.cruise import MAX_THROUGH, Cruise, Restrictions, Roaming, Walk, Walker, start_link
 from openpilot.tools.sim.bridge.gta5.map.lane_match import LaneReading
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, OsmLanes, Section
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
@@ -37,8 +37,8 @@ def junction(arms: dict, approach: dict = MAIN, restrictions: Restrictions | Non
   nodes = {1: (0.0, -ARM), 2: (0.0, 0.0)}
   ways = {10: (approach, [1, 2])}
   for wid, (tags, deg, *length) in arms.items():
-    nodes[wid] = arm(deg, *length)
-    ways[wid] = (tags, [2, wid])
+    nodes[wid], nodes[wid + 100] = arm(deg, *length), arm(deg, 1.5 * (length[0] if length else ARM))  # and on a link
+    ways[wid] = (tags, [2, wid, wid + 100])
   osm = make_map(nodes, ways)
   walk = Walk(Walker(osm, restrictions=restrictions), 1, 2)
   walk.extend(ARM + 50.0, MAX_THROUGH)
@@ -76,14 +76,42 @@ def test_ways_it_never_takes():
   assert run.allows([10], 2, 10)  # on along the same way is no turn
 
 
+def test_pockets():
+  """A dead end further on than the walk looks for one (LEADS_ON) is a pocket all the same: by the map's roaming links
+  it carries on round the loop rather than straight on along its road into the cul-de-sac. Started in the pocket it
+  drives out of it; heading into it, it drives to its end, where the road ends. A loop shorter than ROAM_MIN is a
+  pocket too, as a car park's."""
+  # a loop of Main St (a square, 600 m a side, each way round it a roaming set) with a 600 m cul-de-sac straight on
+  # from its south-west corner's road
+  nodes = {1: (0.0, -600.0), 2: (0.0, 0.0), 3: (600.0, 0.0), 4: (600.0, -600.0), 5: (0.0, 600.0), 6: (0.0, 300.0)}
+  ways = {10: (MAIN, [1, 2]), 11: (MAIN, [2, 3]), 12: (MAIN, [3, 4]), 13: (MAIN, [4, 1]), 14: (MAIN, [2, 6, 5])}
+  osm = make_map(nodes, ways)
+  roaming = Roaming.find(osm)
+  assert roaming.links == {(1, 2), (2, 3), (3, 4), (4, 1), (2, 1), (3, 2), (4, 3), (1, 4)}
+  walk = Walk(Walker(osm), 1, 2)
+  walk.extend(650.0, MAX_THROUGH)
+  assert walk.nodes[2] == 6  # by LEADS_ON alone: straight on into it
+  walk = Walk(Walker(osm, roaming=roaming), 1, 2)
+  walk.extend(3000.0, MAX_THROUGH)
+  assert walk.nodes[:6] == [1, 2, 3, 4, 1, 2] and not walk.ended
+  small = make_map({k: (x / 2, y / 2) for k, (x, y) in nodes.items()}, ways)
+  assert not Roaming.find(small).links
+  walk = Walk(Walker(osm, roaming=roaming), 6, 2)  # in the pocket, heading out
+  walk.extend(1000.0, MAX_THROUGH)
+  assert walk.nodes[2] in (1, 3) and not walk.ended
+  walk = Walk(Walker(osm, roaming=roaming), 2, 6)  # heading in: no way on, nor round
+  walk.extend(1000.0, MAX_THROUGH)
+  assert walk.nodes == [2, 6, 5] and walk.ended
+
+
 def test_turn_only_lane():
   """The car in a turn-only lane (its turn:lanes arrows) turns that way at the first junction; in a lane straight on
   it carries on; past the first junction its lane says nothing."""
   approach = {'highway': 'primary', 'oneway': 'yes', 'lanes': '2', 'width': '8', 'turn:lanes': 'left|through', 'name': 'Main St'}
   nodes = {1: (0.0, -ARM), 2: (0.0, 0.0), 3: (0.0, 200.0), 11: arm(-90.0), 12: arm(90.0), 4: (0.0, 200.0 + ARM),
-           13: (-ARM, 200.0)}
-  ways = {10: (approach, [1, 2]), 11: (SIDE, [2, 11]), 12: (SIDE, [2, 12]), 14: (MAIN, [2, 3]), 15: (MAIN, [3, 4]),
-          16: (SIDE, [3, 13])}
+           13: (-ARM, 200.0), 111: arm(-90.0, 2 * ARM), 112: arm(90.0, 2 * ARM), 104: (0.0, 200.0 + 2 * ARM)}
+  ways = {10: (approach, [1, 2]), 11: (SIDE, [2, 11, 111]), 12: (SIDE, [2, 12, 112]), 14: (MAIN, [2, 3]),
+          15: (MAIN, [3, 4, 104]), 16: (SIDE, [3, 13])}
   osm = make_map(nodes, ways)
   walker = Walker(osm)
   sec = Section.of(osm.lanes(10), FORWARD)
@@ -139,9 +167,11 @@ def test_rolling_route(monkeypatch):
     nodes[k + 1] = (0.0, 50.0 * k)
     if k:
       ways[k] = (MAIN, [k, k + 1])
-    if 0 < k < 90:
+    if 0 < k < 90:  # each on to an avenue beside Main St
       nodes[1000 + k] = (ARM, 50.0 * k)
       ways[1000 + k] = (SIDE, [k + 1, 1000 + k])
+      if k > 1:
+        ways[2000 + k] = (LANE, [1000 + k - 1, 1000 + k])
   osm = make_map(nodes, ways)
   monkeypatch.setattr(cr, "strays", lambda points, line, *a, **kw: None)  # the fake's straight lines aren't the roads
   c = Cruise(FakeRouter(osm))
