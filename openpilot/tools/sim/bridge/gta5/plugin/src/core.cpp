@@ -1106,21 +1106,29 @@ void ScaleWav(std::vector<char> &wav, float volume) {
 // one of openpilot's sounds, the gta5op folder's sounds\<name>.wav, at sound_volume through the game's own audio session
 // (so its volume in Windows' mixer applies too); a newer sound cuts off an older one
 void PlayEventSound(const std::string &name) {
-  if (!g_cfg.sounds || name.empty() ||
-      !std::all_of(name.begin(), name.end(), [](char c) { return std::islower(static_cast<unsigned char>(c)) || c == '_'; }))
+  if (!g_cfg.sounds || name.empty()) return;
+  if (!std::all_of(name.begin(), name.end(), [](char c) { return std::islower(static_cast<unsigned char>(c)) || c == '_'; })) {
+    Log("sound: not a sound's name: " + name.substr(0, 40));
     return;
+  }
   // PlaySound reads an async sound's memory while it plays: kept until CoreShutdown stops it
   static std::unordered_map<std::string, std::vector<char>> cache;
   auto it = cache.find(name);
   if (it == cache.end()) {
     std::ifstream f(g_dir + L"\\sounds\\" + std::wstring(name.begin(), name.end()) + L".wav", std::ios::binary);
     std::vector<char> wav((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (wav.empty()) Log("sound: no sounds\\" + name + ".wav");
     ScaleWav(wav, g_cfg.soundVolume);
     it = cache.emplace(name, std::move(wav)).first;
   }
-  if (!it->second.empty())
-    PlaySoundW(reinterpret_cast<LPCWSTR>(it->second.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+  const std::vector<char> &wav = it->second;
+  bool riff = wav.size() >= 12 && !memcmp(wav.data(), "RIFF", 4) && !memcmp(wav.data() + 8, "WAVE", 4);
+  // a checkout without its Git LFS files has small text pointers in place of openpilot's WAVs
+  std::string result = wav.empty() ? "no sounds\\" + name + ".wav"
+                       : !riff     ? "not a WAV (a Git LFS pointer?)"
+                       : PlaySoundW(reinterpret_cast<LPCWSTR>(wav.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT)
+                           ? "playing"
+                           : "PlaySound failed";
+  Log("sound: " + name + ", " + std::to_string(wav.size()) + " bytes: " + result);
 }
 
 // "Bookmarked" for a moment after each mark, so a press is known to have landed

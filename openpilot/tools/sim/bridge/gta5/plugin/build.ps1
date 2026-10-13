@@ -28,6 +28,13 @@ if ($Install) {
   if (-not (Test-Path "$dir\gta5op.ini")) { Copy-Item "$PSScriptRoot\gta5op.ini" $dir }
   # openpilot's sounds, which the bridge has the plugin play as the car engages and hands back
   New-Item -ItemType Directory -Force "$dir\sounds" | Out-Null
-  Copy-Item "$PSScriptRoot\..\..\..\..\..\selfdrive\assets\sounds\*.wav" "$dir\sounds" -Force
+  $pointers = @()
+  foreach ($wav in Get-ChildItem "$PSScriptRoot\..\..\..\..\..\selfdrive\assets\sounds\*.wav") {
+    $bytes = [IO.File]::ReadAllBytes($wav.FullName)
+    if ($bytes.Length -ge 4 -and [Text.Encoding]::ASCII.GetString($bytes, 0, 4) -eq "RIFF") { Copy-Item $wav.FullName "$dir\sounds" -Force }
+    else { $pointers += $wav.Name }
+  }
+  # a checkout without its Git LFS files has text pointers in their place, which play as silence
+  if ($pointers) { Write-Warning "not installed, Git LFS pointers rather than WAVs: $($pointers -join ', '); fetch them with git lfs pull --include 'openpilot/selfdrive/assets/sounds/*'" }
   Write-Host "installed into $GameDir"
 }
