@@ -251,6 +251,28 @@ def test_crossing_between_carriageways():
     assert separated(osm, np.array(nodes[2]), np.array(nodes[5])) is expect, apart
 
 
+def test_lane_line_across_a_crossing(tmp_path):
+  # carriageways far enough apart for separated() (their lanes' edges 3 m apart), but the map paints only a dashed lane
+  # line between them: a lane change; a solid line too and it's a crossing as before, unless that's on another level
+  import json
+  from openpilot.tools.sim.bridge.gta5.map.router import lane_change, separated
+  nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (200.0, 0.0), 4: (0.0, -10.0), 5: (125.0, -10.0), 6: (200.0, -10.0)}
+  tags = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '7'}
+  ways = {1: (tags, [1, 2]), 2: (tags, [2, 3]), 3: (tags, [4, 5]), 4: (tags, [5, 6]),
+          5: ({'highway': 'motorway', 'oneway': 'yes', 'lanes': '1', 'width': '3.5'}, [2, 5])}
+  dashed, solid = [1, 0.0, -5.0, 200.0, -5.0], [2, 0.0, -6.0, 200.0, -6.0]
+  for n, (lines, heights, expect) in enumerate((([dashed], [0.0], True), ([dashed, solid], [0.0, 0.0], False),
+                                                ([dashed, solid], [0.0, 8.0], True), ([], [], False))):
+    osm = osm_map(nodes, ways)
+    (tmp_path / str(n)).mkdir()
+    (tmp_path / str(n) / 'lanes.json').write_text(json.dumps({'kinds': ['edge', 'dashed', 'solid'], 'lines': lines,
+                                                              'heights': heights}))
+    osm.path = str(tmp_path / str(n) / 'map.osm.pbf')
+    osm.data.node_tags.update({2: {'ele': '0'}, 5: {'ele': '0'}})
+    assert separated(osm, np.array(nodes[2]), np.array(nodes[5]))
+    assert lane_change(osm, np.array(nodes[2]), np.array(nodes[5])) is expect, n
+
+
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
   from openpilot.tools.sim.bridge.gta5.gta5_brain import on_path

@@ -40,6 +40,9 @@ CROSSING_BACK = 20.0  # m behind the car the last of those starts
 CROSSING_DETOUR = 300.0  # m longer without the crossings: from the car's own road, not the node ahead, if that's shorter
 CLEAR_NEAR = 25.0  # m about a crossing's points to look for the map's other ways (clear_point)
 SEPARATION_GAP = 1.0  # m between two carriageways' lanes: more is hatching, a double line or a kerb between them
+# the map's painted lines (LaneLines): m squares they're found by, m at a link's ends not counted as crossed, and m of
+# height between a line and a link on one level
+PAINT_CELL, PAINT_ENDS, PAINT_LEVEL = 10.0, 1.0, 2.5
 LINK_ALIGN = 60.0  # deg: a carriageway at a shortcut link's end heads this near the link's way
 CARRIAGEWAY_ALIGN = 30.0  # deg: and the two carriageways this near each other's
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
@@ -560,6 +563,76 @@ def separated(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
   return gap > SEPARATION_GAP
 
 
+class LaneLines:
+  """The lines the map paints on its roads (lanes.json beside its .osm.pbf, osm_to_roads.py --lanes) as segments, for
+  whether a shortcut link separated() judges a crossing has only a dashed lane line across it: two carriageways the
+  map draws as one road surface (side_by_side.py: their lanes' edges within its SHARED, a little more than
+  SEPARATION_GAP, apart), between which it's a lane change after all."""
+  _loaded: dict[str, 'LaneLines | None'] = {}
+
+  def __init__(self, data: dict):
+    kinds = data['kinds']
+    a, b, kind, z = [np.zeros((0, 2))], [np.zeros((0, 2))], [], [np.zeros(0)]
+    for line, h in zip(data['lines'], data.get('heights') or [None] * len(data['lines']), strict=True):
+      pts = np.array(line[1:], float).reshape(-1, 2)
+      zs = np.full(len(pts), np.nan) if h is None else np.broadcast_to(np.asarray(h, float), (len(pts),))
+      a.append(pts[:-1])
+      b.append(pts[1:])
+      z.append((zs[:-1] + zs[1:]) / 2)
+      kind += [kinds[line[0]]] * (len(pts) - 1)
+    self.a, self.b, self.z = np.vstack(a), np.vstack(b), np.concatenate(z)
+    self.kind = np.array(kind)
+    lo, hi = np.floor(np.minimum(self.a, self.b) / PAINT_CELL), np.floor(np.maximum(self.a, self.b) / PAINT_CELL)
+    self.cells: dict[tuple[int, int], list[int]] = {}
+    for k in range(len(self.a)):
+      for cx in range(int(lo[k, 0]), int(hi[k, 0]) + 1):
+        for cy in range(int(lo[k, 1]), int(hi[k, 1]) + 1):
+          self.cells.setdefault((cx, cy), []).append(k)
+
+  @classmethod
+  def of(cls, osm: OsmLanes) -> 'LaneLines | None':
+    """The lines of the map osm was loaded from (read once per file); None without them."""
+    if osm.path is None:
+      return None
+    path = os.path.join(os.path.dirname(osm.path), 'lanes.json')
+    if path not in cls._loaded:
+      cls._loaded[path] = cls(json.load(open(path))) if os.path.exists(path) else None
+    return cls._loaded[path]
+
+  def crossed(self, pa: np.ndarray, pb: np.ndarray, z: float = math.nan) -> set[str]:
+    """The kinds of line a link from pa to pb crosses (at its height z, where known), but within PAINT_ENDS m of its
+    ends, where it meets its own lanes' lines."""
+    d = pb - pa
+    length = float(np.hypot(*d))
+    if length <= 2 * PAINT_ENDS:
+      return set()
+    p, q = pa + d * PAINT_ENDS / length, pb - d * PAINT_ENDS / length
+    lo, hi = np.floor(np.minimum(p, q) / PAINT_CELL), np.floor(np.maximum(p, q) / PAINT_CELL)
+    near = {k for cx in range(int(lo[0]), int(hi[0]) + 1) for cy in range(int(lo[1]), int(hi[1]) + 1)
+            for k in self.cells.get((cx, cy), ())}
+    if not near:
+      return set()
+    k = np.fromiter(near, int)
+    a, b = self.a[k], self.b[k]
+
+    def orient(o, s, t):
+      return (s[..., 0] - o[..., 0]) * (t[..., 1] - o[..., 1]) - (s[..., 1] - o[..., 1]) * (t[..., 0] - o[..., 0])
+    hit = (orient(a, b, p) * orient(a, b, q) < 0) & (orient(p, q, a) * orient(p, q, b) < 0)
+    if not math.isnan(z):
+      hit &= ~(np.abs(self.z[k] - z) > PAINT_LEVEL)
+    return set(self.kind[k[hit]].tolist())
+
+
+def lane_change(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
+  """Whether the map paints only a dashed lane line across a link from pa to pb (map nodes; LaneLines), at its height."""
+  lines = LaneLines.of(osm)
+  na, nb = osm.nodes_at(np.asarray(pa, float), 1.0), osm.nodes_at(np.asarray(pb, float), 1.0)
+  if lines is None or not na or not nb:
+    return False
+  ele = [float(t['ele']) for n in (na[0], nb[0]) if 'ele' in (t := osm.data.node_tags.get(n, {}))]
+  return lines.crossed(osm.node_xy(na[0]), osm.node_xy(nb[0]), float(np.mean(ele)) if ele else math.nan) == {'dashed'}
+
+
 def clear_point(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> np.ndarray:
   """The point of a link from pa to pb furthest from the map's other ways near it, for Valhalla to keep a route off the
   link alone (it takes the edges nearest a point to exclude, and a link's middle can be as near a way it meets)."""
@@ -757,7 +830,8 @@ class Router:
     """Where a route's points take one of GTA's shortcut links from one carriageway to another beside it with a painted
     separation between them (hatching, a double line or a kerb: their lanes' edges more than SEPARATION_GAP m apart),
     which GTA's AI may take but a driver can't: each such link's middle. GTA lays a wide road as parallel node chains
-    joined by shortcut links; those between lanes side by side (a dashed line) are a lane change, and stay."""
+    joined by shortcut links; those between lanes side by side (a dashed line) are a lane change, and stay, as do those
+    the map paints only a dashed lane line across (LaneLines) though their lanes' edges are a little further apart."""
     osm = self.osm if self.osm is not None else self.roads
     if self.paths is None or osm is None or len(points) < 2:
       return []
@@ -765,7 +839,8 @@ class Router:
     out = []
     for a, b in zip(nodes, nodes[1:], strict=False):
       link = self.paths.links.get((a, b)) if a is not None and b is not None and a != b else None
-      if link is not None and link.shortcut and separated(osm, self.paths.xy[a], self.paths.xy[b]):
+      if link is not None and link.shortcut and separated(osm, self.paths.xy[a], self.paths.xy[b]) and \
+         not lane_change(osm, self.paths.xy[a], self.paths.xy[b]):
         out.append(clear_point(osm, self.paths.xy[a], self.paths.xy[b]))
     return out
 
