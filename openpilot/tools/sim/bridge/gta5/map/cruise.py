@@ -30,11 +30,12 @@ into its path on a straight rather than in a turn.
 
 The player's arrow keys steer it (Cruise.prompt): the next junction within PROMPT_SECS s with a way out that side (at a
 fork, every way out within FORK_TURN, the one furthest that way) is taken that way, walked on from there and routed
-again; one nearer than the car can still turn at is too late (prompt_need: by its speed and the lane changes into a lane
-for the turn, lanes_over). That route goes in at once but for while the car's in a turn, as a city's junctions are too
-close together to wait for a gap between them. The other arrow undoes it, walked on from there as before. Each prompt
-is logged (Cruise.take_log): the junctions looked at and why each was or wasn't taken, the route, and whether the car
-then took the turn."""
+again; not by one of GTA's shortcut links across a painted separation, which the route would ban (at a motorway's
+exits, the hop across the gore to a ramp or collector road already split off). One nearer than the car can still turn
+at is too late (prompt_need: by its speed and the lane changes into a lane for the turn, lanes_over). That route goes in
+at once but for while the car's in a turn, as a city's junctions are too close together to wait for a gap between them.
+The other arrow undoes it, walked on from there as before. Each prompt is logged (Cruise.take_log): the junctions looked
+at and why each was or wasn't taken, the route, and whether the car then took the turn."""
 import math
 import threading
 import time
@@ -739,7 +740,7 @@ class Cruise:
       already was), routed on its thread; road is the way out's name;
     - 'cancel': the other side's turn undone, the walk taking its junction as it would have;
     - 'late': the only such junctions are nearer than the car can still turn at (prompt_need), or the turn to undo is;
-      'forbidden': only turn restrictions or dead ends that way; 'none': no junction that way ahead, nor a route to
+      'forbidden': only turn restrictions, dead ends or shortcut links across a painted separation that way; 'none': no junction that way ahead, nor a route to
       steer (a lane change instead)."""
     with self.lock:
       walk = self.pending[1] if self.pending is not None else self.walk
@@ -773,14 +774,18 @@ class Cruise:
       for kj, exits, cands, taken in walk.junctions(1, max(upto, at + PROMPT_TRACE)):
         if walk.along[kj] < at:
           continue
-        seen = self._trace_junction(walk, kj, at, exits, cands, taken)
+        # a way out by one of GTA's shortcut links across a painted separation, which the route would ban (Router.crossings)
+        crossing = {x.edge for x in cands if x is not taken and self._crosses(x)}
+        across = walker.side_exit(side, exits, cands)[0] if crossing else None
+        cands = [x for x in cands if x.edge not in crossing]
+        seen = self._trace_junction(walk, kj, at, exits, cands, taken, crossing)
         trace['junctions'].append(seen)
         e, fork = walker.side_exit(side, exits, cands)
         if walk.along[kj] > upto:
           seen['why'] = 'beyond' if e is not None and (taken is None or e.edge != taken.edge) else 'beyond_no'
           continue
         if e is None:
-          ruled = self._ruled_out(walk, kj, side, cands)
+          ruled = (across is not None and across.edge in crossing) or self._ruled_out(walk, kj, side, cands)
           forbidden = forbidden or ruled
           seen['why'] = 'ruled_out' if ruled else 'no_way'
           continue
@@ -789,6 +794,7 @@ class Cruise:
         if taken is not None and e.edge == taken.edge:
           if fork:
             seen['why'] = 'fork_kept'
+            forbidden = forbidden or (across is not None and across.edge in crossing)
             continue  # keeping to that side already: a junction further on, or a lane change
           seen['why'] = 'already'
           self._trace(trace, 'turn')
@@ -820,7 +826,8 @@ class Cruise:
       self._trace(trace, kind)
       return kind, ''
 
-  def _trace_junction(self, walk: Walk, k: int, at: float, exits: list[Exit], cands: list[Exit], taken: Exit | None) -> dict:
+  def _trace_junction(self, walk: Walk, k: int, at: float, exits: list[Exit], cands: list[Exit], taken: Exit | None,
+                      crossing: set[tuple[int, int]]) -> dict:
     """A junction an arrow key looked at, for the log: m to it, and each way out (turn, move, why it's ruled out)."""
     w = walk.walker
     out = {'node': walk.nodes[k], 'm': round(walk.along[k] - at, 1), 'taken': taken.edge[1] if taken is not None else None,
@@ -830,8 +837,13 @@ class Cruise:
       way = w.way(*e.edge)
       out['exits'].append({'to': e.edge[1], 'turn': round(e.turn), 'move': w.move(e, exits), 'cand': e.edge in ok,
                            'banned': e.edge in w.banned, 'on': e.on, 'minor': w.minor(way), 'road': w.name(way),
-                           'roam': None if w.roaming is None else e.edge in w.roaming, 'len': len(e.path)})
+                           'roam': None if w.roaming is None else e.edge in w.roaming, 'len': len(e.path),
+                           'crossing': e.edge in crossing})
     return out
+
+  def _crosses(self, e: Exit) -> bool:
+    """Whether way out e takes one of GTA's shortcut links across a painted separation (Router.crossings)."""
+    return bool(self.router.crossings(np.array([self.osm.node_xy(n) for n in e.path])))
 
   def _trace(self, trace: dict, kind: str):
     self.log.append({'event': 'prompt', 'kind': kind, **trace})

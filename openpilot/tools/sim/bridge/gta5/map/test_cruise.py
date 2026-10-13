@@ -326,6 +326,32 @@ def test_prompt_other_way_out(monkeypatch):
   assert c.walk.has((2, 13)) and c.forced['link'] == (2, 13) and not c.take_notes()
 
 
+def test_prompt_crossing(monkeypatch):
+  """A way out by one of GTA's shortcut links across a painted separation (Router.crossings), which the route would ban,
+  isn't one an arrow key takes: the next that side is, without asking the router; with none, it can't turn there."""
+  monkeypatch.setattr(cr, "strays", lambda points, line, *a, **kw: None)
+  nodes = {1: (0.0, -ARM), 2: (0.0, 0.0)}
+  ways = {10: (MAIN, [1, 2])}
+  for wid, deg in ((11, 0.0), (12, 50.0), (13, 90.0)):
+    nodes[wid], nodes[wid + 100] = arm(deg), arm(deg, 1.5 * ARM)
+    ways[wid] = ({**SIDE, 'name': f'Way {wid}'}, [2, wid, wid + 100])
+  osm = make_map(nodes, ways)
+  for across, want in (({12}, ('turn', 'Way 13')), ({12, 13}, ('forbidden', ''))):
+    router = FakeRouter(osm)
+    spots = [osm.node_xy(n) for n in across]
+    router.crossings = lambda points, spots=spots: [p for p in spots if any(np.hypot(*(q - p)) < 1.0 for q in points)]
+    c = Cruise(router)
+    c.route, c.walk = c.make(np.array([0.0, -100.0]), 0.0, None)
+    asked = len(router.requests)
+    assert c.prompt('right', np.array([0.0, -100.0]), 0.0, None, 10.0) == want
+    routed(c)
+    assert not c.banned and not c.take_notes()
+    if want[0] == 'turn':
+      assert c.walk.has((2, 13)) and c.forced['link'] == (2, 13) and len(router.requests) == asked + 1
+    else:
+      assert len(router.requests) == asked
+
+
 def test_prompt_too_late(monkeypatch):
   """An arrow key's route goes in with the next update while the car can still make the turn; one that comes after the
   car's nearer than that (routing can take seconds) is dropped, said to be too late."""
