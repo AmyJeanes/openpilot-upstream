@@ -14,7 +14,8 @@ localhost forwarding holds 8793 while the link's world could serve it.
 
 --no-link runs it without openpilot: the game, the relay and the host alone, no WSL. openpilot is then gta5_opio.NullIO,
 never engaged, and the engage key drives with the map driver alone (whatever GTA5_DRIVER says); without a destination
-it cruises on along the road (map/cruise.py, with GTA5_ROUTER), and does nothing without a router.
+it cruises on along the road (map/cruise.py, with GTA5_ROUTER), and does nothing without a router. gta5_cmd.py's debug
+port (gta5_ports.DEBUG_PORT) is then the host's, which passes its commands to the plugin as they are.
 
 GTA5_RECORD=<folder> records here (gta5_record.py): the frames from the relay's frames port (--frames-port), modeld's
 outputs from the link's model tap (none with --no-link), the encoder GTA5_RECORD_FFMPEG's (else ffmpeg on the PATH)."""
@@ -28,6 +29,7 @@ import time
 
 from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, Brain
 from openpilot.tools.sim.bridge.gta5.gta5_opio import NullIO, RemoteIO, link_address
+from openpilot.tools.sim.bridge.gta5.gta5_ports import DEBUG_PORT
 from openpilot.tools.sim.bridge.gta5.gta5_record import RECORD, FrameWorker, Recorder
 from openpilot.tools.sim.bridge.gta5.gta5_relay import BRAIN_PORT, FRAMES_PORT, LINK_FILE
 from openpilot.tools.sim.bridge.gta5.map.map_view import MapView
@@ -61,6 +63,25 @@ class Relay:
       sock.sendall((json.dumps(cmd) + "\n").encode())
     except OSError:
       pass  # the reader sees it go
+
+  def serve_debug(self, port: int):
+    """gta5_cmd.py's commands straight to the plugin (the link's own debug port is in WSL, if it runs at all)."""
+    try:
+      srv = socket.create_server(("127.0.0.1", port))
+    except OSError as e:
+      print(f"gta5: no debug commands on 127.0.0.1:{port} ({e})", flush=True)
+      return
+    threading.Thread(target=self._debug_loop, args=(srv,), daemon=True).start()
+
+  def _debug_loop(self, srv: socket.socket):
+    while True:
+      conn, _ = srv.accept()
+      with conn, conn.makefile("r") as f:
+        for line in f:
+          try:
+            self.send(json.loads(line))
+          except ValueError:
+            continue
 
   def newest(self) -> tuple[dict | None, float]:
     with self.lock:
@@ -108,6 +129,8 @@ def main(argv: list[str] | None = None):
   args = ap.parse_args(argv)
   io = NullIO() if args.no_link else RemoteIO(link_address(args.link_file))
   relay = Relay(args.brain_port)
+  if args.no_link:
+    relay.serve_debug(DEBUG_PORT)
   if isinstance(io, RemoteIO):
     end = time.monotonic() + LINK_WAIT
     while not io.connected and time.monotonic() < end:
