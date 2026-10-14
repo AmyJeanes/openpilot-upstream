@@ -32,8 +32,9 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
-from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (CLAMP_MARGIN, DEADLOCK_WAIT, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR,
-                                                           NUDGE_MARGIN, NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDrive)
+from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (BORROW_LANE, BORROW_ONCOMING, BORROW_STOP, BORROW_V, BORROW_WAIT, BORROW_WIDE, CLAMP_MARGIN,
+                                                           DEADLOCK_WAIT, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_MARGIN,
+                                                           NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDrive)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
 
@@ -213,22 +214,95 @@ def test_nudge_past_a_parked_car():
 
 
 def test_nudge_no_room():
-  # its near side 1.75 m into a 3.5 m lane: no room in the lane, stopped behind and the trip ends as before
+  # within our lane alone (borrow off): its near side 1.75 m into a 3.5 m lane: no room in the lane, stopped behind and
+  # the trip ends as before
+  off = {"seed": 2, "borrow": False}
   r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 1, w=3.5))
-  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=1.75, driven=False)], reach=REACH, seconds=80)
+  trip = ms.drive(r, off, lane=0, vehicles=[parked(r, 0, 200.0, right=1.75, driven=False)], reach=REACH, seconds=80)
   ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
   assert [e["why"] for e in nudges(trip)] == ["no room"] and not trip.md.nudge_off.any(), nudges(trip)
   # 2.85 m into a 5.5 m lane beside the oncoming one: passing it would take us over the centre line, so neither
   r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 1))
-  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=0.9, driven=False)], reach=REACH, seconds=80)
+  trip = ms.drive(r, off, lane=0, vehicles=[parked(r, 0, 200.0, right=0.9, driven=False)], reach=REACH, seconds=80)
   ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
   assert [e["why"] for e in nudges(trip)] == ["no room"] and not trip.md.nudge_off.any(), nudges(trip)
   assert (trip.col(10) - trip.md.half_width).min() > 0.0  # our left side never past the centre line
-  # nor into a lane beside going our way (no borrowing it)
+  # nor into a lane beside going our way
   r = ms.straight(600)
-  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=0.9, driven=False)], reach=REACH, seconds=80)
+  trip = ms.drive(r, off, lane=1, vehicles=[parked(r, 1, 200.0, right=0.9, driven=False)], reach=REACH, seconds=80)
   ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+  # with the borrow, one too far into a one-way lane to pass even BORROW_EDGE from the road's edge: as before
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 0, w=4.4))
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=1.2, driven=False)], reach=REACH, seconds=80)
+  ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
+  assert all(e["why"] == "no room" for e in nudges(trip)), nudges(trip)
   print("nudge no room: ok")
+
+
+def borrowed(trip, kind: str) -> dict:
+  """Arrived without a touch, the parked vehicle passed through the room beside our lane (`kind`), NUDGE_CLEAR from
+  it (less the car's tracking), no faster than BORROW_V beside it (y 200 m along the straight)."""
+  ok = [e for e in nudges(trip) if e["ok"]]
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and len(ok) == 1 and ok[0].get("kind") == kind, (trip.finished, nudges(trip))
+  assert trip.col(13).min() > NUDGE_CLEAR - 0.15, trip.col(13).min()
+  beside = np.abs(trip.col(2) - 200.0) < 3.0
+  assert trip.col(4)[beside].max() < BORROW_V + 0.5, trip.col(4)[beside].max()
+  return ok[0]
+
+
+def test_borrow():
+  # r1t5 (San Andreas Ave, 2026-10-14 traffic baseline): 2.85 m into our 5.5 m right lane, the lane beside ours empty:
+  # passed slowly through it, our body no more than BORROW_LANE into it
+  r = ms.straight(600)
+  blocker = lambda: parked(r, 1, 200.0, right=0.9, driven=False)  # noqa: E731
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[blocker()], reach=REACH, seconds=120)
+  e = borrowed(trip, "lane")
+  assert e["shift"] < -1.0 and (trip.col(10) - trip.md.half_width).min() > LANE_W - BORROW_LANE - 0.15, (e, (trip.col(10) - trip.md.half_width).min())
+  # a car standing beside it in that lane, towards ours: stopped BORROW_STOP short and waited for; it drives off at
+  # 40 s: passed then
+  beside = parked(r, 0, 203.0, right=1.5, later=((40.0, 2.0, 8.0),))
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[blocker(), beside], reach=REACH, seconds=150)
+  borrowed(trip, "lane")
+  t, v, gap = trip.col(0), trip.col(4), trip.col(12)
+  waited = (v < 0.1) & (t < 40.0)
+  assert waited.sum() * ms.FRAME > 10.0 and abs(np.nanmedian(gap[waited]) - BORROW_STOP) < 1.0, (waited.sum(), np.nanmedian(gap[waited]))
+  assert any(e["why"] == "busy" for e in nudges(trip)), nudges(trip)
+  # it stays: the trip ends after BORROW_WAIT s, not PARKED_WAIT
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[blocker(), parked(r, 0, 203.0, right=1.5)], reach=REACH, seconds=150)
+  ended(trip, f"held {BORROW_WAIT:.0f} s by a parked vehicle in the way")
+  # one coming up behind in that lane as we near it: let by first
+  x, y, h = ms.start_pose(r, 0, 120.0)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[blocker(), ms.Vehicle(x, y, h, start=22.0, accel=2.0, until=9.0)], reach=REACH, seconds=150)
+  borrowed(trip, "lane")
+  # beside a side turning the path runs straight through (Autopia Pkwy's parked car stood 3 m short of one)
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[20])
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 197.0, right=0.9, driven=False)], reach=REACH, seconds=120)
+  borrowed(trip, "lane")
+  # a 1+1 road of 3.5 m lanes (Autopia Pkwy): 1.75 m into our lane, over the centre line by no more than
+  # BORROW_ONCOMING; an oncoming car on its way waited for
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 1, w=3.5))
+  blocker = lambda: parked(r, 0, 200.0, right=1.75, driven=False)  # noqa: E731
+  # (the bridge's lane matching may call it the oncoming lanes as our body nears the line: no abort for that meanwhile)
+  near_line = lambda route, st: {"kind": "oncoming" if route.right < 1.2 else "own", "lane": None, "lanes": 1}  # noqa: E731
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[blocker()], reach=REACH, seconds=120, lane_map=near_line)
+  borrowed(trip, "oncoming")
+  assert (trip.col(10) < 1.2).sum() * ms.FRAME > 1.5, (trip.col(10) < 1.2).sum()
+  assert (trip.col(10) - trip.md.half_width).min() > -BORROW_ONCOMING - 0.15, (trip.col(10) - trip.md.half_width).min()
+  x, y, h = ms.start_pose(r, -1, 420.0)
+  onc = ms.Vehicle(x, y, h + 180.0, speed=10.0)
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[blocker(), onc], reach=REACH, seconds=120)
+  borrowed(trip, "oncoming")
+  assert any(e["why"] == "busy" for e in nudges(trip)), nudges(trip)
+  # 2.35 m into a 3.5 m lane: more than BORROW_ONCOMING over the line is needed, up to BORROW_WIDE where it's clear
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=0.4, driven=False)], reach=REACH, seconds=120)
+  borrowed(trip, "oncoming")
+  over = -(trip.col(10) - trip.md.half_width).min()
+  assert BORROW_ONCOMING < over < BORROW_WIDE + 0.15, over
+  # a one-way 4.4 m lane: by BORROW_EDGE from the road's edge where CLAMP_MARGIN has no room
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 0, w=4.4))
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 200.0, right=1.5, driven=False)], reach=REACH, seconds=120)
+  borrowed(trip, "edge")
+  print("borrow: ok")
 
 
 def test_nudge_two_in_a_row():
@@ -524,6 +598,7 @@ if __name__ == "__main__":
   test_queue_that_moves()
   test_nudge_past_a_parked_car()
   test_nudge_no_room()
+  test_borrow()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()

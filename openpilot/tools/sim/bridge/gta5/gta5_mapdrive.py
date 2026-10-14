@@ -50,8 +50,12 @@ nudge_want (0.8) m where the lane has room, at least nudge_clear, held from NUDG
 eased in and out (minimum jerk) over NUDGE_EASE_T s at the speed it's passed at, slower the tighter the pass; our body
 kept CLAMP_MARGIN in from the lane's edges (the plan clamp's lane room; where that's no guide, _fill_room's from the
 road's sections or our lane's edges carried across a junction: never into a lane the path doesn't take or across the
-centre line, and none through a turn). Where there's no room for that, or
-it's seen too late to ease out, it's stopped behind as before. Each is a `nudge` event. Aborts (dev >
+centre line, and none through a turn). Where there's no room for that past a parked one, or it's seen too late to ease
+out, it's passed slowly (BORROW_V) through the room beside our lane (_borrow): our body up to BORROW_LANE into the next
+lane our way, BORROW_ONCOMING over the line into the oncoming one (BORROW_WIDE where a narrow lane needs it, with a
+wider clear look), or BORROW_EDGE from the road's edge, decided within
+BORROW_RANGE of it once that room is clear of others for the pass, else stopped BORROW_STOP short to look again, the trip
+ending after BORROW_WAIT s. Where there's no room for even that, it's stopped behind as before. Each is a `nudge` event. Aborts (dev >
 1.5 m for 1 s, heading off by 30 deg, a collision, off the road, no progress for 20 s, held by a vehicle for WAIT_MAX s
 with none moving (PARKED_WAIT s by a parked one, DEADLOCK_WAIT s by one across our way), lateral acceleration over 4.5,
 ONCOMING_S in the oncoming lanes away from a junction (the bridge's lane matching), the driver's input, a failed plan)
@@ -63,9 +67,10 @@ island_contact.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
-"rear_axle": null, "range_share": 0.75, "nudge": true, "nudge_clear": 0.5, "nudge_want": 0.8}; bias_max 0 and wander 0
-drive exactly on the line; rear_axle (m behind the car's position, default half the state's wheelBase) 0 steers from the
-car's middle; range_share 1 drops the range cap; nudge false stops behind every parked vehicle in the way."""
+"rear_axle": null, "range_share": 0.75, "nudge": true, "nudge_clear": 0.5, "nudge_want": 0.8, "borrow": true}; bias_max 0
+and wander 0 drive exactly on the line; rear_axle (m behind the car's position, default half the state's wheelBase) 0
+steers from the car's middle; range_share 1 drops the range cap; nudge false stops behind every parked vehicle in the
+way; borrow false keeps every pass within our lane."""
 import bisect
 import functools
 import hashlib
@@ -210,6 +215,23 @@ NUDGE_BRIDGE = 50.0  # m of road without a guide a nudge's room is carried acros
 NUDGE_BRIDGE_DEG = 40.0  # deg the path may bend across it (less than a turn)
 NUDGE_FILL = 60.0  # m either side of a shift's hold its room is filled in over
 NUDGE_ACROSS = 40  # m of path either side the lanes it moves across between are taken as ours
+# past a parked vehicle our lane alone has no room past, slowly through the room beside it (_borrow)
+BORROW_LANE = 2.0  # m our body may come into the next lane our way
+BORROW_ONCOMING = 1.0  # m over the line into an oncoming or centre lane
+BORROW_WIDE = 2.0  # m over it where a narrow lane leaves no less, the room looked across and ahead the wider (_borrow_clear)
+BORROW_EDGE = 0.1  # m our body keeps in from the road's edge (CLAMP_MARGIN within a lane)
+BORROW_KINDS = ("", "edge", "lane", "oncoming")  # bolder on
+BORROW_MARGIN = 1.0  # m before and after its body the shift is held
+BORROW_KAPPA = 0.18  # 1/m an ease turns no tighter than (a quintic's peak curvature is 5.77 shift / length^2)
+BORROW_EASE, BORROW_EASE_MIN = 15.0, 4.0  # m an ease takes at most, and at the least
+BORROW_V = 4.0  # m/s the pass is made at, at most
+BORROW_RANGE = 25.0  # m from our front to it within which the pass is decided (on what's about then)
+BORROW_RETRY = 0.5  # s between looks while the room is busy
+BORROW_STOP = 12.0  # m short of it we stop at meanwhile: room to pull out round it
+BORROW_WAIT = 30.0  # s held behind it, the room busy, before the trip ends (PARKED_WAIT where there's none)
+BORROW_BEHIND, BORROW_AHEAD = 10.0, 10.0  # m behind our rear and past the pass's end the room is looked along
+BORROW_SIDE, BORROW_SIDE_ONCOMING = 0.5, 1.0  # m beside our body it's looked across, and more into the oncoming lanes
+BORROW_SPARE = 2.0  # s more than the pass takes at BORROW_V that no one may come into the room within
 # aborts
 DEV_ABORT, DEV_ABORT_S = 1.5, 1.0
 HEADING_ABORT, HEADING_ABORT_S = 30.0, 0.5
@@ -275,7 +297,8 @@ PRESETS = {"calm": 0.2, "normal": 0.5, "brisk": 0.8}
 DEFAULTS = {"seed": None, "preset": "normal", "style": {}, "bias_max": 0.3, "wander": 0.1, "wander_m": 300.0,
             "on_abort": "stop", "speed": None, "plan_check": "fix", "stop_before": 15.0, "hold_after": 3.0, "retime": True,
             "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW, "fit_durations": True,
-            "rear_axle": None, "range_share": 0.75, "nudge": True, "nudge_clear": NUDGE_CLEAR, "nudge_want": NUDGE_WANT}
+            "rear_axle": None, "range_share": 0.75, "nudge": True, "nudge_clear": NUDGE_CLEAR, "nudge_want": NUDGE_WANT,
+            "borrow": True}
 
 
 def pick_style(seed: int, preset: str = "normal", over: dict | None = None) -> dict:
@@ -657,6 +680,7 @@ class MapDrive:
     self.nudge_off = np.zeros(0)  # m right of path0 the path is moved at each point
     self.nudge_fixed = np.zeros(0)  # of it, the shifts passed
     self.room_lo = self.room_hi = np.zeros(0)  # how far (m right) each point may move within its lane; NaN: no guide
+    self.borrow_lo = self.borrow_hi = np.zeros(0)  # how far past its lane, where a pass (_borrow) was made; NaN: none
     self.nudge_groups: list[dict] = []  # the shifts made (_group), until passed
     self.nudge_blocked: list[dict] = []  # parked vehicles with no shift past them, until passed
     self.nudge_log: list[dict] = []  # each nudge event, for the summary
@@ -1382,6 +1406,7 @@ class MapDrive:
     self.theta0 = self.theta
     self.nudge_groups, self.nudge_blocked = [], []
     self.room_lo, self.room_hi = self._nudge_room()
+    self.borrow_lo, self.borrow_hi = np.full(len(target), np.nan), np.full(len(target), np.nan)
     self.room_tried = np.zeros(len(target), bool)
     self._turn_alongs = [tr.dist for tr in (getattr(route, "_turns", None) or []) if abs(tr.angle) >= CLAMP_TURN] + \
                         [sc for sc, turned in route.lanes.corners if abs(turned) >= CLAMP_TURN]
@@ -2026,12 +2051,12 @@ class MapDrive:
                    "driven": None, "ped": True})
     self.cars = cars
 
-  def _place(self, pts: np.ndarray, ahead: float, path: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Points' (m along the path, or `path` of the same length, m right of it) on the path from the car to `ahead` m on;
-    NaN beyond LEAD_OFF off it or off either end."""
+  def _place(self, pts: np.ndarray, ahead: float, path: np.ndarray | None = None, behind: float = 5.0) -> tuple[np.ndarray, np.ndarray]:
+    """Points' (m along the path, or `path` of the same length, m right of it) on the path from `behind` m back of the
+    car to `ahead` m on; NaN beyond LEAD_OFF off it or off either end."""
     sp = self.s_path
     path = self.path if path is None else path
-    lo = max(int(np.searchsorted(sp, self.s - 5.0)) - 1, 0)
+    lo = max(int(np.searchsorted(sp, self.s - behind)) - 1, 0)
     hi = min(int(np.searchsorted(sp, self.s + ahead)) + 1, len(sp) - 1)
     a, ab = path[lo:hi], path[lo + 1:hi + 1] - path[lo:hi]
     if not len(a):
@@ -2376,7 +2401,9 @@ class MapDrive:
   def _nudge(self, v: float, t: float):
     """Each parked vehicle (no one at its wheel, standing), or driven one standing across our way, newly in the way along
     the path ahead: the path shifted past it within our lane (_nudge_for, _nudge_add), else left for the lead to stop
-    behind; a nudge event either way. Shifts and vehicles passed are dropped."""
+    behind; a nudge event either way. A parked one our lane has no room past may be passed slowly through the room
+    beside it (_borrow), looked at again every BORROW_RETRY s while that room is busy; an event as its outcome changes.
+    Shifts and vehicles passed are dropped."""
     if not self.c["nudge"] or self.path0 is None:
       return
     for g in self.nudge_groups:
@@ -2384,6 +2411,8 @@ class MapDrive:
         self.nudge_fixed = self.nudge_fixed + g["off"]  # behind the car: left as driven
     self.nudge_groups = [g for g in self.nudge_groups if self.s <= g["end"]]
     self.nudge_blocked = [b for b in self.nudge_blocked if self.s <= b["end"]]
+    retry = [b for b in self.nudge_blocked if b.get("later") and t >= b["retry"]]
+    self.nudge_blocked = [b for b in self.nudge_blocked if not any(b is r for r in retry)]
     for car in self.cars or []:
       if car.get("ped") or float(np.hypot(*car["vel"])) > LEAD_MOVING:
         continue
@@ -2396,31 +2425,69 @@ class MapDrive:
       seen = [e["c"] for g in self.nudge_groups for e in g["entries"]] + [b["c"] for b in self.nudge_blocked]
       if any(float(np.hypot(*(x - c))) < NUDGE_SAME for x in seen):
         continue
-      e = self._nudge_for(car, v)
+      before = next((b for b in retry if float(np.hypot(*(b["c"] - c))) < NUDGE_SAME), None)
+      e = self._nudge_for(car, v, t)
       if e is None:
         continue
-      why = e.get("why") or self._nudge_add(e)
+      why = e.get("why") or self._nudge_try(e)
+      if why is not None and e.get("shift") is not None and e.get("borrow") is None and car["driven"] is False and self.c["borrow"]:
+        b = self._borrow(e, e["body"], v, t)  # a shift within our lane that doesn't fit with the others: wider
+        if b.get("why") is None:
+          e, why = b, self._nudge_try(b)
+        else:
+          e = {**e, "later": bool(b.get("later")), "past": self._past(b)}
+          why = b["why"] if b.get("later") else why
       rec = {"ok": why is None, "pos": [round(float(c[0]), 1), round(float(c[1]), 1)], "at": e["at"], "right": e["right"],
-             "need": e["need"], **({"driven": True} if car["driven"] else {})}
+             "need": e["need"], **({"driven": True} if car["driven"] else {}), **({"past": e["past"]} if e.get("past") else {})}
       if why is None:
         rec.update(shift=round(e["shift"], 2), clear=round(e["clear"], 2), ease=[round(e["L_in"], 1), round(e["L_out"], 1)],
-                   v=round(e["v"], 1), v_ease=round(e["v_ease"], 1))
+                   v=round(e["v"], 1), v_ease=round(e["v_ease"], 1), **({"kind": e["kind"]} if e.get("kind") else {}))
       else:
         rec["why"] = why
-        self.nudge_blocked.append({"c": c, "end": e["at"][1] + self.rear})
+        later = bool(e.get("later"))
+        self.nudge_blocked.append({"c": c, "end": e["at"][1] + self.rear, "why": why, "later": later, "retry": t + BORROW_RETRY})
+        if before is not None and before["why"] == why:
+          continue  # looked at again, as it was: logged once
       self.nudge_log.append({"t": round(t, 3), **rec})
       self._event("nudge", t, **rec)
+
+  def _nudge_try(self, e: dict) -> str | None:
+    """_nudge_add, with a pass's room past our lane (_borrow) as well while it's tried; why it can't be, else None."""
+    saved = None
+    if e.get("borrow") is not None:
+      ia, ib, lo_, hi_ = e["borrow"]
+      saved = (self.borrow_lo.copy(), self.borrow_hi.copy())
+      self.borrow_lo[ia:ib + 1] = np.fmin(self.borrow_lo[ia:ib + 1], lo_)
+      self.borrow_hi[ia:ib + 1] = np.fmax(self.borrow_hi[ia:ib + 1], hi_)
+    why = self._nudge_add(e)
+    if why is not None and saved is not None:
+      self.borrow_lo, self.borrow_hi = saved
+      e["past"] = f"{why} (shift {e['shift']:.2f}, eases {e['L_in']:.1f}/{e['L_out']:.1f})"
+    return why
+
+  @staticmethod
+  def _past(b: dict) -> str:
+    """A failed _borrow's why, for the nudge event."""
+    return b["why"] + (f" ({b['by']})" if b.get("by") else "")
+
+  def _borrow_pending(self, car: dict) -> dict | None:
+    """The blocked entry of a parked vehicle we may yet pass through the room beside it (_borrow, busy for now); None."""
+    if car.get("driven") is not False:
+      return None
+    c = car["c"].mean(axis=0)
+    return next((b for b in self.nudge_blocked if b.get("later") and float(np.hypot(*(b["c"] - c))) < NUDGE_SAME), None)
 
   def _ease_v(self, length: float, shift: float) -> float:
     """m/s an ease across `shift` m over `length` m is comfortable at."""
     a = NUDGE_A_LAT * self.style["a_lat"]
     return min(length / NUDGE_EASE_T, length * math.sqrt(a / (5.77 * max(abs(shift), 1e-3))))
 
-  def _nudge_for(self, car: dict, v: float) -> dict | None:
+  def _nudge_for(self, car: dict, v: float, t: float = 0.0) -> dict | None:
     """The shift past a parked vehicle: m right (`shift`, from `need` at the least), held over path m h0 to h1 (points i0
     to i1), eased in over L_in m and out over L_out (no faster than `v_ease` m/s), passed at `v` m/s at most with `clear`
-    m between our bodies; with a `why` where there's none. None where it leaves us nudge_clear already, or isn't all in
-    view ahead."""
+    m between our bodies; with a `why` where there's none (and `later` where _borrow's way past may yet open). Where
+    our lane has none for a parked one, _borrow's. None where it leaves us nudge_clear already, or isn't all in view
+    ahead."""
     # placed on a little further than the lead looks, so it's all in view once it's a lead
     along, right = self._place(self._outline(car["c"]), LEAD_AHEAD + self.front + 2 * FRONT + 2.0, self.path0)
     if np.isnan(along).any():
@@ -2435,11 +2502,20 @@ class MapDrive:
     h0, h1 = a0 - self.front - NUDGE_MARGIN, a1 + self.rear + NUDGE_MARGIN
     i0 = int(np.searchsorted(sp, h0))
     i1 = min(int(np.searchsorted(sp, h1, side="right")), len(sp) - 1)
-    e = {"c": car["c"].mean(axis=0), "at": [round(a0, 1), round(a1, 1)], "right": [round(r0, 2), round(r1, 2)], "need": None}
+    e = {"c": car["c"].mean(axis=0), "at": [round(a0, 1), round(a1, 1)], "right": [round(r0, 2), round(r1, 2)], "need": None,
+         "body": (r0, r1, a0, a1)}
+
+    def failed(why: str) -> dict:
+      if car["driven"] is not False or not self.c["borrow"]:
+        return {**e, "why": why}
+      b = self._borrow(e, (r0, r1, a0, a1), v, t)
+      if b.get("why") is None:
+        return b
+      return {**e, "why": b["why"] if b.get("later") else why, "later": bool(b.get("later")), "past": self._past(b)}
     self._fill_room(int(np.searchsorted(sp, h0 - NUDGE_FILL)), int(np.searchsorted(sp, h1 + NUDGE_FILL)))
     lo, hi = self.room_lo[i0:i1 + 1], self.room_hi[i0:i1 + 1]
     if not len(lo) or np.isnan(lo).any():
-      return {**e, "why": "no lane"}
+      return failed("no lane")
     options = []  # (shift, need): past it on its left (moved no further right than need), or on its right
     if r0 - hw - clear >= lo.max():
       options.append((max(r0 - hw - want, float(lo.max())), r0 - hw - clear))
@@ -2447,7 +2523,8 @@ class MapDrive:
       options.append((min(r1 + hw + want, float(hi.min())), r1 + hw + clear))
     if not options:
       need = r0 - hw - clear if abs(r0 - hw - clear) < abs(r1 + hw + clear) else r1 + hw + clear
-      return {**e, "need": round(need, 2), "why": "no room"}
+      e["need"] = round(need, 2)
+      return failed("no room")
     shift, need = min(options, key=lambda o: abs(o[0]))
     e.update(need=round(need, 2), shift=shift, clear=clear + abs(shift - need), h0=h0, h1=h1, i0=i0, i1=i1)
     # eased in at the speed it's driven at there, slowing to pass it the tighter the pass
@@ -2462,15 +2539,159 @@ class MapDrive:
     e["L_in"] = min(length, h0 - max(self.s + NUDGE_GUARD, lane0))
     e["L_out"] = min(length, lane1 - h1)
     if e["L_in"] < NUDGE_EASE_MIN:
-      return {**e, "why": "late" if h0 - self.s - NUDGE_GUARD < NUDGE_EASE_MIN else "no lane"}
+      return failed("late" if h0 - self.s - NUDGE_GUARD < NUDGE_EASE_MIN else "no lane")
     if e["L_out"] < NUDGE_EASE_MIN:
-      return {**e, "why": "no lane"}
+      return failed("no lane")
     e["v"] = NUDGE_V[0] + NUDGE_V[1] * (e["clear"] - clear)
     e["v_ease"] = min(self._ease_v(e["L_in"], shift), self._ease_v(e["L_out"], shift))
     d = h0 - e["L_in"] - self.s - v * STOP_LAG
     if math.sqrt(max(v * v - 2.0 * self.style["decel"] * max(d, 0.0), 0.0)) > NUDGE_LATE * e["v_ease"]:
-      return {**e, "why": "late"}
+      return failed("late")
     return e
+
+  def _borrow(self, e: dict, body: tuple, v: float, t: float) -> dict:
+    """Past a parked vehicle our lane alone has no room past (or none at the speed it's seen at): slowly, through the
+    room beside our lane on its far side (_borrow_room), once that's clear of others for as long as the pass takes
+    (_borrow_clear) and the car is within BORROW_RANGE of it, slow enough to ease out at BORROW_KAPPA. _nudge_for's
+    entry, its `kind` the room's and `borrow` (path points a to b, their left and right bounds) for _nudge_bad; else
+    {"why", "later": whether to look again (it's busy or not yet near, and _longitudinal stops BORROW_STOP short)}."""
+    r0, r1, a0, a1 = body
+    hw = self.half_width
+    clear = max(float(self.c["nudge_clear"]), LEAD_SIDE + 0.05)
+    want = max(float(self.c["nudge_want"]), clear)
+    sp, n = self.s_path, len(self.s_path)
+    side = -1 if abs(r0 - hw - clear) <= abs(r1 + hw + clear) else 1  # past its left (path moved left) or its right
+    need = r0 - hw - clear if side < 0 else r1 + hw + clear
+    h0, h1 = a0 - self.front - BORROW_MARGIN, a1 + self.rear + BORROW_MARGIN
+    i0 = int(np.searchsorted(sp, h0))
+    i1 = min(int(np.searchsorted(sp, h1, side="right")), n - 1)
+    ia = max(int(np.searchsorted(sp, h0 - BORROW_EASE)), 0)
+    ib = min(int(np.searchsorted(sp, h1 + BORROW_EASE)), n - 1)
+    if i1 <= i0 or h0 <= self.s + NUDGE_GUARD:
+      return {"why": "no room", "by": "near"}
+    lo, hi, kinds = self._borrow_room(ia, ib, side)
+    held_lo, held_hi = lo[i0 - ia:i1 - ia + 1], hi[i0 - ia:i1 - ia + 1]
+    if np.isnan(held_lo).any():
+      return {"why": "no lane"}
+    wide = False
+    if (held_lo.max() > need + 1e-6 if side < 0 else held_hi.min() < need - 1e-6) and "oncoming" in kinds[i0 - ia:i1 - ia + 1]:
+      lo, hi, kinds = self._borrow_room(ia, ib, side, BORROW_WIDE)  # further over the line, the pass clear the wider
+      held_lo, held_hi, wide = lo[i0 - ia:i1 - ia + 1], hi[i0 - ia:i1 - ia + 1], True
+    if side < 0:
+      bound = float(held_lo.max())
+      if bound > need + 1e-6:
+        return {"why": "no room", "by": f"{bound:.2f}"}
+      shift = max(min(r0 - hw - want, need), bound)
+    else:
+      bound = float(held_hi.min())
+      if bound < need - 1e-6:
+        return {"why": "no room", "by": f"{bound:.2f}"}
+      shift = min(max(r1 + hw + want, need), bound)
+    kind = max(kinds[i0 - ia:i1 - ia + 1], key=BORROW_KINDS.index)  # the boldest the pass takes
+    # eased in from the car (or where the room starts) and out to where it ends, no tighter than BORROW_KAPPA
+    ok = ~np.isnan(lo)
+    k0 = i0 - ia
+    while k0 > 0 and ok[k0 - 1]:
+      k0 -= 1
+    k1 = i1 - ia
+    while k1 < len(ok) - 1 and ok[k1 + 1]:
+      k1 += 1
+    L_in = min(BORROW_EASE, h0 - max(self.s + NUDGE_GUARD, float(sp[ia + k0])))
+    L_out = min(BORROW_EASE, float(sp[ia + k1]) - h1)
+    # where the eases are short (stopped near it, the room ending soon after), no further over than needed for them
+    fits = min(L_in, L_out) ** 2 * BORROW_KAPPA / 5.77
+    if min(L_in, L_out) < BORROW_EASE_MIN or fits < abs(need):
+      return {"why": "no room", "by": f"eases {L_in:.1f}/{L_out:.1f} for {abs(need):.2f}"}
+    shift = math.copysign(min(abs(shift), fits), shift)
+    if a0 - self.s - self.front > BORROW_RANGE:
+      return {"why": "wait", "later": True}  # decided once near, on what's about then
+    v_ease = min(BORROW_V, self._ease_v(L_in, shift), self._ease_v(L_out, shift))
+    d = h0 - L_in - self.s - v * STOP_LAG
+    if math.sqrt(max(v * v - 2.0 * self.style["decel"] * max(d, 0.0), 0.0)) > NUDGE_LATE * v_ease:
+      return {"why": "late", "later": True}
+    busy = self._borrow_clear(e["c"], side, shift, h1 + L_out, kind, t, wide)
+    if busy is not None:
+      return {"why": "busy", "later": True, "by": busy}
+    return {**e, "need": round(need, 2), "shift": shift, "clear": clear + abs(shift - need), "h0": h0, "h1": h1, "i0": i0,
+            "i1": i1, "L_in": L_in, "L_out": L_out, "v": BORROW_V, "v_ease": v_ease, "kind": kind, "borrow": (ia, ib, lo, hi)}
+
+  def _borrow_room(self, a: int, b: int, side: int, over: float = BORROW_ONCOMING) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """How far (m right of path0) path points a to b may move past a parked vehicle on its `side` (-1 left), by the
+    road's sections: our body BORROW_LANE into the next lane our way ("lane"), `over` m over the line into the
+    oncoming or a centre lane ("oncoming"), or BORROW_EDGE in from the road's edge ("edge"); within our lane's
+    CLAMP_MARGIN on the other side. (left, right bounds, NaN where the sections are no guide, and kinds): about turns
+    and where the path leaves its road's line, as _fill_room's, but not about junction nodes the path runs straight
+    through (parked cars stand by side turnings and driveways), a lane there of NUDGE_SPAN's width."""
+    route, lanes = self.route, self.route.lanes
+    turns = np.asarray(self._turn_alongs, float)
+    hw = self.half_width
+    lo, hi, kinds = np.full(b - a + 1, np.nan), np.full(b - a + 1, np.nan), [""] * (b - a + 1)
+    for i in range(a, b + 1):
+      rs, r = float(self.route_s[i]), float(self.route_r[i])
+      if len(turns) and (np.abs(turns - rs) < NUDGE_NODE).any():
+        continue
+      k = segment_of(route, rs)
+      d = route.points[k + 1, :2] - route.points[k, :2]
+      sec = lanes.section_at(rs, k)
+      if sec is None or not sec.lanes:
+        continue
+      if abs(wrap(math.degrees(self.theta0[i] - math.atan2(d[1], d[0])))) > 2.0 * NUDGE_ALIGN:  # a lane's swerve as it narrows
+        continue
+      j = next((j for j in range(sec.first, sec.first + sec.lanes) if sec.spans[j].left - 0.05 <= r <= sec.spans[j].right + 0.05), None)
+      if j is None:
+        continue
+      own = sec.spans[j]
+      if not NUDGE_SPAN[0] <= own.right - own.left <= NUDGE_SPAN[1]:
+        continue
+      near = max(own.left, sec.edges[0]) + hw + CLAMP_MARGIN - r, min(own.right, sec.edges[1]) - hw - CLAMP_MARGIN - r
+      nb = j + side
+      if 0 <= nb < len(sec.spans) and abs((own.left - sec.spans[nb].right) if side < 0 else (sec.spans[nb].left - own.right)) > 0.3:
+        kind, edge = "edge", (own.left + BORROW_EDGE) if side < 0 else (own.right - BORROW_EDGE)  # a median between
+      elif not 0 <= nb < len(sec.spans):
+        kind, edge = "edge", (sec.edges[0] + BORROW_EDGE) if side < 0 else (sec.edges[1] - BORROW_EDGE)
+      elif sec.spans[nb].heading == 1:
+        far = sec.spans[nb].left + CLAMP_MARGIN if side < 0 else sec.spans[nb].right - CLAMP_MARGIN
+        kind, edge = "lane", max(own.left - BORROW_LANE, far) if side < 0 else min(own.right + BORROW_LANE, far)
+      else:
+        kind, edge = "oncoming", own.left - over if side < 0 else own.right + over
+      # the path as planned is room, whatever the sections say (the kerb side's bound only matters past it)
+      if side < 0:
+        lo[i - a], hi[i - a] = min(edge + hw - r, near[0]), max(near[1], 0.0)
+      else:
+        lo[i - a], hi[i - a] = min(near[0], 0.0), max(edge - hw - r, near[1])
+      kinds[i - a] = kind
+    return lo, hi, kinds
+
+  def _borrow_clear(self, blocker: np.ndarray, side: int, shift: float, end: float, kind: str, t: float,
+                    wide: bool = False) -> str | None:
+    """Why the room a pass past a parked vehicle (middle `blocker`) takes isn't clear, else None: anyone else (on foot
+    too) in it now, or coming into it straight on at their speed before the car's back in its lane (path m `end`, at
+    BORROW_V from where it is, BORROW_SPARE s more): from BORROW_BEHIND m behind our rear (only the room beyond our body
+    there) to BORROW_AHEAD past `end`; BORROW_SIDE m more beside it, more still into the oncoming lanes (and twice that,
+    and twice BORROW_SPARE, for a `wide` pass). Other parked ones on the blocker's side of our way are left to their own
+    nudges."""
+    hw = self.half_width
+    pad = BORROW_SIDE + (BORROW_SIDE_ONCOMING if kind == "oncoming" else 0.0) * (2.0 if wide else 1.0)
+    band = (shift - hw - pad, shift + hw + pad)
+    beyond = (band[0], -hw - 0.2) if side < 0 else (hw + 0.2, band[1])  # beside and behind us: past our own body only
+    secs = (end - self.s) / BORROW_V + BORROW_SPARE * (2.0 if wide else 1.0)
+    ahead = end + BORROW_AHEAD - self.s
+    back = self.rear + BORROW_BEHIND
+    for car in self.cars or []:
+      c = car["c"].mean(axis=0)
+      if float(np.hypot(*(c - blocker))) < NUDGE_SAME:
+        continue
+      moving = float(np.hypot(*car["vel"])) >= LEAD_MOVING
+      for dt in np.arange(0.0, secs + 0.01, 0.5) if moving else (0.0,):
+        along, right = self._place(self._outline(self._car_now(car, t, dt)), ahead, self.path0, behind=back)
+        ok = ~np.isnan(along)
+        if not moving and car.get("driven") is False and ok.any() and side * float(np.nanmean(right)) < 0.0:
+          break
+        front = ok & (along >= self.s + self.front)
+        inside = (front & (right > band[0]) & (right < band[1])) | (ok & ~front & (right > beyond[0]) & (right < beyond[1]))
+        if inside.any():
+          return "ped" if car.get("ped") else "coming" if moving else "standing"
+    return None
 
   def _group(self, entries: list[dict]) -> dict:
     """Shifts one way whose eases overlap, as one: each held over its vehicle, the gap between two held at the lesser,
@@ -2522,14 +2743,14 @@ class MapDrive:
     return why
 
   def _nudge_bad(self, groups: list[dict], off: np.ndarray) -> str | None:
-    """Why the shifts `off` can't be driven: the path moved where the car is, outside the lane's room (or where it's no
-    guide), or short of a vehicle's need; else None."""
+    """Why the shifts `off` can't be driven: the path moved where the car is, outside the lane's room (and a pass's
+    room past it, _borrow's) or where it's no guide, or short of a vehicle's need; else None."""
     sp = self.s_path
     near = sp <= self.s + NUDGE_GUARD
     if np.abs(off[near] - self.nudge_off[near]).max(initial=0.0) > 0.01:
       return "under way"
     moved = np.abs(off) > 0.02
-    lo, hi = self.room_lo, self.room_hi
+    lo, hi = np.fmin(self.room_lo, self.borrow_lo), np.fmax(self.room_hi, self.borrow_hi)
     if (moved & np.isnan(lo)).any():
       return "no lane"
     m = moved & ~np.isnan(lo)
@@ -2640,6 +2861,9 @@ class MapDrive:
       self._abort(f"lateral acceleration {a_lat:.1f} m/s^2", t, pos)
     # the lane matcher's oncoming lanes away from a junction: a plan gone wrong, whatever its keys say
     oncoming = (state.get("laneMap") or {}).get("kind") == "oncoming" and not self._unclear(route.at)
+    # nor while passing a parked car over the line (_borrow)
+    oncoming = oncoming and not any(g["start"] <= self.s <= g["end"] and any(e.get("kind") == "oncoming" for e in g["entries"])
+                                    for g in self.nudge_groups)
     if self.phase != "abort" and held("oncoming", oncoming, ONCOMING_S):
       self._abort("in the oncoming lanes", t, pos)
     if self.s > self.progress[0] + 1.0:
@@ -2782,7 +3006,8 @@ class MapDrive:
       if lead is not None:
         gap, vl, car, side = lead
         self.lead_gap, self.lead_right, self.lead_driven = gap, side, car["driven"]
-        a_lead = self._follow(gap, vl, v)
+        # a parked one we may yet pass through the room beside it: stopped BORROW_STOP short, room to pull out
+        a_lead = self._follow(gap - (BORROW_STOP - LEAD_STOP) if self._borrow_pending(car) else gap, vl, v)
         if held_in and car.get("across_way"):
           a_lead = min(a_lead, HOLD_ACCEL)  # likewise for one across our way ahead: held where we are
         if a_lead < min(need, (vp * vp - v * v) / (2.0 * look)):
@@ -2808,7 +3033,8 @@ class MapDrive:
     # one standing across our way may be waiting for us to clear its way, which we can't (no reverse): a deadlock
     blocked = phase == "yield" and (bool(holder.get("crosswise")) or bool(detail.get("slowed")))
     obst = phase == "follow" and bool(holder.get("obst"))  # a static thing on the plan: it won't move
-    wait = PARKED_WAIT if parked else DEADLOCK_WAIT if blocked else OBST_WAIT if obst else WAIT_MAX
+    wait = (BORROW_WAIT if self._borrow_pending(holder) else PARKED_WAIT) if parked else DEADLOCK_WAIT if blocked else \
+      OBST_WAIT if obst else WAIT_MAX
     if self.held_since is not None and t - self.held_since > wait:
       who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle standing across our way" if blocked else \
             "static obstacle" if obst else "vehicle"
