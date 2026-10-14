@@ -1094,7 +1094,11 @@ def test_real_routes():
         for s0, s1, _, across in md.changes:
           dt = np.interp(s1, s, t) - np.interp(s0, s, t)
           n = max(round(abs(across) / LANE_W), 1)
-          assert abs(across) < 3.0 or 3.0 < dt / n < 12.0, (seg, i, dt, across)  # into a lane still opening is a short move
+          # into a lane still opening is a short move: where nav's keys renumber the lanes as it opens (across the
+          # route's line that can still be a lane's width, where the line jogs as the lane opens)
+          rs0 = float(np.interp(s0, md.s_path, md.route_s))
+          opening = len({lane for a, lane in md.keys if abs(a - rs0) < 0.5}) > 1
+          assert abs(across) < 3.0 or opening or 3.0 < dt / n < 12.0, (seg, i, dt, across)
       worst.append(dev.max())
       done += 1
   if not done:
