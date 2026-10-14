@@ -837,11 +837,20 @@ class Router:
       points, limits = points[keep], np.asarray(limits)[keep[:-1]] if len(limits) else limits
     return Route(points, maneuvers, self.paths, limits, self.osm)
 
-  def route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None = None) -> Route:
+  def route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None = None,
+            avoid: tuple | list = ()) -> Route:
     """From the car, setting off the way it faces (bearing clockwise from north), to dest. Given the car's height,
-    from the road it's on, not one passing over or under it."""
+    from the road it's on, not one passing over or under it. `avoid`: links (pa, pb), each from one map node to the
+    next (game metres), the route keeps off for this request alone, as off a crossing (a fork's branch the car can't
+    get into in time, say: its link a little past the gore)."""
     start, at_car, snapped = self._start(pos, bearing, z)
     request = self._request()
+    osm = self.osm if self.osm is not None else self.roads
+    excluded: list[np.ndarray] = [clear_point(osm, pa, pb) if osm is not None else (np.asarray(pa, float) + np.asarray(pb, float)) / 2
+                                  for pa, pb in avoid]
+    avoided = len(excluded)
+    if excluded:
+      request = {**request, 'exclude_locations': [location(p, radius=CROSSING_RADIUS) for p in excluded]}
     # the road the destination faces, arriving its way, else on that road either way, else the router's nearest road
     snap = self.snap(dest)
     ends = [location(dest)]
@@ -870,7 +879,6 @@ class Router:
         pass
     points, maneuvers = self._shape(trip, snapped)
     # off GTA's shortcut links across a painted separation between carriageways, which a driver can't take
-    excluded: list[np.ndarray] = []
     first = trip.get('summary', {}).get('length', 0.0) * 1000.0
     for _ in range(CROSSING_ROUNDS):
       spots = [p for p in self.crossings(points) if all(np.hypot(*(p - q)) > 1.0 for q in excluded)]
@@ -884,7 +892,7 @@ class Router:
         break  # none without them: as Valhalla has it
       request = avoid
       points, maneuvers = self._shape(trip, snapped)
-    if excluded and snapped is not None and trip.get('summary', {}).get('length', 0.0) * 1000.0 > first + CROSSING_DETOUR:
+    if len(excluded) > avoided and snapped is not None and trip.get('summary', {}).get('length', 0.0) * 1000.0 > first + CROSSING_DETOUR:
       # a route starting at the node ahead may only set off within SNAP_TOLERANCE of the car's heading, where the
       # way on without the crossing turns off sharper there: from the car itself instead, else from a little behind
       # it on its road (the car is about at that node), which the car is then located past

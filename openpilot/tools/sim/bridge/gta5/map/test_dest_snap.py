@@ -244,3 +244,26 @@ if __name__ == '__main__':
     if name.startswith('test_'):
       test()
       print(f'{name} ok')
+
+
+def test_router_avoids_links():
+  # links to keep off for one request (a fork branch, say): each excluded about its middle in every request made,
+  # with the crossings radius; none without
+  from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
+  from openpilot.tools.sim.bridge.gta5.map.router import CROSSING_RADIUS
+  roads = make_map(NODES, WAYS)
+
+  class Keep(FakeRouter):
+    def _post(self, action, request):
+      if action == "route":
+        self.full = [*getattr(self, "full", []), request]
+      return super()._post(action, request)
+  r = Keep(roads, lambda loc: (100.0, (0.0, 1.0)))
+  r.route(np.array([0.0, -300.0]), 0.0, np.array([32.0, 2.0]), avoid=[(np.array(NODES[2]), np.array(NODES[3]))])
+  assert len(r.full) == 2 and all(len(q["exclude_locations"]) == 1 for q in r.full)
+  ex = r.full[0]["exclude_locations"][0]
+  x, y = to_game(ex["lat"], ex["lon"])
+  assert ex["radius"] == CROSSING_RADIUS and abs(x) < 0.5 and 5.0 < y < 55.0
+  plain = Keep(roads, lambda loc: (100.0, (0.0, 1.0)))
+  plain.route(np.array([0.0, -300.0]), 0.0, np.array([32.0, 2.0]))
+  assert all("exclude_locations" not in q for q in plain.full)
