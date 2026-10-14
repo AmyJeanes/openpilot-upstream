@@ -12,7 +12,8 @@ within `closing_time` s. A side's flag comes on at once and goes off once it has
 when its zone goes (the map's lanes beside flickering), so the flag never drops for a single reading.
 Oncoming and crossing vehicles (heading over `heading` deg off ours), parked ones (stopped, nobody in the driver's
 seat), and a side with no lane our way (the kerb, or across the centre line, where the car's lanes are known) never
-count.
+count. The zones and the occupancy rule are side_zones and occupant, and lane_occupied asks them of a state at once
+with any tune's margins: the map driver's lane changes wait on it (gta5_mapdrive.LaneGapTune).
 
 Defaults (GTA5_BLINDSPOT_TUNE, a JSON file of any of them, read again whenever it changes; GTA5_BLINDSPOT=0 turns the
 monitor off):
@@ -75,6 +76,84 @@ def footprint(v) -> tuple[float, float, float, float]:
   return min(ex), max(ex), min(ey), max(ey)
 
 
+def side_zones(state: dict, dims, tune: BlindSpotTune) -> dict[str, tuple[float, float] | None]:
+  """Each side's zone across (our frame: m right of our origin, lo to hi): the lane beside from the map's lanes along
+  our route, else tune's inner..outer from our side, trimmed; None for a side with no lane our way."""
+  mnx, mxx = dims[0], dims[1]
+  outer = _outer(state, (mxx - mnx) / 2, tune.outer)
+  zones: dict[str, tuple[float, float] | None] = {}
+  for side, sign, edge in (("left", -1.0, mnx), ("right", 1.0, mxx)):
+    if outer[side] is None:
+      zones[side] = None
+      continue
+    lane = (state.get("besideLanes") or [None, None])[0 if side == "left" else 1]
+    if lane is not None:  # the lane beside itself, from the map: whatever its width, our own lane stays out
+      near, far = lane[0] + tune.lane_margin, max(min(lane[1], MAX_OUTER + (mxx - mnx) / 2) - tune.lane_margin, lane[0] + tune.lane_margin + 1.0)
+      lo, hi = sorted((sign * near, sign * far))
+    else:
+      lo, hi = _trimmed(sign, edge, outer[side], tune)
+    zones[side] = (lo, hi)
+  return zones
+
+
+def _trimmed(sign: float, edge: float, outer: float, tune: BlindSpotTune) -> tuple[float, float]:
+  """The zone from tune.inner to `outer` m out from our side (`edge`), narrowed by tune.trim about its centre, kept at
+  least 1 m wide."""
+  lo, hi = sorted((edge + sign * tune.inner, edge + sign * max(outer, tune.inner + 1.0)))
+  trim = min(tune.trim, max((hi - lo - 1.0) / 2, 0.0))
+  return lo + trim, hi - trim
+
+
+def _outer(state: dict, half_width: float, default: float) -> dict[str, float | None]:
+  """m out from our side each zone reaches, None for a side with no lane our way: by the map's lanes along our route,
+  else by its lane match off it (not the plugin's own lane reading, which counts one of GTA's links side by side)."""
+  beside, matched = state.get("beside"), state.get("laneMap") or {}
+  if beside is not None:
+    return {side: None if d is None else min(d - half_width, MAX_OUTER) for side, d in zip(("left", "right"), beside, strict=True)}
+  out: dict[str, float | None] = {"left": default, "right": default}
+  if matched.get("kind") == "own" and matched.get("lanes") and matched.get("lane") is not None:
+    if matched["lane"] <= 0:
+      out["left"] = None
+    if matched["lane"] >= matched["lanes"] - 1:
+      out["right"] = None
+  return out
+
+
+def occupant(v, lo: float, hi: float, along: tuple[float, float], rear: float, v_ego: float, tune: BlindSpotTune) -> str | None:
+  """Whether a reported vehicle (a row of the plugin's nearby "v") occupies a zone (our frame: lo..hi across,
+  along[0]..along[1] along, `rear` our rear bumper): "beside" in it, "closing" behind it in that lane by tune's closing
+  rule; None for one not going our way, parked, or clear of it."""
+  if abs(v[2]) > tune.heading:
+    return None  # oncoming, or crossing
+  if math.hypot(v[3], v[4]) < tune.parked_speed and not v[9]:
+    return None  # parked
+  x0, x1, y0, y1 = footprint(v)
+  if x1 < lo or x0 > hi:
+    return None
+  if y1 >= along[0] and y0 <= along[1]:
+    return "beside"
+  gap, closing = rear - y1, v[4] - v_ego
+  return "closing" if 0.0 < gap <= tune.closing_behind and closing > tune.closing_speed and gap / closing < tune.closing_time else None
+
+
+def lane_occupied(state: dict, side: str, tune: BlindSpotTune) -> str | None:
+  """Whether the lane beside on `side` ("left" or "right") is occupied now, by `tune`'s zone and closing rule (the
+  monitor's own, or a lane change's margins): "beside" or "closing", else None. Where the map has no lane our way that
+  side (one a planned change moves into may open just ahead), tune.outer's zone stands in."""
+  nearby = state.get("nearby") or {}
+  dims = tuple(nearby.get("dims") or OWN_DIMS)
+  span = side_zones(state, dims, tune)[side]
+  if span is None:
+    span = _trimmed(-1.0, dims[0], tune.outer, tune) if side == "left" else _trimmed(1.0, dims[1], tune.outer, tune)
+  along = (dims[2] - tune.behind, dims[3] + tune.front)
+  v_ego = state.get("vEgo", 0.0)
+  for v in nearby.get("v") or []:
+    row = list(v[:10]) + [1] * (10 - len(v))  # a plugin without the driven flag: everyone's driven
+    if len(v) >= 9 and (why := occupant(row, span[0], span[1], along, dims[2], v_ego, tune)):
+      return why
+  return None
+
+
 class BlindSpot:
   def __init__(self, tune: BlindSpotTune | None = None):
     self.tune = tune or BlindSpotTune(os.getenv("GTA5_BLINDSPOT_TUNE"))
@@ -108,58 +187,22 @@ class BlindSpot:
     """Each side's zone, and when it was last occupied, from a game state's vehicles."""
     t = self.tune
     self.dims = tuple(nearby.get("dims") or OWN_DIMS)
-    mnx, mxx, mny, mxy = self.dims
+    mny, mxy = self.dims[2], self.dims[3]
     v_ego = state.get("vEgo", 0.0)
-    outer = self._outer(state, (mxx - mnx) / 2)
     along = (mny - t.behind, mxy + t.front)
-    for side, sign, edge in (("left", -1.0, mnx), ("right", 1.0, mxx)):
-      if outer[side] is None:
+    for side, span in side_zones(state, self.dims, t).items():
+      if span is None:
         if self.zones[side] is not None:
           self.zone_lost[side] = now
         self.zones[side] = None
         continue
-      lane = (state.get("besideLanes") or [None, None])[0 if side == "left" else 1]
-      if lane is not None:  # the lane beside itself, from the map: whatever its width, our own lane stays out
-        near, far = lane[0] + t.lane_margin, max(min(lane[1], MAX_OUTER + (mxx - mnx) / 2) - t.lane_margin, lane[0] + t.lane_margin + 1.0)
-        lo, hi = sorted((sign * near, sign * far))
-      else:
-        lo, hi = sorted((edge + sign * t.inner, edge + sign * max(outer[side], t.inner + 1.0)))
-        trim = min(t.trim, max((hi - lo - 1.0) / 2, 0.0))  # narrowed about its centre, keeping it at least 1 m wide
-        lo, hi = lo + trim, hi - trim
+      lo, hi = span
       self.zones[side] = (lo, hi, *along)
-      hits = [v for v in nearby.get("v") or [] if self._occupies(v, lo, hi, along, mny, v_ego)]
+      hits = [v for v in nearby.get("v") or [] if occupant(v, lo, hi, along, mny, v_ego, t)]
       if hits:
         self.seen[side] = now
         # how far back the vehicles that set it reach, for the overlay: a closing one is behind the zone
         self.reach[side] = min(footprint(v)[2] for v in hits)
-
-  def _outer(self, state: dict, half_width: float) -> dict[str, float | None]:
-    """m out from our side each zone reaches, None for a side with no lane our way: by the map's lanes along our route,
-    else by its lane match off it (not the plugin's own lane reading, which counts one of GTA's links side by side)."""
-    beside, matched = state.get("beside"), state.get("laneMap") or {}
-    if beside is not None:
-      return {side: None if d is None else min(d - half_width, MAX_OUTER) for side, d in zip(("left", "right"), beside, strict=True)}
-    out: dict[str, float | None] = {"left": self.tune.outer, "right": self.tune.outer}
-    if matched.get("kind") == "own" and matched.get("lanes") and matched.get("lane") is not None:
-      if matched["lane"] <= 0:
-        out["left"] = None
-      if matched["lane"] >= matched["lanes"] - 1:
-        out["right"] = None
-    return out
-
-  def _occupies(self, v, lo: float, hi: float, along: tuple[float, float], rear: float, v_ego: float) -> bool:
-    t = self.tune
-    if abs(v[2]) > t.heading:
-      return False  # oncoming, or crossing
-    if math.hypot(v[3], v[4]) < t.parked_speed and not v[9]:
-      return False  # parked
-    x0, x1, y0, y1 = footprint(v)
-    if x1 < lo or x0 > hi:
-      return False
-    if y1 >= along[0] and y0 <= along[1]:
-      return True
-    gap, closing = rear - y1, v[4] - v_ego
-    return 0.0 < gap <= t.closing_behind and closing > t.closing_speed and gap / closing < t.closing_time
 
   def overlay(self, state: dict, lead: float = 0.0) -> list[tuple[str, np.ndarray]]:
     """Each side's zone for the map debug overlay, in the world (x, y, the road's z): z its outline, Z filled while
