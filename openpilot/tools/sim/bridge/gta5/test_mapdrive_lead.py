@@ -760,6 +760,23 @@ def test_lights_from_traffic():
   print("lights from traffic: ok")
 
 
+def test_right_on_red():
+  # new4 r1t1 (Olympic Fwy (71,-1153), a right turn at a light): held at the line 2 min, the light read red from the
+  # cross traffic flowing (and released for a moment at each lull). Turning right, a red for the cross traffic is
+  # stopped for, then gone on through after a stop, in a gap the crossing check finds; no touch
+  r = ms.junction_turn("right", stop="lights")
+  base = ms.drive(r, {"seed": 3}, lane=1, seconds=60)
+  t_line = float(np.interp(188.0 - base.md.front, base.col(2), base.col(0)))
+  # (crossing our way 3 s apart from 8 s before we'd reach the line, then a 12 s lull, then four more)
+  when = [t_line - 8.0 + 3.0 * n for n in range(8)] + [t_line + 25.0 + 3.0 * n for n in range(4)]
+  stream = [ms.Vehicle(-10.0 * w, 197.25, 270.0, speed=10.0) for w in when]
+  trip = ms.drive(r, {"seed": 3}, lane=1, vehicles=stream, reach=REACH, seconds=150)
+  ror = events_of(trip, "light_right_on_red")
+  assert events_of(trip, "light_stop") and ror and trip.finished == "arrived" and trip.car.collisions == 0, (ror, trip.finished)
+  assert trip.col(13).min() > 1.5, trip.col(13).min()
+  print("right on red: ok")
+
+
 def test_stop_sign_order():
   # an all-way stop: a car on the cross road came to its line first (stopped 12 m east of the node, heading for it) and
   # goes 3 s after our own dwell is done: given way to, then on across behind it; one that came later is no reason to wait
@@ -910,6 +927,7 @@ if __name__ == "__main__":
   test_crossing_at_the_line()
   test_no_creep_in_a_junction()
   test_lights_from_traffic()
+  test_right_on_red()
   test_stop_sign_order()
   test_pedestrians()
   test_pedestrian_at_the_kerb()

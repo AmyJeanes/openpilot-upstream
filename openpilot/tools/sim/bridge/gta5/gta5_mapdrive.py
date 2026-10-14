@@ -2605,6 +2605,11 @@ class MapDrive:
     return (first - self.s - self.front - CROSS_STOP,
             {"at": round(first, 1), "angle": round(angle), "speed": round(float(np.hypot(*car["vel"])), 1), "slowed": True})
 
+  def _turns_right(self, x: dict) -> bool:
+    """Whether the route turns right (more than 30 deg) at stop line x's junction (within 40 m past it)."""
+    return any(0.0 <= tr.dist - x["along"] < 40.0 and abs(tr.angle) > 30.0 and tr.side == "right"
+               for tr in (getattr(self.route, "_turns", None) or []))
+
   def _red_ahead(self, t: float) -> bool:
     """Whether a signal not yet passed within LIGHT_LOOK m ahead was last read red (_light) within LIGHT_KEEP s."""
     return any(x["kind"] == "lights" and not x["done"] and x["s"] - self.s < LIGHT_LOOK and t - x.get("red_t", -math.inf) < LIGHT_KEEP
@@ -2631,8 +2636,10 @@ class MapDrive:
     x["traffic"] = True
     red = green = None
     own_green = False
-    j = int(np.clip(np.searchsorted(self.s_path, x["s"]), 0, len(self.s_path) - 1))
-    th = float(self.theta[j])
+    # our way in: the route's heading short of the line (the path may already swing into a turn at it)
+    k = segment_of(self.route, max(x["along"] - 10.0, 0.0))
+    seg = self.route.points[k + 1, :2] - self.route.points[k, :2]
+    th = math.atan2(seg[1], seg[0])
     node = self._node_of(x)
     # going straight on through it, the lanes beside going through show our phase too (turning, only our own lane's)
     straight = not any(0.0 <= tr.dist - x["along"] < 40.0 and abs(tr.angle) > 30.0 for tr in (getattr(self.route, "_turns", None) or []))
@@ -3383,6 +3390,13 @@ class MapDrive:
           self._event("light_unknown", t, **{k: v for k, v in mark.items() if k != "t"}, **({"seen": light} if light else {}))
           continue
         d = x["target"] - s
+        if light == "red" and x.get("why") == "cross" and x.get("held") is not None and self._turns_right(x) and            v < STOPPED and t - x["held"] >= st["stop_dwell"] + st["reaction"]:
+          # turning right, red for the cross traffic: on after a stop, as on red, its gaps the crossing check's to judge
+          if not x.get("ror"):
+            x["ror"] = True
+            self._event("light_right_on_red", t, waited=round(t - x["held"], 1))
+        if x.get("ror"):
+          light = None
         if light == "red" and (x.get("held") is not None or d + 1.0 >= v * STOP_LAG + v * v / (2 * DECEL_REAL)):
           # the traffic shows it red: stopped at its line, as for a stop sign, and held there while it does
           if x.get("held") is None:
