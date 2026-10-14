@@ -497,6 +497,13 @@ ROADS = frozenset({'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unc
 # tags that place lanes, beyond their counts: a map without any has no lane geometry to read
 GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward', 'placement:offset')
 TAPER_M = 30.0  # m: a lane begins (or ends) where a way's lane count changes, widening from (narrowing to) nothing over this
+# a run of one-lane freeway ways (HOP_ROADS) off a road with more lanes at a junction node, or onto one, at most HOP_M
+# long, within HOP_TURN of straight on there and straying HOP_SIDE m or more to one side: one of GTA's lane hops
+# (RouteLanes._hops)
+HOP_M, HOP_TURN, HOP_SIDE = 60.0, 45.0, 3.0  # m, deg, m
+HOP_ROADS = frozenset({'motorway', 'motorway_link', 'trunk', 'trunk_link'})
+HOP_LEG = 5.0  # m back (on) from the node the road it leaves (joins) is read over
+HOP_COS = math.cos(math.radians(HOP_TURN))
 CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m either side of a point has a corner there
 CORNER_CHORD = 10.0  # m
 FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a fillet
@@ -1334,7 +1341,7 @@ class RouteLanes:
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
   def __init__(self, points, sections: list[Section | None], arrows: list | None = None, tapers: dict | None = None,
                junctions=None, explicit: dict | None = None, moves: list | None = None, blended: dict | None = None,
-               merges: dict | None = None, splits: dict | None = None, islands: list | None = None):
+               merges: dict | None = None, splits: dict | None = None, islands: list | None = None, hops: list | None = None):
     self.points = np.asarray(points, float)[:, :2]
     self.along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(self.points, axis=0).T))))
     self.sections = sections
@@ -1353,6 +1360,8 @@ class RouteLanes:
     self.merges: dict[int, bool] = merges or {}
     # and where another road leaves it ahead, as an exit from a freeway: whether it leaves on the left of ours
     self.splits: dict[int, bool] = splits or {}
+    # m along from and to each of GTA's lane hops (_hops): the bends in and along one are its line's, not turns
+    self.hops: list[tuple[float, float]] = hops or []
     # m along to the nodes where roads meet: a corner near one is a turn through a junction, the rest are bends
     self.junctions = np.sort(np.asarray(junctions if junctions is not None else [], float))
     # the route's points less than START_STUB from its start: the node the router set off from, a few cm from the car's
@@ -1397,6 +1406,9 @@ class RouteLanes:
         k0, k1 = max(i0, 0), min(i1, len(ways))
         for k in range(k0, k1):
           explicit[k] = (first, last, float(along[k0]), float(along[k1]))
+    fast = [wd is not None and osm.ways[wd[0]][0].get('highway') in HOP_ROADS for wd in ways]
+    hopped, hops = cls._hops(pts, along, sections, degree, explicit, fast)
+    explicit.update(hopped)
     blended = cls._blended(pts, ways_along, osm, len(ways))
     for k, sec in enumerate(sections):
       nxt = sections[k + 1] if k + 1 < len(sections) else None
@@ -1412,7 +1424,8 @@ class RouteLanes:
     moves = [junction_move(osm, nodes, pts, along, k) for k in ends]
     merges = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k)) is not None}
     splits = {k: side for k in range(1, len(pts) - 1) if degree[k] >= 3 and (side := merge_side(osm, nodes, k, True)) is not None}
-    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits, cls._islands(pts, osm, nodes))
+    return cls(pts, sections, arrows, tapers, junctions, explicit, moves, blended, merges, splits, cls._islands(pts, osm, nodes),
+               hops)
 
   @staticmethod
   def _islands(pts: np.ndarray, osm: OsmLanes, nodes: list | None) -> list[np.ndarray]:
@@ -1432,6 +1445,51 @@ class RouteLanes:
           continue
       out.append(ring)
     return out
+
+  @staticmethod
+  def _hops(pts: np.ndarray, along: np.ndarray, sections: list[Section | None], degree: list[int],
+            explicit: dict, fast: list[bool]) -> tuple[dict[int, tuple[Section, Section, float, float]], list[tuple[float, float]]]:
+    """RouteLanes.explicit for GTA's lane hops: a run of one-lane freeway ways (`fast`, per segment) off a road with
+    more lanes at a junction node, or onto one (HOP_M, HOP_TURN, HOP_SIDE), as a lane split off as its own link or a
+    link across to a road alongside. GTA starts and ends their lines at that road's middle node, so its lane would swing
+    in to the road's middle and out again; instead it keeps to where that road's outer lane is on its side (measured
+    from the road's line run on straight), the road before's at the run's start and the road after's at its end,
+    blended between along the run. Also m along from and to each run."""
+    out: dict[int, tuple[Section, Section, float, float]] = {}
+    spans: list[tuple[float, float]] = []
+    n = len(sections)
+    k = 0
+    while k < n:
+      sec = sections[k]
+      if sec is None or sec.lanes != 1 or k in explicit or not fast[k]:
+        k += 1
+        continue
+      k1 = k
+      while k1 + 1 < n and k1 + 1 not in explicit and fast[k1 + 1] and (s := sections[k1 + 1]) is not None and s.lanes == 1:
+        k1 += 1
+      prev, nxt = sections[k - 1] if k else None, sections[k1 + 1] if k1 + 1 < n else None
+      lead = tail = None  # (the road's line: point, unit direction, right normal; the lane middle to keep to; the run's)
+      if along[k1 + 1] - along[k] <= HOP_M:
+        if prev is not None and prev.lanes > sec.lanes and degree[k] >= 3:
+          lead = _hop_road(pts, along, k, -1, pts[k:k1 + 2], pts[k + 1], prev, sec)
+        if nxt is not None and nxt.lanes > sec.lanes and degree[k1 + 1] >= 3:
+          tail = _hop_road(pts, along, k1 + 1, 1, pts[k:k1 + 2], pts[k1], nxt, sec)
+      if lead is not None or tail is not None:
+        span = max(float(along[k1 + 1] - along[k]), EPS)
+        for j in range(k, k1 + 1):
+          d = pts[j + 1] - pts[j]
+          d = d / max(float(np.hypot(*d)), EPS)
+          ends = []
+          for q in (j, j + 1):
+            # the lane where the road's outer lane would be: across the road's line, along this segment's own normal
+            s0, s1 = (0.0 if r is None else (r[3] - float((pts[q] - r[0]) @ r[2])) / max(float(d @ r[1]), HOP_COS) - r[4]
+                      for r in (lead, tail))
+            t = float(along[q] - along[k]) / span
+            ends.append(s0 * (1.0 - t) + s1 * t)
+          out[j] = (_shifted(sections[j], ends[0]), _shifted(sections[j], ends[1]), float(along[j]), float(along[j + 1]))
+        spans.append((float(along[k]), float(along[k1 + 1])))
+      k = k1 + 1
+    return out, spans
 
   @property
   def blocked(self) -> list[tuple[float, float, int, int]]:
@@ -1499,7 +1557,7 @@ class RouteLanes:
       near = self.junctions
       self._corners = []
       for sc, turned in corners(self.points[self._lead:], self.along[self._lead:]):
-        if not len(near) or np.abs(near - sc).min() > FILLET_REACH:
+        if not len(near) or np.abs(near - sc).min() > FILLET_REACH or any(s0 - CORNER_CHORD < sc < s1 + CORNER_CHORD for s0, s1 in self.hops):
           continue
         p = [np.array([np.interp(v, self.along, self.points[:, 0]), np.interp(v, self.along, self.points[:, 1])])
              for v in (sc - CORNER_SHARP, sc - CORNER_SHARP / 2, sc + CORNER_SHARP / 2, sc + CORNER_SHARP)]
@@ -2039,6 +2097,39 @@ def _lerp(a: Section, b: Section, t: float) -> Section:
   spans = [Span(m.lane, o.left + (m.left - o.left) * t, o.right + (m.right - o.right) * t, m.heading)
            for o, m in zip(a.spans, b.spans, strict=True)]
   return Section(spans, tuple(o + (m - o) * t for o, m in zip(a.edges, b.edges, strict=True)))
+
+
+def _shifted(sec: Section, d: float) -> Section:
+  """sec moved d m right."""
+  return Section([Span(s.lane, s.left + d, s.right + d, s.heading) for s in sec.spans], (sec.edges[0] + d, sec.edges[1] + d))
+
+
+def _hop_road(pts: np.ndarray, along: np.ndarray, j: int, way: int, run_pts: np.ndarray, near: np.ndarray, road: Section,
+              run: Section) -> tuple | None:
+  """For RouteLanes._hops: the road a run leaves (way -1, the road before node j) or joins (way 1, after it), where
+  the run turns within HOP_TURN of it and strays HOP_SIDE or more to one side of the road's line run on:
+  (that line's point and unit direction, its right normal, the middle of the road's outer lane of ours on that side, the
+  run's lane's)."""
+  i = j + way
+  while 0 < i < len(pts) - 1 and abs(along[i] - along[j]) < HOP_LEG:
+    i += way
+  if not 0 <= i < len(pts) or i == j:
+    return None
+  u = (pts[j] - pts[i]) * -way
+  u = u / max(float(np.hypot(*u)), EPS)
+  v = (near - pts[j]) * -way
+  if float(np.hypot(*v)) < EPS:
+    return None
+  v = v / float(np.hypot(*v))
+  if math.degrees(math.acos(min(max(float(u @ v), -1.0), 1.0))) > HOP_TURN:
+    return None
+  nrm = _right_normal(u)
+  lat = (run_pts - pts[j]) @ nrm
+  side = float(lat[int(np.argmax(np.abs(lat)))])
+  if abs(side) < HOP_SIDE:
+    return None
+  outer = road.ours[-1] if side > 0 else road.ours[0]
+  return pts[j], u, nrm, outer.centre, run.ours[0].centre
 
 
 def _taperable(a: Section, b: Section) -> bool:

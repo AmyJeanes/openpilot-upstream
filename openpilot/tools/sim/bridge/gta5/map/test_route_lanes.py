@@ -269,6 +269,28 @@ def test_route_lanes_bend_has_no_fillet():
   assert lanes.corners == []
 
 
+def test_hop_keeps_to_the_outer_lane():
+  # GTA's lane hop: a one-lane link off a four-lane freeway's middle node, 8 m out to its right and back onto it 52 m
+  # on. Its lane keeps to where the freeway's right lane is (5.25 m right of its line) rather than swinging in to the
+  # middle node and out again, and its bend isn't a turn through a junction
+  nodes = {1: (-200.0, 0.0), 2: (0.0, 0.0), 3: (17.0, -4.0), 4: (34.0, -8.0), 5: (49.0, 0.0), 6: (200.0, 0.0)}
+  fwy = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '4', 'width': '14'}
+  hop = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '1', 'width': '3.5'}
+  ways = {10: (fwy, [1, 2]), 11: (fwy, [2, 5]), 12: (hop, [2, 3, 4]), 13: (hop, [4, 5]), 14: (fwy, [5, 6])}
+  ids = np.array(sorted(nodes), np.int64)
+  osm = OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {}),
+                 lambda lat, lon: (lon, lat))
+  pts = np.array([nodes[i] for i in (1, 2, 3, 4, 5, 6)])
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert [(round(a), round(b)) for a, b in lanes.hops] == [(200, 252)]
+  for s in np.arange(200.5, 252.0, 2.0):
+    k = lanes.segment(s)
+    d = (pts[k + 1] - pts[k]) / np.hypot(*(pts[k + 1] - pts[k]))
+    p = pts[k] + d * (s - lanes.along[k]) + np.array([d[1], -d[0]]) * lanes.section_at(s, k).ours[0].centre
+    assert abs(p[1] + 5.25) < 0.05, (s, p)
+  assert lanes.corners == []
+
+
 def test_nav_targets_from_arrows():
   arrows = parse_arrows([[100.0, ['left', 'through', 'right;through']]])
   turn = Turn(110.0, 'left', 90.0)
