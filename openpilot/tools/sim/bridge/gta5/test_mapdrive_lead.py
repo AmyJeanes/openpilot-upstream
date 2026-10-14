@@ -543,6 +543,28 @@ def test_two_lane_change():
   print("two lane change: ok")
 
 
+def test_fork_change_gives_up_the_branch():
+  # Amy (14 Oct): a fork's lane change that can't be made safely takes the other branch and routes again, rather than
+  # forcing it or stopping short on a freeway. A motorway whose route keeps left at a fork 600 m on (from the right lane
+  # of two), a car alongside in the left lane for good: the change is put off until it can't be, then given up: on in
+  # our lane, the route asked to keep off the left branch's link past the fork; no stop, no touch
+  from openpilot.tools.sim.bridge.gta5.map.router import Fork
+  r = ms.junction_turn("left", lead=600.0, stop=None)
+  r.classes = ["motorway"] * len(r.classes)
+  r.forks = [Fork(590.0, "left", 1, 2, True)]
+  lane0_x = ms.start_pose(r, 0, 0.0)[0]
+  trip = lane_gap_drive(r, keep=1e9, seconds=120.0, lane0_x=lane0_x)
+  gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+  branch = [e for e in gaps if e["phase"] == "other_branch"]
+  assert branch and not [e for e in gaps if e["phase"] == "late"], gaps
+  assert trip.car.collisions == 0 and trip.col(13).min() > 1.0, trip.col(13).min()
+  t, v = trip.col(0), trip.col(4)
+  assert v[(t > branch[0]["t"]) & (t < branch[0]["t"] + 2.0)].min() > 5.0, "kept going"  # (then slowed for the route's turn)
+  avoid = trip.md.avoid  # not taken in the sim (no navigator): the link past the fork on the branch given up
+  assert avoid and len(avoid) == 1 and 600.0 <= float(np.hypot(*avoid[0][0])) <= 640.0, avoid
+  print("fork change gives up the branch: ok")
+
+
 def test_queue_that_moves():
   # the map driver can't see lights: behind a queue at one, it waits as long as the queue moves on now and then, each time
   # less than WAIT_MAX s still but longer in all; the lead creeps on 0.3 m (too little for us to move), then 4 m, then goes
@@ -843,6 +865,7 @@ if __name__ == "__main__":
   test_borrow()
   test_lane_change_waits_for_its_lane()
   test_two_lane_change()
+  test_fork_change_gives_up_the_branch()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()

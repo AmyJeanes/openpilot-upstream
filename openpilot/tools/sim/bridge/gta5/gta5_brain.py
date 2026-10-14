@@ -425,6 +425,10 @@ class Brain:
       picked, self.picked = self.picked, None
     dest = self.destination.update(state.get("waypoint"), pos, picked, (state.get("mission") or {}).get("dest"))
     match = self.matcher.match if self.matcher is not None else None
+    md = self.expert.md if self.expert.md_driving else getattr(self.driver, "md", None) if self.driver.engaged else None
+    avoid = md.take_avoid() if md is not None else None
+    if avoid and dest is not None:
+      self._reroute(pos, bearing, dest, state["pos"][2], avoid)
     route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
     if self.cruise is not None:
       route = self._cruise_route(route, pos, bearing, state["pos"][2])
@@ -444,6 +448,23 @@ class Brain:
     return {**state, **self.route.info(ROUTE_AHEAD), "route": self.route.ahead(ROUTE_AHEAD, ROUTE_STEP).round(1).tolist(),
             "lane": lane, "lanePlugin": plugin, "laneFrac": frac, "twoWay": self.route.two_way() if on else None,
             "beside": self.route.beside() if on else None, "besideLanes": self.route.beside_lanes() if on else None}
+
+  def _reroute(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float, avoid: list):
+    """A route to the destination keeping off `avoid`'s links (the map driver giving up a fork's branch it couldn't
+    change into in time), on its own thread as the navigator's are; it becomes the navigator's route when it comes."""
+    nav = self.navigator
+
+    def run():
+      try:
+        route = nav.router.route(pos.copy(), bearing, dest.copy(), z, avoid=avoid)
+        route.locate(pos, z, -bearing)
+        with nav.lock:
+          if nav.dest is not None and np.hypot(*(dest - nav.dest)) <= 1.0:
+            nav.route, nav.off_since = route, None
+        print(f"gta5: routed again keeping off {len(avoid)} link(s): the other branch", flush=True)
+      except (OSError, ValueError, KeyError) as e:
+        print(f"gta5: routing again off a branch failed: {e}", flush=True)
+    threading.Thread(target=run, daemon=True).start()
 
   def _cruise_route(self, route: Route | None, pos: np.ndarray, bearing: float, z: float) -> Route | None:
     """The route the map driver drives where it's the only driver: the destination's, else (while it drives, or the

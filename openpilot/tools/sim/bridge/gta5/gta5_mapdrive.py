@@ -168,6 +168,8 @@ LC_SETTLE_S = 1.0  # s in its lane between a change put off and the next one of 
 LC_AFTER_S = 1.5  # s after a change ends its lane is still looked at for one coming up on us (_lane_window)
 LC_GAP_M, LC_GAP_T, LC_GAP_CLOSE = 2.0, 0.3, 1.0  # m, s of the follower's speed and s of its closing speed a change leaves
 LC_CUT_DECEL = 2.0  # m/s^2 a change may leave us to slow at behind one in its lane
+BRANCH_ROOM_S = 3.0  # s of driving at least before a fork, for its lane change given up to take the other branch
+BRANCH_PAST = 20.0  # m past a fork the link of the branch given up that a route is asked to keep off
 LC_LATE_WAIT = 30.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends
 LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
 
@@ -746,6 +748,7 @@ class MapDrive:
     self.prompts: list[tuple[str, str]] = []  # (kind, side) of what became of it, since last taken (ask_lane)
     self.last_v = 0.0  # m/s at the last step
     self.reversing: dict | None = None  # backing off a deadlock: when it began, path m it ends at, when it stopped
+    self.avoid: list | None = None  # links (pa, pb) a route is to keep off, asked for once (take_avoid): a fork's branch given up
     self.reverses = 0  # times backed off
 
   def _body(self, state: dict):
@@ -797,6 +800,12 @@ class MapDrive:
   def take_prompts(self) -> list[tuple[str, str]]:
     p, self.prompts = self.prompts, []
     return p
+
+  def take_avoid(self) -> list | None:
+    """The links a new route should keep off (a fork's branch whose lane change couldn't be made in time), once: the
+    driver's navigator routes again with them."""
+    out, self.avoid = self.avoid, None
+    return out
 
   def take_events(self) -> list[dict]:
     e, self.events = self.events, []
@@ -2059,6 +2068,14 @@ class MapDrive:
         return
       if self.phase == "abort":
         return
+      if not started and not lw.get("branch"):
+        other = self._other_branch(route, s0, v)
+        if other is not None and self._replan_keys(route, state, t, other[0]):
+          # into a fork's branch, no gap in time: on in our lane, along the other branch, the route asked for again
+          self.avoid = [other[1]]
+          lw["branch"] = True
+          self._event("lane_gap", t, phase="other_branch", side=side, why=why, fork=round(other[2] - route.at, 1))
+          return
       if not lw["late"] and not started:
         lw.update(late=True, s0=s0)
         self._event("lane_gap", t, phase="late", side=side, why=why)
@@ -2150,7 +2167,8 @@ class MapDrive:
     # nor across a stop line or a city junction it was before (a freeway's nodes are its slip roads' merges and exits)
     k1 = keys[run[0][1]][0]
     fast = route.classes[segment_of(route, k1)] in ("motorway", "trunk") if getattr(route, "classes", None) else False
-    after = [x for x in list(route.stops) + ([] if fast else list(route.junctions)) if x > k1 - EPS]
+    forks = [f.along for f in getattr(route, "forks", []) if f.keep]  # nor past a fork (its branch is the change's reason)
+    after = [x for x in list(route.stops) + ([] if fast else list(route.junctions)) + forks if x > k1 - EPS]
     limit = min([limit] + [x - CROSSING_CLEAR for x in after]) - EPS
     settle = max(v, 5.0) * LC_SETTLE_S
     lengths = [keys[b][0] - keys[a][0] for a, b in run]
@@ -2174,6 +2192,30 @@ class MapDrive:
       upto, nxt = (placed[n + 1][0][0], placed[n + 1][1]) if n + 1 < len(placed) else (rest, math.inf)
       out += [k for k in keys[b + 1:upto] if end + EPS < k[0] < nxt - EPS]
     return out + list(keys[rest:])
+
+  def _other_branch(self, route, s0: float, v: float) -> tuple[list, tuple, float] | None:
+    """For the lane change starting at path m s0 that can't be put off any more, where it and the changes of its run
+    lead into a fork's branch on a fast road (motorway or trunk) at least BRANCH_ROOM_S s ahead: the keys that stay in
+    our lane (to the route's end: the new route says what lies past the fork), the link BRANCH_PAST m past the fork on
+    the branch given up, for the route to keep off, and the fork's place (m along); None otherwise."""
+    keys = self.keys
+    rs0 = float(np.interp(s0, self.s_path, self.route_s))
+    found = chains(keys)
+    if not found or not getattr(route, "classes", None):
+      return None
+    first = min(range(len(found)), key=lambda n: abs(keys[found[n][0]][0] - rs0))
+    a = found[first][0]
+    if route.classes[segment_of(route, keys[a][0])] not in ("motorway", "trunk", "motorway_link", "trunk_link"):
+      return None
+    fork = next((f for f in route.forks if f.keep and keys[a][0] < f.along), None)
+    if fork is None or fork.along - route.at < BRANCH_ROOM_S * max(v, 5.0):
+      return None
+    lane0 = keys[a][1]
+    # in our lane on: what lies past the fork is the new route's to say, and it comes before the car gets there
+    new = list(keys[:a]) + [(keys[a][0], lane0), (max(route.length, keys[-1][0]), lane0)]
+    k = segment_of(route, min(fork.along + BRANCH_PAST, route.length - 1.0))
+    link = (tuple(float(c) for c in route.points[k, :2]), tuple(float(c) for c in route.points[k + 1, :2]))
+    return new, link, float(fork.along)
 
   def _lc_least(self, lanes: float, v: float) -> float:
     """m a lane change across `lanes` lanes put off takes at the least: MIN_LC_M a lane, and LC_LEAST_SHARE of its
@@ -2560,8 +2602,8 @@ class MapDrive:
     at or just behind its line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS (on its
     green); "green" where one of ours drives over its line faster than LIGHT_THROUGH and none of that, but for one going
     through in our own lane (or any lane of ours where the route goes straight on), which outweighs a queue in the lane
-    beside (a turn lane's own phase); each kept LIGHT_KEEP s. None where nothing shows: no traffic about, and the trip goes as without it. x keeps why, and whether any traffic
-    was about."""
+    beside (a turn lane's own phase); each kept LIGHT_KEEP s. None where nothing shows: no traffic about, and the trip
+    goes as without it. x keeps why, and whether any traffic was about."""
     gap = x["s"] - self.s - self.front
     if gap > LIGHT_LOOK or not self.cars:
       return None
