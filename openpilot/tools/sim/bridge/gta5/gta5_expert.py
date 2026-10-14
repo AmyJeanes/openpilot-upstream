@@ -20,8 +20,9 @@ task's own arrival. A ramp wants task=coord, as the longrange task doesn't take 
 lead of about 3, as the AI settles 1-2 m/s under its cap. `dest` ignores a route that doesn't end near it, as the last
 trip's. Off the map's routes the AI drives to the game's waypoint, or wanders. Each game state appends a JSON line to
 the log (GTA5_EXPERT_LOG, else expert.jsonl beside GTA5_LOG, else gta5_expert.jsonl in the temp folder): the AI's state,
-the target, the label, the lane readings and the drive's collisions (frames in contact since it started), so samples can
-be filtered later. speed_by_class ("residential:10,primary:14,motorway:18", classes as Valhalla names them, ramp for
+the target, the label, the lane readings and the drive's collisions (frames in contact since it started), and with the
+map driver the vehicles and pedestrians around (the plugin's nearby), so samples can be filtered and traffic replayed
+later. speed_by_class ("residential:10,primary:14,motorway:18", classes as Valhalla names them, ramp for
 ramps, default for the rest) caps the speed by the road's class, slowing ahead for a lower one, and decel_fast is the
 slowing rate above 12 m/s. unstick: stopped unstick_after s not at a light, the AI drives with unstick_style
 (steering round a parked car) until it has moved unstick_dist m or unstick_for s have passed. The engage key stops
@@ -813,5 +814,6 @@ class Expert:
       "shortcuts": self.shortcuts_on,
       **({"ww": self.ww.info(), "wwDriving": self.ww_driving, "laneMap": state.get("laneMap")} if self.ww is not None else {}),
       **({"src": self.source, "map": self.md.info(), "laneMap": state.get("laneMap"), "yawRate": state.get("yawRate"),
-          "steerCurvature": state.get("steerCurvature")} if self.md is not None else {}),
+          "steerCurvature": state.get("steerCurvature"),
+          "nearby": {k: v for k, v in (state.get("nearby") or {}).items() if k in ("v", "p", "dims")}} if self.md is not None else {}),
     }) + "\n")
