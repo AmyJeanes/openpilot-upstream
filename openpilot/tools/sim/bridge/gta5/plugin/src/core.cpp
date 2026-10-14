@@ -477,10 +477,11 @@ void RenderCamera(bool on) {
 }
 
 // A camera looking straight down on a point (topcam command), shown on the player's frames instead of the gameplay
-// camera, to check the map overlay against the road paint from above; openpilot's frames are unchanged
+// camera, to check the map overlay against the road paint from above; openpilot's frames are unchanged. Its pitch
+// (degrees, -90 straight down) can be raised to look across at the car, as at its lamps from in front or behind
 struct TopCam {
   bool on = false, follow = true, hud = true;
-  float x = 0, y = 0, height = 40, heading = 0, fov = 50;
+  float x = 0, y = 0, height = 40, heading = 0, fov = 50, pitch = -90;
   float ground = 0;    // the game's ground under the point, which the height is above
   float zref = NAN;    // a height near that ground (the road's, from the map), else the vehicle's
   bool abs = false;    // the height is above zref itself, unprobed: under a bridge, where the probe finds its deck
@@ -598,7 +599,7 @@ void UpdateTopCam(Entity follow) {
                        : (std::isnan(g_top.zref) ? ref.z - 0.5f : g_top.zref);
   SET_CAM_FOV(g_top.cam, g_top.fov);
   SET_CAM_COORD(g_top.cam, g_top.x, g_top.y, g_top.ground + g_top.height);
-  SET_CAM_ROT(g_top.cam, -90.0f, 0.0f, g_top.heading, 2);
+  SET_CAM_ROT(g_top.cam, g_top.pitch, 0.0f, g_top.heading, 2);
   bool away = std::hypot(g_top.x - ref.x, g_top.y - ref.y) > 60.0f;
   if (away) SET_FOCUS_POS_AND_VEL(g_top.x, g_top.y, g_top.ground, 0, 0, 0), g_top.focus = true;
   else if (g_top.focus) CLEAR_FOCUS(), g_top.focus = false;
@@ -2956,6 +2957,7 @@ void HandleMessage(const Message &m, double now) {
     g_top.height = std::clamp(static_cast<float>(MsgNum(m, "height", g_top.height)), g_top.abs ? 1.0f : 3.0f, 300.0f);
     g_top.fov = std::clamp(static_cast<float>(MsgNum(m, "fov", g_top.fov)), 5.0f, 120.0f);
     g_top.heading = static_cast<float>(MsgNum(m, "heading", g_top.heading));
+    g_top.pitch = std::clamp(static_cast<float>(MsgNum(m, "pitch", -90.0)), -90.0f, 30.0f);
     g_top.hud = MsgBool(m, "hud", g_top.hud);
     double x = MsgNum(m, "x", NAN), y = MsgNum(m, "y", NAN);
     g_top.follow = std::isnan(x) || std::isnan(y);
