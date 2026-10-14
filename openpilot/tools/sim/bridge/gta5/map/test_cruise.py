@@ -70,6 +70,20 @@ def test_off_a_link_the_road_it_joins():
   assert junction({11: (road, 30.0), 12: (link, -57.0)}, approach=motorway)[0] == 12
 
 
+def test_not_round_a_loop_again():
+  """Round a one-way loop it carries on along (each corner within SAME_ROAD_TURN), it goes round once and then takes
+  the way off it, rather than round and round."""
+  ring = {'highway': 'primary', 'lanes': '1', 'width': '6', 'name': 'Ring Rd', 'oneway': 'yes'}
+  out = {'highway': 'primary', 'lanes': '2', 'width': '12', 'name': 'Out Rd'}
+  hexagon = {2 + i: (100.0 * math.cos(math.radians(-90.0 + 60.0 * i)), 200.0 + 100.0 * math.sin(math.radians(-90.0 + 60.0 * i)))
+             for i in range(6)}  # 2 at the bottom, counterclockwise to 5 at the top
+  nodes = {1: (0.0, -300.0), **hexagon, 8: (-346.4, 500.0), 9: (-519.6, 600.0)}  # off it at 5, straight on (Out Rd)
+  osm = make_map(nodes, {10: (MAIN, [1, 2]), 11: (ring, [2, 3, 4, 5]), 12: (ring, [5, 6, 7, 2]), 13: (out, [5, 8, 9])})
+  walk = Walk(Walker(osm), 1, 2)
+  walk.extend(3000.0, MAX_THROUGH)
+  assert 8 in walk.nodes and sum(1 for a, b in zip(walk.nodes, walk.nodes[1:]) if (a, b) == (5, 6)) == 1
+
+
 def test_ways_it_never_takes():
   """Not a one-way the wrong way, nor a dead end or a minor road while there's another way on, nor a U-turn, nor a move
   the map's turn restrictions forbid."""

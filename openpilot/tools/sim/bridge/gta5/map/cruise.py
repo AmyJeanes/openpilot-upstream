@@ -444,6 +444,8 @@ class Walk:
       if not cands:
         self.ended = True
         break
+      # not round a loop it has already been round (a service road about a building), while there's a way off it
+      cands = [e for e in cands if not any(self.has(link) for link in zip(e.path, e.path[1:], strict=False))] or cands
       turn = self.turn if self.along[-1] - self.car <= LANE_REACH else None
       self.turn = None  # the car's lane is for the first junction only
       e = w.choose(self.road(), approach, exits, cands, turn)
