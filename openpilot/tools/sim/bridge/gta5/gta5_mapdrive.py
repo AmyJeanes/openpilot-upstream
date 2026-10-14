@@ -232,7 +232,7 @@ LEAD_MOVING = 0.5  # m/s: a vehicle in the way going faster is moving on
 CROSS_MOVING = 2.0  # m/s: a slower vehicle isn't crossing
 CROSS_T = 6.0  # s ahead a crossing vehicle's way is predicted (straight on at its speed)
 CROSS_GAP_AHEAD = 1.2  # s from our rear clearing its way to its body reaching it, for us to go first
-CROSS_GAP_BEHIND = 0.6  # s from its body clearing our way to our front reaching it, for us to go after it
+CROSS_GAP_BEHIND = 1.0  # s from its body clearing our way to our front reaching it, for us to go after it
 CROSS_START_LAG = 0.5  # s a standing start takes to get going, more than the acceleration alone
 CROSS_ANGLE = 25.0  # deg off our way at least, for a crossing
 CROSS_NEAR = 25.0  # m from a junction node or turn the crossing may be, to be held for
@@ -2112,8 +2112,8 @@ class MapDrive:
     ours = self.s + vv * times
     moved_us = n * LANE_W * quintic((ours - s0) / (s1 - s0))  # our path's move across, at our place at each time
     for car in self.cars:
-      if car.get("ped"):
-        continue
+      if car.get("ped") or car.get("driven") is False:
+        continue  # (a parked one in its lane is the nudge's and the lead's, once in it: a kerbside row isn't traffic)
       corners = self._predict(car, t, times, speed_up=True)
       along, right = self._place(corners.reshape(-1, 2), LEAD_AHEAD + 40.0, behind=60.0, off_max=ALONG_OFF + n * LANE_W)
       along, right = along.reshape(len(times), 4), right.reshape(len(times), 4)
