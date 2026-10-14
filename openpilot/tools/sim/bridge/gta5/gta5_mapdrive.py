@@ -2571,6 +2571,7 @@ class MapDrive:
       self.t0, self.collisions0, self.engage0 = t, collisions, state.get("engagePresses")
       self.progress = (0.0, t)
     if route is None:
+      self.progress = (0.0, t)  # waiting for the router isn't being stuck
       self._set("wait", t)
       self.msg = {"type": "control", "active": True, "curvature": 0.0, "accel": HOLD_ACCEL}
       return self.msg

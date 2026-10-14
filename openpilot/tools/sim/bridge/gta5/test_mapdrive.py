@@ -956,6 +956,19 @@ def test_aborts():
     assert trip.car.v < 0.3 and trip.md.aborts
   # a plan the slots disagree with is only an event by default
   assert MapDrive().c["plan_check"] == "fix"
+  # a route that takes longer than NO_PROGRESS_S to come (a busy router) isn't the car stuck once it's driving
+  car = ms.LagCar(*ms.start_pose(r, 1, 0.0))
+  md = MapDrive({"seed": 6})
+  while car.t < 30.0:
+    car.control(md.step(None, car.state(), car.t, 0))
+    car.advance(ms.FRAME)
+  r.at, r.seg = 0.0, 0
+  for _ in range(int(5.0 / ms.FRAME)):
+    st = car.state()
+    r.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(r, st, car.t, 0))
+    car.advance(ms.FRAME)
+  assert not md.aborts and car.v > 1.0, (md.aborts, car.v)
   print("aborts: ok")
 
 
