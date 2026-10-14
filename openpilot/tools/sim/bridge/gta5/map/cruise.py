@@ -55,6 +55,7 @@ EXTEND_AT = 700.0  # m left of it when it's walked on further: well before the m
 MAX_THROUGH = 18  # through locations a route takes at most: Valhalla's max_locations (20) less the start and the end
 LANE_REACH = 150.0  # m: the car's lane chooses the way out at the first junction within this
 SAME_ROAD_TURN = 60.0  # deg: the road the car is on carried on through a junction turns no more than this
+PASSED_M = 2000.0  # m of the links a walk was trimmed of that it remembers, so as not to go round a loop again
 LEADS_ON = 250.0  # m of road on past a way out for it not to be a dead end
 LEADS_ON_STEPS = 2000  # nodes looked at for that at most, beyond which it leads on
 MINOR_CLASSES = frozenset({'service', 'track'})
@@ -394,6 +395,7 @@ class Walk:
     self.turn = turn  # the car's turn-only lane's turn, for the first junction
     self.car = car  # m along it to the car, when it was walked from there
     self.ended = False  # no way on: the road ends
+    self.passed: list[tuple[tuple[int, int], float]] = []  # links trimmed off its start (the latest PASSED_M m), and m each
 
   def _length(self, a: int, b: int) -> float:
     return float(np.hypot(*(self.osm.node_xy(b) - self.osm.node_xy(a))))
@@ -445,7 +447,7 @@ class Walk:
         self.ended = True
         break
       # not round a loop it has already been round (a service road about a building), while there's a way off it
-      cands = [e for e in cands if not any(self.has(link) for link in zip(e.path, e.path[1:], strict=False))] or cands
+      cands = [e for e in cands if not any(self.walked(link) for link in zip(e.path, e.path[1:], strict=False))] or cands
       turn = self.turn if self.along[-1] - self.car <= LANE_REACH else None
       self.turn = None  # the car's lane is for the first junction only
       e = w.choose(self.road(), approach, exits, cands, turn)
@@ -464,6 +466,10 @@ class Walk:
 
   def has(self, link: tuple[int, int]) -> bool:
     return any(self.nodes[k] == link[0] and self.nodes[k + 1] == link[1] for k in range(len(self.nodes) - 1))
+
+  def walked(self, link: tuple[int, int]) -> bool:
+    """Whether it takes the link, or was trimmed of it lately (passed)."""
+    return self.has(link) or any(link == p for p, _ in self.passed)
 
   def junctions(self, k0: int, upto: float) -> list[tuple[int, list[Exit], list[Exit], Exit | None]]:
     """The junctions it passes from node k0 (> 0) to `upto` m along: (the index in nodes of the junction's node, its
@@ -499,6 +505,10 @@ class Walk:
     if k <= 0:
       return
     k = min(k, len(self.nodes) - 2)
+    self.passed += [((a, b), self.along[i + 1] - self.along[i]) for i, (a, b) in enumerate(zip(self.nodes[:k], self.nodes[1:k + 1]))]
+    total = sum(m for _, m in self.passed)
+    while self.passed and total > PASSED_M:
+      total -= self.passed.pop(0)[1]
     base = self.along[k]
     self.nodes, self.along = self.nodes[k:], [a - base for a in self.along[k:]]
     self.choices = [(max(j - k, 0), c - k) for j, c in self.choices if c - k >= 1]
@@ -1106,5 +1116,5 @@ def _copy(walk: Walk, walker: Walker) -> Walk:
   out = Walk.__new__(Walk)
   out.walker, out.osm = walker, walker.osm
   out.nodes, out.along, out.choices, out.ways = list(walk.nodes), list(walk.along), list(walk.choices), list(walk.ways)
-  out.turn, out.ended, out.car = walk.turn, walk.ended, walk.car
+  out.turn, out.ended, out.car, out.passed = walk.turn, walk.ended, walk.car, list(walk.passed)
   return out

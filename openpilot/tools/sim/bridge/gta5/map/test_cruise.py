@@ -82,6 +82,12 @@ def test_not_round_a_loop_again():
   walk = Walk(Walker(osm), 1, 2)
   walk.extend(3000.0, MAX_THROUGH)
   assert 8 in walk.nodes and sum(1 for a, b in zip(walk.nodes, walk.nodes[1:]) if (a, b) == (5, 6)) == 1
+  # walked on as the car drives (trimmed to the car, past the top, then extended): it still remembers going round
+  walk = Walk(Walker(osm), 1, 2)
+  walk.extend(850.0, MAX_THROUGH)
+  walk.trim(walk.nodes.index(6))
+  walk.extend(3000.0, MAX_THROUGH)
+  assert walk.nodes[0] == 6 and 8 in walk.nodes and (5, 6) not in zip(walk.nodes, walk.nodes[1:])
 
 
 def test_ways_it_never_takes():
