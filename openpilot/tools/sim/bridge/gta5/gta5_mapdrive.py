@@ -128,6 +128,7 @@ ABORT_DECEL = 3.5
 HOLD_ACCEL = -1.5  # m/s^2 holding a stop
 STOPPED = 0.25  # m/s
 STOP_NEAR = 2.0  # m from a stop target, stopped: at it
+ARRIVE_NEAR = 6.0  # m short of the arrival, stopped where the profile there is all but nil: arrived
 STOP_LAG = 0.3  # s the car carries on at its speed before braking takes hold
 GIVE_WAY_SPEED = 3.0  # m/s at the line
 LIGHT_MARK = 5.0  # s either side of a light passed without its state
@@ -3456,7 +3457,8 @@ class MapDrive:
     # the arrival
     d_end = self.s_arrive - s
     stop_d = min(stop_d, d_end) if stop_d is not None else d_end
-    if d_end < STOP_NEAR and v < STOPPED or d_end < -1.0:
+    # (stopped for something else a few metres short, the profile left to start again from is too little to move on)
+    if d_end < STOP_NEAR and v < STOPPED or d_end < -1.0 or (d_end < ARRIVE_NEAR and v < STOPPED and vp_here < 0.3):
       if self.arrived_t is None:
         self.arrived_t = t
         self._event("arrived", t, miss=round(d_end, 2))
