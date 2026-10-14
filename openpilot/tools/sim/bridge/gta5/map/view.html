@@ -734,7 +734,8 @@ canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, [e.clientX, e.clientY]);
   pinch = null;
-  tap = pointers.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
+  // a tap while the button shows only dismisses it
+  tap = pointers.size === 1 && !picked ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
   hidePick();
 });
 canvas.addEventListener('pointerup', e => {
@@ -784,6 +785,7 @@ async function setDestination(body) {
 }
 pick.onclick = () => { if (picked) setDestination({ x: picked[0], y: picked[1] }); hidePick(); };
 document.getElementById('clear').onclick = () => setDestination({});
+addEventListener('keydown', e => { if (e.key === 'Escape') hidePick(); });
 
 // heading up turns with the car, so it follows it too; off it, the map turns back north
 function setFollow(on) {
