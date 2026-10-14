@@ -144,7 +144,10 @@ ASK_KEEP_S = 10.0  # s of driving (and ASK_KEEP m at the least) nav mustn't want
 ASK_KEEP = 150.0
 ASK_PHASES = ("drive", "follow")
 LC_GATE_T = 1.0  # s before a lane change starts from which its lane is to be clear (_lc_gate)
-LC_COMMIT = 0.4  # share of the way across after which a change is carried through (before it, gone back from)
+# share of the way across after which a change is carried through (before it, gone back from): our middle still in
+# our lane, so the monitor's lane beside is the one moved into (past it, the lane beyond that); going back later takes
+# longer than letting one closing on us brake
+LC_COMMIT = 0.25
 LC_DEFER_S, LC_DEFER_MIN = 2.0, 15.0  # s on from the car (m at the least) a change put off starts again
 LC_LATE_WAIT = 30.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends
 LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
