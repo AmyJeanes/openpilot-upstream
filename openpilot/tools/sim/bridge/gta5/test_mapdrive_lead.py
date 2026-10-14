@@ -582,6 +582,31 @@ def test_fork_change_gives_up_the_branch():
   print("fork change gives up the branch: ok")
 
 
+def test_cut_in():
+  # final-run trips (Strawberry Ave onto Olympic Fwy, San Andreas Ave, Calais Ave, Del Perro Fwy): cars overtaking us
+  # 6-10 m/s faster while we were slow, swerving or merging into our lane alongside, hit us. One coming up 6 m/s faster
+  # in the left lane from 8 m behind, swerving into ours at 8 deg: braked for (cut_in), let in ahead, no touch; without
+  # the check it hits us
+  r = ms.straight(800)
+  x1, y, h = ms.start_pose(r, 1, 200.0)
+  x0 = ms.start_pose(r, 0, 0.0)[0]
+  for on in (True, False):
+    real = MapDrive._cut_in
+    if not on:
+      MapDrive._cut_in = lambda self, t, v: None
+    try:
+      car = ms.Vehicle(x0, y - 8.0, h - 8.0, speed=14.0)
+      trip = ms.drive(r, {"seed": 2, "speed": 8.0}, pose=(x1, y, h), v0=8.0, vehicles=[car], reach=REACH, seconds=12)
+    finally:
+      MapDrive._cut_in = real
+    cuts = [e for e in trip.events if e["event"] == "cut_in"]
+    if on:
+      assert cuts and trip.car.collisions == 0 and trip.col(13).min() > 0.1, (cuts, trip.col(13).min())
+    else:
+      assert trip.car.collisions
+  print("cut in: ok")
+
+
 def test_queue_that_moves():
   # the map driver can't see lights: behind a queue at one, it waits as long as the queue moves on now and then, each time
   # less than WAIT_MAX s still but longer in all; the lead creeps on 0.3 m (too little for us to move), then 4 m, then goes
@@ -915,6 +940,7 @@ if __name__ == "__main__":
   test_two_lane_change()
   test_fork_change_gives_up_the_branch()
   test_lane_window_speeding_up()
+  test_cut_in()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()

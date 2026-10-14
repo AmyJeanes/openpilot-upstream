@@ -96,7 +96,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
-           "ped", "nudge", "ped_kerb", "blocked", "obstacle", "light", "order")
+           "ped", "nudge", "ped_kerb", "blocked", "obstacle", "light", "order", "cut_in")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -219,6 +219,9 @@ RANGE_BODY = 2.5  # m of its body before its middle (which the plugin's reach is
 WAIT_MAX = 60.0  # s held by a vehicle in the way (none moving) before the trip ends
 PARKED_WAIT = 10.0  # s, by a parked one (no one in its driver's seat)
 DEADLOCK_WAIT = 20.0  # s, by a driven one standing across our way (it may be waiting for us), after backing off it
+CUT_IN_T = 2.0  # s ahead one beside us is looked at coming into our way (straight on at its velocity)
+CUT_IN_SIDE = 0.8  # m/s towards us at least, for that
+CUT_IN_DECEL = 2.5  # m/s^2 braked at to let it in ahead
 REVERSE_AFTER = 6.0  # s held, stopped, by a driven one standing across our way close ahead before backing off it
 REVERSE_NEAR = 8.0  # m from our front bumper it stands within, for that
 REVERSE_DIST = 3.0  # m backed off
@@ -745,6 +748,7 @@ class MapDrive:
     self.nudge_blocked: list[dict] = []  # parked vehicles with no shift past them, until passed
     self.nudge_log: list[dict] = []  # each nudge event, for the summary
     self.kerb_logged = -math.inf  # when the pedestrian kerb cap last held the car back
+    self.cut_logged = -math.inf  # when one cutting in last had us brake
     self.obst: list[dict] = []  # static things ahead the plugin's probes hit, as bodies in the world (_obstacles)
     self.obst_rows = None
     self.gap_tune = LaneGapTune()
@@ -3390,7 +3394,8 @@ class MapDrive:
           self._event("light_unknown", t, **{k: v for k, v in mark.items() if k != "t"}, **({"seen": light} if light else {}))
           continue
         d = x["target"] - s
-        if light == "red" and x.get("why") == "cross" and x.get("held") is not None and self._turns_right(x) and            v < STOPPED and t - x["held"] >= st["stop_dwell"] + st["reaction"]:
+        if (light == "red" and x.get("why") == "cross" and x.get("held") is not None and self._turns_right(x) and
+            v < STOPPED and t - x["held"] >= st["stop_dwell"] + st["reaction"]):
           # turning right, red for the cross traffic: on after a stop, as on red, its gaps the crossing check's to judge
           if not x.get("ror"):
             x["ror"] = True
@@ -3545,6 +3550,13 @@ class MapDrive:
                     **({"ped": True} if car.get("ped") else {}), **({"across": True} if across else {}),
                     **({"obst": True} if car.get("obst") else {})}
           holder = car
+      cut = self._cut_in(t, v)
+      if cut is not None and -CUT_IN_DECEL < min(need, 0.0):
+        need = -CUT_IN_DECEL
+        reason = "cut_in"
+        if t - self.cut_logged > 2.0:
+          self._event("cut_in", t, **cut)
+        self.cut_logged = t
       # a plugin whose nearby has no pedestrians still counts those just ahead (traffic.peds, PED_BOX): stop for them
       peds = int((state.get("traffic") or {}).get("peds") or 0)
       if not self.peds_reported and peds:
@@ -3606,6 +3618,35 @@ class MapDrive:
       a = min(a, -0.5) if (self.s_arrive - s) > 0 else HOLD_ACCEL
     a = float(np.clip(a, -DECEL_MAX, st["accel"]))
     return self._out_accel(a, dt, hard=a < -b)
+
+  def _cut_in(self, t: float, v: float) -> dict | None:
+    """A driven vehicle beside us, not yet in our way (outside LEAD_SIDE of our body), moving towards our path at
+    CUT_IN_SIDE or more whose body (straight on at its velocity, its sideways motion carried on) comes within 0.3 m of
+    our body's side alongside us within CUT_IN_T s: one merging or swerving into us, which only braking can let in
+    ahead (GTA's drivers merge into a slower car, and pass a slow one cutting back in). Its details; None."""
+    best = None
+    for car in self.cars or []:
+      if car.get("ped") or not car.get("driven") or float(np.hypot(*car["vel"])) < 2.0:
+        continue
+      now_a, now_r = self._place(self._outline(self._car_now(car, t)), self.front + 15.0, behind=self.rear + 15.0)
+      if np.isnan(now_a).all() or np.nanmin(np.abs(now_r)) < self.half_width + LEAD_SIDE:
+        continue  # off our road, or in our way already (a lead's)
+      side = float(np.sign(np.nanmean(now_r)))
+      j = int(np.clip(np.searchsorted(self.s_path, float(np.nanmean(now_a))), 0, len(self.s_path) - 1))
+      towards = -side * float(car["vel"] @ np.array([math.sin(self.theta[j]), -math.cos(self.theta[j])]))
+      if towards < CUT_IN_SIDE:
+        continue
+      for dt in np.arange(0.25, CUT_IN_T + 1e-6, 0.25):
+        a, r = self._place(self._outline(self._car_now(car, t, dt)), self.front + 15.0 + v * dt, behind=self.rear + 15.0)
+        ok = ~np.isnan(a)
+        ours = self.s + v * dt
+        alongside = ok & (a > ours - self.rear - 1.0) & (a < ours + self.front + 1.0)
+        if (alongside & (np.abs(np.nan_to_num(r, nan=99.0)) < self.half_width + 0.3)).any():
+          if best is None or dt < best["in"]:
+            best = {"in": round(float(dt), 2), "side": "right" if side > 0 else "left", "towards": round(towards, 1),
+                    "speed": round(float(np.hypot(*car["vel"])), 1)}
+          break
+    return best
 
   def _behind_clear(self, t: float) -> bool:
     """Whether the road behind us is clear to back off REVERSE_DIST: no one (vehicle, pedestrian or static thing)
