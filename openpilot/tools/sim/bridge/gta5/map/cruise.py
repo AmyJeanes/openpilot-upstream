@@ -362,9 +362,13 @@ class Walker:
       if ours:
         return min(ours, key=lambda e: abs(e.turn))
 
+    # off a link (a ramp, GTA's hop across to a road alongside) its class isn't the road it leads onto: the next link
+    # back would pass for the road carried on
+    link = self.osm.ways[approach][0].get('highway', '').endswith('_link')
+
     def same(e: Exit) -> bool:
       w = self.way(*e.edge)
-      return self.name(w) == road if road else not self.name(w) and self.road_class(w) == self.road_class(approach)
+      return self.name(w) == road if road else not link and not self.name(w) and self.road_class(w) == self.road_class(approach)
     carried = [e for e in cands if abs(e.turn) <= SAME_ROAD_TURN and same(e)]
     return min(carried or cands, key=lambda e: abs(e.turn))
 

@@ -60,6 +60,16 @@ def test_straight_on_the_same_road():
   assert took == 12
 
 
+def test_off_a_link_the_road_it_joins():
+  """Off a link (unnamed, as GTA's hops across to a road alongside are) the next link back isn't taken for the road
+  carried on: the way out turning least is; off an unnamed motorway, the motorway's class still carries on."""
+  link = {'highway': 'motorway_link', 'lanes': '1', 'width': '6'}
+  road = {'highway': 'primary', 'lanes': '2', 'width': '12'}
+  motorway = {'highway': 'motorway', 'lanes': '2', 'width': '12', 'oneway': 'yes'}
+  assert junction({11: (road, 30.0), 12: (link, -57.0)}, approach=link)[0] == 11
+  assert junction({11: (road, 30.0), 12: (link, -57.0)}, approach=motorway)[0] == 12
+
+
 def test_ways_it_never_takes():
   """Not a one-way the wrong way, nor a dead end or a minor road while there's another way on, nor a U-turn, nor a move
   the map's turn restrictions forbid."""
