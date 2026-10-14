@@ -139,6 +139,7 @@ LIGHT_THROUGH = 3.0  # m/s: one of ours crossing its line faster is going throug
 LIGHT_CROSS = 4.0  # m/s: one crossing our way at its junction faster is going on its green
 LIGHT_QUEUE = 1.0  # s one of ours has stood at or behind its line, waiting
 LIGHT_NODE = 25.0  # m from a signal's junction node a crosser is in its junction
+LIGHT_STRAIGHT = 0.15  # rad/s a crosser turns at most, going straight across on its green
 ORDER_WAIT = 8.0  # s after its dwell at most a stop sign waits for those who came to their lines first
 ORDER_NEAR = 30.0  # m from the junction's node one waiting at its line may be
 SIGNAL_TIME, SIGNAL_DIST = 5.0, 50.0  # s, m before a turn (as the AI expert)
@@ -2599,8 +2600,8 @@ class MapDrive:
   def _light(self, x: dict, state: dict, t: float) -> str | None:
     """What the traffic about shows of the signal at stop line x, from LIGHT_LOOK m short of it: "red" where one of
     ours (going our way) ahead of our rear waits at a red light (its own flag, where the plugin sends one) or has stood
-    at or just behind the line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS (on its
-    green); "green" where one of ours drives over the line faster than LIGHT_THROUGH, or one on the crossing road waits
+    at or just behind the line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS, going
+    straight (on its green; not turning); "green" where one of ours drives over the line faster than LIGHT_THROUGH, or one on the crossing road waits
     at its red by the junction, and none of that, but for one going through in our own lane (or any lane of ours where
     the route goes straight on), which outweighs a queue in the lane beside (a turn lane's own phase); each kept
     LIGHT_KEEP s. Never from those behind us, who wait because we do (the plugin's traffic.red counts them too, so isn't
@@ -2635,8 +2636,8 @@ class MapDrive:
           green = "through"
           own_green = own_green or straight or abs(float(right[0])) < LANE_W / 2 + 1.0
       elif 50.0 < ang < 130.0 and float(np.hypot(*(mid - node))) < LIGHT_NODE:
-        if speed > LIGHT_CROSS:
-          red = red or "cross"
+        if speed > LIGHT_CROSS and abs(float(car.get("yaw") or 0.0)) < LIGHT_STRAIGHT:
+          red = red or "cross"  # (one turning through the junction, from the road opposite or on its own red, shows nothing)
         elif car.get("at_light"):
           green = green or "cross_waiting"
     if red and not own_green:
