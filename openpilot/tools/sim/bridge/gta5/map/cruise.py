@@ -884,6 +884,8 @@ class Cruise:
     w = self.watching
     if w is None:
       return
+    if self.pending is not None and self.pending[0] is self.prompted:
+      return  # its route not in yet (held): the car's on the old one, and _too_late still needs the watch
     p = np.asarray(pos[:2], float)
     d_want = float(np.hypot(*(p - w['want'])))
     d_other = float(np.hypot(*(p - w['other']))) if w['other'] is not None else math.inf

@@ -431,6 +431,19 @@ def test_prompt_too_late(monkeypatch):
       assert c.route is made and c.forced is not None and not c.take_notes()
 
 
+def test_prompt_watch_waits_for_its_route(monkeypatch):
+  """A forced turn's outcome isn't judged while its route still waits to go in (the car on the old route), so it can
+  still be dropped as too late: a sharp turn's point past its junction can lie beside the approach."""
+  c = cruising(monkeypatch, grid(), 150.0)
+  assert c.prompt('left', np.array([0.0, 150.0]), 0.0, None, 15.0) == ('turn', 'Row 1')
+  while c.busy:
+    time.sleep(0.01)
+  c._watch_step(np.array(c.watching['want']))  # the car by the turn's way out, its route still pending
+  assert c.watching is not None and not [e for e in c.take_log() if e['event'] == 'prompt_outcome']
+  c.update(np.array([0.0, 290.0]), 0.0, -1.0)
+  assert c.pending is None and c.forced is None and c.take_notes() == [('late', 'left', '')]
+
+
 def test_prompt_need():
   """How near a turn may be: by the lane changes into a lane for it (turn:lanes arrows, else the outermost lane that
   side; a pocket opening on that side counted), and by speed, braking for a turn but not a fork."""
