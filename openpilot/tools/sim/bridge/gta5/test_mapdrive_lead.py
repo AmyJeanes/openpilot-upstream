@@ -471,7 +471,7 @@ def test_lane_change_waits_for_its_lane():
   for v in (0.0, 18.0):
     got = md._deferred_keys(md.route, s0, 385.0, v)
     if got is not None:
-      ramps = [(k0[0], k1[0]) for k0, k1 in zip(got, got[1:]) if abs(k1[1] - k0[1]) > 1e-3 and k1[0] - k0[0] > 1e-3]
+      ramps = [(k0[0], k1[0]) for k0, k1 in zip(got, got[1:], strict=False) if abs(k1[1] - k0[1]) > 1e-3 and k1[0] - k0[0] > 1e-3]
       assert len(ramps) == 2 and all(e - s >= min(md._lc_least(1.0, v), 30.0) - 1e-6 for s, e in ramps), (v, got)  # (as long as they were)
       assert ramps[1][0] - ramps[0][1] >= max(v, 5.0) * LC_SETTLE_S - 1e-6 and ramps[1][1] <= md.route.length, (v, got)
   assert md._deferred_keys(md.route, s0, 590.0, 18.0) is None  # no room left before the route's end
@@ -634,6 +634,66 @@ def test_no_creep_in_a_junction():
   print("no creep in a junction: ok")
 
 
+def events_of(trip, what: str) -> list[dict]:
+  return [e for e in trip.events if e["event"] == what]
+
+
+def test_lights_from_traffic():
+  # no light state to read: the traffic about shows it. North to a signal's line at 288 m, its junction's node at 300
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30], stops=[(288.0, "lights")])
+  base = ms.drive(r, {"seed": 2}, lane=1, seconds=60)
+  t_line = float(np.interp(288.0 - base.md.front, base.col(2), base.col(0)))
+  x_us = ms.start_pose(r, 1, 300.0)[0]
+
+  def moved_off(trip, y_at: float) -> float:  # when the car first moved on from standing at y_at
+    t, y, v = trip.col(0), trip.col(2), trip.col(4)
+    k = np.flatnonzero((np.abs(y - y_at) < 0.5) & (v < 0.25))
+    return float(t[k[-1]]) if len(k) else math.nan
+  # red: one of ours stands at the line in the lane beside until t_line + 20 s, then goes: stopped at our line, on after it
+  go = t_line + 20.0
+  beside = parked(r, 0, 288.0 - 2.6, start=go, accel=2.0, until=12.0)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[beside], reach=REACH, seconds=120)
+  stops, gos = events_of(trip, "light_stop"), events_of(trip, "light_go")
+  t, y, v = trip.col(0), trip.col(2), trip.col(4)
+  k = int(np.argmin(np.where((y > 250.0) & (y < 300.0), v, 99.0)))
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and stops and stops[0]["why"] == "waiting", (trip.finished, stops)
+  assert v[k] < 0.25 and y[k] + trip.md.front < 288.0 and gos and t[k] < go < moved_off(trip, y[k]) < go + 4.0, (v[k], gos)
+  # cross traffic flowing through its junction until t_line + 12 s: stopped at the line (not in the lanes) until it's done
+  stream = [ms.Vehicle(x_us - 10.0 * (t_line - 6.0 + 2.5 * n), 302.75, 270.0, speed=10.0) for n in range(8)]
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=stream, reach=REACH, seconds=120)
+  stops = events_of(trip, "light_stop")
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and stops and stops[0]["why"] == "cross", (trip.finished, stops)
+  assert trip.col(13).min() > 2.0, trip.col(13).min()
+  # green: one of ours ahead in our lane drives on over the line: no stop for it
+  lead = parked(r, 1, 120.0, speed=12.0)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[lead], reach=REACH, seconds=90)
+  assert trip.finished == "arrived" and not events_of(trip, "light_stop"), events_of(trip, "light_stop")
+  assert trip.col(4)[(trip.col(2) > 250.0) & (trip.col(2) < 300.0)].min() > 5.0
+  print("lights from traffic: ok")
+
+
+def test_stop_sign_order():
+  # an all-way stop: a car on the cross road came to its line first (stopped 12 m east of the node, heading for it) and
+  # goes 3 s after our own dwell is done: given way to, then on across behind it; one that came later is no reason to wait
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30], stops=[(288.0, "stop")])
+  base = ms.drive(r, {"seed": 2}, lane=1, seconds=60)
+  dwell = base.md.style["stop_dwell"] + base.md.style["reaction"]
+  t_stop = min(e["t"] for e in base.events if e["event"] == "stopped")
+  x_us = ms.start_pose(r, 1, 300.0)[0]
+  for early, waits in ((True, True), (False, False)):
+    arrive = t_stop - 6.0 if early else t_stop + 1.0  # when it comes to a stand at its line
+    go = t_stop + dwell + (3.0 if early else 10.0)  # (a later one waits for us, as GTA's drivers do)
+    v0 = 8.0
+    d = v0 * v0 / (2 * 2.0)
+    other = ms.Vehicle(x_us + 12.0 + d + v0 * (arrive - v0 / 2.0), 302.75, 90.0, speed=v0, accel=-2.0, until=0.0,
+                       start=arrive - v0 / 2.0, later=((go, 2.5, 10.0),))
+    trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[other], reach=REACH, seconds=120)
+    orders = events_of(trip, "stop_order")
+    assert trip.finished == "arrived" and trip.car.collisions == 0 and trip.col(13).min() > 1.5, (early, trip.finished, trip.col(13).min())
+    assert bool(orders) == waits, (early, orders)
+  print("stop sign order: ok")
+
+
 def test_pedestrians():
   # mdlead traffic trip 1: turning left at 5 m/s, a pedestrian crossing the road out (walking across it, 12 m past the
   # node) was hit; the driver had no pedestrians. Here one walks north across the road out at x -12, reaching our lane as
@@ -758,6 +818,8 @@ if __name__ == "__main__":
   test_oncoming_round_a_bend()
   test_crossing_at_the_line()
   test_no_creep_in_a_junction()
+  test_lights_from_traffic()
+  test_stop_sign_order()
   test_pedestrians()
   test_pedestrian_at_the_kerb()
   test_range()

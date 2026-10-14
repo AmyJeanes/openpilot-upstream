@@ -49,7 +49,8 @@ class Track:
     self.id = tid
     self.ped = bool(car.get("ped"))
     self.first = t
-    self.t = t
+    self.t = t  # its reading's time
+    self.seen = t  # when a report last had it (one the same as the last is no new reading, but it's still there)
     self.c = car["c"]
     self.vel = car["vel"]
     self.yaw = 0.0
@@ -81,7 +82,7 @@ class Track:
       acc = (speed - self.speed) / dt
       if acc > ACCEL_MIN:
         self.accel += k * (min(acc, 4.0) - self.accel)
-    self.c, self.vel, self.t, self.speed, self.heading = car["c"], car["vel"], t, speed, heading
+    self.c, self.vel, self.t, self.seen, self.speed, self.heading = car["c"], car["vel"], t, t, speed, heading
     if speed < STILL:
       self.still_since = self.still_since if self.still_since is not None else t
     else:
@@ -97,7 +98,7 @@ class Traffic:
     self.next_id = 1
 
   def update(self, cars: list[dict], t: float):
-    for tid in [k for k, tr in self.tracks.items() if t - tr.t > TRACK_FORGET]:
+    for tid in [k for k, tr in self.tracks.items() if t - tr.seen > TRACK_FORGET]:
       del self.tracks[tid]
     free = dict(self.tracks)
     by_handle = {tr.handle: tid for tid, tr in free.items() if tr.handle is not None}
@@ -127,6 +128,15 @@ class Traffic:
       if n not in used_cars:
         tr = self.tracks[self.next_id] = Track(self.next_id, car, t)
         self.next_id += 1
+        self._mark(car, tr, t)
+
+  def again(self, cars: list[dict], t: float):
+    """The same report as last time (the plugin's places unchanged, as when everything stands still): its tracks are
+    still there, and the times they've stood grow."""
+    for car in cars:
+      tr = self.tracks.get(car.get("id"))
+      if tr is not None:
+        tr.seen = t
         self._mark(car, tr, t)
 
   @staticmethod

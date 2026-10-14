@@ -29,8 +29,10 @@ car's middle, which moves inwards of its heading in a bend), predicted `latency`
 `ff_preview` (0.32) s ahead as feedforward (the pursuit's own curve-cutting taken out), rate limited to 3x the style's
 lateral jerk (more once off the path) and capped at 4.5 m/s^2; the speed follows a static profile (limit or road class x style, the path's
 curvature's envelope at the style's lateral acceleration and lateral jerk, nav's turn speeds) with stop signs (full stop and
-dwell), give way lines (slow, then on), traffic lights (no state to read: driven through and marked light_unknown +-5 s)
-and a gentle arrival stop_before m short of the end. Other vehicles: one whose body comes within LEAD_SIDE of ours along
+dwell, then those who came to their lines first let go first: _before_us), give way lines (slow, then on), traffic lights
+(no state of their own to read: what the traffic about shows of them, _light, stopped at their line while it's red, come
+up to no faster than LIGHT_UNKNOWN_V while there's traffic but no sign; without traffic driven through as before, each
+marked light_unknown +-5 s) and a gentle arrival stop_before m short of the end. Other vehicles: one whose body comes within LEAD_SIDE of ours along
 the path ahead (in a turn too) is followed (the intelligent driver model's braking, by the style's headway) or stopped
 behind, LEAD_STOP short, but a driven one standing across our way (side or head on) is no lead: it's stopped for and
 waited for while it moves, the trip ending after DEADLOCK_WAIT s (it may be waiting for us, and the car can't back off);
@@ -94,7 +96,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
 REASONS = ("", "limit", "curve", "turn", "stop", "give_way", "arrive", "start", "abort", "hold", "lead", "cross", "range",
-           "ped", "nudge", "ped_kerb", "blocked", "obstacle")
+           "ped", "nudge", "ped_kerb", "blocked", "obstacle", "light", "order")
 # lc_tau: 0..1 through the lane change under way by path distance, NaN outside one; lc_dir: its side, -1 left / +1 right
 MAPX_COLUMNS = ("phase", "plan_s", "path_dev", "target_lane", "target_right", "v_prof", "a_cmd", "kappa_cmd", "speed_reason",
                 "lc_tau", "lead_gap", "lc_dir")
@@ -129,6 +131,16 @@ STOP_NEAR = 2.0  # m from a stop target, stopped: at it
 STOP_LAG = 0.3  # s the car carries on at its speed before braking takes hold
 GIVE_WAY_SPEED = 3.0  # m/s at the line
 LIGHT_MARK = 5.0  # s either side of a light passed without its state
+LIGHT_LOOK = 60.0  # m short of a signal's line from which the traffic about is read for its state (_light)
+LIGHT_KEEP = 1.5  # s a sign of red or green stands after it was last seen
+LIGHT_WAIT_MAX = 150.0  # s held at a red light before the trip ends
+LIGHT_UNKNOWN_V = 8.0  # m/s a signal's line is come up to at most while the traffic about shows nothing of it
+LIGHT_THROUGH = 3.0  # m/s: one of ours crossing its line faster is going through on green
+LIGHT_CROSS = 4.0  # m/s: one crossing our way at its junction faster is going on its green
+LIGHT_QUEUE = 1.0  # s one of ours has stood at or behind its line, waiting
+LIGHT_NODE = 25.0  # m from a signal's junction node a crosser is in its junction
+ORDER_WAIT = 8.0  # s after its dwell at most a stop sign waits for those who came to their lines first
+ORDER_NEAR = 30.0  # m from the junction's node one waiting at its line may be
 SIGNAL_TIME, SIGNAL_DIST = 5.0, 50.0  # s, m before a turn (as the AI expert)
 TURN_DONE_HEADING, TURN_DONE_AFTER, TURN_PAST, KEEP_PAST = 20.0, 5.0, 40.0, 30.0
 JOG_LINK, JOG_TURN, JOG_BACK, JOG_PAD = 25.0, 10.0, 12.0, 10.0  # m, deg, deg, m (route_jogs)
@@ -2229,6 +2241,7 @@ class MapDrive:
     self.peds_reported = "p" in nb
     rows = (nb.get("v") or [], nb.get("p") or [])
     if self.cars is not None and rows == self.cars_rows:
+      self.traffic.again(self.cars, t)
       return
     self.cars_rows = rows
     h = math.radians(float(state.get("heading") or 0.0))
@@ -2517,6 +2530,90 @@ class MapDrive:
       return None  # along our way: a lead, or oncoming
     return (first - self.s - self.front - CROSS_STOP,
             {"at": round(first, 1), "angle": round(angle), "speed": round(float(np.hypot(*car["vel"])), 1), "slowed": True})
+
+  def _red_ahead(self, t: float) -> bool:
+    """Whether a signal not yet passed within LIGHT_LOOK m ahead was last read red (_light) within LIGHT_KEEP s."""
+    return any(x["kind"] == "lights" and not x["done"] and x["s"] - self.s < LIGHT_LOOK and t - x.get("red_t", -math.inf) < LIGHT_KEEP
+               for x in self.stops)
+
+  def _node_of(self, x: dict) -> np.ndarray:
+    """The world place of a stop line's junction: its first node within STOP_LINE_FAR past it, else 10 m past it."""
+    after = [a for a in self.route.junctions if 0.0 <= a - x["along"] <= STOP_LINE_FAR]
+    return route_point(self.route, after[0] if after else x["along"] + 10.0)
+
+  def _light(self, x: dict, state: dict, t: float) -> str | None:
+    """What the traffic about shows of the signal at stop line x, from LIGHT_LOOK m short of it: "red" where AI cars
+    going our way wait at a red light (the plugin's traffic.red, or a reported vehicle's own flag), one of ours has stood
+    at or just behind its line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS (on its
+    green); "green" where one of ours drives over its line faster than LIGHT_THROUGH and none of that, but for one going
+    through in our own lane, which outweighs a queue in the lane beside (a turn lane's own phase); each kept LIGHT_KEEP
+    s. None where nothing shows: no traffic about, and the trip goes as without it. x keeps why, and whether any traffic
+    was about."""
+    gap = x["s"] - self.s - self.front
+    if gap > LIGHT_LOOK or not self.cars:
+      return None
+    x["traffic"] = True
+    red = green = None
+    own_green = False
+    if int((state.get("traffic") or {}).get("red") or 0):
+      red = "queue"
+    j = int(np.clip(np.searchsorted(self.s_path, x["s"]), 0, len(self.s_path) - 1))
+    th = float(self.theta[j])
+    node = self._node_of(x)
+    for car in self.cars:
+      if car.get("ped") or not car["driven"]:
+        continue
+      mid = car["c"].mean(axis=0)
+      speed = float(np.hypot(*car["vel"]))
+      h = math.atan2(car["vel"][1], car["vel"][0]) if speed > 1.0 else body_heading(car["c"])
+      ang = abs(wrap(math.degrees(h - th)))
+      if ang < ALONG_ANGLE:
+        along, right = self._place(mid[None], gap + self.front + 40.0, behind=40.0, off_max=2.0 * LANE_W)
+        if math.isnan(along[0]):
+          continue
+        rel = float(along[0]) - x["s"]
+        if car.get("at_light") or (-25.0 < rel < 3.0 and float(car.get("still") or 0.0) >= LIGHT_QUEUE):
+          red = red or "waiting"
+        elif -3.0 < rel < 20.0 and speed > LIGHT_THROUGH:
+          green = "through"
+          own_green = own_green or abs(float(right[0])) < LANE_W / 2 + 1.0
+      elif 50.0 < ang < 130.0 and speed > LIGHT_CROSS and float(np.hypot(*(mid - node))) < LIGHT_NODE:
+        red = red or "cross"
+    if red and not own_green:
+      x["red_t"], x["why"] = t, red
+    elif green:
+      x["green_t"], x["why"] = t, green
+    if t - x.get("red_t", -math.inf) < LIGHT_KEEP:
+      return "red"
+    if t - x.get("green_t", -math.inf) < LIGHT_KEEP:
+      return "green"
+    return None
+
+  def _before_us(self, x: dict, t: float) -> dict | None:
+    """At a stop sign's line, stopped since x["t_stop"]: a driven vehicle waiting at its own line into the junction
+    since before we stopped (standing within ORDER_NEAR of the junction's node, heading for it, not in our way along our
+    path, which the lead and crossing checks see to, and having moved since it was seen: not one parked by the kerb
+    with its driver idle): the first come goes first. None where there's none."""
+    node = self._node_of(x)
+    for car in self.cars or []:
+      if car.get("ped") or not car["driven"] or car.get("obst"):
+        continue
+      still = float(car.get("still") or 0.0)
+      if still <= 0.0 or t - still > x["t_stop"] - 0.3 or not car.get("moved", True):
+        continue  # moving, came after us, or never moved since seen
+      mid = car["c"].mean(axis=0)
+      to = node - mid
+      dist = float(np.hypot(*to))
+      if not 3.0 < dist < ORDER_NEAR:
+        continue
+      h = body_heading(car["c"])
+      if float(to @ np.array([math.cos(h), math.sin(h)])) < 0.5 * dist:
+        continue  # not heading for the junction
+      along, right = self._place(mid[None], ORDER_NEAR + 20.0, behind=10.0)
+      if not math.isnan(along[0]) and abs(float(right[0])) < self.half_width + LEAD_SIDE + 1.0:
+        continue  # in our way along our path: a lead's, or the crossing check's
+      return car
+    return None
 
   def _in_junction(self) -> bool:
     """Whether our front bumper is in a junction: past a stop line within JUNCTION_IN, or within JUNCTION_NODE of a node."""
@@ -3190,11 +3287,39 @@ class MapDrive:
       if x["done"]:
         continue
       if x["kind"] == "lights":
+        light = self._light(x, state, t)
         if s + self.front >= x["s"]:
           x["done"] = True
           mark = {"t": round(t, 3), "s": round(x["s"], 1), "along": round(x["along"], 1), "from": round(t - LIGHT_MARK, 3), "to": round(t + LIGHT_MARK, 3)}
           self.lights.append(mark)
-          self._event("light_unknown", t, **{k: v for k, v in mark.items() if k != "t"})
+          self._event("light_unknown", t, **{k: v for k, v in mark.items() if k != "t"}, **({"seen": light} if light else {}))
+          continue
+        d = x["target"] - s
+        if light == "red" and (x.get("held") is not None or d + 1.0 >= v * STOP_LAG + v * v / (2 * DECEL_REAL)):
+          # the traffic shows it red: stopped at its line, as for a stop sign, and held there while it does
+          if x.get("held") is None:
+            x["held"] = t
+            self._event("light_stop", t, why=x.get("why"), d=round(d, 1))
+          if t - x["held"] > LIGHT_WAIT_MAX:
+            self._abort(f"held {LIGHT_WAIT_MAX:.0f} s at a red light", t, state.get("pos"))
+            return self.a
+          cap = math.sqrt(2 * b * 0.8 * max(d - 0.3, 0.0))
+          stop_d = d
+          self.stopped_at = t if v < STOPPED else None
+          if cap < vp:
+            vp, reason = cap, "light"
+            if d < 40.0:
+              phase = "stop"
+          break
+        if x.get("held") is not None:
+          self._event("light_go", t, waited=round(t - x["held"], 1), why=x.get("why"))
+          x["held"] = None
+          self.stopped_at = None
+        if light is None and x.get("traffic") and 0.0 < x["s"] - s - self.front < LIGHT_LOOK:
+          # traffic about but nothing shown of the light yet: no faster than would stop at its line from LIGHT_UNKNOWN_V
+          cap = math.sqrt(LIGHT_UNKNOWN_V ** 2 + 2 * b * 0.8 * max(d - look, 0.0))
+          if cap < vp:
+            vp, reason = cap, "light"
         continue
       d = x["target"] - s
       if x["kind"] == "give_way":
@@ -3210,9 +3335,19 @@ class MapDrive:
       # a stop sign: a full stop at its target, the dwell, then on
       if x["t_stop"] is not None:
         if t - x["t_stop"] >= st["stop_dwell"] + st["reaction"]:
-          x["done"] = True
-          self.stopped_at = None
-          continue
+          first = self._before_us(x, t) if t - x["t_stop"] < st["stop_dwell"] + st["reaction"] + ORDER_WAIT else None
+          if first is None:
+            if x.get("order"):
+              self._event("stop_order", t, waited=round(t - x["t_stop"], 1), gave_way=x["order"])
+            x["done"] = True
+            self.stopped_at = None
+            continue
+          x["order"] = x.get("order", 0) + (first["id"] != x.get("first"))
+          x["first"] = first["id"]
+          self.stopped_at = x["t_stop"]
+          self.v_prof, self.reason = 0.0, "order"
+          self._set("stop", t)
+          return self._out_accel(HOLD_ACCEL, dt, hard=True)
         self.stopped_at = x["t_stop"]
         self.v_prof, self.reason = 0.0, "stop"
         self._set("stop", t)
@@ -3335,7 +3470,7 @@ class MapDrive:
     blocked = phase == "yield" and (bool(holder.get("crosswise")) or bool(detail.get("slowed")))
     obst = phase == "follow" and bool(holder.get("obst"))  # a static thing on the plan: it won't move
     wait = (BORROW_WAIT if self._borrow_pending(holder) else PARKED_WAIT) if parked else DEADLOCK_WAIT if blocked else \
-      OBST_WAIT if obst else WAIT_MAX
+      OBST_WAIT if obst else LIGHT_WAIT_MAX if self._red_ahead(t) else WAIT_MAX  # in a queue at a light shown red: as long as it holds us
     if self.held_since is not None and t - self.held_since > wait:
       who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle standing across our way" if blocked else \
             "static obstacle" if obst else "vehicle"
