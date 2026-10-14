@@ -295,6 +295,30 @@ def test_hairpin_hop():
   assert not hairpin(osm, p[7], p[2])  # against the one-way: no way through at all
 
 
+def test_oncoming_hop():
+  # a dual carriageway, east at y = 0 and west at y = 10, with a shortcut link across its median from one to the other
+  # (a U-turn either way through it): mid-block it's never taken, nor anywhere on a motorway; at a junction (a side
+  # road meeting within 30 m) it's a U-turn bay and stays; so does one a car can also take on to a road there
+  from openpilot.tools.sim.bridge.gta5.map.router import oncoming
+  hop = {(2, 6)}
+
+  def road(cls, side=False, north=False):
+    tags = {'highway': cls, 'oneway': 'yes', 'lanes': '2', 'width': '7', 'name': 'Main St'}
+    nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (115.0, 0.0), 4: (200.0, 0.0), 5: (200.0, 10.0), 6: (95.0, 10.0),
+             7: (0.0, 10.0), 9: (115.0, -100.0), 10: (95.0, 110.0)}
+    ways = {1: (tags, [1, 2, 3, 4]), 2: (tags, [5, 6, 7]), 3: ({'highway': cls, 'oneway': 'yes'}, [2, 6])}
+    if side:
+      ways[4] = ({'highway': 'residential', 'name': 'Side St'}, [3, 9])
+    if north:
+      ways[5] = ({'highway': 'residential', 'oneway': 'yes', 'name': 'North St'}, [6, 10])
+    osm = osm_map(nodes, ways)
+    return lambda: oncoming(osm, np.array(nodes[2]), np.array(nodes[6]), lambda n, m: (n, m) in hop or (m, n) in hop)
+  assert road('primary')()
+  assert not road('primary', side=True)()
+  assert road('motorway', side=True)()
+  assert not road('primary', north=True)()  # into North St too: not every way through it a U-turn
+
+
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
   from openpilot.tools.sim.bridge.gta5.gta5_brain import on_path

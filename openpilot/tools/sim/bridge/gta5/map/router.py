@@ -44,6 +44,11 @@ SEPARATION_GAP = 1.0  # m between two carriageways' lanes: more is hatching, a d
 # height between a line and a link on one level
 PAINT_CELL, PAINT_ENDS, PAINT_LEVEL = 10.0, 1.0, 2.5
 HAIRPIN = 90.0  # deg: a shortcut link every way through which turns back more than this, in and out again, is a hairpin
+# a shortcut link into the oncoming carriageway (oncoming): deg at least between the ways the carriageways at its ends
+# run, the road classes it's never taken on, and m from its middle another road meets for it to be at a junction
+ONCOMING_APART = 150.0
+ONCOMING_FAST = frozenset({'motorway', 'motorway_link', 'trunk', 'trunk_link'})
+ONCOMING_JUNCTION = 30.0
 LINK_ALIGN = 60.0  # deg: a carriageway at a shortcut link's end heads this near the link's way
 CARRIAGEWAY_ALIGN = 30.0  # deg: and the two carriageways this near each other's
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
@@ -650,6 +655,78 @@ def hairpin(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
   return bool(t_in and t_out) and all(abs(i) > HAIRPIN and abs(o) > HAIRPIN and (i > 0) != (o > 0) for i in t_in for o in t_out)
 
 
+def _carriageway_through(osm: OsmLanes, n: int, other: int) -> tuple[np.ndarray, int] | None:
+  """The one-way carriageway through map node n but for its link to `other`: the way it runs there (by its straightest
+  links in and out, else its one link) and a way of it; None where a two-way way meets n."""
+  ins, outs = [], []
+  for m in osm.links.get(n, ()):
+    if m == other:
+      continue
+    w, fwd = osm.pairs[(n, m)]
+    one = oneway_of(osm.ways[w][0])
+    if one == 0:
+      return None
+    d = osm.node_xy(m) - osm.node_xy(n)
+    if np.hypot(*d) < 1e-6:
+      continue
+    d = d / np.hypot(*d)
+    if (one == 1) == fwd:
+      outs.append((d, w))
+    else:
+      ins.append((-d, w))
+  pairs = sorted(((float(i @ o), i, o, w) for i, _ in ins for o, w in outs), key=lambda t: -t[0])
+  if pairs and pairs[0][0] > math.cos(math.radians(45.0)):
+    _, i, o, w = pairs[0]
+    return (i + o) / np.hypot(*(i + o)), w
+  single = ins + outs
+  return single[0] if len(single) == 1 else None
+
+
+def oncoming(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray, shortcut) -> bool:
+  """Whether a link from pa to pb (map nodes) crosses from a one-way carriageway into one running the other way beside
+  it, every way through it a U-turn (turning more than ONCOMING_APART in all): through the gap in a median. Never on a motorway or trunk road
+  (ONCOMING_FAST); elsewhere only at a junction, where another road (not one of the two carriageways, nor a service
+  road or one of GTA's shortcut links, `shortcut(n, m)`) meets within ONCOMING_JUNCTION of it: a junction's U-turn or
+  its turn bay's, not a gap mid-block."""
+  na, nb = osm.nodes_at(np.asarray(pa, float), 1.0), osm.nodes_at(np.asarray(pb, float), 1.0)
+  if not na or not nb or (na[0], nb[0]) not in osm.pairs:
+    return False
+  a, b = na[0], nb[0]
+  ca, cb = _carriageway_through(osm, a, b), _carriageway_through(osm, b, a)
+  if ca is None or cb is None or float(ca[0] @ cb[0]) > math.cos(math.radians(ONCOMING_APART)):
+    return False
+
+  def drivable(x: int, y: int) -> bool:
+    w, fwd = osm.pairs[(x, y)]
+    one = oneway_of(osm.ways[w][0])
+    return one == 0 or (one == 1) == fwd
+
+  def bearing(x: int, y: int) -> float:
+    d = osm.node_xy(y) - osm.node_xy(x)
+    return math.degrees(math.atan2(d[0], d[1]))
+  # every way through it turns back: no turn on to a road meeting there
+  ins = [bearing(p, a) for p in osm.links.get(a, ()) if p != b and drivable(p, a)]
+  outs = [bearing(b, q) for q in osm.links.get(b, ()) if q != a and drivable(b, q)]
+  if not drivable(a, b) or not ins or not outs or any(abs(wrap(o - i)) <= ONCOMING_APART for i in ins for o in outs):
+    return False
+  ways = (ca[1], cb[1])
+  if any(osm.ways[w][0].get('highway') in ONCOMING_FAST for w in ways):
+    return True
+  names = {osm.ways[w][0].get('name') for w in ways} - {None}
+  mid = (osm.node_xy(a) + osm.node_xy(b)) / 2
+  xy = np.asarray(osm.xy)[:, :2]
+  for k in np.flatnonzero(np.hypot(*(xy - mid).T) < ONCOMING_JUNCTION):
+    n = int(osm.ids[k])
+    for m in osm.links.get(n, ()):
+      w = osm.pairs[(n, m)][0]
+      tags = osm.ways[w][0]
+      if w in ways or tags.get('highway') in ('service', 'track') or shortcut(n, m):
+        continue
+      if tags.get('name') not in names or oneway_of(tags) == 0:
+        return False  # another road meets: at a junction
+  return True
+
+
 def lane_change(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
   """Whether the map paints only a dashed lane line across a link from pa to pb (map nodes; LaneLines), at its height."""
   lines = LaneLines.of(osm)
@@ -859,7 +936,8 @@ class Router:
     which GTA's AI may take but a driver can't: each such link's middle. GTA lays a wide road as parallel node chains
     joined by shortcut links; those between lanes side by side (a dashed line) are a lane change, and stay, as do those
     the map paints only a dashed lane line across (LaneLines) though their lanes' edges are a little further apart.
-    A shortcut link no car takes but by a hairpin in and out (hairpin) is one too."""
+    A shortcut link no car takes but by a hairpin in and out (hairpin) is one too, as is one into the oncoming
+    carriageway but at a junction (oncoming)."""
     osm = self.osm if self.osm is not None else self.roads
     if self.paths is None or osm is None or len(points) < 2:
       return []
@@ -870,9 +948,16 @@ class Router:
       if link is None or not link.shortcut:
         continue
       pa, pb = self.paths.xy[a], self.paths.xy[b]
-      if hairpin(osm, pa, pb) or (separated(osm, pa, pb) and not lane_change(osm, pa, pb)):
+      if hairpin(osm, pa, pb) or (separated(osm, pa, pb) and not lane_change(osm, pa, pb)) or \
+         oncoming(osm, pa, pb, self._shortcut):
         out.append(clear_point(osm, pa, pb))
     return out
+
+  def _shortcut(self, n: int, m: int) -> bool:
+    """Whether the map's link from node n to m is one of GTA's shortcut links."""
+    osm = self.osm if self.osm is not None else self.roads
+    ga, gb = self.paths.nodes_at(osm.node_xy(n)), self.paths.nodes_at(osm.node_xy(m))
+    return any(getattr(self.paths.links.get((i, j)), 'shortcut', False) for i in ga for j in gb)
 
   def _without_uturns(self, request: dict, snapped, points: np.ndarray, uturns: list[float]) -> dict | None:
     """Another trip for request without U-turns: one of Valhalla's alternatives, else one kept off the U-turns' spots."""
