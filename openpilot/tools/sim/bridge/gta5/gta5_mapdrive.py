@@ -169,9 +169,10 @@ LC_SETTLE_S = 1.0  # s in its lane between a change put off and the next one of 
 LC_AFTER_S = 1.5  # s after a change ends its lane is still looked at for one coming up on us (_lane_window)
 LC_GAP_M, LC_GAP_T, LC_GAP_CLOSE = 2.0, 0.3, 1.0  # m, s of the follower's speed and s of its closing speed a change leaves
 LC_CUT_DECEL = 2.0  # m/s^2 a change may leave us to slow at behind one in its lane
+LC_SLOW, LC_GAP_SLOW = 3.0, 1.0  # m/s both are slower than, and m a change leaves then
 BRANCH_ROOM_S = 3.0  # s of driving at least before a fork, for its lane change given up to take the other branch
 BRANCH_PAST = 20.0  # m past a fork the link of the branch given up that a route is asked to keep off
-LC_LATE_WAIT = 30.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends
+LC_LATE_WAIT = 90.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends (a queue standing in it moves on at its light)
 LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
 
 
@@ -2119,12 +2120,13 @@ class MapDrive:
           continue  # in none of its lanes, or we're not into that lane yet then
         front, rear = ours[k] + self.front, ours[k] - self.rear
         a0, a1 = float(along[k].min()), float(along[k].max())
+        gap_m = LC_GAP_SLOW if max(v, vi) < LC_SLOW else LC_GAP_M  # creeping into a queue, a metre is room
         if a0 >= front:  # behind it once in, slowing to its speed (if we must) no harder than LC_CUT_DECEL
           gap = a0 - front
-          need = LC_GAP_M + LC_GAP_T * vv + max(vv - vi, 0.0) ** 2 / (2 * LC_CUT_DECEL)
+          need = gap_m + LC_GAP_T * vv + max(vv - vi, 0.0) ** 2 / (2 * LC_CUT_DECEL)
           why = "ahead"
         elif a1 <= rear:
-          need, gap, why = LC_GAP_M + LC_GAP_T * vi + LC_GAP_CLOSE * max(vi - vv, 0.0), rear - a1, "behind"
+          need, gap, why = gap_m + LC_GAP_T * vi + LC_GAP_CLOSE * max(vi - vv, 0.0), rear - a1, "behind"
         else:
           need, gap, why = 1.0, -1.0, "beside"
         if gap < need:
@@ -3537,6 +3539,8 @@ class MapDrive:
     obst = phase == "follow" and bool(holder.get("obst"))  # a static thing on the plan: it won't move
     wait = (BORROW_WAIT if self._borrow_pending(holder) else PARKED_WAIT) if parked else DEADLOCK_WAIT if blocked else \
       OBST_WAIT if obst else LIGHT_WAIT_MAX if self._red_ahead(t) else WAIT_MAX  # in a queue at a light shown red: as long as it holds us
+    if detail.get("lane_gap"):
+      wait = LC_LATE_WAIT + 1.0  # stopped short of a change waiting for its lane: the gate ends it (_lc_gate)
     # one standing across our way close ahead, it may be waiting for us to clear its way: backed off a little where the
     # road behind is clear, to let it by (_reverse)
     near = detail.get("gap", detail.get("at", math.inf) - s - self.front if "at" in detail else math.inf)
