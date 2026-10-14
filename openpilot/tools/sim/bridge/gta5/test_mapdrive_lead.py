@@ -160,8 +160,10 @@ def test_held_ends_the_trip():
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 120.0)], reach=REACH, seconds=150)
   ended(trip, f"held {WAIT_MAX:.0f} s by a vehicle in the way")
   assert trip.events[-1]["phase"] == "end" and trip.md.info()["leadDriven"] is True, trip.events[-1]
-  # parked (no one at its wheel, mdlead trips 2 and 3 by the camera): it won't move, so PARKED_WAIT s
-  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 120.0, driven=False)], reach=REACH, seconds=150)
+  # parked (no one at its wheel, mdlead trips 2 and 3 by the camera): it won't move, so PARKED_WAIT s (on a one-way
+  # road of one lane, where there's no room beside it either: with a lane beside, it's passed through that, test_borrow)
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(1, 0))
+  trip = ms.drive(r, {"seed": 2}, lane=0, vehicles=[parked(r, 0, 120.0, driven=False)], reach=REACH, seconds=150)
   ended(trip, f"held {PARKED_WAIT:.0f} s by a parked vehicle in the way")
   t, v = trip.col(0), trip.col(4)
   stopped = t[(t > 5.0) & (v < 0.25)][0]
@@ -274,6 +276,12 @@ def test_borrow():
   x, y, h = ms.start_pose(r, 0, 120.0)
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[blocker(), ms.Vehicle(x, y, h, start=22.0, accel=2.0, until=9.0)], reach=REACH, seconds=150)
   borrowed(trip, "lane")
+  # a broken-down car square in our right lane (fwy_lc2 r1t7, Olympic Fwy): round it through the lane beside, though
+  # its right side needs a hair less, never onto the shoulder past our lane's edge
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 0), road_class="motorway")
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 200.0, right=-0.2, driven=False)], reach=REACH, seconds=120)
+  e = borrowed(trip, "lane")
+  assert e["shift"] < -2.0 and (trip.col(10) + trip.md.half_width).max() < 2 * LANE_W + 0.1, (e, (trip.col(10) + trip.md.half_width).max())
   # beside a side turning the path runs straight through (Autopia Pkwy's parked car stood 3 m short of one)
   r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[20])
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[parked(r, 1, 197.0, right=0.9, driven=False)], reach=REACH, seconds=120)
@@ -390,6 +398,77 @@ def test_standing_across():
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[ms.Vehicle(x + LANE_W / 2 + 2.4 - 1.6, y, h + 90.0)], reach=REACH, seconds=80)
   assert passed(trip)[0]["driven"]
   print("standing across: ok")
+
+
+def lane_gap_drive(route, keep: float, seconds: float, lane0_x: float, behind: float = 0.0, v_other: float | None = None,
+                   seed: int = 1):
+  """A trip from the right lane of `route` (north) with a car in the left lane `behind` m back of ours, kept there
+  (alongside, our speed) until the car is `keep` m along the route, then left to drive on at v_other (our speed + 6 m/s
+  by default; "pace": our speed then, kept alongside while we keep it)."""
+  x, y, h = ms.start_pose(route, 1, 0.0)
+  other = ms.Vehicle(lane0_x, y - behind, h)
+  trip = ms.drive(route, {"seed": seed}, lane=1, v0=12.0, vehicles=[other], reach=REACH, seconds=0.05, until_done=False)
+  car, md = trip.car, trip.md
+  kept, pace = True, None
+  while car.t < seconds and md.finished is None:
+    kept = kept and route.at < keep
+    if kept:
+      other.y, other.speed = car.y - behind, car.v
+    elif v_other == "pace":
+      pace = car.v if pace is None else pace
+      other.speed = pace
+      if car.v >= pace - 0.2:  # as fast as it: alongside
+        other.y = car.y - behind
+    elif v_other is not None:
+      other.speed = v_other
+    elif other.speed < car.v + 6.0:
+      other.speed = car.v + 6.0
+    car.advance(ms.FRAME)
+    st = car.state()
+    route.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(route, st, car.t, car.collisions))
+    trip.events += md.take_events()
+    trip.rows.append((car.t, car.x, car.y, car.h, car.v, car.k * car.v, md.kappa, md.a, md.dev, md.s, route.right,
+                      {"left": -1, "right": 1}.get(md.indicator, 0), md.lead_gap, ms.clearance(car.body(), other.corners())))
+  return trip
+
+
+def test_lane_change_waits_for_its_lane():
+  # traffic baseline 2026-10-14 after3 r2t4 (Movie Star Way): a planned change left, straight into a car alongside in
+  # that lane. Here a left turn from the right lane of two needs one: with a car alongside it's put off (lane_gap
+  # wait), started only once it's gone, and never comes near it
+  r = ms.junction_turn("left", lead=600.0, stop=None)
+  lane0_x = ms.start_pose(r, 0, 0.0)[0]
+  free = ms.drive(r, {"seed": 1}, lane=1, v0=12.0, reach=REACH, seconds=1.0).md.changes[0]
+  trip = lane_gap_drive(r, keep=free[0] + 60.0, seconds=150.0, lane0_x=lane0_x)
+  gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+  assert [e["phase"] for e in gaps][:1] == ["wait"] and gaps[-1]["phase"] == "go" and gaps[0]["why"] == "beside", gaps
+  assert trip.md.finished == "arrived" and trip.car.collisions == 0, (trip.md.finished, trip.md.aborts)
+  assert trip.col(13).min() > 1.0, trip.col(13).min()
+  # one coming up fast from 30 m behind as it's due (the plugin reports 45 m back): let by first
+  trip = lane_gap_drive(r, keep=free[0] - 30.0, seconds=150.0, lane0_x=lane0_x, behind=30.0, v_other=26.0)
+  gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+  assert gaps and gaps[0]["why"] == "closing" and trip.md.finished == "arrived" and trip.car.collisions == 0, (gaps, trip.md.finished)
+  assert trip.col(13).min() > 1.0, trip.col(13).min()
+  # one pacing alongside at our cruising speed (fwy_lc2 r1t1, Los Santos Freeway: 30 s alongside): dropped back from
+  trip = lane_gap_drive(r, keep=free[0] - 100.0, seconds=150.0, lane0_x=lane0_x, v_other="pace")
+  gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+  assert [e["phase"] for e in gaps] == ["wait", "go"] and gaps[1]["waited"] < 6.0, gaps  # (11 s, till it slowed for the turn)
+  assert trip.md.finished == "arrived" and trip.car.collisions == 0 and trip.col(13).min() > 1.0, (trip.md.finished, trip.col(13).min())
+  # alongside for good: put off until it can't be, then stopped short of it, and the trip ends after LC_LATE_WAIT s
+  trip = lane_gap_drive(r, keep=1e9, seconds=200.0, lane0_x=lane0_x)
+  phases_ = [e["phase"] for e in trip.events if e["event"] == "lane_gap"]
+  assert "late" in phases_ and trip.md.finished is not None and "no gap" in trip.md.finished, (phases_, trip.md.finished)
+  assert trip.car.collisions == 0 and trip.col(13).min() > 1.0, trip.col(13).min()
+  # put off past the keys that only hold its new lane on (section boundaries); up to the next lane event at the most
+  md = ms.drive(ms.straight(600), {"seed": 1}, lane=1, seconds=0.1).md
+  md.keys = [(0.0, 1.0), (100.0, 1.0), (130.0, 0.0), (200.0, 0.0), (260.0, 0.0), (400.0, 0.0), (430.0, 1.0)]
+  s0 = float(np.interp(100.0, md.route_s, md.s_path))
+  got = md._deferred_keys(md.route, s0, 180.0)
+  assert [(round(k[0]), k[1]) for k in got] == [(0, 1.0), (180, 1.0), (210, 0.0), (260, 0.0), (400, 0.0), (430, 1.0)], got
+  got = md._deferred_keys(md.route, s0, 385.0)  # the next change starts at 400: shortened to MIN_LC_M's room, no more
+  assert got is None or got[2][0] <= 400.0, got
+  print("lane change waits for its lane: ok")
 
 
 def test_queue_that_moves():
@@ -599,6 +678,7 @@ if __name__ == "__main__":
   test_nudge_past_a_parked_car()
   test_nudge_no_room()
   test_borrow()
+  test_lane_change_waits_for_its_lane()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()

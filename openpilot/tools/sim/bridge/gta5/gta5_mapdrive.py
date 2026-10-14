@@ -14,7 +14,11 @@ edge, else the road's far edge), within its lane outside lane changes and turns'
 gore, and off the map's raised islands (traffic_calming=island: a tram crossing's D islands), our body CLAMP_MARGIN
 clear of each. That line is the intent, recorded as the path labels; the car aims for it plus a small, slow in-lane bias and
 wander (never periodic, faded out through turns, junctions and forks, and within its lane), joining it from where the
-car is (on the trip's first plan, a bend it can't take there where the route doubles back fails the plan). The plan is
+car is (on the trip's first plan, a bend it can't take there where the route doubles back fails the plan). Each lane
+change, planned or asked for, goes only while its lane is clear by the blind-spot monitor's rules with a lane change's
+margins (LaneGapTune: alongside, or closing on us from behind): otherwise it's put off and planned again from the car,
+one under way going back to its lane, and where it can't be put off any more the car stops short of it (_lc_gate,
+lane_gap events). The plan is
 checked against the lane slots' targets (lane_slots.py, compared by where the lanes are): where the slots want another
 lane, plan_check=fix (the default) changes into it by the target's end (else as soon after as MIN_LC_M allows, short of
 its move), event only logs it, abort ends the trip; each is a plan_slot_mismatch anomaly. A fix into a lane the road
@@ -83,6 +87,7 @@ import numpy as np
 
 from openpilot.selfdrive.navd.maneuvers import maneuvers
 from openpilot.selfdrive.navd.planner import FREEWAY, TUNE, FwyState, Turn, lane_plan
+from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpotTune, lane_occupied
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
@@ -137,10 +142,21 @@ PROMPT_ROOM = 30.0
 ASK_WAIT = 5.0  # s a lane change the player asks for waits for the lane beside to be clear, at most
 ASK_KEEP_S = 10.0  # s of driving (and ASK_KEEP m at the least) nav mustn't want back out of the lane asked for within
 ASK_KEEP = 150.0
-ASK_BEHIND = 8.0  # m behind our rear bumper a vehicle in the lane beside keeps it from being clear, and ASK_CLOSE s of
-ASK_AHEAD = 4.0  # its closing speed more; ahead of our front bumper likewise
-ASK_CLOSE = 3.0
 ASK_PHASES = ("drive", "follow")
+LC_GATE_T = 1.0  # s before a lane change starts from which its lane is to be clear (_lc_gate)
+LC_COMMIT = 0.4  # share of the way across after which a change is carried through (before it, gone back from)
+LC_DEFER_S, LC_DEFER_MIN = 2.0, 15.0  # s on from the car (m at the least) a change put off starts again
+LC_LATE_WAIT = 30.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends
+LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
+
+
+class LaneGapTune(BlindSpotTune):
+  """The lane beside clear for a lane change of ours: the blind-spot monitor's zone across (the lane beside), from
+  `behind` m behind our rear bumper (behind_s s of our speed, within behind_min..behind) to `front` m ahead of our
+  front, and anyone in that lane behind it closing on us faster than closing_speed due within closing_time s, as far
+  back as the plugin reports. In slow, dense traffic a car length's gap is a gap, as GTA's drivers let one in."""
+  DEFAULTS = {**BlindSpotTune.DEFAULTS, "behind": 10.0, "behind_s": 0.5, "behind_min": 3.0, "front": 1.0,
+              "closing_behind": 45.0, "closing_speed": 1.0, "closing_time": 3.0}
 LC_A_LAT = 0.6  # x the style's lateral acceleration, a lane change's peak at most
 LC_MAX_S = 9.0  # s a change takes at the most
 LC_SHORTEST = 12.0  # m a change re-timed to its time takes at the least, a lane (pulling away, slowly)
@@ -221,6 +237,7 @@ BORROW_ONCOMING = 1.0  # m over the line into an oncoming or centre lane
 BORROW_WIDE = 2.0  # m over it where a narrow lane leaves no less, the room looked across and ahead the wider (_borrow_clear)
 BORROW_EDGE = 0.1  # m our body keeps in from the road's edge (CLAMP_MARGIN within a lane)
 BORROW_KINDS = ("", "edge", "lane", "oncoming")  # bolder on
+BORROW_PREFER = ("lane", "oncoming", "edge")  # the side a pass takes where both have room
 BORROW_MARGIN = 1.0  # m before and after its body the shift is held
 BORROW_KAPPA = 0.18  # 1/m an ease turns no tighter than (a quintic's peak curvature is 5.77 shift / length^2)
 BORROW_EASE, BORROW_EASE_MIN = 15.0, 4.0  # m an ease takes at most, and at the least
@@ -687,6 +704,9 @@ class MapDrive:
     self.kerb_logged = -math.inf  # when the pedestrian kerb cap last held the car back
     self.obst: list[dict] = []  # static things ahead the plugin's probes hit, as bodies in the world (_obstacles)
     self.obst_rows = None
+    self.gap_tune = LaneGapTune()
+    self.lc_wait: dict | None = None  # the lane change waiting for its lane (_lc_gate): since, side, defers, late, s0
+    self.last_state: dict = {}
     self.asked: dict | None = None  # the lane change the player asked for, waiting for the lane beside: side, t, waited
     self.prompts: list[tuple[str, str]] = []  # (kind, side) of what became of it, since last taken (ask_lane)
     self.last_v = 0.0  # m/s at the last step
@@ -1953,23 +1973,108 @@ class MapDrive:
     return None
 
   def _lane_clear(self, side: str, state: dict) -> bool:
-    """Whether no vehicle is in the lane beside (`side`) from ASK_BEHIND m behind us to ASK_AHEAD m ahead, each more by
-    its closing speed: by the plugin's nearby as it reports them (from the car), as one keeping pace with us leaves its
-    report unchanged and _vehicles' places in the world behind."""
+    """Whether the lane beside (`side`) is clear for a lane change (_lane_busy)."""
+    return self._lane_busy(side, state) is None
+
+  def _lane_busy(self, side: str, state: dict) -> str | None:
+    """What keeps the lane beside (`side`) from being clear for a lane change, "beside" or "closing", else None: the
+    blind-spot monitor's zone and closing rule with a lane change's margins (LaneGapTune, gta5_blindspot.lane_occupied)."""
+    g = self.gap_tune
     v = float(state.get("vEgo") or 0.0)
-    sign = -1.0 if side == "left" else 1.0
-    for row in (state.get("nearby") or {}).get("v") or []:
-      if len(row) < 9:
+    g.values["behind"] = min(max(g.behind_s * v, g.behind_min), LaneGapTune.DEFAULTS["behind"])
+    return lane_occupied(state, side, g)
+
+  # *** planned lane changes wait for their lane ***
+
+  def _lc_gate(self, route, state: dict, t: float, v: float):
+    """The next lane change on the path (planned, or asked for), from LC_GATE_T s before it starts until LC_COMMIT of
+    the way across, made only while its lane is clear (_lane_clear). Otherwise it's put off (_deferred_keys), started
+    again LC_DEFER_S s on from the car and planned again from where the car is: one under way goes back to its lane;
+    meanwhile, with one alongside, the car drops back to LC_DROP_BACK of its speed to let it by.
+    Where it can't be put off (it would run into the plan's next key or a stop line), the car stops short of it
+    (_longitudinal) until its lane clears, the trip ending after LC_LATE_WAIT s. A lane_gap event as it starts to wait
+    ("wait"), goes back ("back"), can wait no more ("late") and goes ("go")."""
+    lw = self.lc_wait
+    for s0, s1, side, _ in self.changes:
+      if s1 <= self.s:
         continue
-      x, y, rel, _, vy, mnx, mxx, mny, mxy = (float(a) for a in row[:9])
-      c, s_ = math.cos(math.radians(rel)), math.sin(math.radians(rel))
-      body = [(x + cx * c - cy * s_, y + cx * s_ + cy * c) for cx, cy in ((mnx, mny), (mxx, mny), (mxx, mxy), (mnx, mxy))]
-      xs, ys = [sign * p[0] for p in body], [p[1] for p in body]
-      if max(xs) < 0.5 * LANE_W or min(xs) > 1.5 * LANE_W:
-        continue
-      closing = vy - v
-      if max(ys) > -(self.rear + ASK_BEHIND + max(closing, 0.0) * ASK_CLOSE) and          min(ys) < self.front + ASK_AHEAD + max(-closing, 0.0) * ASK_CLOSE:
-        return False
+      if self.s < s0 - max(v, 3.0) * LC_GATE_T or self.s > s0 + LC_COMMIT * (s1 - s0):
+        if lw is not None and self.s > s0:  # under way past the point of no return: it went
+          self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
+          self.lc_wait = None
+        return
+      why = self._lane_busy(side, state)
+      if why is None:
+        if lw is not None:
+          self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
+          self.lc_wait = None
+        return
+      started = self.s > s0
+      if lw is None:
+        lw = self.lc_wait = {"since": t, "side": side, "defers": 0, "late": False, "s0": s0, "v0": v}
+        self._event("lane_gap", t, phase="wait", side=side, why=why, started=started)
+      lw["why"] = why
+      keys = self._deferred_keys(route, s0, route.at + max(v * LC_DEFER_S, LC_DEFER_MIN))
+      if keys is not None and self._replan_keys(route, state, t, keys):
+        lw.update(defers=lw["defers"] + 1, late=False)
+        if started:
+          self._event("lane_gap", t, phase="back", side=side, why=why)
+        return
+      if self.phase == "abort":
+        return
+      if not lw["late"] and not started:
+        lw.update(late=True, s0=s0)
+        self._event("lane_gap", t, phase="late", side=side, why=why)
+      if t - lw["since"] > LC_LATE_WAIT:
+        self._abort(f"no gap in the lane to the {side} in {LC_LATE_WAIT:.0f} s", t, state.get("pos"))
+      return
+
+  def _deferred_keys(self, route, s0: float, start: float) -> list[tuple[float, float]] | None:
+    """The plan's keys with the lane change starting at path m s0 put off to start at route m `start`, its length kept
+    (shortened to MIN_LC_M at the least where the plan's next lane event, a stop line or a city junction node comes
+    first);
+    the keys after it in the lane it moves into (section boundaries, no renumbering) up to there go with it. None where
+    it can't be put off."""
+    keys = self.keys
+    rs0 = float(np.interp(s0, self.s_path, self.route_s))
+    found = chains(keys)
+    if not found:
+      return None
+    a, b = min(found, key=lambda ab: abs(keys[ab[0]][0] - rs0))
+    k0, k1, lane1 = keys[a][0], keys[b][0], keys[b][1]
+    if start <= k0:
+      return None
+    j = b + 1  # past the keys that only hold its new lane on: the next is another change's start, or a renumbering
+    while j < len(keys) and abs(keys[j][1] - lane1) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
+      j += 1
+    if j >= len(keys):
+      limit = route.length
+    elif abs(keys[j][1] - lane1) >= EPS and keys[j][0] - keys[j - 1][0] > EPS:
+      limit = keys[j - 1][0]  # a ramp to another lane begins at the key before it
+    else:
+      limit = keys[j][0]  # a renumbering step
+    # nor across a stop line or a city junction it was before (a freeway's nodes are its slip roads' merges and exits)
+    fast = route.classes[segment_of(route, k1)] in ("motorway", "trunk") if getattr(route, "classes", None) else False
+    after = [x for x in list(route.stops) + ([] if fast else list(route.junctions)) if x > k1 - EPS]
+    limit = min([limit] + [x - CROSSING_CLEAR for x in after]) - EPS
+    length = k1 - k0
+    end = min(start + length, limit)
+    if end - start < min(MIN_LC_M, length) - EPS:
+      return None
+    scale = (end - start) / max(length, EPS)
+    return (list(keys[:a]) + [(start + (k[0] - k0) * scale, k[1]) for k in keys[a:b + 1]] +
+            [k for k in keys[b + 1:j] if k[0] > end + EPS] + list(keys[j:]))
+
+  def _replan_keys(self, route, state: dict, t: float, keys: list[tuple[float, float]]) -> bool:
+    """The path for `keys` from where the car is (as the first plan's: from its lane line, joined as a lane change
+    would), the plan's keys and changes with it; False (an abort, from _build) where there's no line."""
+    lane = route.lane() if route.on_road() else None
+    if lane is None or lane[0] < 0:
+      lane = [int(round(lane_at(keys, route.at))), max(int(round(lane_at(keys, route.at))) + 1, 1)]
+    if self._build(route, keys, lane, state, t) is None:
+      return False
+    self.keys, self.changes = keys, self._changes(keys)
+    self.plan = {**self.plan, "keys": [(round(s, 2), round(lane_, 3)) for s, lane_ in keys]}
     return True
 
   def _ask_step(self, route, state: dict, t: float):
@@ -2558,9 +2663,20 @@ class MapDrive:
     r0, r1, a0, a1 = body
     hw = self.half_width
     clear = max(float(self.c["nudge_clear"]), LEAD_SIDE + 0.05)
+    near = -1 if abs(r0 - hw - clear) <= abs(r1 + hw + clear) else 1  # the side needing the smaller shift
+    tries = [(side, self._borrow_side(e, body, v, t, side)) for side in (near, -near)]
+    # either side whose room is there (passed now, or once clear): into a lane our way first, then over the line,
+    # then the road's edge; the smaller shift where alike
+    there = [(BORROW_PREFER.index(b["kind"]), k, b) for k, (side, b) in enumerate(tries) if b.get("kind") and (b.get("why") is None or b.get("later"))]
+    return min(there, key=lambda x: (x[0], x[1]))[2] if there else tries[0][1]
+
+  def _borrow_side(self, e: dict, body: tuple, v: float, t: float, side: int) -> dict:
+    """_borrow past its left (`side` -1: the path moved left) or its right (1)."""
+    r0, r1, a0, a1 = body
+    hw = self.half_width
+    clear = max(float(self.c["nudge_clear"]), LEAD_SIDE + 0.05)
     want = max(float(self.c["nudge_want"]), clear)
     sp, n = self.s_path, len(self.s_path)
-    side = -1 if abs(r0 - hw - clear) <= abs(r1 + hw + clear) else 1  # past its left (path moved left) or its right
     need = r0 - hw - clear if side < 0 else r1 + hw + clear
     h0, h1 = a0 - self.front - BORROW_MARGIN, a1 + self.rear + BORROW_MARGIN
     i0 = int(np.searchsorted(sp, h0))
@@ -2604,14 +2720,16 @@ class MapDrive:
       return {"why": "no room", "by": f"eases {L_in:.1f}/{L_out:.1f} for {abs(need):.2f}"}
     shift = math.copysign(min(abs(shift), fits), shift)
     if a0 - self.s - self.front > BORROW_RANGE:
-      return {"why": "wait", "later": True}  # decided once near, on what's about then
+      return {"why": "wait", "later": True, "kind": kind}  # decided once near, on what's about then
     v_ease = min(BORROW_V, self._ease_v(L_in, shift), self._ease_v(L_out, shift))
     d = h0 - L_in - self.s - v * STOP_LAG
     if math.sqrt(max(v * v - 2.0 * self.style["decel"] * max(d, 0.0), 0.0)) > NUDGE_LATE * v_ease:
-      return {"why": "late", "later": True}
+      return {"why": "late", "later": True, "kind": kind}
     busy = self._borrow_clear(e["c"], side, shift, h1 + L_out, kind, t, wide)
+    if busy is None and kind == "lane" and not self._lane_clear("left" if side < 0 else "right", self.last_state):
+      busy = "lane"  # the lane beside, by the lane change's own check
     if busy is not None:
-      return {"why": "busy", "later": True, "by": busy}
+      return {"why": "busy", "later": True, "by": busy, "kind": kind}
     return {**e, "need": round(need, 2), "shift": shift, "clear": clear + abs(shift - need), "h0": h0, "h1": h1, "i0": i0,
             "i1": i1, "L_in": L_in, "L_out": L_out, "v": BORROW_V, "v_ease": v_ease, "kind": kind, "borrow": (ia, ib, lo, hi)}
 
@@ -2647,8 +2765,8 @@ class MapDrive:
       nb = j + side
       if 0 <= nb < len(sec.spans) and abs((own.left - sec.spans[nb].right) if side < 0 else (sec.spans[nb].left - own.right)) > 0.3:
         kind, edge = "edge", (own.left + BORROW_EDGE) if side < 0 else (own.right - BORROW_EDGE)  # a median between
-      elif not 0 <= nb < len(sec.spans):
-        kind, edge = "edge", (sec.edges[0] + BORROW_EDGE) if side < 0 else (sec.edges[1] - BORROW_EDGE)
+      elif not 0 <= nb < len(sec.spans):  # our lane's own edge, not a shoulder past it (a freeway's barrier stands there)
+        kind, edge = "edge", (max(own.left, sec.edges[0]) + BORROW_EDGE) if side < 0 else (min(own.right, sec.edges[1]) - BORROW_EDGE)
       elif sec.spans[nb].heading == 1:
         far = sec.spans[nb].left + CLAMP_MARGIN if side < 0 else sec.spans[nb].right - CLAMP_MARGIN
         kind, edge = "lane", max(own.left - BORROW_LANE, far) if side < 0 else min(own.right + BORROW_LANE, far)
@@ -2808,8 +2926,12 @@ class MapDrive:
     self._vehicles(state, t)
     self._obstacles(state, t)
     self.last_v = v
+    self.last_state = state
     if self.asked is not None:
       self._ask_step(route, state, t)
+    self._lc_gate(route, state, t, v)
+    if self.phase == "abort":
+      return self._abort_msg(v, t)
     self._checks(route, state, t, collisions, v)
     if self.phase == "abort":
       return self._abort_msg(v, t)
@@ -3025,6 +3147,19 @@ class MapDrive:
         vp, reason, phase, detail = 0.0, "ped", "yield", {"peds": peds}
         if v > STOPPED:
           need = min(need, -DECEL_MAX)
+    # a lane change waiting for its lane (_lc_gate): one keeping alongside in it let draw ahead, by dropping back (as
+    # one closing from behind is let by at our speed); one that can't be put off any more, stopped short of
+    lw = self.lc_wait
+    if lw is not None and not lw["late"] and lw.get("why") == "beside":
+      cap = max(LC_DROP_BACK * lw["v0"], 3.0)
+      if cap < vp:
+        vp, reason = cap, "hold"
+    if lw is not None and lw["late"]:
+      d = lw["s0"] - 1.0 - s
+      cap = math.sqrt(2 * b * 0.8 * max(d - 0.3, 0.0))
+      stop_d = min(stop_d, d)
+      if cap < vp:
+        vp, reason, phase, detail = cap, "hold", "yield", {"lane_gap": lw["side"]}
     # held up: the wait starts again whenever the vehicle holding us moves (a queue at a light we can't see creeping on);
     # one that's parked won't, so it ends the trip sooner
     held = phase in ("follow", "yield") and v < STOPPED and not (phase == "follow" and float(np.hypot(*holder["vel"])) > LEAD_MOVING)
