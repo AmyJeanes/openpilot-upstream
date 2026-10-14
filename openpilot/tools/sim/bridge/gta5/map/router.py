@@ -43,6 +43,7 @@ SEPARATION_GAP = 1.0  # m between two carriageways' lanes: more is hatching, a d
 # the map's painted lines (LaneLines): m squares they're found by, m at a link's ends not counted as crossed, and m of
 # height between a line and a link on one level
 PAINT_CELL, PAINT_ENDS, PAINT_LEVEL = 10.0, 1.0, 2.5
+HAIRPIN = 90.0  # deg: a shortcut link every way through which turns back more than this, in and out again, is a hairpin
 LINK_ALIGN = 60.0  # deg: a carriageway at a shortcut link's end heads this near the link's way
 CARRIAGEWAY_ALIGN = 30.0  # deg: and the two carriageways this near each other's
 DEST_SNAP = os.getenv("GTA5_DEST_SNAP", "1") != "0"
@@ -623,6 +624,32 @@ class LaneLines:
     return set(self.kind[k[hit]].tolist())
 
 
+def hairpin(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
+  """Whether every way through a link from pa to pb (map nodes) turns more than HAIRPIN into it and more than HAIRPIN
+  back out of it: the back half of GTA's X of shortcut links between two carriageways running the same way, or a hop
+  sideways and back across them. A way through it that a car takes without such a pair of kinks (a slip road, a turn,
+  a U-turn bay turning the one way twice) keeps it."""
+  na, nb = osm.nodes_at(np.asarray(pa, float), 1.0), osm.nodes_at(np.asarray(pb, float), 1.0)
+  if not na or not nb or (na[0], nb[0]) not in osm.pairs:
+    return False
+  a, b = na[0], nb[0]
+
+  def drivable(x: int, y: int) -> bool:
+    w, fwd = osm.pairs[(x, y)]
+    one = oneway_of(osm.ways[w][0])
+    return one == 0 or (one == 1) == fwd
+
+  def bearing(x: int, y: int) -> float:
+    d = osm.node_xy(y) - osm.node_xy(x)
+    return math.degrees(math.atan2(d[0], d[1]))
+  if not drivable(a, b):
+    return False
+  h = bearing(a, b)
+  t_in = [wrap(h - bearing(p, a)) for p in osm.links.get(a, ()) if p != b and drivable(p, a)]
+  t_out = [wrap(bearing(b, q) - h) for q in osm.links.get(b, ()) if q != a and drivable(b, q)]
+  return bool(t_in and t_out) and all(abs(i) > HAIRPIN and abs(o) > HAIRPIN and (i > 0) != (o > 0) for i in t_in for o in t_out)
+
+
 def lane_change(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
   """Whether the map paints only a dashed lane line across a link from pa to pb (map nodes; LaneLines), at its height."""
   lines = LaneLines.of(osm)
@@ -831,7 +858,8 @@ class Router:
     separation between them (hatching, a double line or a kerb: their lanes' edges more than SEPARATION_GAP m apart),
     which GTA's AI may take but a driver can't: each such link's middle. GTA lays a wide road as parallel node chains
     joined by shortcut links; those between lanes side by side (a dashed line) are a lane change, and stay, as do those
-    the map paints only a dashed lane line across (LaneLines) though their lanes' edges are a little further apart."""
+    the map paints only a dashed lane line across (LaneLines) though their lanes' edges are a little further apart.
+    A shortcut link no car takes but by a hairpin in and out (hairpin) is one too."""
     osm = self.osm if self.osm is not None else self.roads
     if self.paths is None or osm is None or len(points) < 2:
       return []
@@ -839,9 +867,11 @@ class Router:
     out = []
     for a, b in zip(nodes, nodes[1:], strict=False):
       link = self.paths.links.get((a, b)) if a is not None and b is not None and a != b else None
-      if link is not None and link.shortcut and separated(osm, self.paths.xy[a], self.paths.xy[b]) and \
-         not lane_change(osm, self.paths.xy[a], self.paths.xy[b]):
-        out.append(clear_point(osm, self.paths.xy[a], self.paths.xy[b]))
+      if link is None or not link.shortcut:
+        continue
+      pa, pb = self.paths.xy[a], self.paths.xy[b]
+      if hairpin(osm, pa, pb) or (separated(osm, pa, pb) and not lane_change(osm, pa, pb)):
+        out.append(clear_point(osm, pa, pb))
     return out
 
   def _without_uturns(self, request: dict, snapped, points: np.ndarray, uturns: list[float]) -> dict | None:

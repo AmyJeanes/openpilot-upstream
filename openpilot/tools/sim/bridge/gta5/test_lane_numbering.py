@@ -273,6 +273,28 @@ def test_lane_line_across_a_crossing(tmp_path):
     assert lane_change(osm, np.array(nodes[2]), np.array(nodes[5])) is expect, n
 
 
+def test_hairpin_hop():
+  # GTA's X of shortcut links between two one-way carriageways heading east: the forward half is a lane change, the
+  # back half (west across them, a hairpin in and out) never is; nor is a hop sideways and back. A link a car takes
+  # some way without two such kinks stays: a turn off into a road north, a U-turn link into the carriageway heading west
+  from openpilot.tools.sim.bridge.gta5.map.router import hairpin
+  east = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '7'}
+  hop = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '1', 'width': '3.5'}
+  nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (120.0, 0.0), 4: (200.0, 0.0), 5: (0.0, -10.0), 6: (100.0, -10.0),
+           7: (120.0, -10.0), 8: (200.0, -10.0), 9: (160.0, 100.0), 10: (0.0, 30.0), 11: (40.0, 30.0), 12: (200.0, 30.0),
+           13: (98.0, -10.0), 14: (60.0, -10.0), 15: (160.0, 0.0)}
+  ways = {1: (east, [1, 2, 3, 15, 4]), 2: (east, [5, 14, 13, 6, 7, 8]), 3: (hop, [2, 7]), 4: (hop, [3, 6]), 5: (hop, [2, 13]),
+          6: ({'highway': 'residential'}, [15, 9]), 7: ({**east, 'oneway': '-1'}, [10, 11, 12]), 8: (hop, [14, 11])}
+  osm = osm_map(nodes, ways)
+  p = {n: np.array(xy) for n, xy in nodes.items()}
+  assert not hairpin(osm, p[2], p[7])  # forward: a lane change
+  assert hairpin(osm, p[3], p[6])  # back across
+  assert hairpin(osm, p[2], p[13])  # all but sideways, a little back
+  assert not hairpin(osm, p[15], p[9])  # a turn off
+  assert not hairpin(osm, p[14], p[11])  # a U-turn: left, then left again
+  assert not hairpin(osm, p[7], p[2])  # against the one-way: no way through at all
+
+
 def test_turn_markers_on_the_lane_line():
   # the overlay's turn and signal markers go on nav's lane line, not the route's line down the road's middle
   from openpilot.tools.sim.bridge.gta5.gta5_brain import on_path
