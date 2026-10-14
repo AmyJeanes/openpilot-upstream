@@ -210,7 +210,15 @@ RANGE_STOP = 1.0  # m short of a vehicle at the range's end the range cap stops 
 RANGE_BODY = 2.5  # m of its body before its middle (which the plugin's reach is to)
 WAIT_MAX = 60.0  # s held by a vehicle in the way (none moving) before the trip ends
 PARKED_WAIT = 10.0  # s, by a parked one (no one in its driver's seat)
-DEADLOCK_WAIT = 20.0  # s, by a driven one standing across our way (it may be waiting for us: we can't back off)
+DEADLOCK_WAIT = 20.0  # s, by a driven one standing across our way (it may be waiting for us), after backing off it
+REVERSE_AFTER = 6.0  # s held, stopped, by a driven one standing across our way close ahead before backing off it
+REVERSE_NEAR = 8.0  # m from our front bumper it stands within, for that
+REVERSE_DIST = 3.0  # m backed off
+REVERSE_V = 1.0  # m/s backed off at
+REVERSE_T = 6.0  # s backing off at most
+REVERSE_WAIT = 4.0  # s stood still after, for it to go by, before going on
+REVERSE_MAX = 2  # times backed off a trip, at most
+REVERSE_BEHIND = 4.0  # m behind where the back-off ends that's to be clear of anyone (now and REVERSE_T s on)
 ACROSS_ANGLE = 35.0  # deg off our way a standing vehicle's heading is, at least, for it to be across our way
 LEAD_MOVING = 0.5  # m/s: a vehicle in the way going faster is moving on
 CROSS_MOVING = 2.0  # m/s: a slower vehicle isn't crossing
@@ -736,6 +744,8 @@ class MapDrive:
     self.asked: dict | None = None  # the lane change the player asked for, waiting for the lane beside: side, t, waited
     self.prompts: list[tuple[str, str]] = []  # (kind, side) of what became of it, since last taken (ask_lane)
     self.last_v = 0.0  # m/s at the last step
+    self.reversing: dict | None = None  # backing off a deadlock: when it began, path m it ends at, when it stopped
+    self.reverses = 0  # times backed off
 
   def _body(self, state: dict):
     """Our car's body from the plugin's nearby.dims (its model's bounds: min x, max x, min y, max y)."""
@@ -3198,6 +3208,11 @@ class MapDrive:
     self._checks(route, state, t, collisions, v)
     if self.phase == "abort":
       return self._abort_msg(v, t)
+    if self.reversing is not None:
+      msg = self._reverse(v, t, dt)
+      if msg is not None:
+        self.msg = msg
+        return msg
     self._nudge(v, t)
     accel = self._longitudinal(state, v, t, dt)
     if self.phase == "abort":
@@ -3471,6 +3486,15 @@ class MapDrive:
     obst = phase == "follow" and bool(holder.get("obst"))  # a static thing on the plan: it won't move
     wait = (BORROW_WAIT if self._borrow_pending(holder) else PARKED_WAIT) if parked else DEADLOCK_WAIT if blocked else \
       OBST_WAIT if obst else LIGHT_WAIT_MAX if self._red_ahead(t) else WAIT_MAX  # in a queue at a light shown red: as long as it holds us
+    # one standing across our way close ahead, it may be waiting for us to clear its way: backed off a little where the
+    # road behind is clear, to let it by (_reverse)
+    near = detail.get("gap", detail.get("at", math.inf) - s - self.front if "at" in detail else math.inf)
+    if (self.held_since is not None and t - self.held_since > REVERSE_AFTER and phase in ("follow", "yield") and blocked and
+        near < REVERSE_NEAR and self.reverses < REVERSE_MAX and s > REVERSE_DIST + 2.0 and self._behind_clear(t)):
+      self.reversing = {"t0": t, "to": s - REVERSE_DIST, "stopped": None}
+      self.reverses += 1
+      self.held_since = None
+      self._event("reverse", t, gap=round(near, 1), n=self.reverses)
     if self.held_since is not None and t - self.held_since > wait:
       who = "pedestrian" if reason == "ped" else "parked vehicle" if parked else "vehicle standing across our way" if blocked else \
             "static obstacle" if obst else "vehicle"
@@ -3492,6 +3516,40 @@ class MapDrive:
       a = min(a, -0.5) if (self.s_arrive - s) > 0 else HOLD_ACCEL
     a = float(np.clip(a, -DECEL_MAX, st["accel"]))
     return self._out_accel(a, dt, hard=a < -b)
+
+  def _behind_clear(self, t: float) -> bool:
+    """Whether the road behind us is clear to back off REVERSE_DIST: no one (vehicle, pedestrian or static thing)
+    within our width and a metre of the path from our rear bumper to REVERSE_BEHIND m past where the back-off ends, now
+    or (by _predict) over the next REVERSE_T s."""
+    back = REVERSE_DIST + REVERSE_BEHIND
+    lo, hi = self.s - self.rear - back, self.s - self.rear + 0.5
+    times = np.arange(0.0, REVERSE_T + 1e-6, 1.0)
+    for car in (self.cars or []) + self.obst:
+      corners = self._predict(car, t, times)
+      along, right = self._place(np.concatenate([self._outline(c) for c in corners]), 1.0, behind=back + self.rear + 5.0)
+      hit = ~np.isnan(along) & (along > lo) & (along < hi) & (np.abs(np.nan_to_num(right, nan=99.0)) < self.half_width + 1.0)
+      if hit.any():
+        return False
+    return True
+
+  def _reverse(self, v: float, t: float, dt: float) -> dict | None:
+    """Backing off a deadlock: REVERSE_V straight back until REVERSE_DIST is done (or REVERSE_T s, or someone comes
+    into the road behind), then standing still REVERSE_WAIT s for the one in our way to go by; None once that's done."""
+    rv = self.reversing
+    self.v_prof, self.reason, self.kappa = 0.0, "hold", 0.0
+    if rv["stopped"] is None and (self.s <= rv["to"] or t - rv["t0"] > REVERSE_T or not self._behind_clear(t)):
+      rv["stopped"] = t
+      self._event("reversed", t, back=round(rv["to"] + REVERSE_DIST - self.s, 1))
+    if rv["stopped"] is None:
+      self._set("yield", t, reverse=True)
+      self.a = -0.5
+      return {"type": "control", "active": True, "curvature": 0.0, "accel": self.a, "reverse": REVERSE_V}
+    if t - rv["stopped"] < REVERSE_WAIT or v < -STOPPED:
+      self._set("yield", t, reversed=True)
+      self.a = HOLD_ACCEL
+      return {"type": "control", "active": True, "curvature": 0.0, "accel": self.a}
+    self.reversing = None
+    return None
 
   def _follow(self, gap: float, vl: float, v: float) -> float:
     """Our acceleration behind a vehicle gap m ahead going vl m/s along the path (the intelligent driver model's

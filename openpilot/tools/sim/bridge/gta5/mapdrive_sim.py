@@ -127,6 +127,7 @@ class LagCar:
     self.rng = np.random.default_rng(seed)
     self.queue: list[tuple[float, float, float]] = []  # (when it acts, curvature, accel)
     self.cmd = (0.0, 0.0)
+    self.rev = 0.0  # m/s backing up at, as the plugin's control "reverse"
     self.t = 0.0
     self.collisions = 0
     self.user: dict = {}
@@ -219,14 +220,14 @@ class LagCar:
 
   def control(self, msg: dict | None):
     if msg is not None and msg.get("type") == "control" and msg.get("active"):
-      self.queue.append((self.t + self.delay, float(msg["curvature"]), float(msg["accel"])))
+      self.queue.append((self.t + self.delay, float(msg["curvature"]), float(msg["accel"]), float(msg.get("reverse") or 0.0)))
 
   def advance(self, secs: float = FRAME):
     end = self.t + secs - 1e-9
     while self.t < end:
       while self.queue and self.queue[0][0] <= self.t + 1e-9:
-        _, k, a = self.queue.pop(0)
-        self.cmd = (k, a)
+        _, k, a, rev = self.queue.pop(0)
+        self.cmd, self.rev = (k, a), rev
       k_cmd, a_cmd = self.cmd
       # the plugin's integral on the yaw rate error (lat_ki 1/s), which takes out a steering gain error in about a second
       if self.v > 3.0:
@@ -239,6 +240,8 @@ class LagCar:
         self.a = max(self.a, -self.brake)
       if self.blocked:
         self.v, self.a = 0.0, 0.0
+      elif self.rev > 0.0 or self.v < 0.0:  # backing up as the plugin does (its brake reverses a stopped car)
+        self.v = max(self.v + (-self.rev - self.v) * min(SUB / 0.5, 1.0), -self.rev) if self.rev > 0.0 else min(self.v + 3.0 * SUB, 0.0)
       elif self.v < 0.3 and a_cmd <= 0:
         self.v = 0.0  # the handbrake hold
       else:

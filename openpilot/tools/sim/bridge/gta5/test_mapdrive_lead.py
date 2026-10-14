@@ -33,7 +33,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (BORROW_LANE, BORROW_ONCOMING, BORROW_STOP, BORROW_V, BORROW_WAIT, BORROW_WIDE, CLAMP_MARGIN,
-                                                           DEADLOCK_WAIT, LANE_W, LC_SETTLE_S, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_MARGIN,
+                                                           DEADLOCK_WAIT, LANE_W, LC_SETTLE_S, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_MARGIN, REVERSE_DIST,
                                                            NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDrive)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
@@ -381,8 +381,8 @@ def test_nudge_where_the_lane_is_no_guide():
 
 def test_standing_across():
   # mdnudge traffic trips 1 and 4: a driven vehicle standing across our way (a truck swung wide into our lane, a crossing
-  # car stopped at our nose) is no lead to queue behind: stopped for, waited for while it moves, and a deadlock (it may be
-  # waiting for us, and we can't back off) ends the trip after DEADLOCK_WAIT s, not WAIT_MAX
+  # car stopped at our nose) is no lead to queue behind: stopped for, waited for while it moves, backed off a little
+  # (REVERSE_MAX times) and a deadlock ends the trip DEADLOCK_WAIT s after, not WAIT_MAX
   r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30])
   x, y, h = ms.start_pose(r, 1, 300.0)
   for turned in (90.0, 180.0):  # side on, head on
@@ -398,6 +398,41 @@ def test_standing_across():
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[ms.Vehicle(x + LANE_W / 2 + 2.4 - 1.6, y, h + 90.0)], reach=REACH, seconds=80)
   assert passed(trip)[0]["driven"]
   print("standing across: ok")
+
+
+def test_deadlock_backs_off():
+  # traffic baselines: a car standing across our nose waiting for us to clear its way (GTA's AI won't drive into us). Held
+  # REVERSE_AFTER s: backed off REVERSE_DIST where the road behind is clear, and it goes once we're 2 m back; with a car
+  # standing right behind us, not backed into it
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(2, 2), junctions=[30])
+  x, y, h = ms.start_pose(r, 1, 300.0)
+  for behind in (False, True):
+    blocker = ms.Vehicle(x - 1.0, y, h + 90.0)
+    # (one coming up behind us at 3 m/s, standing 1.5 m off our rear from 12 s)
+    others = [blocker] + ([parked(r, 1, 292.6 - 2 * 2.4 - 1.5 - 36.0, speed=3.0, later=((12.0, -50.0, 0.0),))] if behind else [])
+    trip = ms.drive(r, {"seed": 2}, pose=ms.start_pose(r, 1, 280.0), vehicles=others, reach=REACH, seconds=0.05, until_done=False)
+    car, md = trip.car, trip.md
+    y_stop = None
+    while car.t < 200.0 and md.finished is None:
+      if y_stop is None and car.v < 0.05 and car.t > 2.0:
+        y_stop = car.y
+      if y_stop is not None and car.y < y_stop - 2.0 and not blocker.accel:
+        blocker.accel, blocker.until, blocker.start = 2.0, 8.0, car.t + 1.0  # it sees room and goes
+      car.advance(ms.FRAME)
+      st = car.state()
+      r.locate(np.array(st["pos"][:2]), None, st["heading"])
+      car.control(md.step(r, st, car.t, car.collisions))
+      trip.events += md.take_events()
+      trip.rows.append((car.t, car.x, car.y, car.h, car.v, 0.0, 0.0, 0.0, 0.0, md.s, r.right, 0, md.lead_gap,
+                        min(ms.clearance(car.body(), o.corners()) for o in others)))
+    backs = [e for e in trip.events if e["event"] == "reverse"]
+    if behind:
+      assert not backs and md.finished is not None and "deadlock" in md.finished and car.collisions == 0, (backs, md.finished)
+    else:
+      assert len(backs) == 1 and md.finished == "arrived" and car.collisions == 0 and trip.col(13).min() > 0.5, (backs, md.finished)
+      back = y_stop - trip.col(2)[trip.col(0) > backs[0]["t"]].min()
+      assert 2.0 < back < REVERSE_DIST + 0.5, back
+  print("deadlock backs off: ok")
 
 
 def lane_gap_drive(route, keep: float, seconds: float, lane0_x: float, behind: float = 0.0, v_other: float | None = None,
@@ -813,6 +848,7 @@ if __name__ == "__main__":
   test_nudge_before_a_turn()
   test_nudge_where_the_lane_is_no_guide()
   test_standing_across()
+  test_deadlock_backs_off()
   test_following()
   test_crossing()
   test_oncoming_round_a_bend()
