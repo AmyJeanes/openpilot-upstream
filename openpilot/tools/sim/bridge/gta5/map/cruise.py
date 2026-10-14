@@ -779,7 +779,8 @@ class Cruise:
         if not ahead:
           forced = self.forced = None  # passed
         elif forced['side'] != side:
-          if walk.along[ahead[0]] - at < prompt_need(v, 0, True):
+          # within JUNCTION_SPAN of its turn the undoing route would be held (_held) till the car had made the turn
+          if walk.along[ahead[0]] - at < max(prompt_need(v, 0, True), JUNCTION_SPAN[1] + PROMPT_LAG * v):
             self.log.append({'event': 'prompt', 'kind': 'late', 'side': side, 'node': forced['node'], 'cancel': True})
             return 'late', ''  # the turn's under way: no time to be routed and spliced back
           walk.cut(ahead[0])  # walked on from the junction as it would have been

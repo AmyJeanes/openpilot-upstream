@@ -295,6 +295,9 @@ def test_prompt_turns(monkeypatch):
   assert not c.busy
   assert c.prompt('right', np.array([0.0, 285.0]), 0.0, None, 10.0) == ('late', '')  # too near to undo
   assert not c.busy and c.forced is not None
+  # stopped at the stop line: in time to brake, but its route would be held till the car had made the turn
+  assert c.prompt('right', np.array([0.0, 280.0]), 0.0, None, 0.0) == ('late', '')
+  assert not c.busy and c.forced is not None
   assert c.prompt('right', pos, 0.0, None, 15.0) == ('cancel', 'Row 1')
   routed(c)
   k = c.walk.nodes.index(201)
