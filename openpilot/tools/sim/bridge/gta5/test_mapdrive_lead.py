@@ -33,7 +33,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5 import mapdrive_sim as ms
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, Section, Span
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import (BORROW_LANE, BORROW_ONCOMING, BORROW_STOP, BORROW_V, BORROW_WAIT, BORROW_WIDE, CLAMP_MARGIN,
-                                                           DEADLOCK_WAIT, LANE_W, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_MARGIN,
+                                                           DEADLOCK_WAIT, LANE_W, LC_SETTLE_S, LEAD_STOP, MAPX_COLUMNS, NUDGE_CLEAR, NUDGE_MARGIN,
                                                            NUDGE_NODE, NUDGE_WANT, OBST_WAIT, PARKED_WAIT, WAIT_MAX, MapDrive)
 
 REACH = {"ahead": 120.0, "side": 40.0}  # the plugin's reach (core.cpp NEARBY_AHEAD, NEARBY_SIDE_AHEAD)
@@ -466,9 +466,46 @@ def test_lane_change_waits_for_its_lane():
   s0 = float(np.interp(100.0, md.route_s, md.s_path))
   got = md._deferred_keys(md.route, s0, 180.0)
   assert [(round(k[0]), k[1]) for k in got] == [(0, 1.0), (180, 1.0), (210, 0.0), (260, 0.0), (400, 0.0), (430, 1.0)], got
-  got = md._deferred_keys(md.route, s0, 385.0)  # the next change starts at 400: shortened to MIN_LC_M's room, no more
-  assert got is None or got[2][0] <= 400.0, got
+  # the next change starts at 400: put off with it, each keeping its least length and LC_SETTLE_S apart, never squeezed
+  # into one sweep (Amy's Route 68 on-ramp, 14 Oct: 3 -> 2 squeezed to 23 m ran straight on into 2 -> 1, into a truck)
+  for v in (0.0, 18.0):
+    got = md._deferred_keys(md.route, s0, 385.0, v)
+    if got is not None:
+      ramps = [(k0[0], k1[0]) for k0, k1 in zip(got, got[1:]) if abs(k1[1] - k0[1]) > 1e-3 and k1[0] - k0[0] > 1e-3]
+      assert len(ramps) == 2 and all(e - s >= min(md._lc_least(1.0, v), 30.0) - 1e-6 for s, e in ramps), (v, got)  # (as long as they were)
+      assert ramps[1][0] - ramps[0][1] >= max(v, 5.0) * LC_SETTLE_S - 1e-6 and ramps[1][1] <= md.route.length, (v, got)
+  assert md._deferred_keys(md.route, s0, 590.0, 18.0) is None  # no room left before the route's end
   print("lane change waits for its lane: ok")
+
+
+def test_two_lane_change():
+  # Amy's Route 68 on-ramp, 14 Oct: a change across two lanes checked only the lane beside, and ran into a truck in the
+  # far one. A left turn from the right lane of three: with a truck kept alongside in the far lane (none beside) it waits
+  # ("into"), and goes once it's by
+  r = ms.junction_turn("left", lead=700.0, stop=None, ours=3)
+  far_x = ms.start_pose(r, 0, 0.0)[0]
+  free = ms.drive(r, {"seed": 1}, lane=2, v0=15.0, reach=REACH, seconds=1.0).md.changes[0]
+  assert abs(free[3]) > 1.5 * LANE_W, free
+  _, y, h = ms.start_pose(r, 2, 0.0)
+  truck = ms.Vehicle(far_x, y + 3.0, h, speed=15.0, dims=(-1.3, 1.3, -5.0, 5.0))
+  trip = ms.drive(r, {"seed": 1}, lane=2, v0=15.0, reach=REACH, seconds=0.05, until_done=False, vehicles=[truck])
+  car, md = trip.car, trip.md
+  while car.t < 150.0 and md.finished is None:
+    if r.at < free[1] + 80.0:
+      truck.y, truck.speed = car.y + 3.0, car.v
+    else:
+      truck.speed = car.v + 5.0
+    car.advance(ms.FRAME)
+    st = car.state()
+    r.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(r, st, car.t, car.collisions))
+    trip.events += md.take_events()
+    trip.rows.append((car.t, car.x, car.y, car.h, car.v, car.k * car.v, md.kappa, md.a, md.dev, md.s, r.right,
+                      0, md.lead_gap, ms.clearance(car.body(), truck.corners())))
+  gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+  assert gaps and gaps[0]["why"] == "into" and gaps[-1]["phase"] == "go", gaps
+  assert md.finished == "arrived" and car.collisions == 0 and trip.col(13).min() > 1.0, (md.finished, trip.col(13).min())
+  print("two lane change: ok")
 
 
 def test_queue_that_moves():
@@ -710,6 +747,7 @@ if __name__ == "__main__":
   test_nudge_no_room()
   test_borrow()
   test_lane_change_waits_for_its_lane()
+  test_two_lane_change()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()

@@ -151,6 +151,11 @@ LC_GATE_T = 1.0  # s before a lane change starts from which its lane is to be cl
 # longer than letting one closing on us brake
 LC_COMMIT = 0.25
 LC_DEFER_S, LC_DEFER_MIN = 2.0, 15.0  # s on from the car (m at the least) a change put off starts again
+LC_LEAST_SHARE = 0.6  # of a change's time (lc_seconds) one put off keeps at the least
+LC_SETTLE_S = 1.0  # s in its lane between a change put off and the next one of its run, at the least
+LC_AFTER_S = 1.5  # s after a change ends its lane is still looked at for one coming up on us (_lane_window)
+LC_GAP_M, LC_GAP_T, LC_GAP_CLOSE = 2.0, 0.3, 1.0  # m, s of the follower's speed and s of its closing speed a change leaves
+LC_CUT_DECEL = 2.0  # m/s^2 a change may leave us to slow at behind one in its lane
 LC_LATE_WAIT = 30.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends
 LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
 
@@ -2004,7 +2009,7 @@ class MapDrive:
     (_longitudinal) until its lane clears, the trip ending after LC_LATE_WAIT s. A lane_gap event as it starts to wait
     ("wait"), goes back ("back"), can wait no more ("late") and goes ("go")."""
     lw = self.lc_wait
-    for s0, s1, side, _ in self.changes:
+    for s0, s1, side, shift in self.changes:
       if s1 <= self.s:
         continue
       if self.s < s0 - max(v, 3.0) * LC_GATE_T or self.s > s0 + LC_COMMIT * (s1 - s0):
@@ -2012,7 +2017,7 @@ class MapDrive:
           self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
           self.lc_wait = None
         return
-      why = self._lane_busy(side, state)
+      why = self._lane_busy(side, state) or self._lane_window(s0, s1, side, shift, v, t)
       if why is None:
         if lw is not None:
           self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
@@ -2023,7 +2028,7 @@ class MapDrive:
         lw = self.lc_wait = {"since": t, "side": side, "defers": 0, "late": False, "s0": s0, "v0": v}
         self._event("lane_gap", t, phase="wait", side=side, why=why, started=started)
       lw["why"] = why
-      keys = self._deferred_keys(route, s0, route.at + max(v * LC_DEFER_S, LC_DEFER_MIN))
+      keys = self._deferred_keys(route, s0, route.at + max(v * LC_DEFER_S, LC_DEFER_MIN), v)
       if keys is not None and self._replan_keys(route, state, t, keys):
         lw.update(defers=lw["defers"] + 1, late=False)
         if started:
@@ -2038,22 +2043,79 @@ class MapDrive:
         self._abort(f"no gap in the lane to the {side} in {LC_LATE_WAIT:.0f} s", t, state.get("pos"))
       return
 
-  def _deferred_keys(self, route, s0: float, start: float) -> list[tuple[float, float]] | None:
+  def _lane_window(self, s0: float, s1: float, side: str, shift: float, v: float, t: float) -> str | None:
+    """What keeps a lane change from path m s0 to s1 (`shift` m across) from its lanes, beyond what the blind-spot
+    rule sees (_lane_busy: alongside, or closing from behind, in the lane beside): from the vehicles' predicted motion
+    (_predict), one in any lane it moves into, at any time from now until LC_AFTER_S s after it ends (the car at its
+    speed), nearer our body along the lane than the gap a change leaves (LC_GAP_M plus LC_GAP_T s of the follower's
+    speed, and LC_GAP_CLOSE s of how much faster one behind is, or the room to slow to the speed of one ahead at
+    LC_CUT_DECEL): "ahead" (we'd cut in on one), "behind" (one would come up on us) or "beside", "into" where a far lane
+    of a change across more than one is busy; else None."""
+    if not self.cars or s1 - s0 < 1.0:
+      return None
+    n = max(int(round(abs(shift) / LANE_W)), 1)
+    sign = 1.0 if side == "right" else -1.0
+    vv = max(v, 3.0)
+    times = np.arange(0.0, max(s1 - self.s, 0.0) / vv + LC_AFTER_S + 1e-6, 0.25)
+    ours = self.s + vv * times
+    moved_us = n * LANE_W * quintic((ours - s0) / (s1 - s0))  # our path's move across, at our place at each time
+    for car in self.cars:
+      if car.get("ped"):
+        continue
+      corners = self._predict(car, t, times)
+      along, right = self._place(corners.reshape(-1, 2), LEAD_AHEAD + 40.0, behind=60.0, off_max=ALONG_OFF + n * LANE_W)
+      along, right = along.reshape(len(times), 4), right.reshape(len(times), 4)
+      vi = float(np.hypot(*car["vel"]))
+      for k in range(len(times)):
+        if np.isnan(along[k]).any():
+          continue
+        # its body's place across, in lanes from where our change starts (our path itself moves across at its place)
+        moved = n * LANE_W * quintic((along[k] - s0) / (s1 - s0))
+        lat = sign * (right[k] + sign * moved)
+        lo, hi = float(lat.min()), float(lat.max())
+        lane = next((m for m in range(1, n + 1) if lo < (m + 0.5) * LANE_W - 0.3 and hi > (m - 0.5) * LANE_W + 0.3), None)
+        if lane is None or moved_us[k] + self.half_width < (lane - 0.5) * LANE_W:
+          continue  # in none of its lanes, or we're not into that lane yet then
+        front, rear = ours[k] + self.front, ours[k] - self.rear
+        a0, a1 = float(along[k].min()), float(along[k].max())
+        if a0 >= front:  # behind it once in, slowing to its speed (if we must) no harder than LC_CUT_DECEL
+          gap = a0 - front
+          need = LC_GAP_M + LC_GAP_T * vv + max(vv - vi, 0.0) ** 2 / (2 * LC_CUT_DECEL)
+          why = "ahead"
+        elif a1 <= rear:
+          need, gap, why = LC_GAP_M + LC_GAP_T * vi + LC_GAP_CLOSE * max(vi - vv, 0.0), rear - a1, "behind"
+        else:
+          need, gap, why = 1.0, -1.0, "beside"
+        if gap < need:
+          return "into" if lane > 1 else why
+    return None
+
+  def _deferred_keys(self, route, s0: float, start: float, v: float | None = None) -> list[tuple[float, float]] | None:
     """The plan's keys with the lane change starting at path m s0 put off to start at route m `start`, its length kept
-    (shortened to MIN_LC_M at the least where the plan's next lane event, a stop line or a city junction node comes
-    first);
-    the keys after it in the lane it moves into (section boundaries, no renumbering) up to there go with it. None where
-    it can't be put off."""
+    but shortened, where what comes after leaves less room, to no less than _lc_least (a lane change's least time at
+    the car's speed `v`); the keys after it in the lane it moves into (section boundaries) go with it. A change after
+    it in the same run of lanes (nothing but holds between) it would come within LC_SETTLE_S of is put off with it, as
+    squeezing both into one sweep across two lanes is what a lane-by-lane gap check can't keep clear. The run ends at
+    the plan's next renumbering or the route's end, and not across a stop line or a city junction node it was before.
+    None where it can't be put off."""
     keys = self.keys
+    v = self.last_v if v is None else v
     rs0 = float(np.interp(s0, self.s_path, self.route_s))
     found = chains(keys)
     if not found:
       return None
-    a, b = min(found, key=lambda ab: abs(keys[ab[0]][0] - rs0))
-    k0, k1, lane1 = keys[a][0], keys[b][0], keys[b][1]
-    if start <= k0:
+    first = min(range(len(found)), key=lambda n: abs(keys[found[n][0]][0] - rs0))
+    if start <= keys[found[first][0]][0]:
       return None
-    j = b + 1  # past the keys that only hold its new lane on: the next is another change's start, or a renumbering
+    # the run: this change and those after it with only holds in their lanes between
+    run = [found[first]]
+    for a, b in found[first + 1:]:
+      pb = run[-1][1]
+      if any(abs(keys[m][1] - keys[pb][1]) > EPS or keys[m + 1][0] - keys[m][0] <= EPS for m in range(pb, a)):
+        break
+      run.append((a, b))
+    lane1 = keys[run[-1][1]][1]
+    j = run[-1][1] + 1  # past the keys that only hold the last one's lane on: the next is another change's start, or a renumbering
     while j < len(keys) and abs(keys[j][1] - lane1) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
       j += 1
     if j >= len(keys):
@@ -2063,16 +2125,38 @@ class MapDrive:
     else:
       limit = keys[j][0]  # a renumbering step
     # nor across a stop line or a city junction it was before (a freeway's nodes are its slip roads' merges and exits)
+    k1 = keys[run[0][1]][0]
     fast = route.classes[segment_of(route, k1)] in ("motorway", "trunk") if getattr(route, "classes", None) else False
     after = [x for x in list(route.stops) + ([] if fast else list(route.junctions)) if x > k1 - EPS]
     limit = min([limit] + [x - CROSSING_CLEAR for x in after]) - EPS
-    length = k1 - k0
-    end = min(start + length, limit)
-    if end - start < min(MIN_LC_M, length) - EPS:
-      return None
-    scale = (end - start) / max(length, EPS)
-    return (list(keys[:a]) + [(start + (k[0] - k0) * scale, k[1]) for k in keys[a:b + 1]] +
-            [k for k in keys[b + 1:j] if k[0] > end + EPS] + list(keys[j:]))
+    settle = max(v, 5.0) * LC_SETTLE_S
+    lengths = [keys[b][0] - keys[a][0] for a, b in run]
+    least = [min(self._lc_least(abs(keys[b][1] - keys[a][1]), v), length) for (a, b), length in zip(run, lengths, strict=True)]
+    placed = []  # (chain, its new start, its new end)
+    s = start
+    for n, ((a, b), length) in enumerate(zip(run, lengths, strict=True)):
+      if n and s <= keys[a][0] + EPS:
+        break  # not reached: it stays where it was, and so do those after it
+      room = limit - s - sum(least[n + 1:len(run)]) - settle * (len(run) - n - 1)
+      end = s + min(length, room)
+      if end - s < least[n] - EPS:
+        return None
+      placed.append(((a, b), s, end))
+      s = end + settle
+    rest = run[len(placed)][0] if len(placed) < len(run) else j
+    out = list(keys[:run[0][0]])
+    for n, ((a, b), s_a, end) in enumerate(placed):
+      k0, scale = keys[a][0], (end - s_a) / max(keys[b][0] - keys[a][0], EPS)
+      out += [(s_a + (k[0] - k0) * scale, k[1]) for k in keys[a:b + 1]]
+      upto, nxt = (placed[n + 1][0][0], placed[n + 1][1]) if n + 1 < len(placed) else (rest, math.inf)
+      out += [k for k in keys[b + 1:upto] if end + EPS < k[0] < nxt - EPS]
+    return out + list(keys[rest:])
+
+  def _lc_least(self, lanes: float, v: float) -> float:
+    """m a lane change across `lanes` lanes put off takes at the least: MIN_LC_M a lane, and LC_LEAST_SHARE of its
+    time (lc_seconds) at the car's speed."""
+    n = max(lanes, 1.0)
+    return max(MIN_LC_M * n, LC_LEAST_SHARE * lc_seconds(self.style, n) * max(v, 5.0))
 
   def _replan_keys(self, route, state: dict, t: float, keys: list[tuple[float, float]]) -> bool:
     """The path for `keys` from where the car is (as the first plan's: from its lane line, joined as a lane change
