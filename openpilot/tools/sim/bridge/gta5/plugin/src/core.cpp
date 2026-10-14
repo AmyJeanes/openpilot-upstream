@@ -194,6 +194,7 @@ struct Driver {
 struct Control {
   bool active = false;
   float curvature = 0, accel = 0;  // left-positive 1/m, m/s^2
+  float reverse = 0;  // m/s to back up at, 0 driving forwards
   double t = -1e9;
   float latI = 0, lonI = 0;
   bool braking = false, wasLive = false, holding = false;
@@ -1007,6 +1008,34 @@ void ApplyControls(float dt, double now) {
   // takes away; the coasting model and throttle table are flat-road ones
   float grade = 9.81f * std::sin(g_m.grade);
   float u = std::clamp(accel + g_ctl.lonI, -4.0f, 2.5f) + grade;
+  if (g_ctl.reverse > 0 && !g_user.gas) {
+    // backing up (the map driver clearing a deadlock): the game's brake reverses the car, and its throttle brakes it
+    // while it goes backwards; a proportional hold on the speed asked for
+    if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, false);
+    g_ctl.holding = g_ctl.braking = false;
+    g_ctl.lonI = 0;
+    float err = speed + g_ctl.reverse;  // > 0: not going back fast enough
+    float brake = err > 0 ? std::clamp(0.15f + 0.4f * err, 0.0f, 0.6f) : 0.0f;
+    float throttle = err < -0.3f ? std::clamp(-0.5f * err, 0.0f, 0.5f) : 0.0f;
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, brake);
+    g_ctl.steerOut = steer;
+    g_ctl.throttleOut = throttle;
+    g_ctl.brakeOut = brake;
+    return;
+  }
+  if (speed < -0.5f && !g_user.gas) {
+    // still going backwards with no reverse asked for: the throttle stops it (the brake would back it up more)
+    if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, false);
+    g_ctl.holding = g_ctl.braking = false;
+    float throttle = std::clamp(-0.4f * speed, 0.2f, 0.6f);
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, 0.0f);
+    g_ctl.steerOut = steer;
+    g_ctl.throttleOut = throttle;
+    g_ctl.brakeOut = 0;
+    return;
+  }
   // the game's brake reverses a stopped car, so hold a stop with the handbrake like a car's brake hold
   bool hold = std::fabs(speed) < 0.5f && accel < 0 && !g_user.gas;
   if (hold != g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, hold);
@@ -2119,7 +2148,9 @@ std::string Obstacles(double now) {
 // the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
 // "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...], "p":[[x, y, vx, vy],
 // ...]}: each vehicle's origin (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward,
-// in our frame), its model's bounds (m, in its own frame) and whether anyone is in its driver's seat; each pedestrian on
+// in our frame), its model's bounds (m, in its own frame), whether anyone is in its driver's seat, its entity handle (the
+// same while it exists, for the bridge's tracking) and whether it waits at a red light (or queues behind one, as the AI
+// counts it: IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS); each pedestrian on
 // foot's place and velocity, within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits
 std::string Nearby(double now) {
   static std::string out;
@@ -2166,7 +2197,8 @@ std::string Nearby(double now) {
     bool driven = driver && DOES_ENTITY_EXIST(driver) && !IS_PED_DEAD_OR_DYING(driver, TRUE);
     if (!list.empty()) list += ",";
     list += "[" + num(rel.x) + "," + num(rel.y) + "," + num(WrapDeg(GET_ENTITY_HEADING(v) - heading)) + "," + num(vx) + "," + num(vy) + "," +
-            num(mn.x) + "," + num(mx.x) + "," + num(mn.y) + "," + num(mx.y) + "," + (driven ? "1" : "0") + "]";
+            num(mn.x) + "," + num(mx.x) + "," + num(mn.y) + "," + num(mx.y) + "," + (driven ? "1" : "0") + "," + std::to_string(v) + "," +
+            (driven && IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS(v) ? "1" : "0") + "]";
   }
   static VehicleHandles peds;
   count = AllPeds(peds);
@@ -2780,6 +2812,7 @@ void HandleMessage(const Message &m, double now) {
     g_ctl.active = MsgBool(m, "active");
     g_ctl.curvature = static_cast<float>(MsgNum(m, "curvature"));
     g_ctl.accel = static_cast<float>(MsgNum(m, "accel"));
+    g_ctl.reverse = std::clamp(static_cast<float>(MsgNum(m, "reverse", 0.0)), 0.0f, 3.0f);
     g_ctl.t = now;
   } else if (type == "hud") {
     g_hud.setKph = static_cast<float>(MsgNum(m, "setSpeed"));
