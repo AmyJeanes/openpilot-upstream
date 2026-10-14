@@ -234,6 +234,7 @@ CROSS_KEEP_IN = 1.5  # s, stopped in a junction (a crosser flickering at the edg
 CROSS_SLOW = 3.0  # m/s we're slower than, in a junction, for its crossing holds (_crossing)
 CROSS_T_IN = 10.0  # s ahead a crossing vehicle's way is predicted then: time to clear the junction from a standstill
 CROSS_BESIDE = 1.0  # m beside our body a slowed crosser may stand, in a junction, to be held for
+SLOWED_TURN = 15.0  # m of path on from its place along which our way may turn to its heading, for it to be no crosser
 JUNCTION_IN = 25.0  # m past a stop line our front bumper is in its junction for
 JUNCTION_NODE = 10.0  # m from a junction node, likewise
 # pedestrians (the plugin's nearby "p": their places and velocities, a body PED_HALF m either way of each)
@@ -2534,10 +2535,12 @@ class MapDrive:
     if first < self.s - self.rear:
       return None
     j = int(np.clip(np.searchsorted(self.s_path, first), 0, len(self.s_path) - 1))
+    k = int(np.clip(np.searchsorted(self.s_path, first + SLOWED_TURN), j + 1, len(self.s_path)))
     fwd = car["c"][3] - car["c"][0]
-    angle = abs(wrap(math.degrees(math.atan2(fwd[1], fwd[0]) - self.theta[j])))
-    if angle < CROSS_ANGLE or angle > 180.0 - CROSS_ANGLE:
-      return None  # along our way: a lead, or oncoming
+    angles = np.abs((math.degrees(math.atan2(fwd[1], fwd[0])) - np.degrees(self.theta[j:k]) + 180.0) % 360.0 - 180.0)
+    angle = float(angles[0])
+    if float(angles.min()) < CROSS_ANGLE or float(angles.max()) > 180.0 - CROSS_ANGLE:
+      return None  # along our way, or the way we're turning into (one queued in the road we turn into): a lead; or oncoming
     return (first - self.s - self.front - CROSS_STOP,
             {"at": round(first, 1), "angle": round(angle), "speed": round(float(np.hypot(*car["vel"])), 1), "slowed": True})
 
