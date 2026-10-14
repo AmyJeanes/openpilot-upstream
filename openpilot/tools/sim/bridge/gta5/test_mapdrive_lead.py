@@ -721,6 +721,20 @@ def test_lights_from_traffic():
   stops = events_of(trip, "light_stop")
   assert trip.finished == "arrived" and trip.car.collisions == 0 and stops and stops[0]["why"] == "cross", (trip.finished, stops)
   assert trip.col(13).min() > 2.0, trip.col(13).min()
+  # new1 r1t1 (Vespucci Blvd): one queued behind us waits because we do; it's no sign of red (held 150 s on it before)
+  stream = [ms.Vehicle(x_us - 10.0 * (t_line - 6.0 + 2.5 * n), 302.75, 270.0, speed=10.0) for n in range(8)]
+  follower = parked(r, 1, -100.0)  # (comes to stand 3 m behind us once we've stopped)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=stream + [follower], reach=REACH, seconds=0.05, until_done=False)
+  car, md = trip.car, trip.md
+  while car.t < 120.0 and md.finished is None:
+    if follower.y < 0.0 and car.t > 10.0 and car.v < 0.05:
+      follower.x, follower.y = car.x, car.y - 2 * 2.4 - 3.0
+    car.advance(ms.FRAME)
+    st = car.state()
+    r.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(r, st, car.t, car.collisions))
+    trip.events += md.take_events()
+  assert md.finished == "arrived" and car.collisions == 0 and follower.y > 0.0 and events_of(trip, "light_go"), (md.finished, follower.y)
   # green: one of ours ahead in our lane drives on over the line: no stop for it
   lead = parked(r, 1, 120.0, speed=12.0)
   trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[lead], reach=REACH, seconds=90)

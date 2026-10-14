@@ -2597,21 +2597,21 @@ class MapDrive:
     return route_point(self.route, after[0] if after else x["along"] + 10.0)
 
   def _light(self, x: dict, state: dict, t: float) -> str | None:
-    """What the traffic about shows of the signal at stop line x, from LIGHT_LOOK m short of it: "red" where AI cars
-    going our way wait at a red light (the plugin's traffic.red, or a reported vehicle's own flag), one of ours has stood
-    at or just behind its line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS (on its
-    green); "green" where one of ours drives over its line faster than LIGHT_THROUGH and none of that, but for one going
-    through in our own lane (or any lane of ours where the route goes straight on), which outweighs a queue in the lane
-    beside (a turn lane's own phase); each kept LIGHT_KEEP s. None where nothing shows: no traffic about, and the trip
-    goes as without it. x keeps why, and whether any traffic was about."""
+    """What the traffic about shows of the signal at stop line x, from LIGHT_LOOK m short of it: "red" where one of
+    ours (going our way) ahead of our rear waits at a red light (its own flag, where the plugin sends one) or has stood
+    at or just behind the line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS (on its
+    green); "green" where one of ours drives over the line faster than LIGHT_THROUGH, or one on the crossing road waits
+    at its red by the junction, and none of that, but for one going through in our own lane (or any lane of ours where
+    the route goes straight on), which outweighs a queue in the lane beside (a turn lane's own phase); each kept
+    LIGHT_KEEP s. Never from those behind us, who wait because we do (the plugin's traffic.red counts them too, so isn't
+    used). None where nothing shows: no traffic about, and the trip goes as without it. x keeps why, and whether any
+    traffic was about."""
     gap = x["s"] - self.s - self.front
     if gap > LIGHT_LOOK or not self.cars:
       return None
     x["traffic"] = True
     red = green = None
     own_green = False
-    if int((state.get("traffic") or {}).get("red") or 0):
-      red = "queue"
     j = int(np.clip(np.searchsorted(self.s_path, x["s"]), 0, len(self.s_path) - 1))
     th = float(self.theta[j])
     node = self._node_of(x)
@@ -2626,16 +2626,19 @@ class MapDrive:
       ang = abs(wrap(math.degrees(h - th)))
       if ang < ALONG_ANGLE:
         along, right = self._place(mid[None], gap + self.front + 40.0, behind=40.0, off_max=2.0 * LANE_W)
-        if math.isnan(along[0]):
-          continue
+        if math.isnan(along[0]) or along[0] < self.s - self.rear + 1.0:
+          continue  # behind us: queued because we stand
         rel = float(along[0]) - x["s"]
-        if car.get("at_light") or (-25.0 < rel < 3.0 and float(car.get("still") or 0.0) >= LIGHT_QUEUE):
+        if (car.get("at_light") and rel < 3.0) or (-25.0 < rel < 3.0 and float(car.get("still") or 0.0) >= LIGHT_QUEUE):
           red = red or "waiting"
         elif -3.0 < rel < 20.0 and speed > LIGHT_THROUGH:
           green = "through"
           own_green = own_green or straight or abs(float(right[0])) < LANE_W / 2 + 1.0
-      elif 50.0 < ang < 130.0 and speed > LIGHT_CROSS and float(np.hypot(*(mid - node))) < LIGHT_NODE:
-        red = red or "cross"
+      elif 50.0 < ang < 130.0 and float(np.hypot(*(mid - node))) < LIGHT_NODE:
+        if speed > LIGHT_CROSS:
+          red = red or "cross"
+        elif car.get("at_light"):
+          green = green or "cross_waiting"
     if red and not own_green:
       x["red_t"], x["why"] = t, red
     elif green:
