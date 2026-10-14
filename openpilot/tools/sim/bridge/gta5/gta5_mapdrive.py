@@ -74,10 +74,12 @@ island_contact.
 
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
-"rear_axle": null, "range_share": 0.75, "nudge": true, "nudge_clear": 0.5, "nudge_want": 0.8, "borrow": true}; bias_max 0
+"rear_axle": null, "range_share": 0.75, "nudge": true, "nudge_clear": 0.5, "nudge_want": 0.8, "borrow": true,
+"lights": "traffic"}; bias_max 0
 and wander 0 drive exactly on the line; rear_axle (m behind the car's position, default half the state's wheelBase) 0
 steers from the car's middle; range_share 1 drops the range cap; nudge false stops behind every parked vehicle in the
-way; borrow false keeps every pass within our lane."""
+way; borrow false keeps every pass within our lane; lights "off" drives through signals as with no traffic about (the
+crossing check alone), rather than reading them from the traffic."""
 import bisect
 import functools
 import hashlib
@@ -360,7 +362,7 @@ DEFAULTS = {"seed": None, "preset": "normal", "style": {}, "bias_max": 0.3, "wan
             "on_abort": "stop", "speed": None, "plan_check": "fix", "stop_before": 15.0, "hold_after": 3.0, "retime": True,
             "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW, "fit_durations": True,
             "rear_axle": None, "range_share": 0.75, "nudge": True, "nudge_clear": NUDGE_CLEAR, "nudge_want": NUDGE_WANT,
-            "borrow": True}
+            "borrow": True, "lights": "traffic"}
 
 
 def pick_style(seed: int, preset: str = "normal", over: dict | None = None) -> dict:
@@ -3386,7 +3388,7 @@ class MapDrive:
       if x["done"]:
         continue
       if x["kind"] == "lights":
-        light = self._light(x, state, t)
+        light = self._light(x, state, t) if self.c.get("lights") != "off" else None
         if s + self.front >= x["s"]:
           x["done"] = True
           mark = {"t": round(t, 3), "s": round(x["s"], 1), "along": round(x["along"], 1), "from": round(t - LIGHT_MARK, 3), "to": round(t + LIGHT_MARK, 3)}
