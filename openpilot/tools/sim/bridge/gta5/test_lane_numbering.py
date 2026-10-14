@@ -273,6 +273,87 @@ def test_lane_line_across_a_crossing(tmp_path):
     assert lane_change(osm, np.array(nodes[2]), np.array(nodes[5])) is expect, n
 
 
+def hatched_map(tmp_path, name: str, rings: list, heights: list | None = None, kinds=None):
+  """Two one-way carriageways heading east 7 m apart (their lanes side by side: not separated()), joined by a link
+  angling across from (100, 0) to (125, -7), on a map whose lanes.json paints these hatched rings [[x, y], ...]."""
+  import json
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import KINDS
+  kinds = kinds or KINDS
+  nodes = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (200.0, 0.0), 4: (0.0, -7.0), 5: (125.0, -7.0), 6: (200.0, -7.0)}
+  tags = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '7'}
+  ways = {1: (tags, [1, 2]), 2: (tags, [2, 3]), 3: (tags, [4, 5]), 4: (tags, [5, 6]),
+          5: ({'highway': 'motorway', 'oneway': 'yes', 'lanes': '1', 'width': '3.5'}, [2, 5])}
+  osm = osm_map(nodes, ways)
+  (tmp_path / name).mkdir()
+  lines = [[kinds.index('hatched')] + [v for p in ring + ring[:1] for v in p] for ring in rings]
+  (tmp_path / name / 'lanes.json').write_text(json.dumps({'kinds': kinds, 'lines': lines,
+                                                          'heights': heights if heights is not None else [0] * len(rings)}))
+  osm.path = str(tmp_path / name / 'map.osm.pbf')
+  osm.data.node_tags.update({2: {'ele': '0'}, 5: {'ele': '0'}})
+  return osm, np.array(nodes[2]), np.array(nodes[5])
+
+
+def box(x0: float, y0: float, x1: float, y1: float) -> list:
+  return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
+def test_hatched_area_across_a_crossing(tmp_path, monkeypatch):
+  # a hatched gore between the carriageways makes the link through it no way for a driver, though their lanes are side
+  # by side (not separated()); a link wholly inside a long gore crosses no line at all and is still one. A link grazing
+  # the gore's corner (under HATCH_IN m inside once HATCH_ERODE m in from its outline) stays, as does one through a
+  # gore on another level, and every link on a map whose lanes.json has no hatched areas (an older one)
+  from openpilot.tools.sim.bridge.gta5.map import router
+  from openpilot.tools.sim.bridge.gta5.map.router import LaneLines, crosses_hatched, separated
+  cases = (('across', [box(90.0, -5.0, 140.0, -2.0)], None, True),
+           ('long', [box(90.0, -8.0, 140.0, 1.0)], None, True),
+           ('corner', [box(117.0, -5.0, 140.0, -2.0)], None, False),
+           ('bridge', [box(90.0, -5.0, 140.0, -2.0)], [8], False),
+           ('none', [], None, False))
+  for name, rings, heights, expect in cases:
+    osm, pa, pb = hatched_map(tmp_path, name, rings, heights)
+    assert not separated(osm, pa, pb)
+    assert crosses_hatched(osm, pa, pb) is expect, name
+  osm, pa, pb = hatched_map(tmp_path, 'old', [], kinds=['edge', 'dashed', 'solid'])
+  assert not LaneLines.of(osm).rings and not crosses_hatched(osm, pa, pb)
+  lines = LaneLines.of(hatched_map(tmp_path, 'long2', [box(90.0, -8.0, 140.0, 1.0)])[0])
+  assert lines.crossed(pa, pb, 0.0) == set() and abs(lines.inside(pa, pb, 0.0, 0.0) - np.hypot(25.0, 7.0)) < 0.1
+  monkeypatch.setattr(router, 'HATCH_ERODE', 0.0)  # the corner's 0.9 m inside its outline is a crossing unshrunk
+  assert crosses_hatched(hatched_map(tmp_path, 'corner2', [box(117.0, -5.0, 140.0, -2.0)])[0], pa, pb)
+
+
+def test_hatched_rings_into_lanes_json(tmp_path):
+  # osm_to_roads' hatched kind: painted islands outlined in paint (colour, or painted_island=hatched) and those listed
+  # by their centre, each a closed ring at its nodes' heights, read back by LaneLines as areas; an unpainted island not
+  # listed isn't one, nor is a listed centre with no island near it, nor an island held out by its centre
+  import json
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import KINDS, hatched_rings, packed
+  from openpilot.tools.sim.bridge.gta5.map.router import LaneLines
+  nodes, ways, tags = {}, {}, {}
+  for n, (x, y) in enumerate([(0.0, 0.0), (20.0, 0.0), (20.0, 4.0)]):  # four triangles, 30 m apart
+    for k in range(4):
+      nodes[10 * k + n + 1] = (x + 30.0 * k, y)
+      tags[10 * k + n + 1] = {'ele': str(5.0 + k + 0.1 * n)}
+  island = {'area': 'yes', 'traffic_calming': 'painted_island'}
+  for k, more in enumerate(({'colour': 'white'}, {}, {}, {'painted_island': 'hatched'})):
+    ways[100 + k] = ({**island, **more}, [10 * k + 1, 10 * k + 2, 10 * k + 3, 10 * k + 1])
+  osm = osm_map(nodes, ways)
+  osm.data.node_tags.update(tags)
+  centre = np.array([[0.0, 0.0], [20.0, 0.0], [20.0, 4.0]]).mean(0)
+  rings, missed = hatched_rings(osm.data, osm.xy, [centre + (60.4, 0.3), (500.0, 500.0)])
+  assert missed == 1 and len(rings) == 3
+  assert [round(float(r[:-1].mean(0)[0])) for r, _ in rings] == [13, 73, 103]  # not the unlisted unpainted one at 43
+  held, _ = hatched_rings(osm.data, osm.xy, held=[centre + (0.5, 0.0)])  # a painted one held out
+  assert [round(float(r[:-1].mean(0)[0])) for r, _ in held] == [103]
+  ring, z = rings[1]
+  assert np.allclose(ring[0], ring[-1]) and len(ring) == 4 and np.allclose(z, [7.0, 7.1, 7.2, 7.0])
+  data = {'kinds': KINDS, 'lines': [[KINDS.index('hatched')] + [round(float(v), 2) for v in r.ravel()] for r, _ in rings],
+          'heights': [packed(z) for _, z in rings]}
+  (tmp_path / 'lanes.json').write_text(json.dumps(data))
+  lines = LaneLines(json.loads((tmp_path / 'lanes.json').read_text()))
+  assert len(lines.rings) == 3 and np.allclose(lines.rings[1][0], ring) and np.allclose(lines.rings[1][1], 7.0)
+  assert set(lines.kind.tolist()) == {'hatched'}
+
+
 def test_hairpin_hop():
   # GTA's X of shortcut links between two one-way carriageways heading east: the forward half is a lane change, the
   # back half (west across them, a hairpin in and out) never is; nor is a hop sideways and back. A link a car takes

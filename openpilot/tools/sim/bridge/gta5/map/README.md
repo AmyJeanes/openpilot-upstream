@@ -445,7 +445,11 @@ topcam poses) as tiles, so the check runs on them without the game.
   surface strips stay; `junctions.off_islands`, the map view and the overlay), the
   map view and the overlay draw an island's outline in its colour, and a junction's corner ends at a painted
   island's tip, square, rather than trimming back over a painted gore (Vinewood Blvd's hatched median beside the
-  left-turn lane, hidden under a junction area trimmed 40 m back).
+  left-turn lane, hidden under a junction area trimmed 40 m back). lanes.json also has each island outlined in paint
+  (or tagged `painted_island=hatched`) as a closed `hatched` ring at its nodes' heights, as well as islands
+  `osm_to_roads.py --hatched` lists by centre, less those it holds out (where GTA's link across the island is the only
+  way to a road the map has no other way onto). The router bans a GTA shortcut link with 0.5 m or more inside one, on
+  its level (`router.crosses_hatched`).
 - Raised islands (`raised_islands.py`), from the same tiles: kerbed islands a little above the road with road all round
   them, where a road's lanes run over them (the D-shaped islands with a lamp post on a tram crossing's centre line,
   where GTA lays every link to one junction node; slip, corner and pork-chop islands; median noses), each a closed way

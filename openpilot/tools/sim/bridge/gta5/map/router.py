@@ -43,6 +43,9 @@ SEPARATION_GAP = 1.0  # m between two carriageways' lanes: more is hatching, a d
 # the map's painted lines (LaneLines): m squares they're found by, m at a link's ends not counted as crossed, and m of
 # height between a line and a link on one level
 PAINT_CELL, PAINT_ENDS, PAINT_LEVEL = 10.0, 1.0, 2.5
+# a link through a hatched area (crosses_hatched): m of it inside, m in from the area's outline (a link grazing a gore's
+# edge or tip stays), and m between the points it's measured at
+HATCH_IN, HATCH_ERODE, HATCH_STEP = 0.5, 0.3, 0.05
 HAIRPIN = 90.0  # deg: a shortcut link every way through which turns back more than this, in and out again, is a hairpin
 # a shortcut link into the oncoming carriageway (oncoming): deg at least between the ways the carriageways at its ends
 # run, the road classes it's never taken on, and m from its middle another road meets for it to be at a junction
@@ -573,12 +576,14 @@ class LaneLines:
   """The lines the map paints on its roads (lanes.json beside its .osm.pbf, osm_to_roads.py --lanes) as segments, for
   whether a shortcut link separated() judges a crossing has only a dashed lane line across it: two carriageways the
   map draws as one road surface (side_by_side.py: their lanes' edges within its SHARED, a little more than
-  SEPARATION_GAP, apart), between which it's a lane change after all."""
+  SEPARATION_GAP, apart), between which it's a lane change after all. Its `hatched` lines are also kept as areas,
+  `rings` [(outline [K, 2], heights [K])], for whether a link runs through one (crosses_hatched)."""
   _loaded: dict[str, 'LaneLines | None'] = {}
 
   def __init__(self, data: dict):
     kinds = data['kinds']
     a, b, kind, z = [np.zeros((0, 2))], [np.zeros((0, 2))], [], [np.zeros(0)]
+    self.rings: list[tuple[np.ndarray, np.ndarray]] = []
     for line, h in zip(data['lines'], data.get('heights') or [None] * len(data['lines']), strict=True):
       pts = np.array(line[1:], float).reshape(-1, 2)
       zs = np.full(len(pts), np.nan) if h is None else np.broadcast_to(np.asarray(h, float), (len(pts),))
@@ -586,6 +591,8 @@ class LaneLines:
       b.append(pts[1:])
       z.append((zs[:-1] + zs[1:]) / 2)
       kind += [kinds[line[0]]] * (len(pts) - 1)
+      if kinds[line[0]] == 'hatched' and len(pts) >= 4:
+        self.rings.append((pts, np.array(zs)))
     self.a, self.b, self.z = np.vstack(a), np.vstack(b), np.concatenate(z)
     self.kind = np.array(kind)
     lo, hi = np.floor(np.minimum(self.a, self.b) / PAINT_CELL), np.floor(np.maximum(self.a, self.b) / PAINT_CELL)
@@ -594,6 +601,41 @@ class LaneLines:
       for cx in range(int(lo[k, 0]), int(hi[k, 0]) + 1):
         for cy in range(int(lo[k, 1]), int(hi[k, 1]) + 1):
           self.cells.setdefault((cx, cy), []).append(k)
+    self.ring_cells: dict[tuple[int, int], list[int]] = {}
+    for n, (pts, _) in enumerate(self.rings):
+      (x0, y0), (x1, y1) = np.floor(pts.min(0) / PAINT_CELL).astype(int), np.floor(pts.max(0) / PAINT_CELL).astype(int)
+      for cx in range(x0, x1 + 1):
+        for cy in range(y0, y1 + 1):
+          self.ring_cells.setdefault((cx, cy), []).append(n)
+
+  def inside(self, pa: np.ndarray, pb: np.ndarray, za: float = math.nan, zb: float = math.nan) -> float:
+    """How many m of a link from pa to pb (heights za, zb, where known) lie inside a hatched area, at least
+    HATCH_ERODE m in from its outline and on its level."""
+    pa, pb = np.asarray(pa, float), np.asarray(pb, float)
+    lo, hi = np.floor(np.minimum(pa, pb) / PAINT_CELL).astype(int), np.floor(np.maximum(pa, pb) / PAINT_CELL).astype(int)
+    near = sorted({n for cx in range(lo[0], hi[0] + 1) for cy in range(lo[1], hi[1] + 1) for n in self.ring_cells.get((cx, cy), ())})
+    length = float(np.hypot(*(pb - pa)))
+    if not near or length < 1e-6:
+      return 0.0
+    steps = max(int(math.ceil(length / HATCH_STEP)), 1)
+    t = (np.arange(steps) + 0.5) / steps  # the middle of each step
+    q = pa + (pb - pa) * t[:, None]
+    qz = za + (zb - za) * t
+    hit = np.zeros(steps, bool)
+    for n in near:
+      ring, rz = self.rings[n]
+      a, b = ring[:-1], ring[1:]
+      ab = b - a
+      s = np.clip(np.einsum('pij,ij->pi', q[:, None] - a[None], ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-12), 0.0, 1.0)
+      dist = np.hypot(*(a[None] + ab[None] * s[..., None] - q[:, None]).transpose(2, 0, 1))
+      # even-odd: crossings of a ray east from each point
+      up = (a[None, :, 1] > q[:, None, 1]) != (b[None, :, 1] > q[:, None, 1])
+      x = a[None, :, 0] + (q[:, None, 1] - a[None, :, 1]) * ab[None, :, 0] / np.where(ab[:, 1] == 0, 1e-12, ab[:, 1])[None]
+      inner = ((up & (q[:, None, 0] < x)).sum(1) % 2 == 1) & (dist.min(1) >= HATCH_ERODE)
+      k = np.argmin(dist, axis=1)  # the outline's height at the nearest edge
+      ez = rz[k] + (rz[k + 1] - rz[k]) * s[np.arange(steps), k]
+      hit |= inner & ~(np.abs(ez - qz) > PAINT_LEVEL)
+    return float(hit.sum()) * length / steps
 
   @classmethod
   def of(cls, osm: OsmLanes) -> 'LaneLines | None':
@@ -735,6 +777,18 @@ def lane_change(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
     return False
   ele = [float(t['ele']) for n in (na[0], nb[0]) if 'ele' in (t := osm.data.node_tags.get(n, {}))]
   return lines.crossed(osm.node_xy(na[0]), osm.node_xy(nb[0]), float(np.mean(ele)) if ele else math.nan) == {'dashed'}
+
+
+def crosses_hatched(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
+  """Whether HATCH_IN m or more of a link from pa to pb (map nodes) runs through a hatched area the map paints
+  (LaneLines.rings: a painted gore or island) at its height. Measured inside the area rather than across its outline:
+  a link can start and end inside a long gore."""
+  lines = LaneLines.of(osm)
+  na, nb = osm.nodes_at(np.asarray(pa, float), 1.0), osm.nodes_at(np.asarray(pb, float), 1.0)
+  if lines is None or not lines.rings or not na or not nb:
+    return False
+  za, zb = (float(t['ele']) if 'ele' in (t := osm.data.node_tags.get(n, {})) else math.nan for n in (na[0], nb[0]))
+  return lines.inside(osm.node_xy(na[0]), osm.node_xy(nb[0]), za, zb) >= HATCH_IN
 
 
 def clear_point(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> np.ndarray:
@@ -944,8 +998,8 @@ class Router:
     which GTA's AI may take but a driver can't: each such link's middle. GTA lays a wide road as parallel node chains
     joined by shortcut links; those between lanes side by side (a dashed line) are a lane change, and stay, as do those
     the map paints only a dashed lane line across (LaneLines) though their lanes' edges are a little further apart.
-    A shortcut link no car takes but by a hairpin in and out (hairpin) is one too, as is one into the oncoming
-    carriageway but at a junction (oncoming)."""
+    A shortcut link no car takes but by a hairpin in and out (hairpin) is one too, as is one through a hatched area
+    (crosses_hatched) and one into the oncoming carriageway but at a junction (oncoming)."""
     osm = self.osm if self.osm is not None else self.roads
     if self.paths is None or osm is None or len(points) < 2:
       return []
@@ -956,7 +1010,7 @@ class Router:
       if link is None or not link.shortcut:
         continue
       pa, pb = self.paths.xy[a], self.paths.xy[b]
-      if hairpin(osm, pa, pb) or (separated(osm, pa, pb) and not lane_change(osm, pa, pb)) or \
+      if hairpin(osm, pa, pb) or crosses_hatched(osm, pa, pb) or (separated(osm, pa, pb) and not lane_change(osm, pa, pb)) or \
          oncoming(osm, pa, pb, self._shortcut):
         out.append(clear_point(osm, pa, pb))
     return out

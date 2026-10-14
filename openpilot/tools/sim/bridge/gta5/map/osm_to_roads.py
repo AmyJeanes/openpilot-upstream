@@ -29,14 +29,16 @@ from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
 # lanes.json's kinds: a road's edge (kerb), white lines between lanes one way, yellow lines between the directions,
-# stop lines, give way lines, crossings, the paths of the moves through junctions from lane to lane by their turn, and
-# parking lanes on the carriageway (along their middle)
+# stop lines, give way lines, crossings, the paths of the moves through junctions from lane to lane by their turn,
+# parking lanes on the carriageway (along their middle), and the outlines of painted areas no car may cross (hatched_rings).
+# New kinds go on the end: readers keep the indices of the old.
 KINDS = ['edge', 'dashed', 'solid', 'centre', 'centre_dashed', 'stop', 'give_way', 'crossing', 'guide_left', 'guide_through',
-         'guide_right', 'parking']
+         'guide_right', 'parking', 'hatched']
 PARKING_STRIP = 'parking_strip'  # a parking lane's middle, in a road's lines
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
 PAINTED = (DIVIDER, CENTRE, MEDIAN, EDGE_LINE)  # the lines a road carried on through a junction can keep across it
 CELL = 50.0  # m
+HATCHED_MATCH = 1.0  # m between an island's centre listed with --hatched and the map's island's
 NODE_REACH = 2.0  # m out from a junction node along each road that where they start reaches (node_ends) ...
 NODE_PAD = 0.3  # m: ... and this much wider all round
 
@@ -188,6 +190,35 @@ def level(tags: dict) -> tuple[int, int]:
   return layer, 1 if bridge else 2 if tunnel else 0
 
 
+def hatched_rings(data, xy: np.ndarray, listed=(), held=()) -> tuple[list[tuple[np.ndarray, np.ndarray | None]], int]:
+  """The painted islands (traffic_calming=painted_island) drawn as hatched areas no car may cross: those outlined in
+  paint (`colour`, or `painted_island=hatched`) and those whose centre is within HATCHED_MATCH m of one of `listed`
+  [(x, y)], but none near one of `held` (where the map lacks the way round the island that GTA's link across it is).
+  Each is a closed ring [K, 2] (xy: the map's nodes' positions, in data.index's order) with its nodes' heights [K]
+  (None where they have none). Also how many of `listed` and `held` matched no island."""
+  rings = []
+  for tags, refs in data.ways.values():
+    if tags.get('traffic_calming') != 'painted_island' or len(refs) < 4:
+      continue
+    refs = list(refs) if refs[0] == refs[-1] else list(refs) + [refs[0]]
+    try:
+      z = np.array([float(data.node_tags[n]['ele']) for n in refs])
+    except (KeyError, ValueError):
+      z = None
+    rings.append((xy[data.index(refs)], z, tags.get('colour') in ('white', 'yellow') or tags.get('painted_island') == 'hatched'))
+  centres = np.array([ring[:-1].mean(0) for ring, _, _ in rings]).reshape(-1, 2)
+  picked = [p for *_, p in rings]
+  missed = 0
+  for centre_list, pick in ((listed, True), (held, False)):
+    for c in centre_list:
+      d = np.hypot(*(centres - np.asarray(c, float)).T)
+      if len(d) and d.min() <= HATCHED_MATCH:
+        picked[int(np.argmin(d))] = pick
+      else:
+        missed += 1
+  return [(ring, z) for (ring, z, _), p in zip(rings, picked, strict=True) if p], missed
+
+
 def strip(osm: OsmLanes, wid: int, t0: float, t1: float) -> tuple[np.ndarray, np.ndarray] | None:
   """A way whose kerbs move along it (OsmLanes.taper, .blend): its left and right kerbs [N, 2] seen along it, as
   line_geometry draws them, trimmed back t0 m from its first node and t1 m from its last; None where they don't."""
@@ -318,6 +349,7 @@ def main():
   p.add_argument('out')
   p.add_argument('--lanes', help="the lines painted on the roads, from the map's lane tags (lanes.json)")
   p.add_argument('--frame', choices=['gta5', 'local'], default='gta5')
+  p.add_argument('--hatched', help='JSON {"islands": [{"x", "y"}], "held": [...]}: islands also, or never, hatched (hatched_rings)')
   args = p.parse_args()
 
   data = osm_pbf.read(args.osm, relations=('restriction', 'connectivity'))
@@ -519,10 +551,18 @@ def main():
   for xy, z in junctions.raised:  # raised islands' kerbs, at their road's height
     ring = np.vstack([xy, xy[:1]])
     add(KINDS.index('edge'), ring, 0, np.full(len(ring), z if np.isfinite(z) else 0.0) if high else None)
-  crossings = junctions.crossing_lines()
-  if high:  # a crossing's height is its nearest road node's
+  if high:  # a crossing's height is its nearest road node's, and so is a hatched area's without its own
     road_nodes = sorted({n for _, refs in junctions.ways.values() for n in refs})
     road_xy, road_z = points(road_nodes), heights(road_nodes)
+  chosen = json.load(open(args.hatched)) if args.hatched else {}
+  listed, held = ([(i['x'], i['y']) for i in chosen.get(k, ())] for k in ('islands', 'held'))
+  hatched, missed = hatched_rings(data, osm.xy, listed, held)
+  for ring, z in hatched:
+    if high and z is None:
+      z = np.full(len(ring), road_z[np.argmin(np.hypot(*(road_xy - ring.mean(0)).T))])
+    add(KINDS.index('hatched'), ring, 0, z if high else None)
+  print(f"{len(hatched)} hatched areas ({len(listed)} listed, {len(held)} held, {missed} of those not found)")
+  crossings = junctions.crossing_lines()
   for c in crossings:
     add(KINDS.index('crossing'), c, 0, road_z[np.argmin(np.hypot(*(road_xy - c.mean(0)).T))] if high else None)
   lines, line_layers, line_z = join_lines(lines, line_layers, line_z if high else None)
