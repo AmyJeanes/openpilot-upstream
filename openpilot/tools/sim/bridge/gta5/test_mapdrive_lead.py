@@ -543,6 +543,23 @@ def test_two_lane_change():
   print("two lane change: ok")
 
 
+def test_lane_window_speeding_up():
+  # new3 r1t3 (El Rancho Blvd): setting off into the lane beside as one 14 m back there sped up from 5 to 11 m/s. One
+  # 25 m back at 5 m/s leaves room for a slow 15 m change; the same speeding up at 3 m/s^2 doesn't
+  from openpilot.tools.sim.bridge.gta5.gta5_traffic import rect
+  r = ms.junction_turn("left", lead=600.0, stop=None)
+  trip = ms.drive(r, {"seed": 1}, lane=1, reach=REACH, seconds=12.0)
+  md, car = trip.md, trip.car
+  x0 = ms.start_pose(r, 0, 0.0)[0]
+  got = []
+  for accel in (0.0, 3.0):
+    md.cars = [{"c": rect(np.array([x0, car.y - 25.0]), math.pi / 2, 4.8, 2.0), "vel": np.array([0.0, 5.0]), "t": car.t,
+                "driven": True, "accel": accel, "yaw": 0.0}]
+    got.append(md._lane_window(md.s + 1.0, md.s + 15.0, "left", -LANE_W, 1.0, car.t))
+  assert got == [None, "behind"], got
+  print("lane window speeding up: ok")
+
+
 def test_fork_change_gives_up_the_branch():
   # Amy (14 Oct): a fork's lane change that can't be made safely takes the other branch and routes again, rather than
   # forcing it or stopping short on a freeway. A motorway whose route keeps left at a fork 600 m on (from the right lane
@@ -880,6 +897,7 @@ if __name__ == "__main__":
   test_lane_change_waits_for_its_lane()
   test_two_lane_change()
   test_fork_change_gives_up_the_branch()
+  test_lane_window_speeding_up()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
   test_nudge_before_a_turn()
