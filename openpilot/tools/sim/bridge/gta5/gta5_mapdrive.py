@@ -34,9 +34,10 @@ and a gentle arrival stop_before m short of the end. Other vehicles: one whose b
 the path ahead (in a turn too) is followed (the intelligent driver model's braking, by the style's headway) or stopped
 behind, LEAD_STOP short, but a driven one standing across our way (side or head on) is no lead: it's stopped for and
 waited for while it moves, the trip ending after DEADLOCK_WAIT s (it may be waiting for us, and the car can't back off);
-before a junction or turn the car waits while a moving one's way (straight on at its speed) crosses ours within
-CROSS_GAP s of when we'd be there, at the junction's signal or give way line where it can still stop there, else
-CROSS_STOP short of that way; stopped in a junction it's held where it is (not crept on into the lanes) for the nearest
+before a junction or turn the car waits while a moving one's way (predicted from its track, gta5_traffic.py: along
+the road where it runs along ours, else on at its yaw rate) crosses ours within CROSS_GAP_AHEAD s after we'd be
+through, or CROSS_GAP_BEHIND s before we'd be there, at the junction's signal or give way line where it can still stop
+there, else CROSS_STOP short of that way; stopped in a junction it's held where it is (not crept on into the lanes) for the nearest
 lane's crosser, one slowed or standing beside our way, and those up to CROSS_T_IN s off, a lapse in them kept
 CROSS_KEEP_IN s; and it's no faster than stops for one at the edge of what the
 plugin reports (its nearby's "ahead", 15 m where it has none), but for range_share (0.75) of the speed. Pedestrians
@@ -88,6 +89,7 @@ import numpy as np
 from openpilot.selfdrive.navd.maneuvers import maneuvers
 from openpilot.selfdrive.navd.planner import FREEWAY, TUNE, FwyState, Turn, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpotTune, lane_occupied
+from openpilot.tools.sim.bridge.gta5.gta5_traffic import ALONG_ANGLE, ALONG_OFF, TURN_OFF, Traffic, body_heading, ctra, rect, size, wrap as wrap_rad
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
 
 PHASES = ("", "wait", "drive", "stop", "give_way", "arrive", "done", "abort", "follow", "yield")  # gta5.npz mapx phase codes: the index
@@ -185,6 +187,7 @@ OBST_WAIT = 3.0  # s stopped behind one before the trip ends
 LEAD_BESIDE = 1.0  # m behind our front bumper a body may start and still be ahead (not beside us)
 NEARBY_AHEAD = 15.0  # m ahead of our origin the plugin reports vehicles, where its nearby has no "ahead"
 NEARBY_SIDE = 15.0  # m either side, likewise ("side")
+ALONG_BEND = 15.0  # m of path about a vehicle's place whose bends it may be taking (_predict)
 RANGE_LAG = 0.6  # s before braking takes hold, for the range cap (the command's delay, its jerk and the car's lag)
 RANGE_STOP = 1.0  # m short of a vehicle at the range's end the range cap stops at
 RANGE_BODY = 2.5  # m of its body before its middle (which the plugin's reach is to)
@@ -195,7 +198,9 @@ ACROSS_ANGLE = 35.0  # deg off our way a standing vehicle's heading is, at least
 LEAD_MOVING = 0.5  # m/s: a vehicle in the way going faster is moving on
 CROSS_MOVING = 2.0  # m/s: a slower vehicle isn't crossing
 CROSS_T = 6.0  # s ahead a crossing vehicle's way is predicted (straight on at its speed)
-CROSS_GAP = 2.0  # s between it and us at the place our ways cross, at the least
+CROSS_GAP_AHEAD = 1.2  # s from our rear clearing its way to its body reaching it, for us to go first
+CROSS_GAP_BEHIND = 0.6  # s from its body clearing our way to our front reaching it, for us to go after it
+CROSS_START_LAG = 0.5  # s a standing start takes to get going, more than the acceleration alone
 CROSS_ANGLE = 25.0  # deg off our way at least, for a crossing
 CROSS_NEAR = 25.0  # m from a junction node or turn the crossing may be, to be held for
 CROSS_STOP = 2.0  # m short of its way we stop at
@@ -688,6 +693,7 @@ class MapDrive:
     self.front, self.rear, self.half_width = FRONT, FRONT, HALF_WIDTH  # our car's body from its origin (_body)
     self.cars: list[dict] | None = None  # the vehicles around, in the world (_vehicles); None: the plugin reports none
     self.cars_rows = None
+    self.traffic = Traffic()  # their tracks, from report to report
     self.peds_reported = False  # whether the plugin's nearby lists pedestrians ("p")
     self.reach = (NEARBY_AHEAD, NEARBY_SIDE)  # m ahead of our origin and to either side the plugin reports them
     self.lead_gap = math.nan  # m from our front bumper to the vehicle in our way along the path
@@ -2152,16 +2158,19 @@ class MapDrive:
       c, s = math.cos(math.radians(rel)), math.sin(math.radians(rel))
       local = np.array([(x + cx * c - cy * s, y + cx * s + cy * c) for cx, cy in ((mnx, mny), (mxx, mny), (mxx, mxy), (mnx, mxy))])
       cars.append({"c": pos + np.outer(local[:, 0], right) + np.outer(local[:, 1], fwd), "vel": right * vx + fwd * vy, "t": t,
-                   "driven": len(v) < 10 or bool(v[9])})
+                   "driven": len(v) < 10 or bool(v[9]), **({"handle": int(v[10])} if len(v) > 10 else {}),
+                   **({"at_light": bool(v[11])} if len(v) > 11 else {})})
     body = np.array([(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]) * PED_HALF
     for x, y, vx, vy in (r[:4] for r in rows[1] if len(r) >= 4):
       cars.append({"c": pos + right * float(x) + fwd * float(y) + body, "vel": right * float(vx) + fwd * float(vy), "t": t,
                    "driven": None, "ped": True})
+    self.traffic.update(cars, t)
     self.cars = cars
 
-  def _place(self, pts: np.ndarray, ahead: float, path: np.ndarray | None = None, behind: float = 5.0) -> tuple[np.ndarray, np.ndarray]:
+  def _place(self, pts: np.ndarray, ahead: float, path: np.ndarray | None = None, behind: float = 5.0,
+             off_max: float = LEAD_OFF) -> tuple[np.ndarray, np.ndarray]:
     """Points' (m along the path, or `path` of the same length, m right of it) on the path from `behind` m back of the
-    car to `ahead` m on; NaN beyond LEAD_OFF off it or off either end."""
+    car to `ahead` m on; NaN beyond off_max off it or off either end."""
     sp = self.s_path
     path = self.path if path is None else path
     lo = max(int(np.searchsorted(sp, self.s - behind)) - 1, 0)
@@ -2179,13 +2188,60 @@ class MapDrive:
     seg = np.sqrt(ab2[i])
     along = sp[lo + i] + tc[n, i] * seg
     right = (rel[n, i, 0] * ab[i, 1] - rel[n, i, 1] * ab[i, 0]) / seg
-    off = (d[n, i] > LEAD_OFF) | ((i == 0) & (tt[n, i] < 0.0)) | ((i == len(a) - 1) & (tt[n, i] > 1.0))
+    off = (d[n, i] > off_max) | ((i == 0) & (tt[n, i] < 0.0)) | ((i == len(a) - 1) & (tt[n, i] > 1.0))
     along[off], right[off] = np.nan, np.nan
     return along, right
 
   def _car_now(self, car: dict, t: float, ahead: float = 0.0) -> np.ndarray:
     """A vehicle's corners `ahead` s after now, straight on at its velocity from its reading."""
     return car["c"] + car["vel"] * (t - car["t"] + ahead)
+
+  def _predict(self, car: dict, t: float, times: np.ndarray) -> np.ndarray:
+    """A vehicle's corners at each of `times` s after now (gta5_traffic's prediction): one running along the road our
+    route runs on (its heading within ALONG_ANGLE of the route's there, or of its reverse) and turning as the road does
+    (its yaw rate within TURN_OFF of the path's curvature at its speed, ALONG_BEND m about its place), at no more than ALONG_OFF beside our path, goes
+    on along the route's line at its offset from it and its speed (its braking carried on to a stop); any other on at its
+    yaw rate and speed (gta5_traffic.ctra); a pedestrian straight on. Along the route's line, not our path, which moves
+    across lanes in a lane change. (One going straight on where our route turns isn't along the road it leaves for: off
+    the road ahead it isn't along the route at all, and on it, once the route turns, its yaw rate no longer matches.)"""
+    times = np.asarray(times, float)
+    speed = float(np.hypot(*car["vel"]))
+    if car.get("ped") or car.get("obst") or speed < 0.5 or self.path is None:
+      return np.stack([self._car_now(car, t, dt) for dt in times])
+    c0 = self._car_now(car, t)
+    along, _ = self._place(c0.mean(axis=0)[None], LEAD_AHEAD + 40.0, behind=60.0, off_max=ALONG_OFF)
+    if not math.isnan(along[0]):
+      route = self.route
+      u0 = float(np.interp(along[0], self.s_path, self.route_s))
+      k = segment_of(route, u0)
+      seg = route.points[k + 1, :2] - route.points[k, :2]
+      th = math.atan2(seg[1], seg[0])
+      hv = math.atan2(car["vel"][1], car["vel"][0])
+      diff = abs(wrap_rad(hv - th))
+      way = 1.0 if diff < math.radians(ALONG_ANGLE) else -1.0 if diff > math.pi - math.radians(ALONG_ANGLE) else 0.0
+      # the road's bends about its place (it may be where a bend starts or ends)
+      near = np.abs(self.s_path - along[0]) < ALONG_BEND
+      bends = (self.kappa_path[near] if near.any() else np.zeros(1)) * speed * way
+      if way and float(np.min(np.abs(float(car.get("yaw") or 0.0) - bends))) < TURN_OFF:
+        mid = c0.mean(axis=0)
+        w = float((mid[0] - route.points[k, 0]) * seg[1] - (mid[1] - route.points[k, 1]) * seg[0]) / max(float(np.hypot(*seg)), 1e-6)
+        acc = min(float(car.get("accel") or 0.0), 0.0)
+        go = np.minimum(speed * times + 0.5 * acc * times ** 2, speed * speed / (2 * -acc)) if acc < -0.1 else speed * times
+        reach = (route.length - u0) if way > 0 else u0  # along the route's line to its end
+        length, width = size(c0)
+        out = []
+        for d in go:
+          u = u0 + way * min(d, reach)
+          kk = segment_of(route, u)
+          sg = route.points[kk + 1, :2] - route.points[kk, :2]
+          h = math.atan2(sg[1], sg[0])
+          p = route_point(route, u) + np.array([math.sin(h), -math.cos(h)]) * w
+          h += 0.0 if way > 0 else math.pi
+          if d > reach:  # straight on past the route's end
+            p = p + (d - reach) * np.array([math.cos(h), math.sin(h)])
+          out.append(rect(p, h, length, width))
+        return np.stack(out)
+    return ctra(car, t, times)
 
   @staticmethod
   def _outline(c: np.ndarray) -> np.ndarray:
@@ -2235,9 +2291,30 @@ class MapDrive:
       side = 0.0 if across else float(right[near][np.argmin(np.abs(right[near]))])
       car["across_way"] = self._across(car, th)
       car["crosswise"] = car["across_way"] and car["driven"] and float(np.hypot(*car["vel"])) <= LEAD_MOVING
+      if gap > 2.0 and self._clears(car, t, th, gap):
+        continue  # crossing our way, gone before we get there: the crossing check's to judge, no lead to brake for
       if best is None or gap < best[0]:
         best = (gap, v_along, car, side)
     return best
+
+  def _clears(self, car: dict, t: float, th: float, gap: float) -> bool:
+    """Whether a vehicle moving across our way (heading CROSS_ANGLE or more off the path's `th`, faster than
+    CROSS_MOVING) `gap` m ahead of our front is out of our way (its body, by _predict, no longer within LEAD_SIDE of
+    ours along the path) CROSS_GAP_BEHIND s before we'd reach it at our speed."""
+    speed = float(np.hypot(*car["vel"]))
+    if car.get("ped") or car.get("obst") or speed < CROSS_MOVING:
+      return False
+    angle = abs(wrap(math.degrees(math.atan2(car["vel"][1], car["vel"][0]) - th)))
+    if angle < CROSS_ANGLE or angle > 180.0 - CROSS_ANGLE:
+      return False
+    reach = gap / max(self.last_v, 1.0) - CROSS_GAP_BEHIND
+    if reach <= 0.0:
+      return False
+    times = np.arange(0.0, reach + 1e-6, 0.25)
+    corners = self._predict(car, t, times)
+    _, right = self._place(self._outline(corners[-1]), LEAD_AHEAD + self.front)
+    return bool(np.all(np.isnan(right) | (np.abs(np.nan_to_num(right, nan=99.0)) >= self.half_width + LEAD_SIDE)) and
+                not (np.nanmin(right, initial=1.0) < 0.0 < np.nanmax(right, initial=-1.0)))
 
   @staticmethod
   def _across(car: dict, th: float) -> bool:
@@ -2273,7 +2350,8 @@ class MapDrive:
 
   def _crossing(self, t: float, v: float) -> tuple[float, dict] | None:
     """A moving vehicle whose way (straight on at its speed, CROSS_T s) crosses ours near a junction or turn ahead
-    within CROSS_GAP s of when we'd be there, or a walking pedestrian's (PED_T s, within PED_SIDE of our body) anywhere
+    within CROSS_GAP_AHEAD s after we'd be through or CROSS_GAP_BEHIND s before we'd be there (its way by
+    _predict), or a walking pedestrian's (PED_T s, within PED_SIDE of our body) anywhere
     along the path: (m from our front bumper to where we'd stop for it, details); None. In a junction, slow (_in_junction):
     the nearest lane's crosser held for, not the farthest's: one whose way meets ours beside us held where we are, those
     up to CROSS_T_IN s off (clearing the junction from a standstill takes longer than CROSS_T), and one slowed or stopped
@@ -2289,8 +2367,10 @@ class MapDrive:
     speed = np.maximum(np.minimum(self.v_static[i0:i1], np.sqrt(v * v + 2 * max(self.style["accel"], 0.5) * ds)), 1.0)
     secs = np.concatenate(([0.0], np.cumsum(np.diff(ds) / (0.5 * (speed[1:] + speed[:-1])))))
 
+    lag = CROSS_START_LAG if v < 1.0 else 0.0
+
     def when(d: float) -> float:
-      return float(np.interp(d, ds, secs)) if len(ds) > 1 else math.inf
+      return float(np.interp(d, ds, secs)) + lag if len(ds) > 1 else math.inf
     best = None
     for car in self.cars:
       ped = bool(car.get("ped"))
@@ -2302,8 +2382,7 @@ class MapDrive:
             best = slowed
         continue
       times = np.arange(0.0, (PED_T if ped else CROSS_T_IN if inside else CROSS_T) + 1e-6, 0.25)
-      pts = self._outline(self._car_now(car, t))
-      along, right = self._place(np.concatenate([pts + car["vel"] * dt for dt in times]), LEAD_AHEAD)
+      along, right = self._place(np.concatenate([self._outline(c) for c in self._predict(car, t, times)]), LEAD_AHEAD)
       side = self.half_width + (PED_SIDE if ped else LEAD_SIDE)
       m = (~np.isnan(along) & (np.abs(np.nan_to_num(right, nan=99.0)) < side)).reshape(len(times), -1)
       along = along.reshape(len(times), -1)
@@ -2326,7 +2405,7 @@ class MapDrive:
       last = max(h[2] for h in hits)
       us_in = when(first - self.s - self.front)
       us_out = when(last - self.s + self.rear)
-      if us_in > t_out + CROSS_GAP or us_out < t_in - CROSS_GAP:
+      if us_in > t_out + CROSS_GAP_BEHIND or us_out < t_in - CROSS_GAP_AHEAD:
         continue  # it's gone before we're there, or we're through before it comes
       d = first - self.s - self.front - CROSS_STOP
       if not ped and d + CROSS_STOP - 0.5 < v * RANGE_LAG + v * v / (2 * DECEL_REAL):

@@ -530,6 +530,36 @@ def test_crossing():
   print("crossing: ok")
 
 
+def test_oncoming_round_a_bend():
+  # Amy's Route 68 drive, 14 Oct: yields for oncoming cars (170 deg) near junctions, their way taken as straight on at
+  # their speed into our lane where the road bends. One keeping to its lane round a bend with a junction node in it is
+  # predicted along the road: no hold, no slowing for it
+  pts = ms.arc(50.0, 90.0, lead=300.0, tail=300.0)
+  r = ms.made_route(pts, ms.section(1, 1), junctions=[len(pts) // 2])
+
+  def oncoming(u: float) -> tuple[np.ndarray, float]:  # its lane's place u m along the route, heading back down it
+    u = min(max(u, 0.0), r.length - 1.0)
+    k = min(int(np.searchsorted(r.along, u, side="right")) - 1, len(r.points) - 2)
+    a, b = r.points[k], r.points[k + 1]
+    d = (b - a) / np.hypot(*(b - a))
+    return a + d * (u - r.along[k]) - np.array([d[1], -d[0]]) * LANE_W / 2, math.degrees(math.atan2(-d[0], d[1])) + 180.0
+  other = ms.Vehicle(0.0, 0.0, 0.0, speed=13.0)
+  trip = ms.drive(r, {"seed": 2}, lane=0, v0=13.0, reach=REACH, seconds=0.05, until_done=False, vehicles=[other])
+  car, md = trip.car, trip.md
+  u = r.length - 30.0
+  while car.t < 60.0 and md.finished is None:
+    u -= other.speed * ms.FRAME
+    p, other.heading = oncoming(u)
+    other.x, other.y = p
+    car.advance(ms.FRAME)
+    st = car.state()
+    r.locate(np.array(st["pos"][:2]), None, st["heading"])
+    car.control(md.step(r, st, car.t, car.collisions))
+    trip.events += md.take_events()
+  assert md.finished == "arrived" and car.collisions == 0 and not phases(trip, "yield"), (md.finished, phases(trip, "yield"))
+  print("oncoming round a bend: ok")
+
+
 def test_crossing_at_the_line():
   # mdnudge traffic trip 5: yields held 2 m short of the crosser's lane, past the junction's line; with a stream of cross
   # traffic seen in time, now held at the line
@@ -543,7 +573,8 @@ def test_crossing_at_the_line():
     t, y, v = trip.col(0), trip.col(2), trip.col(4)
     m = (t > 5.0) & (y < 400.0)
     k = np.flatnonzero(m)[np.argmin(v[m])]
-    assert trip.finished == "arrived" and trip.car.collisions == 0 and v[k] < 0.5, (meet, trip.finished, v[k])
+    # (rolled up to the line slowly enough to time its start after the last of them, not necessarily stopped)
+    assert trip.finished == "arrived" and trip.car.collisions == 0 and v[k] < 1.5 and trip.col(13).min() > 3.0, (meet, trip.finished, v[k])
     assert y[k] + trip.md.front < 288.0 and any(e.get("line") for e in phases(trip, "yield")), (meet, y[k] + trip.md.front)
   print("crossing at the line: ok")
 
@@ -562,7 +593,7 @@ def test_no_creep_in_a_junction():
   t, y = trip.col(0), trip.col(2)
   moved = t[np.argmax(y > y0 + 0.3)]
   assert trip.finished == "arrived" and trip.car.collisions == 0 and moved > 18.0 and trip.col(13).min() > 1.0, (moved, trip.col(13).min())
-  assert any(e.get("slowed") for e in phases(trip, "yield"))
+  assert phases(trip, "yield")  # (by its predicted braking to a stand across our way, or once slowed, as one standing beside it)
   print("no creep in a junction: ok")
 
 
@@ -686,6 +717,7 @@ if __name__ == "__main__":
   test_standing_across()
   test_following()
   test_crossing()
+  test_oncoming_round_a_bend()
   test_crossing_at_the_line()
   test_no_creep_in_a_junction()
   test_pedestrians()
