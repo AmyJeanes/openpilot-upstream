@@ -133,6 +133,7 @@ GIVE_WAY_SPEED = 3.0  # m/s at the line
 LIGHT_MARK = 5.0  # s either side of a light passed without its state
 LIGHT_LOOK = 60.0  # m short of a signal's line from which the traffic about is read for its state (_light)
 LIGHT_KEEP = 1.5  # s a sign of red or green stands after it was last seen
+LIGHT_HOLD_KEEP = 4.0  # s a sign of red stands, held at the line by it
 LIGHT_WAIT_MAX = 150.0  # s held at a red light before the trip ends
 LIGHT_UNKNOWN_V = 8.0  # m/s a signal's line is come up to at most while the traffic about shows nothing of it
 LIGHT_THROUGH = 3.0  # m/s: one of ours crossing its line faster is going through on green
@@ -2659,8 +2660,12 @@ class MapDrive:
     if red and not own_green:
       x["red_t"], x["why"] = t, red
     elif green:
-      x["green_t"], x["why"] = t, green
-    if t - x.get("red_t", -math.inf) < LIGHT_KEEP:
+      x["green_t"], x["why"], x["green_why"] = t, green, green
+    # held at it, red stands LIGHT_HOLD_KEEP s (a gap in the cross traffic, or one waiting at its own red, isn't our
+    # green), unless one of ours goes through after it
+    keep = LIGHT_HOLD_KEEP if x.get("held") is not None else LIGHT_KEEP
+    ours = x.get("green_why") == "through" and x.get("green_t", -math.inf) > x.get("red_t", -math.inf)
+    if t - x.get("red_t", -math.inf) < keep and not ours:
       return "red"
     if t - x.get("green_t", -math.inf) < LIGHT_KEEP:
       return "green"
