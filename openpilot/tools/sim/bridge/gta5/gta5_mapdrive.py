@@ -166,6 +166,7 @@ LC_COMMIT = 0.25
 LC_DEFER_S, LC_DEFER_MIN = 2.0, 15.0  # s on from the car (m at the least) a change put off starts again
 LC_LEAST_SHARE = 0.6  # of a change's time (lc_seconds) one put off keeps at the least
 LC_SETTLE_S = 1.0  # s in its lane between a change put off and the next one of its run, at the least
+LC_CLEAR_S = 0.5  # s its lane is to read clear, after it was busy, before a change waited for starts
 LC_AFTER_S = 1.5  # s after a change ends its lane is still looked at for one coming up on us (_lane_window)
 LC_GAP_M, LC_GAP_T, LC_GAP_CLOSE = 2.0, 0.3, 1.0  # m, s of the follower's speed and s of its closing speed a change leaves
 LC_CUT_DECEL = 2.0  # m/s^2 a change may leave us to slow at behind one in its lane
@@ -209,6 +210,7 @@ LEAD_BESIDE = 1.0  # m behind our front bumper a body may start and still be ahe
 NEARBY_AHEAD = 15.0  # m ahead of our origin the plugin reports vehicles, where its nearby has no "ahead"
 NEARBY_SIDE = 15.0  # m either side, likewise ("side")
 ALONG_BEND = 15.0  # m of path about a vehicle's place whose bends it may be taking (_predict)
+SPEED_UP_MAX, SPEED_UP_TO = 3.0, 15.0  # m/s^2 and m/s one speeding up is taken to go on to, looking behind for a lane change
 RANGE_LAG = 0.6  # s before braking takes hold, for the range cap (the command's delay, its jerk and the car's lag)
 RANGE_STOP = 1.0  # m short of a vehicle at the range's end the range cap stops at
 RANGE_BODY = 2.5  # m of its body before its middle (which the plugin's reach is to)
@@ -2052,6 +2054,12 @@ class MapDrive:
           self.lc_wait = None
         return
       why = self._lane_busy(side, state) or self._lane_window(s0, s1, side, shift, v, t)
+      if why is None and lw is not None and self.s <= s0:
+        lw["clear"] = lw.get("clear") or t
+        if t - lw["clear"] < LC_CLEAR_S:
+          why = lw["why"]  # one reading clear after a busy one isn't a gap yet
+      elif lw is not None:
+        lw["clear"] = None
       if why is None:
         if lw is not None:
           self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
@@ -2104,7 +2112,7 @@ class MapDrive:
     for car in self.cars:
       if car.get("ped"):
         continue
-      corners = self._predict(car, t, times)
+      corners = self._predict(car, t, times, speed_up=True)
       along, right = self._place(corners.reshape(-1, 2), LEAD_AHEAD + 40.0, behind=60.0, off_max=ALONG_OFF + n * LANE_W)
       along, right = along.reshape(len(times), 4), right.reshape(len(times), 4)
       vi = float(np.hypot(*car["vel"]))
@@ -2349,14 +2357,16 @@ class MapDrive:
     """A vehicle's corners `ahead` s after now, straight on at its velocity from its reading."""
     return car["c"] + car["vel"] * (t - car["t"] + ahead)
 
-  def _predict(self, car: dict, t: float, times: np.ndarray) -> np.ndarray:
+  def _predict(self, car: dict, t: float, times: np.ndarray, speed_up: bool = False) -> np.ndarray:
     """A vehicle's corners at each of `times` s after now (gta5_traffic's prediction): one running along the road our
     route runs on (its heading within ALONG_ANGLE of the route's there, or of its reverse) and turning as the road does
-    (its yaw rate within TURN_OFF of the path's curvature at its speed, ALONG_BEND m about its place), at no more than ALONG_OFF beside our path, goes
-    on along the route's line at its offset from it and its speed (its braking carried on to a stop); any other on at its
-    yaw rate and speed (gta5_traffic.ctra); a pedestrian straight on. Along the route's line, not our path, which moves
-    across lanes in a lane change. (One going straight on where our route turns isn't along the road it leaves for: off
-    the road ahead it isn't along the route at all, and on it, once the route turns, its yaw rate no longer matches.)"""
+    (its yaw rate within TURN_OFF of the path's curvature at its speed, ALONG_BEND m about its place), at no more than
+    ALONG_OFF beside our path, goes on along the route's line at its offset from it and its speed (its braking carried
+    on to a stop); any other on at its yaw rate and speed (gta5_traffic.ctra); a pedestrian straight on. With speed_up
+    (a lane change's look behind), one along the road speeding up goes on doing so (at its tracked rate, SPEED_UP_MAX at
+    most) to SPEED_UP_TO. Along the route's line, not our path, which moves across lanes in a lane change. (One going
+    straight on where our route turns isn't along the road it leaves for: off the road ahead it isn't along the route at
+    all, and on it, once the route turns, its yaw rate no longer matches.)"""
     times = np.asarray(times, float)
     speed = float(np.hypot(*car["vel"]))
     if car.get("ped") or car.get("obst") or speed < 0.5 or self.path is None:
@@ -2380,6 +2390,10 @@ class MapDrive:
         w = float((mid[0] - route.points[k, 0]) * seg[1] - (mid[1] - route.points[k, 1]) * seg[0]) / max(float(np.hypot(*seg)), 1e-6)
         acc = min(float(car.get("accel") or 0.0), 0.0)
         go = np.minimum(speed * times + 0.5 * acc * times ** 2, speed * speed / (2 * -acc)) if acc < -0.1 else speed * times
+        up = min(float(car.get("accel") or 0.0), SPEED_UP_MAX)
+        if speed_up and up > 0.1 and speed < SPEED_UP_TO:  # one speeding up goes on doing so, to SPEED_UP_TO
+          t_up = (SPEED_UP_TO - speed) / up
+          go = np.where(times < t_up, speed * times + 0.5 * up * times ** 2, speed * t_up + 0.5 * up * t_up ** 2 + SPEED_UP_TO * (times - t_up))
         reach = (route.length - u0) if way > 0 else u0  # along the route's line to its end
         length, width = size(c0)
         out = []
