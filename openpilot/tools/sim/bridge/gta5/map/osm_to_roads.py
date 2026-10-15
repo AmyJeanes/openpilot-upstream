@@ -349,7 +349,8 @@ def main():
   p.add_argument('out')
   p.add_argument('--lanes', help="the lines painted on the roads, from the map's lane tags (lanes.json)")
   p.add_argument('--frame', choices=['gta5', 'local'], default='gta5')
-  p.add_argument('--hatched', help='JSON {"islands": [{"x", "y"}], "held": [...]}: islands also, or never, hatched (hatched_rings)')
+  p.add_argument('--hatched', help='JSON {"islands": [{"x", "y"}], "held": [...], "rings": [{"ring": [[x, y]], "z"}]}: islands '
+                 'also, or never, hatched (hatched_rings), and approved areas the map has no island for')
   args = p.parse_args()
 
   data = osm_pbf.read(args.osm, relations=('restriction', 'connectivity'))
@@ -561,7 +562,12 @@ def main():
     if high and z is None:
       z = np.full(len(ring), road_z[np.argmin(np.hypot(*(road_xy - ring.mean(0)).T))])
     add(KINDS.index('hatched'), ring, 0, z if high else None)
-  print(f"{len(hatched)} hatched areas ({len(listed)} listed, {len(held)} held, {missed} of those not found)")
+  for r in chosen.get('rings', ()):
+    ring = np.asarray(r['ring'], float)
+    ring = ring if np.array_equal(ring[0], ring[-1]) else np.vstack([ring, ring[:1]])
+    add(KINDS.index('hatched'), ring, 0, np.full(len(ring), float(r['z'])) if high else None)
+  print(f"{len(hatched)} hatched areas ({len(listed)} listed, {len(held)} held, {missed} of those not found), "
+        f"{len(chosen.get('rings', ()))} given as rings")
   crossings = junctions.crossing_lines()
   for c in crossings:
     add(KINDS.index('crossing'), c, 0, road_z[np.argmin(np.hypot(*(road_xy - c.mean(0)).T))] if high else None)
