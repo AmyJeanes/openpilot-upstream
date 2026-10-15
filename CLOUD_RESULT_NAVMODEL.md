@@ -1,6 +1,24 @@
 # Cloud result: comma's nav model in the GTA V bridge
 
-Brief: `CLOUD_TASK_NAVMODEL.md`. Status: preflight done, work items in progress.
+Brief: `CLOUD_TASK_NAVMODEL.md`. Status: done here; GTA runs are the TODOs at the end.
+
+## Summary for Amy
+
+- **It can work, with comma's rl nav model.** Our router is already Valhalla, the model's own maneuver types, so the
+  `navigation` input comes straight from our routes (`navmodel/nav_input.py`), measured exactly as comma's navd measures
+  them. GTA's roads render with comma's unmodified renderer from a local 581 KB tile file
+  (`navmodel/build_pmtiles.py`). The bridge publishes both with `GTA5_NAV_MODEL=1`, and comma's mapsd runs from the
+  local file. 15 unit tests pass; sample frames are in `navmodel/samples/`.
+- **What still needs your PC:** the model itself. comma's nav models are the "big" chestnut model. The rl one has an
+  ONNX, so it compiles for your GPU through your existing `MODELD_BIG_ONNX` path once comma's small modeld change is
+  applied (`navmodel/modeld_nav_inputs.patch`). The newer **n16 model can't run on your PC**: comma published it only
+  precompiled for their eGPU. I couldn't download any model here (HuggingFace is blocked), so the smoke test is yours.
+- **Where GTA looks different from a real map to the model:** freeways split into lane groups, which give runs of
+  "keep left" 10-30 m apart (folded into one) and freeway bands on the map about twice as wide (not fixed: a TODO if it
+  matters). GTA sits on the equator, so roads draw about 10 % wider than in California (`--lat0 34` option). There
+  are no on-ramp maneuvers and no roundabouts in GTA's map. Bridges cut correctly at 1208 of 1752 overpasses; 542 are
+  bridges over bridges (mostly car parks), drawn without a cut, as on a real map.
+- **Next:** item 6 gives the steps, the trips (`navmodel/trips_navmodel.txt`) and the comparison against today's model.
 
 ## Preflight
 
@@ -262,3 +280,87 @@ run; and `e2e.py` (`xm`) and `probe_gta5.py` write `ExperimentalMode`, which an 
 (a port TODO, not this branch's). Master's modeld also gained small changes since nav alpha (chestnut retry, curvature
 seed from `controlsState`): comma's own `8b8ce13` modeld hunk applies to master's modeld (`75b2ccc`) but for one
 hunk, the `SubMaster` list, where master added `controlsState` on the same line: a one-line merge (`patch --dry-run`).
+
+## 6. Local test plan (with GTA)
+
+**Once.**
+1. `git fetch origin navmodel-cloud && git checkout navmodel-cloud` (= `gta5` + this work). In the map venv:
+   `uv pip install shapely mapbox-vector-tile pmtiles onnxruntime`.
+2. Tiles: `python openpilot/tools/sim/bridge/gta5/navmodel/build_pmtiles.py ~/gta5map/gta5.osm.pbf
+   ~/gta5map/gta5_roads.pmtiles` (and `--lat0 34` into `gta5_roads_lat34.pmtiles` for variant F). Check:
+   `check_crossings.py ~/gta5map/gta5.osm.pbf` gives 1208 cut / 542 bridge on bridge / 2 untagged for this map, and
+   `render_frames.py` sheets look like `navmodel/samples/`.
+3. The rl nav model's ONNX, `big_driving_supercombo.onnx` from comma's `nav-model-integration` (added by `a03bb1d`,
+   unchanged at `afbf2e5`; LFS on comma's HuggingFace host):
+   `git clone --depth 3 --branch nav-model-integration https://github.com/commaai/openpilot ~/comma-nav && cd ~/comma-nav
+   && git lfs pull --include openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx`;
+   sha256 `1d18c42ea4cd95c8bffab4635844b78b8e2d4e25b9de44a9c5ac2e0961371a2e`, 814 591 106 bytes.
+4. CPU smoke test: `python openpilot/tools/sim/bridge/gta5/navmodel/smoke_onnx.py <onnx> --tiles
+   ~/gta5map/gta5_roads.pmtiles`. Prints the graph's inputs (record `nav_map` / `navigation` shapes and dtypes and any
+   other new input here, answering item 1's open points), runs one frame with a GTA map frame and "right turn in 50 m",
+   and again with both zero: outputs finite, and different. (Tested here on a stand-in ONNX with the same input names.)
+5. modeld: `git apply openpilot/tools/sim/bridge/gta5/navmodel/modeld_nav_inputs.patch`. First a regression drive with
+   the current default model (2 min, no nav: unchanged driving, modelV2 at 20 Hz). Then compile:
+   `MODELD_DEV=CUDA MODELD_BIG_ONNX=<onnx> scons -j8 openpilot/selfdrive/modeld` (writes
+   `local_big_driving_tinygrad.pkl`: back up any one you use; or copy it aside and run with `MODELD_PKL=<it>`).
+
+**Processes** (same `OPENPILOT_PREFIX=gta5` everywhere):
+```bash
+valhalla_service ~/gta5map/valhalla.json 2                                                      # 1 router
+MODELD_BIG=1 MODELD_DEV=CUDA FINGERPRINT=TESLA_MODEL_3 GALLIUM_DRIVER=d3d12 BLOCK=soundd \
+  ./openpilot/tools/sim/launch_openpilot.sh                                                      # 2 openpilot + the nav model
+python -m openpilot.tools.sim.bridge.gta5.navmodel.gta5_mapsd --tiles ~/gta5map/gta5_roads.pmtiles --dump ~/navmaps  # 3
+GTA5_NAV_MSGS=1 GTA5_NAV_MODEL=1 GTA5_NOO=off GTA5_MAP=~/gta5map GTA5_ROUTER=http://localhost:8002 \
+  GTA5_LOG=~/gta5test/nm.log ./openpilot/tools/sim/run_bridge.py --simulator gta5               # 4 bridge
+python openpilot/tools/sim/bridge/gta5/e2e.py run --trips openpilot/tools/sim/bridge/gta5/navmodel/trips_navmodel.txt \
+  --reps 3 --out ~/gta5test/nm_B.jsonl                                                           # 5 trips
+```
+Live checks before measuring: `~/navmaps` frames follow the car and look like the samples; `VisionIpcClient.
+available_streams("mapsd", False)` has stream 3; a SubMaster on `navInstruction` shows `allManeuvers` with continues and
+keeps; stopping mapsd for 1 s doesn't stop modeld (the map input goes to zeros).
+
+**Trips.** `navmodel/trips_navmodel.txt` (the three fixture routes, experimental mode on, long trips): N1 city turns
+(Mission Row to New Empire Way, a junction jog), N2 freeways with lane-split keeps and a left exit, N3 10 km with exits
+both sides; plus `e2e.py run --mode city --n 20 --seed 7` for breadth. No roundabout: the map tags none, so Valhalla
+routes GTA's roundabouts as turns (a TODO below, or drive one as a turn trip for a look).
+
+**Conditions** (3 reps of N1-N3 and the 20 random trips each):
+
+| | model | nav inputs | the fork's nav | bridge env |
+|---|---|---|---|---|
+| A baseline | current default | none | drives (NavDesire, signals, speed caps) | `GTA5_NAV_MODEL=0 GTA5_NOO=on`, no mapsd, no `MODELD_BIG` |
+| B model alone | rl nav | map + navigation | guidance only | `GTA5_NAV_MODEL=1 GTA5_NOO=off` + mapsd |
+| C model + NavDesire | rl nav | map + navigation | drives | `GTA5_NAV_MODEL=1 GTA5_NOO=on` + mapsd |
+| D no nav | rl nav | none (zeros) | guidance only | `GTA5_NAV_MSGS=0 GTA5_NOO=off`, no mapsd |
+| E (N2, N3) | as B | raw keeps | | `GTA5_NAV_KEEP_RUN=0` |
+| F (all) | as B | map at 34 N | | tiles `--lat0 34`, `gta5_mapsd --lat0 34` |
+
+**Measure** (`e2e.py summary` / `scensum` per results file): maneuvers done vs missed (e2e scores each route maneuver;
+missed = a reroute within 150 m), by kind: turns (9-16), keeps (22-24), exits (20/21); missed exits on N2/N3; trip
+outcomes (arrived clean, disengaged, stuck, left the road, reroutes); interventions per km; oncoming time and
+collisions; for B, turns taken with no desire at all. Compare B and C against A trip for trip, D against B for what the
+nav inputs add, E and F against B. A good result: B misses no more maneuvers than A on N1-N3 and interventions/km are
+no worse; if keeps or exits fail, try E and F before anything else.
+
+## TODOs for a local session
+
+1. Fetch the rl ONNX, run `smoke_onnx.py`, record the input specs here (item 1's open points).
+2. Apply `modeld_nav_inputs.patch`, regression-drive the current model, compile and run the rl nav model.
+3. The live checks, then conditions A-F; put the e2e summaries in this file.
+4. n16 nav-wm: no ONNX on comma's branch (only a chestnut pkl), so it can't be compiled for the PC; ask or wait.
+5. If the model misreads freeways: carriageway centrelines in `build_pmtiles.py` (fat lane-group bands, item 3).
+6. Roundabouts: tag GTA's (`junction=roundabout`) in `map/ynd_to_osm.py` to get Valhalla's 26/27, if wanted.
+7. Run the bridge's own tests touched by `gta5_nav_msgs.py` (`test_nav_msgs.py`, needs cereal/msgq built; not here).
+8. Recording the two inputs with training data (design in item 4): not built.
+9. Port: `e2e.py` / `probe_gta5.py` write `ExperimentalMode`, gone after "A New Dawn".
+
+## Deviations
+
+- Step 0.5: `navmodel-cloud` already existed (= `gta5` + the brief), so the preflight commit went on top of it.
+- Step 0.4: `valhalla_build_config` is the venv's console script in pyvalhalla 3.9.1, not under `valhalla/bin`.
+- comma's modeld hunk ships as a patch, not applied to the branch's modeld (it can't be run here, and selfdrive edits
+  stay to the tile source). comma's `navd.py` and `tests/test_navigation.py` aren't brought over: the bridge is the
+  navd, and the tests need messaging.
+- The CPU smoke test couldn't run on the model (HuggingFace blocked here); the script is tested on a stand-in.
+- No roundabout trip: the map has none.
+- Sample PNGs are plain git blobs (a `.gitattributes` in `navmodel/samples/`), since the repo sends `*.png` to LFS.

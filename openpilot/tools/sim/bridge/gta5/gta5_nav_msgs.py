@@ -24,6 +24,10 @@ INSTRUCTION_EVERY = 0.1  # s
 # comma's nav model (navmodel/README.md): allManeuvers as its navigation input reads them (navmodel/nav_input.py: every
 # maneuver, continues too, lane-split keeps folded, measured as comma's navd measures them), in place of the UI's five
 NAV_MODEL = os.getenv("GTA5_NAV_MODEL") == "1"
+# its tidy-ups of GTA's maneuvers, for A/B runs: GTA5_NAV_KEEP_RUN m between keeps of one lane split (0: none folded),
+# GTA5_NAV_JUNCTIONS=0 leaves turns through a junction's links apart
+NAV_KEEP_RUN = float(os.getenv("GTA5_NAV_KEEP_RUN", "50"))
+NAV_JUNCTIONS = os.getenv("GTA5_NAV_JUNCTIONS", "1") != "0"
 ROUTE_EVERY = 2.0  # s, for a UI that starts after the route was sent
 ROUTE_TOLERANCE = 1.0  # m the simplified route keeps to the route
 ROAD_TOLERANCE = 2.0  # m, for the roads near it
@@ -378,7 +382,7 @@ class NavMessages:
   def _model_nav(self, route):
     from openpilot.tools.sim.bridge.gta5.navmodel.nav_input import ModelNav
     if self.model_nav is None or self.model_nav[0] is not route:
-      self.model_nav = (route, ModelNav(route, self.project))
+      self.model_nav = (route, ModelNav(route, self.project, NAV_JUNCTIONS, NAV_KEEP_RUN or None))
     return self.model_nav[1]
 
   def _gather(self, route, at: float, osm):

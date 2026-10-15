@@ -1,0 +1,6 @@
+# comma's nav model in GTA (navmodel/README.md, CLOUD_RESULT_NAVMODEL.md item 6): e2e.py trips, the three fixture routes'
+# starts (height from the map's nearest node, heading along the route) and destinations, as long trips in experimental
+# mode (the port's "A New Dawn" has it always on). e2e.py run --trips this --reps 3 --out <condition>.jsonl
+nm-city   209.4,-808.4,29.8,342>-1035.0,-2730.0  xm=1 mode=long  # [N1] Mission Row to New Empire Way: city turns, a junction jog
+nm-fwy    -811.3,-2038.5,27.5,51>-3080.6,325.2   xm=1 mode=long  # [N2] La Puerta, Olympic, Del Perro Fwy: lane-split keeps, a left exit
+nm-exits  -610.0,-1956.4,16.5,156>1937.5,2528.3  xm=1 mode=long  # [N3] LSIA to the Senora Fwy, 10 km: exits right and left
