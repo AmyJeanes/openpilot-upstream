@@ -238,3 +238,26 @@ destination (`Router.route`) or along a cruise (`cruise.py`, `Router.via`). It's
 so `navRoute`, `ModelNav` and the recorded inputs all describe the route the expert drives; a reroute is a new Route,
 and mapsd's tracker and ModelNav start over with it, as on a car. On the Windows host's brain `ModelNav` runs too
 (numpy and comma's pure-Python helpers), its maneuvers going over the link as plain data like the rest of the content.
+
+## 5. Fit with the plan (the sunnypilot port)
+
+What this branch changes outside the bridge folder, and what becomes of each on a port onto sunnypilot (which syncs
+comma's master; master is at `75b2ccc` here, with nav alpha `4c362ca` and "A New Dawn" `f50108b`, but **not** the
+nav-model-integration commits):
+
+| file | origin | on the port |
+|---|---|---|
+| `selfdrive/navigation/{__init__,route,pmtiles,vector_tile,renderer,tiles}.py` | comma, identical on master since nav alpha | comes with the sync; drop ours |
+| `selfdrive/navigation/helpers.py`, `mapsd.py` | comma `afbf2e5` (master has them without 8b8ce13's `navigation_input`, `latest_gps_source`) | from the sync once comma merges the nav model; until then keep these two |
+| `selfdrive/navigation/local_tiles.py` + 4 lines in `mapsd.py` (`NAV_TILES`) | ours, the one selfdrive change | carry (19 + 4 lines; upstreamable as an offline-map source) |
+| `navmodel/modeld_nav_inputs.patch` | comma `8b8ce13`, for the fork's modeld | not on the branch's modeld; on sunnypilot apply to its modeld, or get it with the merge |
+
+Everything GTA-specific is in `tools/sim/bridge/gta5/` (`navmodel/`, and `GTA5_NAV_MODEL` in `gta5_nav_msgs.py`). It
+uses only the bridge's own map stack, the fork's `selfdrive/navd/maneuvers.junction_maneuvers` (which already moves
+with the bridge's nav), and comma's navigation helpers by their public names. comma's navd is not used.
+
+"A New Dawn" removes the `ExperimentalMode` param and makes `selfdriveState.experimentalMode` always true (the model's
+own longitudinal, always). For this work: the GTA test runs should use experimental mode on, to match what the port will
+run; and `e2e.py` (`xm`) and `probe_gta5.py` write `ExperimentalMode`, which an unknown key makes fail after the port
+(a port TODO, not this branch's). Master's modeld also gained small changes since nav alpha (chestnut retry, curvature
+seed from `controlsState`); the patch touches different lines (checked by reading, not applied to master).
