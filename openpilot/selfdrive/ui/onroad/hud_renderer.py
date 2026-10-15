@@ -2,8 +2,6 @@ import os
 import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
-from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
-from openpilot.selfdrive.ui.onroad.nav_speed import NavSpeedSign
 from openpilot.selfdrive.ui.onroad.turn_signals import TurnSignals
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -23,12 +21,9 @@ MODEL_LABEL = os.getenv("GTA5_MODEL_LABEL", "").strip()
 @dataclass(frozen=True)
 class UIConfig:
   header_height: int = 300
-  border_size: int = 30
-  button_size: int = 192
   set_speed_width_metric: int = 200
   set_speed_width_imperial: int = 172
   set_speed_height: int = 204
-  wheel_icon_size: int = 144
 
 
 @dataclass(frozen=True)
@@ -77,10 +72,7 @@ class HudRenderer(Widget):
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
 
-    self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
-    self._nav_speed = NavSpeedSign()
     self._turn_signals = TurnSignals()
-    self.show_exp_button = True  # off while navigation's card has the button's spot
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -89,7 +81,6 @@ class HudRenderer(Widget):
       self.is_cruise_set = False
       self.set_speed = SET_SPEED_NA
       self.speed = 0.0
-      self._nav_speed.update(self.set_speed, False)
       self._turn_signals.update(False)
       return
 
@@ -106,7 +97,6 @@ class HudRenderer(Widget):
 
     if self.is_cruise_set and not ui_state.is_metric:
       self.set_speed *= KM_TO_MILE
-    self._nav_speed.update(self.set_speed, self.is_cruise_set)
 
     v_ego_cluster = car_state.vEgoCluster
     self.v_ego_cluster_seen = self.v_ego_cluster_seen or v_ego_cluster != 0.0
@@ -132,19 +122,8 @@ class HudRenderer(Widget):
     if MODEL_LABEL:
       self._draw_model_label(rect)
 
-    if self.is_cruise_available:
-      self._draw_nav_speed(rect)
-
     self._draw_current_speed(rect)
     self._turn_signals.draw(rect)
-
-    if self.show_exp_button:
-      button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
-      button_y = rect.y + UI_CONFIG.border_size
-      self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
-
-  def user_interacting(self) -> bool:
-    return self._exp_button.is_pressed
 
   def _draw_set_speed(self, rect: rl.Rectangle) -> None:
     """Draw the MAX speed indicator box."""
@@ -188,13 +167,6 @@ class HudRenderer(Widget):
       0,
       set_speed_color,
     )
-
-  def _draw_nav_speed(self, rect: rl.Rectangle) -> None:
-    """Navigation's speed cap under the MAX box (and the model's name), while nav holds the car below the set speed."""
-    width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
-    x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - width) // 2
-    y = rect.y + 45 + UI_CONFIG.set_speed_height + 12 + (56 + 12 if MODEL_LABEL else 0)
-    self._nav_speed.draw(x, y, width)
 
   def _draw_model_label(self, rect: rl.Rectangle) -> None:
     """Draw the driving model's name under the MAX box, at the box's width."""

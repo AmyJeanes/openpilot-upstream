@@ -65,6 +65,8 @@ class UIState:
         "selfdriveState",
         "longitudinalPlan",
         "gpsLocationExternal",
+        "gpsLocation",
+        "navInstruction",
         "carOutput",
         "carControl",
         "vehicleParameters",
@@ -90,11 +92,12 @@ class UIState:
     self.is_metric: bool = self.params.get_bool("IsMetric")
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
-    self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
     self.navigate_on_openpilot: bool = self.params.get_bool("NavigateOnOpenpilot")
     self.nav_show_lanes_always: bool = self.params.get_bool("NavShowLanesAlways")
     self.show_turn_signals: bool = self.params.get("ShowTurnSignals", return_default=True)
     self.show_blindspot: bool = self.params.get("BlindSpot", return_default=True)
+    self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
+    self.nav_destination_set: bool = self.params.get("NavDestination") is not None
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -255,12 +258,13 @@ class UIState:
     self.recording_audio = self.params.get_bool("RecordAudio") and self.started
     self.is_metric = self.params.get_bool("IsMetric")
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
-    self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.navigate_on_openpilot = self.params.get_bool("NavigateOnOpenpilot")
     self.nav_show_lanes_always = self.params.get_bool("NavShowLanesAlways")
     # on by default, before the manager next starts and writes the defaults
     self.show_turn_signals = self.params.get("ShowTurnSignals", return_default=True)
     self.show_blindspot = self.params.get("BlindSpot", return_default=True)
+    self.navigation_enabled = self.params.get_bool("NavigationEnabled")
+    self.nav_destination_set = self.params.get("NavDestination") is not None
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     self.chestnut_alert = any(self.params.get(k) is not None for k, a in OFFROAD_ALERTS.items() if k.startswith("Offroad_Chestnut") and a["severity"] >= 0)

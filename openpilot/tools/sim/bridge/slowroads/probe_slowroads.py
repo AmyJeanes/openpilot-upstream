@@ -14,14 +14,12 @@ from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.tools.sim.bridge.slowroads.slowroads_bridge import SlowRoadsBridge
 
 OpenpilotPrefix(os.environ["OPENPILOT_PREFIX"]).create_dirs()  # /dev/shm is cleared whenever the distro restarts
-from openpilot.common.params import Params  # after create_dirs, which it needs
 
 SIM_DIR = Path(__file__).parents[2]
 SERVICES = ["selfdriveState", "onroadEvents", "modelV2", "cameraOdometry", "carState", "deviceMotion"]
 
 
 def main(duration: float) -> None:
-  Params().put_bool("ExperimentalMode", os.getenv("EXPERIMENTAL", "0") == "1")
   env = dict(os.environ, BLOCK="soundd", BIG="1", GALLIUM_DRIVER="d3d12")
   manager = subprocess.Popen("./launch_openpilot.sh", cwd=SIM_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   sm = messaging.SubMaster(SERVICES)
