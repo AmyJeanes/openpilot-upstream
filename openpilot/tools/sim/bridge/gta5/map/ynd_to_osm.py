@@ -2775,6 +2775,9 @@ def main():
     for k, bit, tag in ((2, SWITCHED_OFF, 'gta:switched_off'), (2, NO_GPS, 'gta:no_gps'), (0, OFFROAD, 'gta:offroad')):
       if (fa[k] | fb[k]) & bit:
         tags[tag] = 'yes'
+    if tags.get('highway') == 'service' and 'gta:switched_off' in tags:
+      # car parks, alleys and drives: a route may start or end in one but not cut through (Valhalla's destination only)
+      tags['access'] = 'destination'
     if wid in drawn and 'gta:offroad' in tags:
       tags['surface'] = 'unpaved'
     if lf[2] & 1:
