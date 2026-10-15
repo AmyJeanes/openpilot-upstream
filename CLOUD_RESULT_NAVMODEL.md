@@ -91,3 +91,44 @@ drives (MAJOR..TRACK stroke px: lat 0 = 19.0/15.5/9.9/6.7/7.0; lat 34 = 17.3/14.
 
 Blocked here: `huggingface.co` (comma's LFS host) is denied by this environment's network policy, so no model file
 could be fetched and the CPU smoke test is a local TODO.
+
+## 2. The navigation input from our routes
+
+`openpilot/tools/sim/bridge/gta5/navmodel/nav_input.py` (`ModelNav`), tests `navmodel/test_nav_input.py` (7, pass:
+`PYTHONPATH=. python openpilot/tools/sim/bridge/gta5/navmodel/test_nav_input.py`) on three GTA routes recorded from
+this session's Valhalla (`navmodel/fixtures/routes.json`: city turns 3.2 km, a freeway trip 5.1 km with a left exit,
+a 10.3 km trip with exits both sides). comma's `selfdrive/navigation/{__init__,helpers,route}.py` are copied unchanged
+from `afbf2e5` (the module uses `navigation_input` and `RouteTracker` as they are).
+
+**How it fits navd's schema.** `navInstruction.allManeuvers` is `List(Maneuver{distance, type :Text, modifier :Text})`
+(the fork adds `primaryText`), and modeld reads `type`/`modifier` back through `valhalla_type()`. So the Valhalla type
+goes in as the Mapbox words that `valhalla_type()` maps back to exactly that type (`WORDS`), no Mapbox round trip and no
+schema or selfdrive change. Lossless for every type navd can produce (test: all 46 types read back). The types navd
+never produces go as navd would give them: 7 becomes -> 8, U-turn right 12 -> 13, merges 25/37/38 -> Mapbox "merge"
+(skipped by the model, as on the car). Ferries/transit have no words and are left out (GTA has none).
+
+**Distances, as navd measures them.** `RouteTracker` over the route's (lon, lat) (the same points as navRoute), each
+maneuver at its `begin_shape_index`; progress = projection of the car's position, monotone, ±window as navd. Test:
+identical (1e-6 m) to navd's own formula over Mapbox-style step geometries built from the same route, and equal to game
+metres along x 6371008.8/6378137 (the mean-radius 0.11 %). Passed maneuvers drop out; a fix behind doesn't move progress
+back; modeld's `v_ego * age` dead reckoning moves to the next maneuver once one is passed (tested).
+
+**GTA's maneuvers vs a real map's.** Over 31 random GTA trips (234 km) Valhalla gave 340 maneuvers > 6, 77 of them
+within 30 m of the one before: GTA lays freeways as lane groups that split and rejoin ("Keep left at the fork" x3 within
+40 m) and junctions as links across medians ("Bear left." onto an unnamed link, then "Bear right onto Vespucci Blvd"
+1 m on). Two tidy-ups, both options of `ModelNav`:
+- turns through a junction's links are one (`selfdrive/navd/maneuvers.junction_maneuvers`, the bridge's own): 340 -> 317;
+- a run of keeps each within 50 m of the one before is one keep at the first, on the last's side and road (`fold_keeps`):
+  -> 281 maneuvers, 23 within 30 m.
+The bridge's `Route.forks` (`paths.jsonl`) didn't tell these lane-group keeps from real forks (it finds forks only at a
+few of them), so the fold is by distance. Whether the model wants the raw keeps, the folded ones, or none of the
+lane-group ones is a GTA test (item 6).
+
+Other findings:
+- No on-ramp types (17-19) in any of the 31 trips: entering a freeway from GTA's streets comes as a turn or "Take the
+  exit" (20/21) or a keep, because of the map's guessed road classes. The model will see fewer ramp types than on a
+  real map.
+- The map has no `junction=roundabout`, so Valhalla never gives 26/27; GTA's roundabouts route as turns.
+- The fork's existing `navInstruction.allManeuvers` (`gta5_nav_msgs.instruction`, for the UI) already goes through
+  `valhalla_type` correctly (its words are close to ours), but leaves out continues (8), keeps only 5, folds no keeps, and
+  measures from the bridge's own route position. For the model, item 4 swaps in `ModelNav`'s list.
