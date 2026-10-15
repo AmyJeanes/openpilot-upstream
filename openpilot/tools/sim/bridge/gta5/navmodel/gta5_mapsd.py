@@ -30,8 +30,13 @@ class FrameSM:
   services' hasFix, speed, latitude and longitude), with the coordinates moved into the frame about lat0."""
   def __init__(self, sm, lat0: float):
     self.sm, self.lat0 = sm, lat0
-    self.updated, self.valid, self.recv_time, self.logMonoTime = sm.updated, sm.valid, sm.recv_time, sm.logMonoTime
     self._route = (None, None)  # (logMonoTime, converted navRoute)
+
+  # read through: SubMaster.update() rebinds these dicts each call
+  updated = property(lambda self: self.sm.updated)
+  valid = property(lambda self: self.sm.valid)
+  recv_time = property(lambda self: self.sm.recv_time)
+  logMonoTime = property(lambda self: self.sm.logMonoTime)
 
   def __getitem__(self, name: str):
     msg = self.sm[name]
