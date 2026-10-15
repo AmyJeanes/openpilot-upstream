@@ -25,6 +25,8 @@ whenever the route changes or the car nears the end of what was sent.
 On a lane-tagged map it also sends what the tags say beyond the lines, so map errors show while driving: each lane's
 turn:lanes arrows painted on it before its junction, crossings, the lane opening or closing along a taper (or a bay's),
 the inner edge of parking lanes, and a flag where a road's lane count changes at a node with no taper to get there.
+The hatched areas no car crosses (lanes.json beside the pbf, osm_to_roads.py --hatched) go as solid white lines, each
+area's outline and diagonal stripes; they're read at each start rather than cached, being few.
 The plugin draws each kind as a strip of its own width and colour lying on the game's ground (core.cpp DrawDebug).
 
 Message formats (the plugin parses flat JSON only, so the geometry is one string):
@@ -86,6 +88,7 @@ PRIORITY = "ZzmgnrbqlskLTRjtcywdepx"
 LAYER_OF = {"e": "e", "d": "d", "w": "d", "c": "d", "y": "d", "l": "s", "s": "s", "k": "s", "j": "j", "r": "r", "b": "r",
             "n": "n", "m": "m", "g": "m", "p": "p", "x": "x", "L": "a", "T": "a", "R": "a", "t": "t", "q": "q", "z": "z", "Z": "z"}
 DOUBLE = 0.15  # m from a double line's middle to each of its lines
+HATCH_GAP = 2.0  # m between a hatched area's stripes
 TAPER_STRIP = 0.2  # m a lane widens or narrows along a tapered way, at least, for its middle to be drawn there
 LAYERS = {"edges": "e", "dividers": "d", "stops": "s", "junctions": "j", "route": "r", "nav": "n", "points": "m", "fill": "f",
           "arrows": "a", "crossings": "x", "parking": "p", "tapers": "t", "flags": "q", "blindspot": "z"}
@@ -640,6 +643,62 @@ def road_marks(paths, osm) -> dict:
           "shape_node": np.array(shape_node, np.int64)}
 
 
+def hatch_lines(ring: np.ndarray, gap: float = HATCH_GAP) -> list[np.ndarray]:
+  """A hatched area's stripes, [2, 2] each: lines gap m apart at 45 deg to the area's long axis, cut to its ring (even-odd,
+  so a ring that folds back still hatches only inside)."""
+  ring = np.asarray(ring, np.float64)
+  if np.hypot(*(ring[-1] - ring[0])) > 1e-6:
+    ring = np.vstack([ring, ring[:1]])
+  centre = ring[:-1].mean(0)
+  _, _, vt = np.linalg.svd(ring[:-1] - centre, full_matrices=False)
+  c, s = np.cos(np.pi / 4), np.sin(np.pi / 4)
+  along = np.array([c * vt[0, 0] - s * vt[0, 1], s * vt[0, 0] + c * vt[0, 1]])
+  across = np.array([-along[1], along[0]])
+  a, b = (ring - centre) @ along, (ring - centre) @ across
+  out = []
+  for t in np.arange(b.min() + gap / 2, b.max(), gap):
+    b0, b1, a0, a1 = b[:-1], b[1:], a[:-1], a[1:]
+    hit = (b0 <= t) != (b1 <= t)
+    xs = np.sort(a0[hit] + (t - b0[hit]) / (b1[hit] - b0[hit]) * (a1[hit] - a0[hit]))
+    for x0, x1 in zip(xs[::2], xs[1::2], strict=False):
+      if x1 - x0 > 0.2:
+        out.append(centre + np.outer([x0, x1], along) + t * across)
+  return out
+
+
+def hatched_areas(lanes_path: str) -> list[np.ndarray]:
+  """lanes.json's hatched areas (osm_to_roads.py --hatched): each one's ring [N, 2]; none without the file."""
+  import json
+  try:
+    with open(lanes_path) as f:
+      lanes = json.load(f)
+  except (OSError, ValueError):
+    return []
+  if "hatched" not in lanes.get("kinds", ()):
+    return []
+  k = lanes["kinds"].index("hatched")
+  return [np.array(line[1:], np.float64).reshape(-1, 2) for line in lanes["lines"] if line[0] == k and len(line) >= 7]
+
+
+def hatch_marks(paths, areas: list[np.ndarray]) -> dict:
+  """The hatched areas as road_marks' segments: each area's ring and stripes, white, at its nearest GTA node's height."""
+  ends, nodes = [], []
+  for ring in areas:
+    g = near_node(paths, ring.mean(0))
+    if g is None:
+      continue
+    for line in [np.vstack([ring, ring[:1]]), *hatch_lines(ring)]:
+      line3 = np.column_stack([line, np.full(len(line), paths.z[g])])
+      ends.append(np.stack([line3[:-1], line3[1:]], axis=1))
+      nodes.extend([(g, g)] * (len(line) - 1))
+  return {"segs": np.concatenate(ends) if ends else np.zeros((0, 2, 3)), "kinds": np.full(len(nodes), "w", "<U1"),
+          "nodes": np.array(nodes, np.int64).reshape(-1, 2)}
+
+
+def with_hatched(marks: dict, extra: dict) -> dict:
+  return {**marks, **{k: np.concatenate([marks[k], extra[k]]) for k in ("segs", "kinds", "nodes")}} if len(extra["kinds"]) else marks
+
+
 def marks_key(paths, osm) -> str | None:
   """The cache key of road_marks(paths, osm): a hash of the two map files read, the code that turns them into the marks,
   and the settings it reads them with; None where they can't be cached (no cache, the maps not read from files, or
@@ -751,6 +810,8 @@ class RoadGeometry:
     self.hull_cache: dict[int, np.ndarray | None] = {}
     if marks is None and osm is not None and osm.tagged:
       marks = road_marks(paths, osm)
+    if marks is not None and getattr(osm, "path", None):  # lanes.json beside the pbf, as osm_to_roads.py writes it
+      marks = with_hatched(marks, hatch_marks(paths, hatched_areas(os.path.join(os.path.dirname(osm.path), "lanes.json"))))
     self.marks = marks
     self.shapes = [] if marks is None else np.split(marks["shape_pts"], np.cumsum(marks["shape_len"])[:-1])
 
