@@ -1,0 +1,2 @@
+# small sample frames, kept in git itself rather than LFS
+*.png -filter -diff -merge binary

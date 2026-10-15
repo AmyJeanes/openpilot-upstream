@@ -132,3 +132,48 @@ Other findings:
 - The fork's existing `navInstruction.allManeuvers` (`gta5_nav_msgs.instruction`, for the UI) already goes through
   `valhalla_type` correctly (its words are close to ours), but leaves out continues (8), keeps only 5, folds no keeps, and
   measures from the bridge's own route position. For the model, item 4 swaps in `ModelNav`'s list.
+
+## 3. The map image for GTA
+
+**Tiles.** `navmodel/build_pmtiles.py gta5.osm.pbf gta5_roads.pmtiles` (pyosmium, shapely, mapbox-vector-tile,
+pmtiles; 17 s): 72 559 ways -> 53 z15 tiles, 581 KB, a gzip PMTiles v3 archive of gzip MVT, layer `roads`, extent 4096
+with a 64-unit buffer, as Protomaps': `kind` highway (motorway, motorway_link) / major_road (trunk, primary, secondary,
+tertiary and links) / minor_road (residential, unclassified, road, service, track) / other (living_street, pedestrian...)
+/ path (footway etc., not drawn); `kind_detail` = the OSM highway (service roads: their `service=*`; GTA's have none);
+`is_bridge` + `level=1` on the 3 297 `bridge=yes` ways (`is_tunnel` where tagged: GTA's map tags none); `name`,
+`oneway`. Read by comma's **unmodified** `pmtiles.py` / `vector_tile.py` / `renderer.py` (copied from `afbf2e5`).
+
+**Local tile source.** `selfdrive/navigation/local_tiles.py` (`LocalTiles`: `size`, `read`, `prefetch`, `close`, the
+interface `PMTiles` takes) and 4 lines in `mapsd.py`: `NAV_TILES=/path/gta5_roads.pmtiles` uses it in place of
+`RemoteTiles`. This is the only change to comma's navigation files.
+
+**Frames.** `navmodel/render_frames.py tiles out --route fixtures/routes.json:<name>` renders as mapsd does (tracker
+following the car in 10 m fixes; it can't jump: the search window is -30..+100 m), one PNG per frame plus a contact
+sheet. Committed in `navmodel/samples/` (a `.gitattributes` there keeps these small PNGs out of LFS, whose host is
+HuggingFace): `contact_city.png`, `contact_freeway.png`, `contact_exits.png` (every 400/450 m of the three fixture
+routes; all frames valid), `crossings_cut.png`, `crossings_bridge_on_bridge.png`, `crossings_level.png`,
+`contact_lat0_vs_lat34.png`, and three single frames.
+
+**Road classes -> widths.** Test `navmodel/test_map_frames.py` (6, pass; the whole-map one with `GTA5_MAP`) checks each
+GTA class gets the renderer's style: motorway/trunk/primary MAJOR (19.0 px at GTA's equator), secondary/tertiary
+MEDIUM (15.5; GTA's map has none), motorway_link/trunk_link/residential/unclassified STREET (9.9), service MINOR (6.7),
+track TRACK (7.0). Whether Protomaps files tracks under `minor_road` (drawn) or `path` (not drawn) isn't clear from
+the renderer (it has a track style, so we draw them); `--tracks path` gives the other.
+
+**Bridges.** `navmodel/check_crossings.py` finds every crossing of two drawn roads with no shared node and compares
+heights (`ele`): of 2 454, 702 are at grade (GTA's links crossing, drawn like a junction), and of 1 752 overpasses
+(> 4 m apart) **1 208 cut correctly** (the upper is a bridge, the lower is cut under it; test `test_a_bridge_cuts_...`
+checks the pixels as comma's own test does), **542 are bridge over bridge** (482 of them car-park decks, 46
+major-over-major stacked interchanges): the renderer has one bridge level, so these cross without a cut, as on a real
+map; **2 untagged** (no cut) and **0 inverted**. Layers aren't read by the renderer.
+
+**Deviations from a real map's look** (for the GTA test to judge):
+- GTA lays a freeway carriageway as several side-by-side lane-group ways where OSM has one. Each is a 19 px MAJOR
+  stroke, so the band under the route is wider: median 36 px on the freeway trip (p25 19, p75 61; 58 % of frames over
+  30 px), 27 px on the city trip. A fix would be carriageway centrelines in the builder (group one-way ways side by
+  side on one level, as `map/side_by_side.py` finds them, and emit their middle line); not done here, a TODO.
+- Roads are drawn about 10 % wider than at comma's latitudes, because GTA sits on the equator.
+  `build_pmtiles.py --lat0 34` plus `frame.py` put GTA about 34 N (Web Mercator, 1 game metre = 1 px still; tested to
+  0.05 % at the origin, 0.2 % across the map). The route and fix must then be in the same frame (item 4).
+  `contact_lat0_vs_lat34.png` shows the same frames both ways (road pixels about 8 % fewer at 34 N).
+- Car parks: 19 232 service ways (GTA's car-park aisles and drives) draw as MINOR roads, as a real map's would.
