@@ -3,8 +3,9 @@ that navd localizes from what a real car gives it.
 
 GTA5_GPS picks the profile, default qcom3x; off leaves the simulator's own gpsLocationExternal at (0, 0), as before:
 - qcom3x: a comma 3X. qcomgpsd's gpsLocation at 1 Hz with its fields (no horizontalAccuracy or flags, as the modem's
-  position report gives neither), 300 ms late, with a slowly wandering bias (Gauss-Markov, 3 m, 60 s) and 1 m white
-  noise on the position, and course noise that grows at low speed.
+  position report gives neither), 300 ms late, with a slowly wandering bias (Gauss-Markov, 3 m, 60 s) and 0.3 m white
+  noise on the position (the modem filters its fixes, so their error drifts rather than jumping fix to fix), and course
+  noise that grows at low speed.
 - ublox: a comma three's u-blox: ubloxd's gpsLocationExternal at 10 Hz, 100 ms late, 1.5 m / 30 s bias and 0.3 m noise.
 - perfect: qcom3x's message and rate without noise or delay.
 The noise is seeded (GTA5_GPS_SEED), so repeated drives get the same. The figures are starting points from general
@@ -36,7 +37,7 @@ class Profile(NamedTuple):
 
 
 PROFILES = {
-  "qcom3x": Profile("gpsLocation", 1.0, 0.3, 3.0, 60.0, 1.0, 1.0, 10.0, 0.15, 7.0),
+  "qcom3x": Profile("gpsLocation", 1.0, 0.3, 3.0, 60.0, 0.3, 1.0, 10.0, 0.15, 7.0),
   "ublox": Profile("gpsLocationExternal", 10.0, 0.1, 1.5, 30.0, 0.3, 0.5, 5.0, 0.1, 5.0),
   "perfect": Profile("gpsLocation", 1.0, 0.0, 0.0, 60.0, 0.0, 0.0, 0.0, 0.0, 0.0),
 }
