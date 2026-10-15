@@ -2,7 +2,7 @@
 
 ## Summary for Amy
 
-Preflight done; item 1 (lane changes kept off hatched areas) is in. Items 2 and 3 follow below as they land.
+Preflight done; items 1 (lane changes kept off hatched areas) and 2 (gap waits) are in. Item 3 follows below.
 
 ## Preflight
 
@@ -103,3 +103,67 @@ renumbering ramp beside 9 areas: 237 vs 181 ms).
 
 **Test results after item 1**: test_mapdrive + test_mapdrive_lead + test_lane_slots 92 passed, 1 failed
 (`test_collision_routes`, the same 029 failure as the baseline); test_blindspot 32 passed (3 not runnable here).
+
+## 2. Waits for a lane gap that ignore clear gaps
+
+Reproduced on `mapdrive_sim` with scratch harnesses (a planned change for a turn; traffic placed per suspect; the state
+given `beside`/`besideLanes` as the bridge's is, and the traffic keeping 1 s behind whatever is ahead of it in its lane:
+without that the sim's cars rear-end anything that slows, and without `besideLanes` the blind-spot zone falls back to
+4.5 m, which on 5.5 m lanes only clips the lane beside's car by 0.2 m and flickers).
+
+**Root causes (confirmed)**
+1. Dropping back behind one alongside could pace it for good. While one is "beside", the car slows to
+   `LC_DROP_BACK` x the speed it had when the wait began, whatever the other's speed: one a little slower than that
+   stays alongside. On a motorway at 25 m/s with cars 150 m apart at 18 m/s in the lane beside (our cap 18.75 m/s):
+   **36.3 s waiting, 33 put-offs** (40.2 s, 36 with following traffic), whys mostly `beside`, the same pattern as the
+   brain log's 121 s / 38. Also, a lead's own acceleration (the following model's `need`) overrode the cap, so with a
+   lead in our lane the drop back didn't happen at all.
+2. The gate was blind most of the time it waited, and a first clear reading put the change off again. Each busy look
+   put the change `LC_DEFER_S` (2 s) on; the gate then didn't look until `LC_GATE_T` (1 s) before the new start; a
+   clear reading there wasn't `LC_CLEAR_S` yet, so it put it off once more and went blind again. So a gap had to read
+   clear at two looks about a second apart: with a car alongside leaving at a known moment, the change **went 1.2-2.2 s
+   after the lane cleared and began 1.75-3.1 s after** (12 and 25 m/s, city and motorway).
+3. Found while fixing 1-2: after "go", the car sped up again (the drop back released, or following the car now ahead in
+   the target lane), closing the gap the window had judged at the slower speed, so a change could be called back
+   mid-move ("back" / "ahead").
+
+**Suspects ruled out** (evidence)
+- The speed-up prediction: `SPEED_UP_TO` caps it at 15 m/s; one 40 m back closing at 1.5 m/s, or there speeding up at
+  0.4 m/s^2, causes no wait (now `test_lane_gaps_in_traffic`).
+- Cars two lanes over, oncoming, across a 3 m median, cross traffic at the junction, a slower car far ahead in the target
+  lane: no waits on 5.5 m or 4.4 m lanes. `_lane_window`'s fixed 5.5 m lane width (instead of the road's) changed no
+  verdict in 800 placements of a car two lanes over or oncoming on 4.4 m and 6.6 m lanes; the one sim case it touched
+  (parked cars with no driven flag beyond the lane beside on 4.4 m lanes) waited 2.2 s before and 0.6 s now. Left as it
+  was.
+- Parked/static with `driven` unknown: at most that 0.6 s.
+- A car stopped short ("late") and then a clear lane: goes 0.1-0.6 s after (with 6 s and 15 s gaps in a stream behind).
+
+**What changed** (`gta5_mapdrive.py`)
+- `_lc_gate`: while a change waits, its lane is looked at every step (as far back as a put-off places it), the change
+  put off again only as it comes due (`LC_GATE_T` before its start) while still busy; it goes once the lane has read
+  clear `LC_CLEAR_S`.
+- `_pull_in`: on "go" the change waited for (signalled all through the wait) is moved to start `LC_GO_S` (0.5 s) on,
+  its length kept, where `_change_room`, the stop lines (and city junction nodes), the hatched areas and `_lane_window`
+  at the new place allow; else it stays.
+- `lc_go`: a change that waited while moving is made no faster than the speed it went at, until it ends.
+- Drop back: `_alongside` gives the slowest driven vehicle alongside on that side (speed, track id); the car drops back
+  to `min(LC_DROP_BACK x v0, v_beside - LC_DROP_REL)` (3 m/s slower than it), and passes one more than `LC_DROP_REL`
+  slower than the drop back. Its speed is taken as first seen there (re-read when another takes its place), so one that
+  keeps our speed doesn't drag us down (`test_fork_change_gives_up_the_branch` caught that). Both caps now also bound a
+  lead's acceleration.
+
+**After**: gap taken (go) 0.6-0.65 s after the lane clears and the change under way 1.1-1.2 s after, at 12 and 25 m/s;
+the slower-traffic case 10.6 s / 10 put-offs (from 36.3 / 33); streams with 3, 6 and 15 s gaps: 4.6 s, 3.0 s and no
+wait, no touch, no "back" (3 s was 4.7 s with a "back" and, from a standstill, flip-flopping before the hold).
+
+**Tests** (new, `test_mapdrive_lead.py`, with a `traffic_drive` helper as above)
+- `test_lane_gap_taken_once_clear`: go within `LC_CLEAR_S` + 0.3 s and under way within `LC_CLEAR_S` + `LC_GO_S` +
+  0.4 s of the lane clearing, at 12 m/s (city) and 25 m/s (motorway). Fails on the old code.
+- `test_lane_gaps_in_traffic`: gaps of 3, 6 and 15 s taken (15 s at once), no touch, no "back" or "late"; no wait for a
+  slow closer, one speeding up, traffic two lanes over, oncoming, parked beyond the lane beside (4.4 m lanes).
+- `test_lane_gap_drops_behind_a_slower_one`: the 18-vs-25 m/s case under 15 s. Fails on the old code (40 s).
+- Existing lane-gap tests unchanged and passing (`test_lane_change_waits_for_its_lane`, `test_two_lane_change`,
+  `test_lane_window_speeding_up`, `test_fork_change_gives_up_the_branch`, test_blindspot.py).
+
+**Test results after item 2**: test_mapdrive + test_mapdrive_lead + test_lane_slots 95 passed, 1 failed
+(`test_collision_routes` 029, as the baseline); test_blindspot 32 passed (3 not runnable here).

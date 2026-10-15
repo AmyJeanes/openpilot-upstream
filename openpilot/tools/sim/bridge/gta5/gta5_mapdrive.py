@@ -173,6 +173,7 @@ LC_DEFER_S, LC_DEFER_MIN = 2.0, 15.0  # s on from the car (m at the least) a cha
 LC_LEAST_SHARE = 0.6  # of a change's time (lc_seconds) one put off keeps at the least
 LC_SETTLE_S = 1.0  # s in its lane between a change put off and the next one of its run, at the least
 LC_CLEAR_S = 0.5  # s its lane is to read clear, after it was busy, before a change waited for starts
+LC_GO_S = 0.5  # s on from the car a change waited for starts once its lane has read clear (_pull_in)
 LC_AFTER_S = 1.5  # s after a change ends its lane is still looked at for one coming up on us (_lane_window)
 LC_GAP_M, LC_GAP_T, LC_GAP_CLOSE = 2.0, 0.3, 1.0  # m, s of the follower's speed and s of its closing speed a change leaves
 LC_CUT_DECEL = 2.0  # m/s^2 a change may leave us to slow at behind one in its lane
@@ -181,6 +182,7 @@ BRANCH_ROOM_S = 3.0  # s of driving at least before a fork, for its lane change 
 BRANCH_PAST = 20.0  # m past a fork the link of the branch given up that a route is asked to keep off
 LC_LATE_WAIT = 90.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends (a queue standing in it moves on at its light)
 LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
+LC_DROP_REL = 3.0  # m/s slower than the one alongside the car drops back to, at least; one that much slower than LC_DROP_BACK is passed
 HATCH_CLEAR = 0.2  # m our body keeps out of a hatched area through a lane change
 HATCH_PAD = 5.0  # m clear of where its body would meet one a change moved off it ends (before) or starts (after)
 HATCH_STEP = 1.0  # m between the places along a change its body is looked at
@@ -762,6 +764,7 @@ class MapDrive:
     self.obst_rows = None
     self.gap_tune = LaneGapTune()
     self.lc_wait: dict | None = None  # the lane change waiting for its lane (_lc_gate): since, side, defers, late, s0
+    self.lc_go: dict | None = None  # a change waited for, under way: m along it ends ("to") and the speed it goes at ("v")
     self.last_state: dict = {}
     self.asked: dict | None = None  # the lane change the player asked for, waiting for the lane beside: side, t, waited
     self.prompts: list[tuple[str, str]] = []  # (kind, side) of what became of it, since last taken (ask_lane)
@@ -1230,6 +1233,7 @@ class MapDrive:
       self._abort(f"plan: lane {check['mismatches'][0]['plan']} where the slots want {check['mismatches'][0]['want']}", t, state.get("pos"))
       return False
     at0 = route.at
+    self.lc_go = None
     built = self._build(route, keys, lane, state, t)
     if built is None:
       return False
@@ -2254,7 +2258,10 @@ class MapDrive:
     the way across, made only while its lane is clear (_lane_clear). Otherwise it's put off (_deferred_keys, not onto a
     hatched area: _deferred_off_hatched), started
     again LC_DEFER_S s on from the car and planned again from where the car is: one under way goes back to its lane;
-    meanwhile, with one alongside, the car drops back to LC_DROP_BACK of its speed to let it by.
+    meanwhile its lane is looked at every step, the change put off again only as it comes due (LC_GATE_T s before it
+    starts) while it's still busy, and made once it has read clear LC_CLEAR_S s; with one alongside, the car drops back
+    to LC_DROP_BACK of its speed to let it by, at least LC_DROP_REL slower than that one (one that much slower than the
+    drop back is passed instead).
     Where it can't be put off (it would run into the plan's next key or a stop line), the car stops short of it
     (_longitudinal) until its lane clears, the trip ending after LC_LATE_WAIT s. A lane_gap event as it starts to wait
     ("wait"), goes back ("back"), can wait no more ("late") and goes ("go")."""
@@ -2262,7 +2269,9 @@ class MapDrive:
     for s0, s1, side, shift in self.changes:
       if s1 <= self.s:
         continue
-      if self.s < s0 - max(v, 3.0) * LC_GATE_T or self.s > s0 + LC_COMMIT * (s1 - s0):
+      due = self.s >= s0 - max(v, 3.0) * LC_GATE_T
+      put_off = self.s >= s0 - max(v, 3.0) * LC_GATE_T - max(v * LC_DEFER_S, LC_DEFER_MIN)  # as near as a wait puts it
+      if (not due and (lw is None or not put_off)) or self.s > s0 + LC_COMMIT * (s1 - s0):
         if lw is not None and self.s > s0:  # under way past the point of no return: it went
           self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
           self.lc_wait = None
@@ -2278,12 +2287,24 @@ class MapDrive:
         if lw is not None:
           self._event("lane_gap", t, phase="go", side=side, waited=round(t - lw["since"], 1), defers=lw["defers"])
           self.lc_wait = None
+          if self.s < s0 - max(v, 3.0) * LC_GO_S:
+            self._pull_in(route, state, t, s0, side, v)
+          if not lw["late"]:
+            # made no faster than the speed its gap was judged at: speeding up again (from a drop back, after one now
+            # ahead in that lane) closes the gap that was judged
+            nxt = next((c[1] for c in self.changes if c[1] > self.s), s1)
+            self.lc_go = {"to": float(np.interp(nxt, self.s_path, self.route_s)), "v": max(v, 3.0)}
         return
       started = self.s > s0
       if lw is None:
         lw = self.lc_wait = {"since": t, "side": side, "defers": 0, "late": False, "s0": s0, "v0": v}
         self._event("lane_gap", t, phase="wait", side=side, why=why, started=started)
       lw["why"] = why
+      beside = self._alongside(side) if why == "beside" else None
+      if beside is None or beside[1] != lw.get("beside_id"):  # its speed as first seen there: one that keeps our speed can't drag us down
+        lw["v_beside"], lw["beside_id"] = beside if beside is not None else (None, None)
+      if not due:
+        return  # looked at again next step; put off only once it comes due
       keys = self._deferred_off_hatched(route, s0, route.at + max(v * LC_DEFER_S, LC_DEFER_MIN), v)
       if keys is not None and self._replan_keys(route, state, t, keys):
         lw.update(defers=lw["defers"] + 1, late=False)
@@ -2307,6 +2328,55 @@ class MapDrive:
         self._abort(f"no gap in the lane to the {side} in {LC_LATE_WAIT:.0f} s", t, state.get("pos"))
       return
     self.lc_wait = None  # no change left ahead to wait for (planned away, or along a fork's other branch)
+
+  def _pull_in(self, route, state: dict, t: float, s0: float, side: str, v: float):
+    """The lane change at path m s0, its gap come while it was put off (signalled all the while), started LC_GO_S s on
+    from the car instead, its length kept, where that's room it may run in (_change_room), onto no stop line (nor,
+    off a freeway, a junction node) and no hatched area it was clear of, and its lanes clear for it there too
+    (_lane_window); else left where it is."""
+    keys = self.keys
+    rs0 = float(np.interp(s0, self.s_path, self.route_s))
+    found = chains(keys)
+    if not found:
+      return
+    a, b = min(found, key=lambda c: abs(keys[c[0]][0] - rs0))
+    st = route.at + max(v, 3.0) * LC_GO_S
+    e = st + keys[b][0] - keys[a][0]
+    lower, _ = self._change_room(route, keys, a, b)
+    k = segment_of(route, keys[a][0])
+    fwy = (route.classes[k] if k < len(route.classes) else "") in FREEWAY
+    crossings = list(route.stops) + ([] if fwy else list(route.junctions))
+    if st >= keys[a][0] - EPS or st < lower - EPS or \
+       any(st - CROSSING_CLEAR < c < e and not keys[a][0] - CROSSING_CLEAR < c < keys[b][0] for c in crossings):
+      return
+    first = a
+    while first > 0 and keys[first - 1][0] > st + EPS:  # holds it now starts before
+      first -= 1
+    chain = self._replace_chain(keys, a, b, st, e)
+    trial = keys[:first] + chain + keys[b + 1:]
+    p0, p1 = (float(np.interp(x, self.route_s, self.s_path)) for x in (st, e))
+    shift = float(np.interp(p1, self.s_path, self.route_r) - np.interp(s0, self.s_path, self.route_r))
+    if self._hatch_hit(route, trial, first, first + len(chain) - 1) is None and \
+       self._lane_window(p0, p1, side, shift if abs(shift) > 1.0 else (-LANE_W if side == "left" else LANE_W), v, t) is None:
+      self._replan_keys(route, state, t, trial)
+
+  def _alongside(self, side: str) -> tuple[float, int | None] | None:
+    """The slowest driven vehicle alongside our body (within LC_GAP_M along) on `side`, within two lanes out: its
+    speed and track id; None where there's none."""
+    out = None
+    for car in self.cars or []:
+      if car.get("ped") or not car.get("driven", True):
+        continue
+      along, right = self._place(car["c"], LC_GAP_M + self.front, behind=LC_GAP_M + self.rear, off_max=2.5 * LANE_W)
+      if np.isnan(along).all():
+        continue
+      out_side = -right if side == "left" else right
+      if np.nanmax(along) >= self.s - self.rear - LC_GAP_M and np.nanmin(along) <= self.s + self.front + LC_GAP_M and \
+         np.nanmax(out_side) > self.half_width + 0.5:
+        speed = float(np.hypot(*car["vel"]))
+        if out is None or speed < out[0]:
+          out = (speed, car.get("id"))
+    return out
 
   def _lane_window(self, s0: float, s1: float, side: str, shift: float, v: float, t: float) -> str | None:
     """What keeps a lane change from path m s0 to s1 (`shift` m across) from its lanes, beyond what the blind-spot
@@ -3797,9 +3867,18 @@ class MapDrive:
     # one closing from behind is let by at our speed); one that can't be put off any more, stopped short of
     lw = self.lc_wait
     if lw is not None and not lw["late"] and lw.get("why") == "beside":
-      cap = max(LC_DROP_BACK * lw["v0"], 3.0)
+      drop, vb = LC_DROP_BACK * lw["v0"], lw.get("v_beside")
+      # (pacing one a little slower than the drop back left it alongside for good)
+      cap = max(drop if vb is None else math.inf if vb < drop - LC_DROP_REL else min(drop, vb - LC_DROP_REL), 3.0)
       if cap < vp:
         vp, reason = cap, "hold"
+        need = min(need, (vp * vp - v * v) / (2.0 * look))  # (a lead's own acceleration doesn't outrun it)
+    go = self.lc_go
+    if go is not None and float(np.interp(s, self.s_path, self.route_s)) >= go["to"]:
+      go = self.lc_go = None
+    if go is not None and go["v"] < vp:
+      vp, reason = go["v"], "hold"
+      need = min(need, (vp * vp - v * v) / (2.0 * look))
     if lw is not None and lw["late"]:
       d = lw["s0"] - 1.0 - s
       cap = math.sqrt(2 * b * 0.8 * max(d - 0.3, 0.0))

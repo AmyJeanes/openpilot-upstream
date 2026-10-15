@@ -543,6 +543,106 @@ def test_two_lane_change():
   print("two lane change: ok")
 
 
+def traffic_drive(route, vehicles: list, seconds: float, v0: float = 12.0, cfg: dict | None = None, release=None):
+  """A trip from the right lane of `route` among `vehicles` that keep 1 s and 6 m behind whatever is ahead in their lane
+  (us included), else their own speed; the state with the lanes beside us as the bridge's (besideLanes). `release`
+  (car, md, route) -> bool, each step, for a test's own moves."""
+  trip = ms.drive(route, {"seed": 1, **(cfg or {})}, lane=1, v0=v0, vehicles=vehicles, reach=REACH, seconds=0.05, until_done=False)
+  car, md = trip.car, trip.md
+  want = {id(o): o.speed for o in vehicles}
+  while car.t < seconds and md.finished is None:
+    if release is not None:
+      release(car, md, route)
+    me = ms.Vehicle(car.x, car.y, car.h, car.v)
+    for o in vehicles:
+      f = np.array([-math.sin(math.radians(o.heading)), math.cos(math.radians(o.heading))])
+      gaps = [float(d @ f) - 4.8 for x in vehicles + [me] if x is not o and
+              float((d := np.array([x.x - o.x, x.y - o.y])) @ f) > 0.0 and abs(float(d @ np.array([f[1], -f[0]]))) < 2.5]
+      if id(o) in want:
+        o.speed = min(want[id(o)], max(0.0, min(gaps, default=math.inf) - 6.0))
+    car.advance(ms.FRAME)
+    st = car.state()
+    route.locate(np.array(st["pos"][:2]), None, st["heading"])
+    st = {**st, "beside": route.beside(), "besideLanes": route.beside_lanes()} if route.on_road() else st
+    car.control(md.step(route, st, car.t, car.collisions))
+    trip.events += md.take_events()
+    trip.rows.append((car.t, car.x, car.y, car.h, car.v, car.k * car.v, md.kappa, md.a, md.dev, md.s, route.right,
+                      {"left": -1, "right": 1}.get(md.indicator, 0), md.lead_gap,
+                      min((ms.clearance(car.body(), o.corners()) for o in vehicles), default=math.inf)))
+  return trip
+
+
+def test_lane_gap_taken_once_clear():
+  """Amy (15 Oct): waiting for a gap with a clear one beside. The gate put the change off LC_DEFER_S on at each busy
+  look, then didn't look again until LC_GATE_T s before its new start; a first clear reading put it off once more (it
+  wasn't LC_CLEAR_S yet), so a gap was taken 1.2-2.2 s after it opened and the change began 2-3 s after. Now its lane is
+  looked at every step while it waits, it goes LC_CLEAR_S after the lane reads clear, and starts LC_GO_S on (_pull_in):
+  a car kept alongside until 60 m past where the change would start, then gone, at 12 and 25 m/s on a city road and a
+  motorway: under way within about a second of the lane clearing."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LC_CLEAR_S, LC_GO_S
+  for v, cls in ((12.0, "primary"), (25.0, "motorway")):
+    r = ms.junction_turn("left", lead=700.0, stop=None)
+    r.classes = [cls] * len(r.classes)
+    free = ms.drive(r, {"seed": 1, "speed": v}, lane=1, v0=v, reach=REACH, seconds=0.2).md.changes[0]
+    x0, y0, h = ms.start_pose(r, 0, 0.0)
+    other = ms.Vehicle(x0, y0, h, v)
+    gone, started = [], []
+
+    def release(car, md, route):
+      if not gone and route.at < free[0] + 60.0:
+        other.y, other.speed = car.y, car.v
+      elif not gone:
+        gone.append(car.t)
+        other.y, other.speed = -5000.0, 0.0
+      elif not started and md.changes and md.changes[0][0] <= md.s:
+        started.append(car.t)
+    trip = traffic_drive(r, [other], 120.0, v0=v, cfg={"speed": v}, release=release)
+    go = [e for e in trip.events if e["event"] == "lane_gap" and e["phase"] == "go" and e["t"] >= gone[0]]
+    assert go and go[0]["t"] - gone[0] <= LC_CLEAR_S + 0.3 and started and started[0] - gone[0] <= LC_CLEAR_S + LC_GO_S + 0.4, (v, go, gone, started)
+    assert trip.finished == "arrived" and trip.car.collisions == 0, trip.finished
+  print("lane gap taken once clear: ok")
+
+
+def test_lane_gaps_in_traffic():
+  """A stream in the lane beside 2 m/s faster than us (each keeping 1 s behind what's ahead), its gaps 3, 6 and 15 s:
+  the change waits for one and takes it, no touch, without going back; with 15 s gaps, at once. One alone 40 m back
+  closing at 1.5 m/s (and one there speeding up), traffic only two lanes over or oncoming, and parked cars beyond the
+  lane beside (on GTA's 4.4 m narrow links): no wait."""
+  for gap, wait_max in ((3.0, 10.0), (6.0, 8.0), (15.0, 0.0)):
+    r = ms.junction_turn("left", lead=500.0, stop=None)
+    stream = [ms.Vehicle(2.75, 200.0 - k * 14.0 * gap, 0.0, 14.0) for k in range(int(400 / (14.0 * gap)) + 8)]
+    trip = traffic_drive(r, stream, 75.0)
+    gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+    assert trip.car.collisions == 0 and trip.col(13).min() > 1.0 and not [e for e in gaps if e["phase"] in ("back", "late")], (gap, gaps)
+    assert sum(e["waited"] for e in gaps if e["phase"] == "go") <= wait_max and trip.md.changes[0][1] < trip.md.s, (gap, gaps)
+  for name, others, w in (("closing", [ms.Vehicle(2.75, 250.0, 0.0, 13.5)], 5.5),
+                          ("speeding up", [ms.Vehicle(2.75, 250.0, 0.0, 12.0, accel=0.4, until=16.0)], 5.5),
+                          ("two over", [ms.Vehicle(2.5 * 4.4, 300.0 - 18.0 * k, 0.0, 12.0) for k in range(30)], 4.4),
+                          ("oncoming", [ms.Vehicle(-2.2, 900.0 - 24.0 * k, 180.0, 12.0) for k in range(60)], 4.4),
+                          ("parked", [ms.Vehicle(-2.2, 250.0 + 12.0 * k, 180.0, 0.0, driven=False) for k in range(15)], 4.4)):
+    r = ms.junction_turn("left", lead=500.0, stop=None, sec=ms.section(3 if name == "two over" else 2, 2, w))
+    trip = traffic_drive(r, others, 75.0)
+    gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+    assert not gaps and trip.car.collisions == 0 and trip.md.changes[0][1] < trip.md.s, (name, gaps)
+  print("lane gaps in traffic: ok")
+
+
+def test_lane_gap_drops_behind_a_slower_one():
+  """Waiting with one alongside, the car dropped back to LC_DROP_BACK of its speed whatever that one's: one a little
+  slower than that (18 m/s against our 18.75) kept alongside for good, as GTA's slower traffic in the lane beside on a
+  motorway did (36 s waiting, 33 put-offs, for cars 150 m apart). Now it drops back LC_DROP_REL below that one's speed
+  as first seen there (one that keeps our speed doesn't drag us down), and passes one that much slower than its drop
+  back: the change made in a few s."""
+  r = ms.junction_turn("left", lead=1500.0, stop=None)
+  r.classes = ["motorway"] * len(r.classes)
+  cars = [ms.Vehicle(2.75, 80.0 + k * 150.0, 0.0, 18.0) for k in range(12)]
+  trip = traffic_drive(r, cars, 120.0, v0=25.0, cfg={"speed": 25.0})
+  gaps = [e for e in trip.events if e["event"] == "lane_gap"]
+  assert trip.finished == "arrived" and trip.car.collisions == 0 and trip.col(13).min() > 1.0, (trip.finished, trip.col(13).min())
+  assert sum(e["waited"] for e in gaps if e["phase"] == "go") < 15.0, gaps
+  print("lane gap drops behind a slower one: ok")
+
+
 def test_lane_window_speeding_up():
   # new3 r1t3 (El Rancho Blvd): setting off into the lane beside as one 14 m back there sped up from 5 to 11 m/s. One
   # 25 m back at 5 m/s leaves room for a slow 15 m change; the same speeding up at 3 m/s^2 doesn't
@@ -968,6 +1068,9 @@ if __name__ == "__main__":
   test_fork_change_gives_up_the_branch()
   test_lane_gap_wait_stays_off_hatched()
   test_lane_window_speeding_up()
+  test_lane_gap_taken_once_clear()
+  test_lane_gaps_in_traffic()
+  test_lane_gap_drops_behind_a_slower_one()
   test_cut_in()
   test_nudge_two_in_a_row()
   test_nudge_on_a_bend()
