@@ -50,7 +50,8 @@ const MARKS = { edge: ['#c8c8c8', null, 0.2], dashed: ['#f4f4f4', [3, 6], 0.15],
   guide_left: ['rgba(77, 163, 255, 0.65)', [1.2, 1], 0.3], guide_through: ['rgba(214, 218, 222, 0.5)', [1.2, 1], 0.3],
   guide_right: ['rgba(255, 169, 64, 0.65)', [1.2, 1], 0.3],
   parking: ['rgba(200, 204, 208, 0.10)', null, 2.0, 'butt'],  // a parking lane, along its middle
-  hatched: ['rgba(244, 244, 244, 0.45)', [0.8, 0.8], 0.15, 'butt'] };  // a hatched area's outline: no car crosses it
+  hatched: ['rgba(244, 244, 244, 0.8)', null, 0.15, 'butt'] };  // a hatched area's outline and stripes: no car crosses it
+const HATCH_GAP = 2.0;  // m between a hatched area's stripes (gta5_overlay.HATCH_GAP)
 const BG = '#15171a';
 const BRIDGE_CASING = '#08090a', CASING = 0.8;  // m each side of a bridge
 const TUNNEL_ALPHA = 0.45;
@@ -546,6 +547,41 @@ function dashes(pts, zs, on, off) {
   return out;
 }
 
+function hatchLines(pts, gap) {
+  // a hatched area's stripes as [x0, y0, x1, y1]: gap m apart at 45 deg to its long axis, cut to its ring (even-odd), as
+  // gta5_overlay.hatch_lines draws them in the game
+  const n = pts.length / 2;
+  let cx = 0, cy = 0;
+  for (let i = 0; i < n; i++) { cx += pts[2 * i]; cy += pts[2 * i + 1]; }
+  cx /= n; cy /= n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = pts[2 * i] - cx, dy = pts[2 * i + 1] - cy;
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+  }
+  const t = 0.5 * Math.atan2(2 * sxy, sxx - syy) + Math.PI / 4;
+  const ux = Math.cos(t), uy = Math.sin(t), vx = -uy, vy = ux;  // along the stripes, across them
+  const ring = [];
+  for (let i = 0; i <= n; i++) {
+    const x = pts[2 * (i % n)] - cx, y = pts[2 * (i % n) + 1] - cy;
+    ring.push([x * ux + y * uy, x * vx + y * vy]);
+  }
+  const bs = ring.map(p => p[1]), lo = Math.min(...bs), hi = Math.max(...bs), out = [];
+  for (let b = lo + gap / 2; b < hi; b += gap) {
+    const xs = [];
+    for (let i = 0; i < n; i++) {
+      const [a0, b0] = ring[i], [a1, b1] = ring[i + 1];
+      if ((b0 <= b) !== (b1 <= b)) xs.push(a0 + (b - b0) / (b1 - b0) * (a1 - a0));
+    }
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      if (xs[k + 1] - xs[k] <= 0.2) continue;
+      out.push([cx + xs[k] * ux + b * vx, cy + xs[k] * uy + b * vy, cx + xs[k + 1] * ux + b * vx, cy + xs[k + 1] * uy + b * vy]);
+    }
+  }
+  return out;
+}
+
 function heightsOf(heights, n, count) {
   // a line's heights, one a point, from a map file's (one number where it's level); null where it has none
   const h = heights ? heights[n] : null;
@@ -702,6 +738,10 @@ async function loadMarks() {
     const pts = l.slice(1), zs = heightsOf(lanes.heights, n, pts.length / 2);
     seen.add(kind);
     for (const d of dash ? dashes(pts, zs, ...dash) : [{ pts, zs }]) addLine(fine, FINE, 'marks', key, d.pts, d.zs, false);
+    if (kind === 'hatched') {
+      const z = zs ? zs.reduce((a, b) => a + b, 0) / zs.length : null;
+      for (const s of hatchLines(pts, HATCH_GAP)) addLine(fine, FINE, 'marks', key, s, z === null ? null : [z, z], false);
+    }
   });
   markKinds = lanes.kinds.filter(k => seen.has(k));
   mapVersion++;

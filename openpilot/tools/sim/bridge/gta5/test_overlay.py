@@ -516,6 +516,20 @@ def test_arrow_strokes():
   assert ov.arrow_strokes(frozenset({"none"})) == [] and ov.arrow_strokes(frozenset()) == []
 
 
+def test_hatch_lines_stay_inside_at_45_deg():
+  box = np.array([[0, 0], [10, 0], [10, 4], [0, 4]], float)
+  lines = ov.hatch_lines(box, gap=2.0)
+  assert len(lines) >= 4
+  for line in lines:
+    assert (line >= -1e-6).all() and (line[:, 0] <= 10 + 1e-6).all() and (line[:, 1] <= 4 + 1e-6).all()
+    d = line[1] - line[0]
+    assert min(abs(np.degrees(np.arctan2(d[1], d[0])) % 180 - a) for a in (45, 135)) < 1e-6
+  notch = np.array([[0, 0], [10, 0], [10, 4], [6, 4], [6, 1], [4, 1], [4, 4], [0, 4]], float)  # a U: none across the gap
+  for line in ov.hatch_lines(notch, gap=0.5):
+    mid = line.mean(0)
+    assert not (4 + 1e-6 < mid[0] < 6 - 1e-6 and mid[1] > 1 + 1e-6)
+
+
 def test_lane_tags_marks_have_the_new_kinds(fresh_marks):
   kinds = set(fresh_marks["kinds"].tolist()) | set(fresh_marks["shape_kind"].tolist())
   # arrows of every turn, tapers, crossings, stop lines at lights, junctions
