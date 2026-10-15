@@ -588,7 +588,7 @@ def test_lane_gap_taken_once_clear():
     other = ms.Vehicle(x0, y0, h, v)
     gone, started = [], []
 
-    def release(car, md, route):
+    def release(car, md, route, gone=gone, started=started, other=other, free=free):
       if not gone and route.at < free[0] + 60.0:
         other.y, other.speed = car.y, car.v
       elif not gone:
@@ -912,6 +912,92 @@ def test_lights_from_traffic():
   print("lights from traffic: ok")
 
 
+def held_at_a_light():
+  """Stopped at a signal's line in the middle lane of three (north; the line at 288 m, its junction's node at 300 m),
+  held there by one standing at the line in the left lane: (md, its stop line, t, the one standing)."""
+  r = ms.made_route(ms.line((600.0, 0.0)), ms.section(3, 2), junctions=[30], stops=[(288.0, "lights")])
+  waiting = parked(r, 0, 288.0 - 2.6)
+  trip = ms.drive(r, {"seed": 2}, lane=1, vehicles=[waiting], reach=REACH, seconds=60.0, until_done=False)
+  md = trip.md
+  x = next(x for x in md.stops if x["kind"] == "lights")
+  assert x.get("held") is not None and trip.car.v < 0.1, x
+  return md, x, trip.car.t, waiting
+
+
+def tracked(x: float, y: float, heading: float, speed: float, tid: int, t: float, yaw: float = 0.0, still: float = 0.0, **kw) -> dict:
+  """A vehicle as MapDrive._vehicles and its tracks give it: middle (x, y), game heading (deg), speed along it."""
+  from openpilot.tools.sim.bridge.gta5.gta5_traffic import rect
+  h = math.radians(heading + 90.0)
+  return {"c": rect(np.array([x, y]), h, 4.8, 2.0), "vel": speed * np.array([math.cos(h), math.sin(h)]), "t": t, "driven": True,
+          "id": tid, "still": still, "yaw": yaw, "moved": True, **kw}
+
+
+def test_held_red_released_surely():
+  """Amy (15 Oct): held at a red (one waiting beside), released 7 s later by a "through" glimpse, then over the line
+  with the light read red: most likely one beside turning right on red. Only one going straight through (its yaw under
+  LIGHT_STRAIGHT) is a sign of green, and held at a red, green needs one in our own lane, two in others, or one seen
+  going through LIGHT_GREEN_S (none of it before the last sign of red or of cross traffic going). On made traffic about
+  the light, stepped 0.1 s: one beside turning right on red stays red; our lane's queue moving off goes at once; cross
+  traffic stopping, then one beside moving off, goes about LIGHT_GREEN_S after it starts through; a single red-runner
+  in the next lane while the cross traffic goes stays red; and a replan while held (a lane change put off) keeps the
+  red."""
+  from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import LIGHT_GREEN_S, LIGHT_THROUGH
+  md, x0, t0, waiting = held_at_a_light()
+  y_line = 288.0
+  wait = tracked(waiting.x, waiting.y, 0.0, 0.0, 1, t0, still=30.0)
+
+  def run(cars_at, secs: float) -> list[tuple[float, str | None]]:
+    x = {**x0}
+    md.stops = [x if s_ is x0 else s_ for s_ in md.stops]
+    out = []
+    for k in range(int(secs / 0.1)):
+      t = t0 + 0.1 * (k + 1)
+      md.cars = cars_at(t - t0, t)
+      out.append((round(t - t0, 1), md._light(x, md.last_state, t)))
+    return out
+
+  # one beside (right lane) turning right on red from the line: 4 m/s, yawing 0.4 rad/s
+  def turner(dt, t):
+    h = -math.degrees(0.4 * dt)
+    p = np.array([13.75, y_line - 2.6]) + 4.0 / 0.4 * np.array([1.0 - math.cos(0.4 * dt), math.sin(0.4 * dt)])
+    return [wait, tracked(p[0], p[1], h, 4.0, 2, t, yaw=-0.4)]
+  got = run(turner, 4.0)
+  assert all(light == "red" for _, light in got), got
+  # our own lane's queue moving off straight: one at the line ahead of us, from 1 s at 2 m/s^2
+  ahead_y = md.path[int(np.searchsorted(md.s_path, md.s + md.front + 5.0)), 1]
+
+  def ours(dt, t):
+    go = max(dt - 1.0, 0.0)
+    return [wait, tracked(8.25, ahead_y + go * go, 0.0, 2.0 * go, 3, t, still=0.0 if go > 0 else 30.0)]
+  got = run(ours, 4.0)
+  t_through = 1.0 + LIGHT_THROUGH / 2.0
+  first = next((dt for dt, light in got if light != "red"), None)
+  assert first is not None and first <= t_through + 0.3, (first, got)
+  # cross traffic going (westward at its node) for 4 s, then waiting at its line; the one beside us then moving off
+  def cross_then_ours(dt, t):
+    cars = [tracked(40.0 - 10.0 * dt - 25.0 * n, 302.75, 90.0, 10.0, 10 + n, t) for n in range(6)] if dt < 4.0 else \
+           [tracked(25.0, 302.75, 90.0, 0.0, 10, t, still=dt - 4.0, at_light=True)]
+    go = max(dt - 5.0, 0.0)
+    return cars + [tracked(waiting.x, waiting.y + go * go, 0.0, 2.0 * go, 1, t, still=0.0 if go > 0 else 30.0)]
+  got = run(cross_then_ours, 9.0)
+  first = next((dt for dt, light in got if light != "red"), None)
+  assert first is not None and 5.0 + LIGHT_THROUGH / 2.0 + LIGHT_GREEN_S - 0.2 <= first <= 5.0 + LIGHT_THROUGH / 2.0 + LIGHT_GREEN_S + 0.4, (first, got)
+  # a single red-runner in the right lane at 14 m/s while the cross traffic goes
+  def runner(dt, t):
+    cars = [tracked(40.0 - 10.0 * dt - 25.0 * n, 302.75, 90.0, 10.0, 10 + n, t) for n in range(12)]
+    return cars + [wait, tracked(13.75, y_line - 30.0 + 14.0 * dt, 0.0, 14.0, 4, t)]
+  got = run(runner, 5.0)
+  assert all(light == "red" for _, light in got), got
+  # a replan while held (as a lane change put off does) keeps its red
+  md.stops = [x0 if s_ is x0 else s_ for s_ in md.stops]
+  md.cars = [wait]
+  assert md._light(x0, md.last_state, t0 + 0.1) == "red"
+  assert md._replan_keys(md.route, md.last_state, t0 + 0.1, md.keys)
+  x = next(s_ for s_ in md.stops if s_["kind"] == "lights")
+  assert x.get("held") is not None and md._light(x, md.last_state, t0 + 0.2) == "red", x
+  print("held red released surely: ok")
+
+
 def test_right_on_red():
   # new4 r1t1 (Olympic Fwy (71,-1153), a right turn at a light): held at the line 2 min, the light read red from the
   # cross traffic flowing (and released for a moment at each lull). Turning right, a red for the cross traffic is
@@ -1084,6 +1170,7 @@ if __name__ == "__main__":
   test_crossing_at_the_line()
   test_no_creep_in_a_junction()
   test_lights_from_traffic()
+  test_held_red_released_surely()
   test_right_on_red()
   test_stop_sign_order()
   test_pedestrians()

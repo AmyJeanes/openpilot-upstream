@@ -145,7 +145,8 @@ LIGHT_THROUGH = 3.0  # m/s: one of ours crossing its line faster is going throug
 LIGHT_CROSS = 4.0  # m/s: one crossing our way at its junction faster is going on its green
 LIGHT_QUEUE = 1.0  # s one of ours has stood at or behind its line, waiting
 LIGHT_NODE = 25.0  # m from a signal's junction node a crosser is in its junction
-LIGHT_STRAIGHT = 0.15  # rad/s a crosser turns at most, going straight across on its green
+LIGHT_STRAIGHT = 0.15  # rad/s a crosser turns at most, going straight across on its green (and one of ours, through)
+LIGHT_GREEN_S = 1.0  # s one of ours in another lane is seen going through, held at a red, before that's our green
 ORDER_WAIT = 8.0  # s after its dwell at most a stop sign waits for those who came to their lines first
 ORDER_NEAR = 30.0  # m from the junction's node one waiting at its line may be
 SIGNAL_TIME, SIGNAL_DIST = 5.0, 50.0  # s, m before a turn (as the AI expert)
@@ -1683,6 +1684,7 @@ class MapDrive:
     k_raw = np.gradient(self.theta, self.s_path)
     self.kappa_path = smooth(k_raw, max(int(CURV_SMOOTH / STEP) | 1, 1))
     self.route_s, self.route_r = along_route(route, target, route.at - 5.0)
+    same = self.route is route
     self.route = route
     self.path0, self.nudge_off, self.nudge_fixed = target, np.zeros(len(target)), np.zeros(len(target))
     self.theta0 = self.theta
@@ -1701,7 +1703,9 @@ class MapDrive:
     self.s = 0.0
     # path m from before a splice mean nothing on the new path: the stall clock runs on from 0 m, a crossing's hold goes
     self.progress, self.cross_hold = (0.0, self.progress[1]), None
-    # stops ahead, as path m
+    # stops ahead, as path m; a light's reading so far kept on a replan of the same route (a lane change put off while
+    # held at it mustn't forget its red)
+    seen = {x["along"]: x for x in getattr(self, "stops", []) if x["kind"] == "lights"} if same else {}
     self.stops = []
     for along, kind in zip(route.stops, route.stop_kinds, strict=False):
       if along <= route.at + 1.0:
@@ -1709,6 +1713,8 @@ class MapDrive:
       s_line = float(np.interp(along, self.route_s, self.s_path))
       self.stops.append({"along": float(along), "kind": kind, "s": s_line, "done": False, "t_stop": None,
                          "target": s_line - self.front - self.style["stop_margin"]})
+      if kind == "lights" and float(along) in seen:
+        self.stops[-1].update({k: v for k, v in seen[float(along)].items() if k not in ("s", "target", "done", "t_stop")})
     arrive_along = route.length - float(self.c["stop_before"])
     self.s_arrive = float(np.interp(max(arrive_along, route.at + 5.0), self.route_s, self.s_path))
     # the static speed profile: the road's speed, the curvature, nav's turn speeds, the arrival
@@ -2928,18 +2934,23 @@ class MapDrive:
     """What the traffic about shows of the signal at stop line x, from LIGHT_LOOK m short of it: "red" where one of
     ours (going our way) ahead of our rear waits at a red light (its own flag, where the plugin sends one) or has stood
     at or just behind the line LIGHT_QUEUE s, or one crosses our way in its junction faster than LIGHT_CROSS, going
-    straight (on its green; not turning); "green" where one of ours drives over the line faster than LIGHT_THROUGH, or one on the crossing road waits
+    straight (on its green; not turning); "green" where one of ours drives over the line faster than LIGHT_THROUGH
+    going straight (turning less than LIGHT_STRAIGHT: one turning right on red, or on its own arrow, shows nothing of
+    ours), or one on the crossing road waits
     at its red by the junction, and none of that, but for one going through in our own lane (or any lane of ours where
     the route goes straight on), which outweighs a queue in the lane beside (a turn lane's own phase); each kept
-    LIGHT_KEEP s. Never from those behind us, who wait because we do (the plugin's traffic.red counts them too, so isn't
-    used). None where nothing shows: no traffic about, and the trip goes as without it. x keeps why, and whether any
-    traffic was about."""
+    LIGHT_KEEP s. Held at it, a red stands until our green is sure (_green_sure): one of ours through in our own lane,
+    two in others, or one seen going through LIGHT_GREEN_S, none of it before the last sign of red or of cross traffic
+    going (a glimpse of one turning or running the red isn't our green). Never from those behind us, who wait because
+    we do (the plugin's traffic.red counts them too, so isn't used). None where nothing shows: no traffic about, and the
+    trip goes as without it. x keeps why, and whether any traffic was about."""
     gap = x["s"] - self.s - self.front
     if gap > LIGHT_LOOK or not self.cars:
       return None
     x["traffic"] = True
     red = green = None
-    own_green = False
+    own_green = own_lane = crossing = False
+    through: set = set()  # the ones of ours going straight through
     # our way in: the route's heading short of the line (the path may already swing into a turn at it)
     k = segment_of(self.route, max(x["along"] - 10.0, 0.0))
     seg = self.route.points[k + 1, :2] - self.route.points[k, :2]
@@ -2961,27 +2972,51 @@ class MapDrive:
         rel = float(along[0]) - x["s"]
         if (car.get("at_light") and rel < 3.0) or (-25.0 < rel < 3.0 and float(car.get("still") or 0.0) >= LIGHT_QUEUE):
           red = red or "waiting"
-        elif -3.0 < rel < 20.0 and speed > LIGHT_THROUGH:
+        elif -3.0 < rel < 20.0 and speed > LIGHT_THROUGH and abs(float(car.get("yaw") or 0.0)) < LIGHT_STRAIGHT:
           green = "through"
-          own_green = own_green or straight or abs(float(right[0])) < LANE_W / 2 + 1.0
+          own = abs(float(right[0])) < LANE_W / 2 + 1.0
+          own_green, own_lane = own_green or straight or own, own_lane or own
+          through.add(car.get("id"))
       elif 50.0 < ang < 130.0 and float(np.hypot(*(mid - node))) < LIGHT_NODE:
         if speed > LIGHT_CROSS and abs(float(car.get("yaw") or 0.0)) < LIGHT_STRAIGHT:
-          red = red or "cross"  # (one turning through the junction, from the road opposite or on its own red, shows nothing)
+          red, crossing = red or "cross", True  # (one turning through the junction, from the road opposite or on its own red, shows nothing)
         elif car.get("at_light"):
           green = green or "cross_waiting"
+    if crossing:
+      x["cross_t"] = t
+    if (red and not own_green) or crossing:
+      x["through"] = {}  # those seen going through count from the last sign of red
     if red and not own_green:
       x["red_t"], x["why"] = t, red
     elif green:
       x["green_t"], x["why"], x["green_why"] = t, green, green
+      seen = x.setdefault("through", {})
+      for i in through:
+        seen.setdefault(i, t)
+      if own_lane:
+        x["own_t"] = t
     # held at it, red stands LIGHT_HOLD_KEEP s (a gap in the cross traffic, or one waiting at its own red, isn't our
-    # green), unless one of ours goes through after it
-    keep = LIGHT_HOLD_KEEP if x.get("held") is not None else LIGHT_KEEP
+    # green), unless one of ours goes through after it, surely
+    held = x.get("held") is not None
+    keep = LIGHT_HOLD_KEEP if held else LIGHT_KEEP
     ours = x.get("green_why") == "through" and x.get("green_t", -math.inf) > x.get("red_t", -math.inf)
+    if ours and held and not self._green_sure(x, t):
+      return "red"
     if t - x.get("red_t", -math.inf) < keep and not ours:
       return "red"
     if t - x.get("green_t", -math.inf) < LIGHT_KEEP:
       return "green"
     return None
+
+  @staticmethod
+  def _green_sure(x: dict, t: float) -> bool:
+    """Whether what's gone through at stop line x since the last sign of red or of cross traffic going is our green
+    (_light): one in our own lane, two in others, or one seen going through LIGHT_GREEN_S."""
+    since = max(x.get("red_t", -math.inf), x.get("cross_t", -math.inf))
+    if x.get("own_t", -math.inf) > since:
+      return True
+    seen = [f for f in x.get("through", {}).values() if f > since]
+    return len(seen) >= 2 or (bool(seen) and t - min(seen) >= LIGHT_GREEN_S and t - x.get("green_t", -math.inf) < LIGHT_KEEP)
 
   def _before_us(self, x: dict, t: float) -> dict | None:
     """At a stop sign's line, stopped since x["t_stop"]: a driven vehicle waiting at its own line into the junction

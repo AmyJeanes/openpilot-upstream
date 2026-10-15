@@ -838,7 +838,7 @@ def test_hatched_live_routes():
     keys = list(md.keys)
     assert md.plans and all(md._hatch_hit(route, keys, a, b) is None for a, b in chains(keys)), spec
     deferred = 0
-    for a, b in chains(keys):
+    for a, _ in chains(keys):
       s0 = float(np.interp(keys[a][0], md.route_s, md.s_path))
       for start in np.arange(keys[a][0] + 20.0, min(keys[a][0] + 200.0, route.length), 20.0):
         got = md._deferred_off_hatched(route, s0, float(start), 20.0)
@@ -846,8 +846,8 @@ def test_hatched_live_routes():
           break
         deferred += 1
         assert all(md._hatch_hit(route, got, x, y) is None for x, y in chains(got) if got[x][0] >= keys[a][0]), (spec, start)
-    print(f"  {spec}: {len(md.changes)} changes, moved {len(md.hatch_moves)}, flagged {len(kinds(md, 'hatched_change'))}, "
-          f"{deferred} deferrals checked, {len(route.lanes.hatched)} areas beside")
+    flagged = len(kinds(md, "hatched_change"))
+    print(f"  {spec}: {len(md.changes)} changes, moved {len(md.hatch_moves)}, flagged {flagged}, {deferred} deferrals checked")
     live += 1
   print(f"hatched live routes: ok ({live} trips)" if live else "hatched live routes: skipped (no live map or router)")
 
