@@ -9,8 +9,10 @@ from openpilot.common.basedir import BASEDIR
 
 FONTS = os.path.join(BASEDIR, 'openpilot/selfdrive/assets/fonts')
 BG, PANEL, INK, MUTED, ALERT = (11, 13, 16), (20, 24, 30), (236, 239, 243), (142, 152, 166), (255, 200, 80)
-# the two 3X cameras yellow / blue, complementary so the seam's tint adds up to grey where they agree
-NARROW_CAM, WIDE_CAM = (255, 196, 0), (60, 124, 255)
+# color follows what a thing is, the same in every panel: the two 3X cameras yellow / blue (complementary, so the seam's tint
+# adds up to grey where they agree), the two model inputs cyan / magenta, the comma 4 frame edges lime (the model path is white)
+NARROW_CAM, WIDE_CAM, NARROW_IN, WIDE_IN, C4_FRAME = (255, 196, 0), (60, 124, 255), (0, 216, 255), (255, 61, 220), (157, 255, 60)
+KIND_COLORS = {'narrow_cam': NARROW_CAM, 'narrow_input': NARROW_IN, 'wide_input': WIDE_IN, 'c4_frame': C4_FRAME}
 SEAM_KEY = (('3X narrow', NARROW_CAM), ('3X wide', WIDE_CAM), ('agree', (170, 170, 170)))
 
 # two rows under 36 px headers: the comma 4 frames and the seam, then the 3X frames at their own shape, the model inputs
@@ -91,6 +93,42 @@ def inset_masks(alpha: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, n
   return inset, edge | np.roll(edge, 1, 0) | np.roll(edge, 1, 1)
 
 
+def outline_layer(items: list, native_wh: tuple[int, int], size: tuple[int, int]) -> Image.Image:
+  """The outlines as one RGBA layer at the panel's size, drawn at the frame's own size and scaled down for smooth edges.
+  Fills, bands and strokes are layers of their own: on one layer a later shape replaces an earlier one's pixels."""
+  fills, bands, strokes = (Image.new('RGBA', native_wh, (0, 0, 0, 0)) for _ in range(3))
+  df, db, ds = ImageDraw.Draw(fills), ImageDraw.Draw(bands), ImageDraw.Draw(strokes)
+  for it in items:
+    if not it['visible'] or len(it['points']) < 3:
+      continue
+    col = KIND_COLORS[it['kind']]
+    pts = [tuple(p) for p in it['points']]
+    if it.get('inner'):
+      inner = [tuple(p) for p in it['inner']]
+      for i in range(len(pts)):
+        j = (i + 1) % len(pts)
+        db.polygon([pts[i], pts[j], inner[j], inner[i]], fill=col + (90,))
+    else:
+      if it['kind'] != 'c4_frame':  # frame edges are reference lines: no fill to tint the picture
+        df.polygon(pts, fill=col + (32,))
+      ds.line(pts + pts[:1], fill=(0, 0, 0, 150), width=6)  # a dark edge keeps every color readable over sky and road alike
+      ds.line(pts + pts[:1], fill=col + (255,), width=3)
+  out = Image.new('RGBA', native_wh, (0, 0, 0, 0))
+  for layer in (fills, bands, strokes):
+    out = Image.alpha_composite(out, layer)
+  return bare(out.convert('RGBa'), *size, Image.LANCZOS).convert('RGBA')
+
+
+def fade(layer: Image.Image, opacity: float) -> Image.Image:
+  """An RGBA layer at a fraction of its strength."""
+  if opacity >= 1:
+    return layer
+  out = layer.copy()
+  out.putalpha(layer.getchannel('A').point([round(a * opacity) for a in range(256)]))
+  return out
+
+
+@lru_cache(maxsize=32)
 def header(w: int, title: str, items: tuple = (), sub: str | None = None, right: str | None = None, alert: str = '') -> Image.Image:
   """A panel's header bar: its name, then a swatch and name per thing drawn on it; `right` at the far end, and an alert just
   before it (shortened to the room there is)."""
@@ -123,6 +161,10 @@ def header(w: int, title: str, items: tuple = (), sub: str | None = None, right:
   return p
 
 
+def legend(items: list) -> tuple:
+  return tuple((it['name'], KIND_COLORS[it['kind']]) for it in items if it['visible'])
+
+
 # where each panel's picture sits in the whole picture (x, y, w, h); its header bar is the HB px above it
 IH = (PH - 2) // 2
 _Y2 = HB + PH + GAP
@@ -134,17 +176,24 @@ TITLES = {'c4_narrow': 'C4 NARROW', 'c4_wide': 'C4 WIDE', 'seam': 'SEAM', 'devic
 
 
 def compose(v: dict) -> Image.Image:
-  """The whole picture from the panels' pictures (RGB, at their panel sizes, the stats panel's too) and the stats header's
-  v['speed'] and v['alert']."""
+  """The whole picture from the panels' pictures (RGB, at their panel sizes, the stats panel's too) and the headers'
+  contents: v['legends'] per panel, v['speed'], v['alert']."""
   out = Image.new('RGB', (W, H), BG)
   for k, (x, y, _, _) in PANELS.items():
     out.paste(v[k], (x, y))
   for k, title in TITLES.items():
     x, y, w, _ = PANELS[k]
-    out.paste(header(w, title, SEAM_KEY if k == 'seam' else ()), (x, y - HB))
+    out.paste(header(w, title, SEAM_KEY if k == 'seam' else v['legends'][k]), (x, y - HB))
   x, y, w, _ = PANELS['input_narrow']
   out.paste(header(w, 'MODEL INPUT', (), 'narrow above, wide below'), (x, y - HB))
   x, y, w, _ = PANELS['stats']
   out.paste(header(w, 'STATS', (), 'last 10 s', v['speed'], v['alert']), (x, y - HB))
   return out
 
+
+def canvas_layer(panels: dict) -> Image.Image:
+  """Panels' RGBA layers placed where their panels sit, transparent elsewhere."""
+  out = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+  for k, img in panels.items():
+    out.paste(img, PANELS[k][:2])
+  return out
