@@ -8,8 +8,8 @@ within its lane-slot window (by the trip's style, freeway ones within +-20 % of 
 its time (the style's t_lc, no quicker than its lateral acceleration allows) at the speed the car will drive it, its end
 kept, moved off jogs in the route's line (route_jogs, where the lane line swerves; jog_change where there's no
 room) and so our body keeps out of the map's hatched areas (gores, painted medians: off_hatched; hatched_change where
-there's no room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
-and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in, and
+there's no room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its
+offsets, jogs and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in, and
 kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner kerb (a far-side turn's a median's
 edge, else the road's far edge), within its lane outside lane changes and turns' corners, past a fork off its
 gore, and off the map's raised islands (traffic_calming=island: a tram crossing's D islands), our body CLAMP_MARGIN
