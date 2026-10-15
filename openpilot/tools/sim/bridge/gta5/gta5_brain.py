@@ -246,7 +246,12 @@ class Brain:
     self.next_hud = now + HUD_EVERY
     set_kph = self.io.set_speed_kph
     self._send({"type": "hud", "setSpeed": set_kph if 0 < set_kph < 255 else 0, "metric": self.metric,
-                "engaged": self.driver.engaged or self.openpilot.engaged})
+                "engaged": self.driver.engaged or self.openpilot.engaged, "reason": self._map_status()})
+
+  def _map_status(self) -> str:
+    """What the map driver driving now is doing and why (MapDrive.status), for the HUD and the map view; "" without one."""
+    md = self._map_drive()
+    return md.status(md.last_v) if md is not None and md.path is not None else ""
 
   def close(self):
     self._flush_marks()
@@ -589,7 +594,7 @@ class Brain:
                  "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
       "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.driver.engaged or self.openpilot.engaged else ''}" +
-              ("  cruising (no destination)" if cruising else ""),
+              ("  cruising (no destination)" if cruising else "") + (f"  | {why}" if (why := self._map_status()) else ""),
       "nav": {"routes": self.routes, "cruise": cruising, "length": None if self.route is None else round(self.route.length, 1),
               "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
     })

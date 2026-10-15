@@ -702,6 +702,7 @@ class MapDrive:
     self.indicator: str | None = None
     self.label = "none"
     self.reason = ""
+    self.reason_detail: dict = {}  # what _longitudinal knew of the reason (a lead's gap, a lane gap's side), for status()
     self.msg: dict | None = None
     self.last_key = None
     self.last_t: float | None = None
@@ -808,6 +809,42 @@ class MapDrive:
       return []
     i = max(int(self.s / STEP) - 2, 0)
     return self.intent[i::step].round(1).tolist()
+
+  def status(self, v: float) -> str:
+    """What the car is doing and why, in a few words for the HUD: the speed's reason (_longitudinal), and a lane change
+    under way or waiting for its lane."""
+    r, d = self.reason, self.reason_detail
+    stopped = v < STOPPED
+    if self.phase == "abort" or r == "abort":
+      return f"Gave up: {self.why}" if self.why else "Gave up"
+    if self.phase == "done" or r == "arrive":
+      return "Arrived" if stopped else "Arriving"
+    lw = self.lc_wait
+    if r == "hold" and lw is not None:
+      return f"Waiting for a gap to move {lw['side']}"
+    if r == "light":
+      red = any(x["kind"] == "lights" and x.get("held") is not None and not x["done"] for x in self.stops)
+      return ("Stopped at a red light" if stopped else "Stopping for a red light") if red else "Slowing: light ahead not seen yet"
+    if r == "lead":
+      if stopped:
+        return "Queued behind a vehicle"
+      return f"Following a vehicle, {d['gap']:.0f} m" if "gap" in d else "Following a vehicle"
+    words = {
+      "": "Cruising", "limit": "Cruising", "curve": "Slowing for a curve", "turn": "Slowing for the turn", "give_way": "Give way ahead",
+      "start": "Pulling away", "range": "Slowing: can't see far ahead", "nudge": "Passing a parked vehicle",
+      "ped_kerb": "Slowing for a pedestrian at the kerb", "cut_in": "Braking for a car cutting in",
+      "order": "Waiting our turn at the stop", "hold": "Holding back",
+    }
+    paired = {"stop": ("Stopped at a stop sign", "Slowing for a stop sign"),
+              "cross": ("Waiting for cross traffic", "Slowing for cross traffic"),
+              "ped": ("Stopped for a pedestrian", "Slowing for a pedestrian"),
+              "blocked": ("Waiting: a vehicle across our way", "Slowing: a vehicle across our way"),
+              "obstacle": ("Stopped: obstacle ahead", "Slowing for an obstacle")}
+    text = paired[r][0 if stopped else 1] if r in paired else words.get(r, "")
+    if not math.isnan(self.lc_tau):
+      move = f"Changing lane {'left' if self.lc_dir < 0 else 'right'}"
+      text = f"{move} - {text}" if text and text != "Cruising" else move  # GTA's HUD font has no middle dot
+    return text
 
   def take_prompts(self) -> list[tuple[str, str]]:
     p, self.prompts = self.prompts, []
@@ -3605,7 +3642,7 @@ class MapDrive:
       self._abort(f"held {wait:.0f} s by a {who}" + (" (deadlock)" if blocked else " in the way"), t, state.get("pos"))
       return self.a
     self._set(phase, t, **detail)
-    self.v_prof, self.reason = min(vp_here, vp), reason
+    self.v_prof, self.reason, self.reason_detail = min(vp_here, vp), reason, detail
     if v < 0.5 and vp > 0.5 and reason not in ("stop", "arrive"):
       self.reason = "start"
     a = (vp * vp - v * v) / (2.0 * look)
