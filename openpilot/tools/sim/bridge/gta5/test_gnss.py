@@ -44,6 +44,13 @@ def test_gnss_as_a_3x():
     true_x = 10.0 * ((fix.unixTimestampMillis / 1000.0 - 1.7e9) - 100.0)  # the position when it was taken, 300 ms back
     errors.append(np.hypot(x - true_x, y - 50.0))
   assert 0.3 < np.mean(errors) < 10.0  # noisy, but metres, not tens
+  pm_still = PubMaster()
+  g = Gnss("qcom3x", seed=2, pm=pm_still)
+  for k in range(2400):  # 120 s standing still: the fixes drift, they don't hop about
+    clock.t = 300.0 + k * 0.05
+    g.update(clock.t, 0.0, 0.0, 30.0, 0.0, 0.0)
+  still = np.array([to_game(m.gpsLocation.latitude, m.gpsLocation.longitude) for _, m in pm_still.sent])
+  assert np.mean(np.hypot(*np.diff(still, axis=0).T)) < 0.3 and np.max(np.hypot(*still.T)) > 0.5
   pm2 = PubMaster()
   g = Gnss("perfect", pm=pm2)
   clock.t = 200.0
