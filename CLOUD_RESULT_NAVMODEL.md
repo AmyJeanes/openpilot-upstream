@@ -177,3 +177,64 @@ map; **2 untagged** (no cut) and **0 inverted**. Layers aren't read by the rende
   0.05 % at the origin, 0.2 % across the map). The route and fix must then be in the same frame (item 4).
   `contact_lat0_vs_lat34.png` shows the same frames both ways (road pixels about 8 % fewer at 34 N).
 - Car parks: 19 232 service ways (GTA's car-park aisles and drives) draw as MINOR roads, as a real map's would.
+
+## 4. Bridge integration
+
+```
+Router / Navigator (Valhalla, map/router.py) -- Route --> NavMessages (gta5_nav_msgs, GTA5_NAV_MSGS=1)
+   |                                                      |-- navRoute: the route's (lat, lon), simplified to 1 m, resent every 2 s
+   |                                                      '-- navInstruction 10 Hz: banner + lanes as before, and with
+   |                                                          GTA5_NAV_MODEL=1 allManeuvers = ModelNav (item 2)
+gta5_gnss -- gpsLocation (qcom3x: 1 Hz, 300 ms late, 3 m bias) --.
+                                                                   v
+                        gta5_mapsd = comma's MapsD + local tiles (+ frame) -- VISION_STREAM_MAP 20 Hz --> modeld: nav_map
+                                                     navInstruction ------------------------------------> modeld: navigation
+```
+
+**What the bridge publishes.** It already is the navd: `NavMessages` + `NavPublisher` publish `navRoute` and
+`navInstruction` from its router's route (`valid=True`; the fork's schema is a superset of comma's). comma's own navd
+must **not** run (it routes with Mapbox from `NavDestination`, which `gta5_navd` sets for the UI). Changed:
+`gta5_nav_msgs.py` gains `GTA5_NAV_MODEL=1`, which puts `ModelNav`'s list in `allManeuvers` (one `ModelNav` per route;
+the banner fields stay as they were). The car's place on the route is the game's pose, as nav_msgs already uses; the
+UI's maneuver list then also shows continues and keeps (cosmetic). Test `navmodel/test_bridge_nav.py`.
+
+**mapsd.** comma's mapsd runs as it is, from GTA's tiles: `NAV_TILES=~/gta5map/gta5_roads.pmtiles python -m
+openpilot.selfdrive.navigation.mapsd`, or `navmodel/gta5_mapsd.py --tiles ...`, the same MapsD with an optional frame
+(`--lat0 34` with tiles built `--lat0 34`): `FrameSM` moves the route's and the fix's coordinates into that frame on
+the way in, so the bridge's GNSS, Valhalla and UI stay in their own frame. It reads the fix as on a car: projected onto
+the route (the 3 m bias drops out sideways), moved on by `speed x time since received` (the 300 ms latency isn't
+undone, as on a comma 3X: about 7 m behind at 25 m/s). Rendering takes 21-29 ms a frame here (about half a core at 20 Hz);
+along the three fixture routes every frame (9 320, every 2 m) was valid. `gta5_mapsd --dump DIR` saves every Nth
+frame with its fix and progress. Not added to `process_config` (comma adds navd + mapsd under `NavigationEnabled`;
+that comes with the sunnypilot sync); run it in a terminal or from the bridge.
+
+**modeld.** The fork's modeld needs comma's `8b8ce13` hunk (dtype-aware input packing, `nav_map` from a `mapsd`
+VisionIPC client with a 0.5 s timeout, `navigation` from `navInstruction` with a 2 s timeout): as
+`navmodel/modeld_nav_inputs.patch` on the fork's modeld (`git apply --check` passes; the patched file compiles; not run
+here: no tinygrad/msgq build). Models without those inputs are unaffected by it (the packing is byte-identical for
+all-float32 inputs, the inputs go only to a model that has them). The rl model: `MODELD_DEV=CUDA
+MODELD_BIG_ONNX=<a03bb1d's big_driving_supercombo.onnx> scons` -> `local_big_driving_tinygrad.pkl`, run with
+`MODELD_BIG=1` (the fork's existing path). Note comma's branch bumped tinygrad (`d3f09c9` vs the fork's `9d0446a`);
+the fork compiles with its own.
+
+**What it sits beside or replaces.**
+- The fork's navd planner and NavDesire (turn and keep desires through the blinker, lane changes, speed caps): with
+  the nav model, two conditions: *model alone* (`GTA5_NOO=off`: nav only guides, no desires; the blinker lane-turn
+  desire then only comes from the driver) and *model + NavDesire* (`GTA5_NOO=on`). The model's own `desire` input is
+  unchanged.
+- The route input (`selfdrive/navd/route_input.py`, 223 floats, for gta5-train's route models): independent; modeld
+  feeds each input by name, a model has one or the other.
+- The UI: unchanged, reads the same messages.
+
+**Recording the two inputs with our training data.** `gta5_record.py` writes each segment's frames with per-frame rows
+(the plan, modeld's tap). Add per frame, cheaply: the `navigation` vector (47 floats, `ModelNav` at the frame's pose with
+modeld's dead reckoning, or the raw `allManeuvers` + message age + v_ego), and the map's render inputs: mapsd's pose
+(lon, lat, bearing: `RouteTracker.pose(progress + ahead)`), the route (once per route change), the tiles file's sha256 and
+lat0. The renderer is deterministic CPU code, so `nav_map` re-renders offline exactly (or keep a 1 Hz PNG, as
+`--dump` does, to check). This keeps the recording small (a 256x256 frame at 20 Hz would be 1.3 MB/s raw).
+
+**The map driver's routes as the model's routes.** The map driver (expert) drives a Navigator route: to a
+destination (`Router.route`) or along a cruise (`cruise.py`, `Router.via`). It's the same `Route` object NavMessages gets,
+so `navRoute`, `ModelNav` and the recorded inputs all describe the route the expert drives; a reroute is a new Route,
+and mapsd's tracker and ModelNav start over with it, as on a car. On the Windows host's brain `ModelNav` runs too
+(numpy and comma's pure-Python helpers), its maneuvers going over the link as plain data like the rest of the content.

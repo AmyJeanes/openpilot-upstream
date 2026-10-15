@@ -8,6 +8,7 @@ simplified for a small map (fork fields), from a background thread since gatheri
 
 The content is plain data, so the brain makes it wherever it runs (on Windows too) and hands it to its OpenpilotIO's
 nav_instruction and nav_route; gta5_nav_pub.py builds the messages from it and publishes them where openpilot is."""
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -20,6 +21,9 @@ from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import FORWARD, LEFTS, RIGHTS
 
 INSTRUCTION_EVERY = 0.1  # s
+# comma's nav model (navmodel/README.md): allManeuvers as its navigation input reads them (navmodel/nav_input.py: every
+# maneuver, continues too, lane-split keeps folded, measured as comma's navd measures them), in place of the UI's five
+NAV_MODEL = os.getenv("GTA5_NAV_MODEL") == "1"
 ROUTE_EVERY = 2.0  # s, for a UI that starts after the route was sent
 ROUTE_TOLERANCE = 1.0  # m the simplified route keeps to the route
 ROAD_TOLERANCE = 2.0  # m, for the roads near it
@@ -325,6 +329,7 @@ class NavMessages:
     self.osm = None
     self.busy = False
     self.lock = threading.Lock()
+    self.model_nav = None  # (route, nav_input.ModelNav) for NAV_MODEL
 
   def update(self, route, v: float, osm=None, slots_for: Callable | None = None, now: float | None = None,
              pose: tuple | None = None) -> None:
@@ -364,7 +369,17 @@ class NavMessages:
     except Exception as e:
       print(f"nav msgs: lanes: {e!r}")
       guide = NO_LANES
-    return instruction(route, route.at, v, self.project, guide, pose)
+    ni = instruction(route, route.at, v, self.project, guide, pose)
+    if NAV_MODEL:
+      ni["allManeuvers"] = self._model_nav(route).all_maneuvers_at(pose[0] if pose is not None else point_at(route, route.at),
+                                                                   self.project)
+    return ni
+
+  def _model_nav(self, route):
+    from openpilot.tools.sim.bridge.gta5.navmodel.nav_input import ModelNav
+    if self.model_nav is None or self.model_nav[0] is not route:
+      self.model_nav = (route, ModelNav(route, self.project))
+    return self.model_nav[1]
 
   def _gather(self, route, at: float, osm):
     """On a thread: the roads near the route ahead of `at`, and the navRoute's content with them."""
