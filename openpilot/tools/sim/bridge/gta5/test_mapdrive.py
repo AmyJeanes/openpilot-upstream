@@ -1083,6 +1083,31 @@ def test_expert_ai_unchanged():
   print("expert ai unchanged: ok")
 
 
+def test_status_words():
+  """The HUD's reason line: the speed's reason in words, stopped or moving, with a lane change under way."""
+  md = MapDrive.__new__(MapDrive)
+  md.phase, md.why, md.lc_wait, md.stops, md.lc_tau, md.lc_dir = "drive", "", None, [], math.nan, math.nan
+
+  def says(reason, v, **detail):
+    md.reason, md.reason_detail = reason, detail
+    return md.status(v)
+
+  assert says("limit", 20.0) == "Cruising"
+  assert says("ped", 0.0) == "Stopped for a pedestrian" and says("ped", 5.0) == "Slowing for a pedestrian"
+  assert says("cross", 0.0) == "Waiting for cross traffic"
+  assert says("lead", 10.0, gap=23.4) == "Following a vehicle, 23 m" and says("lead", 0.0) == "Queued behind a vehicle"
+  md.stops = [{"kind": "lights", "held": 1.0, "done": False}]
+  assert says("light", 0.0) == "Stopped at a red light"
+  md.stops = []
+  assert says("light", 8.0) == "Slowing: light ahead not seen yet"
+  md.lc_wait = {"side": "left"}
+  assert says("hold", 9.0) == "Waiting for a gap to move left"
+  md.lc_wait, md.lc_tau, md.lc_dir = None, 0.4, 1.0
+  assert says("limit", 20.0) == "Changing lane right" and says("curve", 15.0) == "Changing lane right - Slowing for a curve"
+  md.phase, md.why = "abort", "plan: the car is 9 m from its lane line"
+  assert says("abort", 0.0) == "Gave up: plan: the car is 9 m from its lane line"
+
+
 def test_real_routes():
   if ms.live_map() is None:
     print("real routes: skipped (no live map)")
