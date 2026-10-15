@@ -820,8 +820,12 @@ class MapDrive:
     if self.phase == "done" or r == "arrive":
       return "Arrived" if stopped else "Arriving"
     lw = self.lc_wait
-    if r == "hold" and lw is not None:
-      return f"Waiting for a gap to move {lw['side']}"
+    if lw is not None and (r == "hold" or math.isnan(self.lc_tau)):
+      why = {"beside": "a car beside", "closing": "a car closing from behind", "behind": "a car coming up behind",
+             "ahead": "a car just ahead in that lane", "into": "the far lane busy"}.get(lw.get("why"), lw.get("why") or "")
+      held = f" ({why})" if why else ""
+      if r in ("", "limit", "hold"):
+        return f"Waiting for a gap to move {lw['side']}{held}"
     if r == "light":
       red = any(x["kind"] == "lights" and x.get("held") is not None and not x["done"] for x in self.stops)
       return ("Stopped at a red light" if stopped else "Stopping for a red light") if red else "Slowing: light ahead not seen yet"
@@ -2137,6 +2141,7 @@ class MapDrive:
       if t - lw["since"] > LC_LATE_WAIT:
         self._abort(f"no gap in the lane to the {side} in {LC_LATE_WAIT:.0f} s", t, state.get("pos"))
       return
+    self.lc_wait = None  # no change left ahead to wait for (planned away, or along a fork's other branch)
 
   def _lane_window(self, s0: float, s1: float, side: str, shift: float, v: float, t: float) -> str | None:
     """What keeps a lane change from path m s0 to s1 (`shift` m across) from its lanes, beyond what the blind-spot
@@ -3799,6 +3804,8 @@ class MapDrive:
       if s0 <= s <= s1:
         self.lc_tau = (s - s0) / max(s1 - s0, EPS)
         self.lc_dir = -1.0 if d == "left" else 1.0
+    if side is None and self.lc_wait is not None:
+      side = self.lc_wait["side"]  # waiting for a gap: signalled all the while its change is put off (the label as it was)
     at, heading = route.at, float(state.get("heading") or 0.0)
     for i, m in enumerate(self.mans):
       if i in self.done_mans:
