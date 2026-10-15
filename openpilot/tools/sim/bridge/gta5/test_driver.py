@@ -128,6 +128,30 @@ def test_destination_from_the_game_and_the_map_view():
   assert dest.dest is None and sent == [{"type": "waypoint", "off": True}] and "NavDestination" not in params.values
 
 
+def test_destination_stops_added_on_the_map_view():
+  """"Add stop" keeps the destination so far as a stop before the new one; passing one drops it; a plain pick or a new
+  waypoint in the game starts again without stops."""
+  params, sent = Params(), []
+  dest = Destination(params, sent.append)
+  car = np.array([0.0, 0.0])
+  assert list(dest.update(None, car, ([5.0, 6.0], "add"))) == [5.0, 6.0] and dest.stops == []  # nothing to keep yet
+  dest.update(None, car, ([7.0, 8.0], "add"))
+  dest.update(None, car, ([9.0, 10.0], "add"))
+  assert list(dest.dest) == [9.0, 10.0] and [list(p) for p in dest.stops] == [[5.0, 6.0], [7.0, 8.0]]
+  assert params.values["NavDestination"] and np.allclose(to_game(params.values["NavDestination"]["latitude"],
+                                                                params.values["NavDestination"]["longitude"]), (9.0, 10.0))
+  dest.pass_stops(1)
+  assert [list(p) for p in dest.stops] == [[7.0, 8.0]]
+  dest.update(None, car, ([1.0, 2.0],))
+  assert dest.stops == []
+  dest.update(None, car, ([3.0, 4.0], "add"))
+  dest.update([1000.0, 2000.0], car, None)
+  assert list(dest.dest) == [1000.0, 2000.0] and dest.stops == []
+  dest.update([1000.0, 2000.0], car, ([3.0, 4.0], "add"))
+  dest.arrived()
+  assert dest.stops == []
+
+
 def test_destination_ended_by_the_driver():
   # the UI's slide to end removes NavDestination: the destination goes and the game's waypoint (left set in the game)
   # is ignored, until the player sets another

@@ -374,7 +374,7 @@ class Brain:
       else:
         self.expert.control(cmd.get("cfg") or {})
     elif cmd.get("type") == "destination":
-      self.picked = (cmd.get("xy"),)
+      self.picked = (cmd.get("xy"), "add") if cmd.get("add") else (cmd.get("xy"),)
 
   def _match_step(self, state: dict):
     """navd's map match, moved on each step by the car's speed and yaw rate and corrected by each GNSS fix openpilot
@@ -434,7 +434,10 @@ class Brain:
     avoid = md.take_avoid() if md is not None else None
     if avoid and dest is not None:
       self._reroute(pos, bearing, dest, state["pos"][2], avoid)
-    route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match)
+    route = self.navigator.update(pos, bearing, dest, time.monotonic(), state["pos"][2], match=match, stops=self.destination.stops)
+    if passed := self.navigator.passed():
+      self.destination.pass_stops(passed)
+      print(f"gta5: passed a stop; {len(self.destination.stops)} more before the destination", flush=True)
     if self.cruise is not None:
       route = self._cruise_route(route, pos, bearing, state["pos"][2])
     self.routes += route is not None and route is not self.route
@@ -457,15 +460,14 @@ class Brain:
   def _reroute(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float, avoid: list):
     """A route to the destination keeping off `avoid`'s links (the map driver giving up a fork's branch it couldn't
     change into in time), on its own thread as the navigator's are; it becomes the navigator's route when it comes."""
-    nav = self.navigator
+    nav, stops = self.navigator, list(self.navigator.stops)
 
     def run():
       try:
-        route = nav.router.route(pos.copy(), bearing, dest.copy(), z, avoid=avoid)
+        route = nav.router.route(pos.copy(), bearing, dest.copy(), z, avoid=avoid, through=stops)
         route.locate(pos, z, -bearing)
         with nav.lock:
-          if nav.dest is not None and np.hypot(*(dest - nav.dest)) <= 1.0:
-            nav.route, nav.off_since = route, None
+          nav.take(route, dest, stops)
         print(f"gta5: routed again keeping off {len(avoid)} link(s): the other branch", flush=True)
       except (OSError, ValueError, KeyError) as e:
         print(f"gta5: routing again off a branch failed: {e}", flush=True)
@@ -593,6 +595,7 @@ class Brain:
       "routes": {"gps": self.gps_route, "nav": [] if self.route is None else self.route.rest().round(1).tolist(),
                  "lanes": self._lane_line(state, v)},
       "waypoint": waypoint if waypoint and any(waypoint) else None,
+      "stops": [[round(float(v), 1) for v in p] for p in self.destination.stops],
       "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.driver.engaged or self.openpilot.engaged else ''}" +
               ("  cruising (no destination)" if cruising else "") + (f"  | {why}" if (why := self._map_status()) else ""),
       "nav": {"routes": self.routes, "cruise": cruising, "length": None if self.route is None else round(self.route.length, 1),

@@ -40,6 +40,34 @@ def test_navigator_without_a_match_is_unchanged():
   assert abs(route.off - 3.0) < 1e-6 and abs(route.at - 100.0) < 1e-6 and not starts
 
 
+def test_navigator_stops():
+  """A route through two stops: each is passed as the car goes by where the route passes it, dropping it keeps the route,
+  and any other change to the stops routes again (through them, to Valhalla)."""
+  calls: list = []
+  route = Route(np.array([(0.0, 0.0), (0.0, 300.0), (300.0, 300.0)]), [])
+
+  class FakeRouter:
+    def route(self, pos, bearing, dest, z, through=()):
+      calls.append([list(p) for p in through])
+      return route
+
+  nav = Navigator(FakeRouter())
+  dest, stops = np.array([300.0, 300.0]), [np.array([5.0, 100.0]), np.array([150.0, 310.0])]
+  nav._route(np.array([0.0, 0.0]), 0.0, dest, None, 0, stops)  # what _start's thread does
+  assert nav.route is None  # the route came for a destination no longer wanted
+  nav.dest, nav.stops = dest, list(stops)
+  nav._route(np.array([0.0, 0.0]), 0.0, dest, None, 0, stops)
+  assert calls[-1] == [[5.0, 100.0], [150.0, 310.0]] and np.allclose(nav.stop_at, (100.0, 450.0))
+  nav._start = lambda *a: calls.append("again")
+  assert nav.update(np.array([0.0, 50.0]), 0.0, dest, 0.0, stops=stops) is route and nav.passed() == 0
+  nav.update(np.array([0.0, 97.0]), 0.0, dest, 1.0, stops=stops)
+  assert nav.passed() == 1
+  assert nav.update(np.array([0.0, 120.0]), 0.0, dest, 2.0, stops=stops[1:]) is route and nav.passed() == 0
+  assert np.allclose(nav.stop_at, (450.0,)) and calls[-1] != "again"
+  assert nav.update(np.array([0.0, 130.0]), 0.0, dest, 3.0, stops=[np.array([200.0, 290.0])]) is None
+  assert calls[-1] == "again"
+
+
 def test_navigator_routes_again_with_more_map():
   """A route made before the map's paths and lanes loaded is routed again once they have, on the route meanwhile."""
   route = Route(np.array([(0.0, 0.0), (0.0, 500.0)]), [])

@@ -42,6 +42,7 @@ class Destination:
     # honour the UI's slide to end; off, a NavDestination the manager clears (offroad, restart) can't end a test drive
     self.ends = ends
     self.dest: np.ndarray | None = None  # game metres
+    self.stops: list[np.ndarray] = []  # passed through on the way to it, in turn
     self.from_game = False
     self.game_target: np.ndarray | None = None  # the game's target the destination last took, and its kind
     self.game_kind: str | None = None  # "waypoint" (the player's) or "mission" (a mission's GPS route)
@@ -53,7 +54,8 @@ class Destination:
 
   def update(self, waypoint, pos: np.ndarray, picked: tuple | None, mission=None) -> np.ndarray | None:
     """The destination, given the game's waypoint ([x, y], (0, 0) or None for none), the car's position, a pick on the
-    map view (([x, y] or None,) or None for none) and the end of a mission's GPS route ([x, y] or None)."""
+    map view (([x, y] or None,), ([x, y], "add") to make the destination so far a stop on the way, or None for none) and
+    the end of a mission's GPS route ([x, y] or None). Any other new destination drops the stops."""
     target, kind = self._game_target(waypoint, mission)
     self._check_ended(target)
     if self.ended_target is not None:
@@ -65,14 +67,24 @@ class Destination:
       if kind != self.game_kind or self.game_target is None or np.hypot(*(target - self.game_target)) > MOVED[kind]:
         self.dest, self.from_game = target, True
         self.game_target, self.game_kind = target, kind
+        self.stops = []
     elif target is None:
       self.game_target = None  # the same target back is new again; its kind stays for arriving
       if self.from_game and self.dest is not None and np.hypot(*(self.dest - pos)) > CANCELLED_FROM:
         self.dest = None
     if picked is not None:
-      self.dest, self.from_game = (np.array(picked[0], dtype=float) if picked[0] else None), False
+      new = np.array(picked[0], dtype=float) if picked[0] else None
+      adding = new is not None and self.dest is not None and len(picked) > 1 and picked[1] == "add"
+      self.stops = [*self.stops, self.dest] if adding else []
+      self.dest, self.from_game = new, False
+    if self.dest is None:
+      self.stops = []
     self._write()
     return self.dest
+
+  def pass_stops(self, n: int):
+    """The route has passed the first n stops."""
+    del self.stops[:n]
 
   @staticmethod
   def _game_target(waypoint, mission) -> tuple[np.ndarray | None, str | None]:
@@ -110,7 +122,7 @@ class Destination:
     the mission's to clear)."""
     if not (self.from_game and self.game_kind == "mission"):
       self.send({"type": "waypoint", "off": True})
-    self.dest = None
+    self.dest, self.stops = None, []
     self._write()
 
   def _write(self):

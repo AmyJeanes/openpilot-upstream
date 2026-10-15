@@ -1,4 +1,5 @@
 """Routes over a Valhalla server (map/README.md), as a car's navigation would, and follows the car along the route."""
+import itertools
 import json
 import math
 import os
@@ -892,12 +893,14 @@ class Router:
     return Route(points, maneuvers, self.paths, limits, self.osm)
 
   def route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None = None,
-            avoid: tuple | list = ()) -> Route:
+            avoid: tuple | list = (), through: tuple | list = ()) -> Route:
     """From the car, setting off the way it faces (bearing clockwise from north), to dest. Given the car's height,
     from the road it's on, not one passing over or under it. `avoid`: links (pa, pb), each from one map node to the
     next (game metres), the route keeps off for this request alone, as off a crossing (a fork's branch the car can't
-    get into in time, say: its link a little past the gore)."""
+    get into in time, say: its link a little past the gore). `through`: stops (game metres) passed on the way, in
+    turn, without stopping (Valhalla's through locations, each on its nearest road)."""
     start, at_car, snapped = self._start(pos, bearing, z)
+    mid = [location(np.asarray(p, float), type='through') for p in through]
     request = self._request()
     osm = self.osm if self.osm is not None else self.roads
     excluded: list[np.ndarray] = [clear_point(osm, pa, pb) if osm is not None else (np.asarray(pa, float) + np.asarray(pb, float)) / 2
@@ -917,7 +920,7 @@ class Router:
     trip = None
     for n, end in enumerate(ends):
       try:
-        trip = self._post('route', {**request, 'locations': [start, end]})['trip']
+        trip = self._post('route', {**request, 'locations': [start, *mid, end]})['trip']
         break
       except urllib.error.HTTPError:
         if n == len(ends) - 1:
@@ -926,7 +929,7 @@ class Router:
     used = ends[n]
     if snap is not None and not snap.as_is and snap.kerb_side and n == 0:
       try:  # either way, if the kerb side means going a long way round
-        either = self._post('route', {**request, 'locations': [start, ends[1]]})['trip']
+        either = self._post('route', {**request, 'locations': [start, *mid, ends[1]]})['trip']
         if either['summary']['time'] + SIDE_DETOUR < trip['summary']['time']:
           trip, used = either, ends[1]
       except urllib.error.HTTPError:
@@ -941,7 +944,7 @@ class Router:
       excluded += spots
       avoid = {**request, 'exclude_locations': [location(p, radius=CROSSING_RADIUS) for p in excluded]}
       try:
-        trip = self._post('route', {**avoid, 'locations': [start, used]})['trip']
+        trip = self._post('route', {**avoid, 'locations': [start, *mid, used]})['trip']
       except (urllib.error.HTTPError, KeyError):
         break  # none without them: as Valhalla has it
       request = avoid
@@ -953,7 +956,7 @@ class Router:
       back = np.asarray(pos, float)[:2] - CROSSING_BACK * np.array([math.sin(math.radians(bearing)), math.cos(math.radians(bearing))])
       for begin in (at_car, location(back, heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)):
         try:
-          other = self._post('route', {**request, 'locations': [begin, used]})['trip']
+          other = self._post('route', {**request, 'locations': [begin, *mid, used]})['trip']
         except (urllib.error.HTTPError, KeyError):
           continue
         if (other['summary']['length'] - trip['summary']['length']) * 1000.0 < -CROSSING_DETOUR and not self.crossings(self._shape(other, None)[0]):
@@ -961,7 +964,7 @@ class Router:
           break
     uturns, avoided = sharp_turns(Route(points, maneuvers)), False
     if uturns:
-      other = self._without_uturns({**request, 'locations': [start, used]}, snapped, points, uturns)
+      other = self._without_uturns({**request, 'locations': [start, *mid, used]}, snapped, points, uturns)
       if other is not None:
         trip, (points, maneuvers), avoided = other, self._shape(other, snapped), True
     route = Route(points, maneuvers, self.paths, self._trip_limits(trip, len(points)), self.osm)
@@ -1068,17 +1071,40 @@ class Router:
     return out
 
 
+def same_stops(a: list[np.ndarray], b: list[np.ndarray]) -> bool:
+  return len(a) == len(b) and all(np.hypot(*(p - q)) <= 1.0 for p, q in zip(a, b, strict=True))
+
+
+def stops_along(points: np.ndarray, along: np.ndarray, stops: list[np.ndarray]) -> list[float]:
+  """m along the route to where it passes nearest each stop, in turn (each one's search starts at the last's)."""
+  out, k0 = [], 0
+  a, b = points[:-1], points[1:]
+  d = b - a
+  span = np.maximum((d * d).sum(1), 1e-9)
+  for p in stops:
+    t = np.clip(((p - a) * d).sum(1) / span, 0.0, 1.0)
+    dist = np.hypot(*(a + t[:, None] * d - p).T)
+    dist[:k0] = np.inf
+    k = int(np.argmin(dist))
+    out.append(float(along[k] + t[k] * np.sqrt(span[k])))
+    k0 = k
+  return out
+
+
 class Navigator:
-  """Keeps a route from the car to a destination, routing again when the destination moves or the car leaves the
-  route. Routing runs on its own thread, so update() never waits on the server."""
+  """Keeps a route from the car to a destination, by way of any stops in turn, routing again when the destination or
+  the stops change or the car leaves the route. Routing runs on its own thread, so update() never waits on the server."""
   OFF_ROUTE = 15.0  # m from the route
   OFF_FOR = 1.5  # s
   RETRY = 3.0  # s between attempts
+  STOP_PASSED = 5.0  # m short of where the route passes a stop that counts as passing it
 
   def __init__(self, router: Router):
     self.router = router
     self.route: Route | None = None
     self.dest: np.ndarray | None = None
+    self.stops: list[np.ndarray] = []  # passed through on the way, in turn
+    self.stop_at: list[float] = []  # m along the route to each
     self.off_since: float | None = None
     self.next_try = 0.0
     self.busy = False
@@ -1092,15 +1118,22 @@ class Navigator:
     self.map_version += 1
 
   def update(self, pos: np.ndarray, bearing: float, dest: np.ndarray | None, now: float, z: float | None = None,
-             match=None) -> Route | None:
+             match=None, stops=()) -> Route | None:
     """pos and bearing (clockwise from north) are the car's; with a map match (navd's map_match.Match, from GNSS), the
     car is where the match puts it on its road instead, heading that road's way if the match is sure of the direction
-    (else only its distance from the route counts), and without a height."""
+    (else only its distance from the route counts), and without a height. Stops dropped from the front (passed()) keep
+    the route; any other change to them routes again."""
     if dest is None:
-      self.dest, self.route = None, None
+      self.dest, self.route, self.stops, self.stop_at = None, None, [], []
       return None
-    if self.dest is None or np.hypot(*(dest - self.dest)) > 1.0:
-      self.dest, self.route, self.next_try = dest, None, 0.0
+    stops = [np.asarray(p, float) for p in stops]
+    if self.dest is None or np.hypot(*(dest - self.dest)) > 1.0 or not same_stops(stops, self.stops[-len(stops):] if stops else []):
+      with self.lock:
+        self.dest, self.route, self.next_try, self.stops, self.stop_at = dest, None, 0.0, stops, []
+    elif len(stops) < len(self.stops):
+      with self.lock:
+        self.stop_at = self.stop_at[len(self.stop_at) - len(stops):] if self.stop_at else []
+        self.stops = stops
     heading: float | None = -bearing
     if match is not None:
       pos, z, heading = np.asarray(match.point, float), None, match.heading if match.sure else None
@@ -1117,19 +1150,36 @@ class Navigator:
       self._start(pos, bearing, dest, now, z)
     return route
 
+  def passed(self) -> int:
+    """How many of the stops, from the first, the car has passed along the route."""
+    with self.lock:
+      route, stop_at = self.route, self.stop_at
+    if route is None:
+      return 0
+    return sum(1 for _ in itertools.takewhile(lambda s: route.at >= s - self.STOP_PASSED, stop_at))
+
+  def take(self, route: Route, dest: np.ndarray, stops: list[np.ndarray]) -> bool:
+    """A route made for dest by way of stops becomes the route, if they're still what's wanted (call with the lock)."""
+    if self.dest is None or np.hypot(*(dest - self.dest)) > 1.0 or not same_stops(stops, self.stops):
+      return False
+    self.route, self.off_since = route, None
+    self.stop_at = stops_along(route.points, route.along, stops) if stops and len(route.points) >= 2 else []
+    return True
+
   def _start(self, pos: np.ndarray, bearing: float, dest: np.ndarray, now: float, z: float | None):
     if self.busy:
       return
     self.busy, self.next_try = True, now + self.RETRY
-    threading.Thread(target=self._route, args=(pos.copy(), bearing, dest.copy(), z, self.map_version), daemon=True).start()
+    threading.Thread(target=self._route, args=(pos.copy(), bearing, dest.copy(), z, self.map_version, list(self.stops)),
+                     daemon=True).start()
 
-  def _route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None, version: int):
+  def _route(self, pos: np.ndarray, bearing: float, dest: np.ndarray, z: float | None, version: int, stops: list[np.ndarray]):
     try:
-      route = self.router.route(pos, bearing, dest, z)
+      route = self.router.route(pos, bearing, dest, z, through=stops)
       route.locate(pos, z, -bearing)
       with self.lock:
-        if self.dest is not None and np.hypot(*(dest - self.dest)) <= 1.0:
-          self.route, self.off_since, self.route_version = route, None, version
+        if self.take(route, dest, stops):
+          self.route_version = version
     except (OSError, ValueError, KeyError) as e:
       print(f"router: {e}")
     finally:
