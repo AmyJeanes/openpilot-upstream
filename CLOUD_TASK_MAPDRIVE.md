@@ -2,6 +2,10 @@
 
 You are a Claude Code cloud session. You see only GitHub, not Amy's PC (no GTA, no GPU, no live services).
 
+Repos: `AmyJeanes/openpilot-upstream` (read and push, branch `mapdrive-cloud` only) and `AmyJeanes/gta5-distill`
+(private, read only, branch `cloud-data`). The session may start on another branch of openpilot-upstream: work on
+`mapdrive-cloud`, which is `gta5` plus this brief.
+
 ## Background
 
 Amy drives openpilot in GTA V through a bridge: `openpilot/tools/sim/bridge/gta5/` on branch `gta5` of
@@ -21,8 +25,9 @@ router already won't route a shortcut link through one. The overlay and map view
 
 Record pass/fail with one line of evidence in `CLOUD_RESULT_MAPDRIVE.md` under "Preflight":
 
-1. Repo: this repo's `gta5` (shallow, single branch: `git clone --depth 1 --branch gta5 --single-branch`; the full repo
-   is very large). Note the hash; it should be `a14158d1d` or later.
+1. Repo: `AmyJeanes/openpilot-upstream` branch `mapdrive-cloud`, shallow and single branch (`git clone --depth 1
+   --branch mapdrive-cloud --single-branch`, or fetch just that branch; the full repo is very large). Its parent commit
+   is `gta5` at `647143d89`; note both hashes.
 2. Data: `AmyJeanes/gta5-distill` (private) branch `cloud-data`. Check sha256 against `cloud/MANIFEST.md` for
    `cloud/live18/map1/*` and `cloud/live19b/*`. Assemble the live map in one folder: live18's `gta5.osm.pbf`,
    `roads.json`, `paths.jsonl`, `nodes.npz` (gunzip the `.gz` ones) plus **live19b's `lanes.json`**; point `GTA5_MAP`
@@ -35,7 +40,8 @@ Record pass/fail with one line of evidence in `CLOUD_RESULT_MAPDRIVE.md` under "
 5. Baseline: `pytest -q test_mapdrive.py test_mapdrive_lead.py test_blindspot.py test_lane_slots.py` on the
    untouched branch, with GTA5_MAP set. On Amy's PC today: test_mapdrive + test_mapdrive_lead = 68 passed, 1 failed
    (`test_collision_routes`, known). Record yours; that's the bar for "no regressions".
-6. Push access: create branch `mapdrive-cloud` from `gta5` with a commit adding only `CLOUD_RESULT_MAPDRIVE.md`, push.
+6. Push access: on `mapdrive-cloud` (it already exists, with this brief), commit only `CLOUD_RESULT_MAPDRIVE.md` and
+   push.
 
 If 1, 2 or 6 fails, stop and push (or report) the preflight. If 4 fails, use made routes only and say so.
 
