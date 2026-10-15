@@ -74,6 +74,9 @@ def test_link_stands_in_for_the_host_in_wsl(tmp_path, monkeypatch):
   got: list[dict] = []
   until(lambda: got.extend(remote.take_commands()) or any(c["type"] == "destination" for c in got), link)
   assert got == [{"type": "destination", "xy": [10.0, -20.0]}]  # and not the file from before
+  picks.append(([11.0, -21.0], "add"))
+  until(lambda: got.extend(remote.take_commands()) or len(got) == 2, link)
+  assert got.pop() == {"type": "destination", "xy": [11.0, -21.0], "add": True}
   time.sleep(0.01)
   control.write_text('{"on": true, "speed": 9}\n')
   until(lambda: got.extend(remote.take_commands()) or len(got) == 2, link)

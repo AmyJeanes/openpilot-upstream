@@ -2,9 +2,10 @@
 """Serves the map view: a web page of the roads with the car and routes, for a browser on this machine or the network.
 
 MapView.update() sets what /state reports: {"t": seconds, "car": {"x", "y", "z", "bearing"}, "routes": {name: [[x, y], ...]},
-"waypoint": [x, y], "text": "..."}, in the same metres as roads.json, bearing in degrees clockwise from north, z the
-height of the road under the car (optional: the view dims the roads on other levels from it).
-A destination picked on the page (POST /destination {"x", "y"}, or {} to clear) waits in take_destination().
+"waypoint": [x, y], "stops": [[x, y], ...], "text": "..."}, in the same metres as roads.json, bearing in degrees clockwise
+from north, z the height of the road under the car (optional: the view dims the roads on other levels from it).
+A destination picked on the page (POST /destination {"x", "y"}, with "add": true to keep the one so far as a stop on the
+way, or {} to clear) waits in take_destination().
 lanes.json beside roads.json (osm_to_roads.py --lanes), where there is one, gives the lines painted on the roads.
 Every CHECK_EVERY s the view asks itself for /state: when that goes unanswered it says so, with the threads' stacks in
 `stacks` where given, and it serves again if its server thread has ended.
@@ -37,7 +38,7 @@ class MapView:
     self.stuck: str | None = None  # why the last check went unanswered
     self.closing = threading.Event()
     self.state = b'{}'
-    self.destination: tuple | None = None  # ([x, y] or None,) until taken
+    self.destination: tuple | None = None  # ([x, y] or None,) or ([x, y], 'add') until taken
     view = self
 
     class Handler(BaseHTTPRequestHandler):
@@ -65,7 +66,8 @@ class MapView:
           return
         try:
           d = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
-          view.destination = ([float(d['x']), float(d['y'])] if 'x' in d else None,)
+          xy = [float(d['x']), float(d['y'])] if 'x' in d else None
+          view.destination = (xy, 'add') if xy is not None and d.get('add') else (xy,)
         except (ValueError, KeyError, TypeError):
           self.send_error(400)
           return

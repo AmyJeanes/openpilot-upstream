@@ -27,6 +27,10 @@ def test_state_and_destination(tmp_path):
     with NO_PROXY.open(req, timeout=5) as r:
       r.read()
     assert v.take_destination() == ([1.0, 2.0],) and v.take_destination() is None
+    req = urllib.request.Request(f"http://127.0.0.1:{v.port}/destination", json.dumps({"x": 3, "y": 4, "add": True}).encode())
+    with NO_PROXY.open(req, timeout=5) as r:
+      r.read()
+    assert v.take_destination() == ([3.0, 4.0], "add")
   finally:
     v.close()
 

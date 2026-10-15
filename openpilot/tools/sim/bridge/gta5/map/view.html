@@ -13,7 +13,9 @@
   button { background: var(--panel); color: var(--text); border: 1px solid #3a3f46; border-radius: 8px; padding: 8px 12px; font: inherit; }
   button.on { border-color: var(--accent); color: #fff; background: #1f3b66; }
   #info { background: var(--panel); border-radius: 8px; padding: 7px 10px; color: var(--muted); white-space: pre; }
-  #pick { position: fixed; display: none; transform: translate(-50%, -100%); margin-top: -10px; background: var(--accent); color: #fff; border: 0; font-weight: 600; }
+  #pick { position: fixed; display: none; gap: 6px; transform: translate(-50%, -100%); margin-top: -10px; }
+  #pick button { background: var(--accent); color: #fff; border: 0; font-weight: 600; white-space: nowrap; }
+  #pick #addstop { display: none; background: #1f3b66; }
   #clear { display: none; }
   #legend { position: fixed; bottom: 8px; left: 8px; background: var(--panel); border-radius: 8px; padding: 6px 10px; color: var(--muted); font-size: 12px; }
   #legend i { display: inline-block; width: 18px; height: 4px; margin: 0 4px 2px 8px; vertical-align: middle; }
@@ -28,7 +30,7 @@
   <button id="clear">Clear route</button>
   <span id="info">loading roads…</span>
 </div>
-<button id="pick">Navigate here</button>
+<div id="pick"><button id="go">Navigate here</button><button id="addstop">Add stop</button></div>
 <div id="legend"><i style="background:#3d8bfd"></i>route<i style="background:#ff5fd2"></i>game GPS</div>
 <script>
 // Draws roads.json (polylines in metres, x east, y north, each road's middle and width) with the car and routes from
@@ -457,6 +459,13 @@ function draw() {
     }
   }
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  (state && state.stops || []).forEach(([sx, sy], i) => {
+    const [x, y] = toScreen(sx, sy);
+    ctx.fillStyle = '#e0a030';
+    ctx.beginPath(); ctx.arc(x, y - 14, 8, 0, 7); ctx.moveTo(x - 6, y - 11); ctx.lineTo(x, y); ctx.lineTo(x + 6, y - 11); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), x, y - 14);
+  });
   if (state && state.waypoint) {
     const [x, y] = toScreen(...state.waypoint);
     ctx.fillStyle = '#e04848';
@@ -818,13 +827,16 @@ const pick = document.getElementById('pick');
 let picked = null;
 function showPick(sx, sy) {
   picked = toWorld(sx, sy);
-  pick.style.left = sx + 'px'; pick.style.top = sy + 'px'; pick.style.display = 'block';
+  pick.style.left = sx + 'px'; pick.style.top = sy + 'px'; pick.style.display = 'flex';
+  // a stop goes before the destination there is
+  document.getElementById('addstop').style.display = state && state.waypoint ? 'inline-block' : 'none';
 }
 function hidePick() { pick.style.display = 'none'; picked = null; }
 async function setDestination(body) {
   await fetch('destination', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
-pick.onclick = () => { if (picked) setDestination({ x: picked[0], y: picked[1] }); hidePick(); };
+document.getElementById('go').onclick = () => { if (picked) setDestination({ x: picked[0], y: picked[1] }); hidePick(); };
+document.getElementById('addstop').onclick = () => { if (picked) setDestination({ x: picked[0], y: picked[1], add: true }); hidePick(); };
 document.getElementById('clear').onclick = () => setDestination({});
 addEventListener('keydown', e => { if (e.key === 'Escape') hidePick(); });
 

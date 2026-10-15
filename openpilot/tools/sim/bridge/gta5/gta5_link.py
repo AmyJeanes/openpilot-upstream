@@ -117,7 +117,7 @@ class LinkServer:
     if conn is None:
       return
     if picked is not None:
-      self.out.append({"type": "destination", "xy": picked[0]})
+      self.out.append({"type": "destination", "xy": picked[0], **({"add": True} if picked[1:] == ("add",) else {})})
     self._poll_control(now)
     if now < self.next_status:
       return
