@@ -260,4 +260,5 @@ with the bridge's nav), and comma's navigation helpers by their public names. co
 own longitudinal, always). For this work: the GTA test runs should use experimental mode on, to match what the port will
 run; and `e2e.py` (`xm`) and `probe_gta5.py` write `ExperimentalMode`, which an unknown key makes fail after the port
 (a port TODO, not this branch's). Master's modeld also gained small changes since nav alpha (chestnut retry, curvature
-seed from `controlsState`); the patch touches different lines (checked by reading, not applied to master).
+seed from `controlsState`): comma's own `8b8ce13` modeld hunk applies to master's modeld (`75b2ccc`) but for one
+hunk, the `SubMaster` list, where master added `controlsState` on the same line: a one-line merge (`patch --dry-run`).
