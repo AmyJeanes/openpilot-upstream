@@ -7,7 +7,8 @@ nav's lane plan (planner.lane_plan, as the ribbon draws it) with absolute along-
 within its lane-slot window (by the trip's style, freeway ones within +-20 % of nav's schedule), then re-placed to take
 its time (the style's t_lc, no quicker than its lateral acceleration allows) at the speed the car will drive it, its end
 kept, moved off jogs in the route's line (route_jogs, where the lane line swerves; jog_change where there's no
-room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
+room) and so our body keeps out of the map's hatched areas (gores, painted medians: off_hatched; hatched_change where
+there's no room), and reshaped as a quintic (minimum-jerk) move; then put on the lanes by RouteLanes.lane_line (its offsets, jogs
 and fillets), bends the car can't take as drawn eased out (sharp_corner), swinging wide rather than cutting in, and
 kept on its lane (_clamp, plan_clamp): our body out of each turn's inside corner kerb (a far-side turn's a median's
 edge, else the road's far edge), within its lane outside lane changes and turns' corners, past a fork off its
@@ -75,11 +76,12 @@ island_contact.
 The control file's `mapdrive` object sets it up: {"seed": 7, "preset": "normal", "style": {"t_lc": 5.0}, "bias_max":
 0.3, "wander": 0.1, "on_abort": "stop", "speed": null, "plan_check": "fix", "latency": 0.1, "ff_preview": 0.32,
 "rear_axle": null, "range_share": 0.75, "nudge": true, "nudge_clear": 0.5, "nudge_want": 0.8, "borrow": true,
-"lights": "traffic"}; bias_max 0
+"lights": "traffic", "hatched": true}; bias_max 0
 and wander 0 drive exactly on the line; rear_axle (m behind the car's position, default half the state's wheelBase) 0
 steers from the car's middle; range_share 1 drops the range cap; nudge false stops behind every parked vehicle in the
 way; borrow false keeps every pass within our lane; lights "off" drives through signals as with no traffic about (the
-crossing check alone), rather than reading them from the traffic."""
+crossing check alone), rather than reading them from the traffic; hatched false lets lane changes cross the map's hatched
+areas (off_hatched)."""
 import bisect
 import functools
 import hashlib
@@ -179,6 +181,9 @@ BRANCH_ROOM_S = 3.0  # s of driving at least before a fork, for its lane change 
 BRANCH_PAST = 20.0  # m past a fork the link of the branch given up that a route is asked to keep off
 LC_LATE_WAIT = 90.0  # s stopped short of a change that can't be put off, its lane busy, before the trip ends (a queue standing in it moves on at its light)
 LC_DROP_BACK = 0.75  # share of its speed as it began to wait the car slows to while one keeps alongside in that lane
+HATCH_CLEAR = 0.2  # m our body keeps out of a hatched area through a lane change
+HATCH_PAD = 5.0  # m clear of where its body would meet one a change moved off it ends (before) or starts (after)
+HATCH_STEP = 1.0  # m between the places along a change its body is looked at
 
 
 class LaneGapTune(BlindSpotTune):
@@ -362,7 +367,7 @@ DEFAULTS = {"seed": None, "preset": "normal", "style": {}, "bias_max": 0.3, "wan
             "on_abort": "stop", "speed": None, "plan_check": "fix", "stop_before": 15.0, "hold_after": 3.0, "retime": True,
             "drive_on_right": True, "latency": LATENCY, "ff_preview": FF_PREVIEW, "fit_durations": True,
             "rear_axle": None, "range_share": 0.75, "nudge": True, "nudge_clear": NUDGE_CLEAR, "nudge_want": NUDGE_WANT,
-            "borrow": True, "lights": "traffic"}
+            "borrow": True, "lights": "traffic", "hatched": True}
 
 
 def pick_style(seed: int, preset: str = "normal", over: dict | None = None) -> dict:
@@ -728,6 +733,7 @@ class MapDrive:
     self.corners: list[dict] = []
     self.clamps: list[dict] = []  # where _clamp moved the plan back: {"i": path index, "push": m right, "why", "length"}
     self.jog_changes: list[tuple[float, float]] = []  # lane changes left across a jog, with no room off it
+    self.hatch_moves: list[dict] = []  # lane changes moved off the hatched areas (off_hatched)
     self.moves_along: list[float] = []  # m along the route of the lane slots' moves (turns, forks, junctions through)
     self.unclear = np.zeros(0)
     self.front, self.rear, self.half_width = FRONT, FRONT, HALF_WIDTH  # our car's body from its origin (_body)
@@ -801,7 +807,7 @@ class MapDrive:
     return {"seed": self.seed, "style": self.style, "cfg": {k: v for k, v in self.c.items() if k != "style"}, "version": map_version(),
             "keys": self.plan["keys"] if self.plan else None, "plans": self.plans, "splices": self.splices, "aborts": self.aborts,
             "anomalies": self.anomalies, "lights": self.lights, "slot_check": self.plan["slot_check"] if self.plan else None,
-            "nudges": self.nudge_log}
+            "nudges": self.nudge_log, "hatched": self.hatch_moves}
 
   def intent_line(self, step: int = 2) -> list:
     """The intent (the planned path without the in-lane wander) from the car on, for the ribbon and recordings."""
@@ -1229,6 +1235,7 @@ class MapDrive:
       return False
     fitted = self.fit_durations(route, keys, float(state.get("vEgo") or 0.0)) if self.c["fit_durations"] else keys
     fitted = self.off_jogs(route, fitted)
+    fitted = self.off_hatched(route, fitted, t)
     if fitted != keys:
       keys = fitted
       built = self._build(route, keys, lane, state, t)
@@ -1446,6 +1453,158 @@ class MapDrive:
       else:
         self.jog_changes.append((s0, s1))
     return keys
+
+  def off_hatched(self, route, keys: list[tuple[float, float]], t: float) -> list[tuple[float, float]]:
+    """The keys with each lane change whose body would cross a hatched area (_hatch_hit: a gore, a painted median)
+    moved off it, whichever way moves it less: to end HATCH_PAD short of where it would first meet it (before a gore's
+    nose) or to start HATCH_PAD past where it last would (after a painted island ends); its length kept, or where there's
+    less room down to _lc_least; within the holds in its lanes (_change_room), onto no stop line (nor, off a freeway, a
+    junction node) it was clear of, and clear of every area where it then runs. One with no such place stays where it
+    was, a hatched_change anomaly. Each move goes in hatch_moves, a hatched_move event."""
+    if not self.c["hatched"] or route.lanes is None or not route.lanes.hatched:
+      return keys
+    keys = list(keys)
+    for a, b in reversed(chains(keys)):
+      hit = self._hatch_hit(route, keys, a, b)
+      if hit is None:
+        continue
+      h0, h1, rings = hit
+      s0, s1 = keys[a][0], keys[b][0]
+      length = s1 - s0
+      least = min(self._lc_least(abs(self._chain_lanes(keys, a, b)), self._speed_at(route, s0)), length)
+      lower, upper = self._change_room(route, keys, a, b)
+      k = segment_of(route, s0)
+      fwy = (route.classes[k] if k < len(route.classes) else "") in FREEWAY
+      crossings = [c for c in list(route.stops) + ([] if fwy else list(route.junctions)) if not s0 - CROSSING_CLEAR < c < s1]
+      found = []
+      for before in (True, False):
+        edge = h0 if before else h1
+        for _ in range(4):  # each place tried may meet the area (or another) further on
+          st, e = (max(edge - HATCH_PAD - length, lower), edge - HATCH_PAD) if before else \
+                  (edge + HATCH_PAD, min(edge + HATCH_PAD + length, upper))
+          if e - st < least - EPS or any(st - CROSSING_CLEAR < c < e for c in crossings):
+            break
+          first, after = a, b + 1
+          while first > 0 and keys[first - 1][0] > st + EPS:  # holds it now starts before
+            first -= 1
+          while after < len(keys) and keys[after][0] < e - EPS:  # holds it now ends after
+            after += 1
+          chain = self._replace_chain(keys, a, b, st, e)
+          trial = keys[:first] + chain + keys[after:]
+          again = self._hatch_hit(route, trial, first, first + len(chain) - 1)
+          if again is None:
+            found.append((abs(st - s0), trial, st, e))
+            break
+          edge = again[0] if before else again[1]
+      moved = min(found, key=lambda f: f[0])[1:] if found else None
+      at = float(np.interp(s0, self.route_s, self.s_path)) if self.path is not None else s0
+      areas = [[round(float(v), 1) for v in r.mean(axis=0)] for r in rings]
+      if moved is None:
+        self._anomaly("hatched_change", t, route_point(route, 0.5 * (h0 + h1)), at, span=[round(s0, 1), round(s1, 1)],
+                      hits=[round(h0, 1), round(h1, 1)], areas=areas)
+        continue
+      keys, st, e = moved
+      m = {"from": [round(s0, 1), round(s1, 1)], "to": [round(st, 1), round(e, 1)], "moved": round(st - s0, 1), "areas": areas}
+      self.hatch_moves.append(m)
+      self._event("hatched_move", t, **m)
+    return keys
+
+  def _change_room(self, route, keys: list[tuple[float, float]], a: int, b: int) -> tuple[float, float]:
+    """m along from and to which the lane change of keys a to b may run, moved: back over the holds in its lane to the
+    change, step or start before it (not back across the move before, unless it already was), and on over the holds in
+    the lane it moves into to the next change or renumbering (not past a fork it leads to, nor the route's end)."""
+    s0, s1 = keys[a][0], keys[b][0]
+    j = a - 1
+    while j > 0 and abs(keys[j - 1][1] - keys[j][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
+      j -= 1
+    lower = max(keys[j][0] if a > 0 else s0, route.at)
+    prev = [x for x in self.moves_along if x < s1 - 1.0]
+    if prev:
+      lower = max(lower, min(prev[-1] + CROSSING_CLEAR, s0))
+    j = b + 1
+    while j < len(keys) and abs(keys[j][1] - keys[b][1]) < EPS and keys[j][0] - keys[j - 1][0] > EPS:
+      j += 1
+    if j >= len(keys):
+      upper = route.length
+    elif abs(keys[j][1] - keys[b][1]) >= EPS and keys[j][0] - keys[j - 1][0] > EPS:
+      upper = keys[j - 1][0]  # a ramp to another lane begins at the key before it
+    else:
+      upper = keys[j][0]  # a renumbering step
+    forks = [f.along - CROSSING_CLEAR for f in getattr(route, "forks", []) if f.keep and f.along > s1 - EPS]
+    return lower, min([upper, route.length] + forks)
+
+  def _hatch_hit(self, route, keys: list[tuple[float, float]], a: int, b: int) -> tuple[float, float, list] | None:
+    """Where the lane change of keys a to b would bring our body (HATCH_CLEAR round it) into a hatched area beside the
+    route (route.lanes.hatched), as it'll be driven: across the lanes by their cross-sections as the lane line is, its
+    heading turned with its move: (m along from, to, the areas' outlines); None where it's clear. Not where our body in
+    the lane it leaves or the one it moves into would be in one too: the map's lanes running into it, which no change
+    makes better."""
+    areas = route.lanes.hatched if self.c["hatched"] and route.lanes is not None else []
+    s0, s1 = keys[a][0], keys[b][0]
+    reach = max(self.front, self.rear) + HATCH_CLEAR
+    near = [(max(s0, lo - reach), min(s1, hi + reach), ring) for ring, lo, hi in areas if lo - reach < s1 and s0 < hi + reach]
+    if not near or s1 - s0 < EPS:
+      return None
+    steps = [(keys[j + 1][0], keys[j + 1][1] - keys[j][1]) for j in range(a, b) if keys[j + 1][0] - keys[j][0] <= EPS]
+    # the lanes it leaves and moves into, each in the numbering at each key (its renumbering steps carried)
+    leaves = [(k[0], keys[a][1] + sum(d for x, d in steps if x <= k[0] + EPS)) for k in keys[a:b + 1]]
+    enters = [(k[0], keys[b][1] - sum(d for x, d in steps if x > k[0] + EPS)) for k in keys[a:b + 1]]
+    moving = shaped(keys[a:b + 1])
+    lo, hi, hit_rings = math.inf, -math.inf, []
+    for x0, x1, ring in near:  # only where each is beside the route
+      s = np.append(np.arange(x0, x1, HATCH_STEP), x1)
+      c, r = ring.mean(axis=0), float(np.hypot(*(ring - ring.mean(axis=0)).T).max()) + reach + self.half_width
+      pos, th = self._lane_places(route, moving, s)
+      hit = self._body_in(pos, th, ring, c, r)
+      for lane in (leaves, enters):
+        if hit.any():
+          hit &= ~self._body_in(*self._lane_places(route, lane, s), ring, c, r)
+      if hit.any():
+        lo, hi = min(lo, float(s[hit].min())), max(hi, float(s[hit].max()))
+        hit_rings.append(ring)
+    return (lo, hi, hit_rings) if hit_rings else None
+
+  @staticmethod
+  def _lane_places(route, keys: list[tuple[float, float]], s: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Our place (world) and heading (radians) at each of `s` m along, in the keys' lane there by the route's
+    cross-sections; NaN where its lanes aren't known."""
+    lanes = route.lanes
+    pos, th = np.full((len(s), 2), np.nan), np.full(len(s), np.nan)
+    off = np.full(len(s), np.nan)
+    base = np.zeros(len(s))
+    for n, x in enumerate(s.tolist()):
+      k = segment_of(route, x)
+      sec = lanes.section_at(x, k)
+      if sec is None or not sec.lanes:
+        continue
+      d = route.points[k + 1, :2] - route.points[k, :2]
+      d = d / max(float(np.hypot(*d)), 1e-9)
+      off[n] = sec.offset(lane_at(keys, x))
+      pos[n] = route_point(route, x) + np.array([d[1], -d[0]]) * off[n]
+      base[n] = math.atan2(d[1], d[0])
+    if len(s) > 1:
+      th = base - np.arctan(np.gradient(off, s))  # moving right turns it clockwise
+    return pos, th
+
+  def _body_in(self, pos: np.ndarray, th: np.ndarray, ring: np.ndarray, centre: np.ndarray, reach: float) -> np.ndarray:
+    """Whether our body (HATCH_CLEAR round it), at each place and heading, is in an area (its outline [K, 2]; none
+    further than `reach` from `centre` can be)."""
+    from openpilot.tools.sim.bridge.gta5.map.junctions import densify
+    from openpilot.tools.sim.bridge.gta5.map.osm_lanes import inside_ring
+    ok = ~np.isnan(pos).any(axis=1) & ~np.isnan(th)
+    ok[ok] = np.hypot(*(pos[ok] - centre).T) < reach
+    out = np.zeros(len(pos), bool)
+    if not ok.any():
+      return out
+    p, h = pos[ok], th[ok]
+    edge = densify(np.vstack([ring, ring[:1]]), 0.5)
+    rel = edge[None] - p[:, None]
+    f = np.stack([np.cos(h), np.sin(h)], axis=1)
+    x = np.einsum("nmk,nk->nm", rel, f)
+    y = np.einsum("nmk,nk->nm", rel, np.stack([-f[:, 1], f[:, 0]], axis=1))
+    c = HATCH_CLEAR
+    out[ok] = ((x >= -self.rear - c) & (x <= self.front + c) & (np.abs(y) <= self.half_width + c)).any(axis=1) | inside_ring(p, ring)
+    return out
 
   @staticmethod
   def _chain_lanes(keys, a: int, b: int) -> float:
@@ -2037,7 +2196,8 @@ class MapDrive:
     that lane is clear, within ASK_WAIT s: what becomes of it comes in take_prompts(): 'lane' as it starts, 'wait' while
     the lane beside isn't clear, 'blocked' as it gives up, or why it can't), or why it can't now: 'busy' (a lane change
     under way or signalled), 'no_lane' (no lane our way that side, or the car's lane isn't known), 'lane_no' (nav would
-    want back out of it soon: it turns off, ends, or the route needs this lane). The other side's arrow while one waits
+    want back out of it soon: it turns off, ends, or the route needs this lane), 'hatched' (the move would cross a
+    hatched area: a gore, a painted median). The other side's arrow while one waits
     cancels it ('cancel')."""
     if self.asked is not None:
       if self.asked["side"] == side:
@@ -2069,6 +2229,10 @@ class MapDrive:
         break
       if s1 - s0 > EPS and (l1 - l0) * (lane[0] - i) > 0:
         return "lane_no"  # a change back towards the car's lane (not a renumbering, which is a step)
+    s0 = route.at + self.style["signal_lead"] * max(v, 3.0)  # where _asked_keys would place it
+    s1 = s0 + max(lc_seconds(self.style, 1.0) * max(v, 5.0), MIN_LC_M)
+    if self._hatch_hit(route, [(route.at, float(lane[0])), (s0, float(lane[0])), (s1, float(i))], 1, 2) is not None:
+      return "hatched"
     return None
 
   def _lane_clear(self, side: str, state: dict) -> bool:
@@ -2087,7 +2251,8 @@ class MapDrive:
 
   def _lc_gate(self, route, state: dict, t: float, v: float):
     """The next lane change on the path (planned, or asked for), from LC_GATE_T s before it starts until LC_COMMIT of
-    the way across, made only while its lane is clear (_lane_clear). Otherwise it's put off (_deferred_keys), started
+    the way across, made only while its lane is clear (_lane_clear). Otherwise it's put off (_deferred_keys, not onto a
+    hatched area: _deferred_off_hatched), started
     again LC_DEFER_S s on from the car and planned again from where the car is: one under way goes back to its lane;
     meanwhile, with one alongside, the car drops back to LC_DROP_BACK of its speed to let it by.
     Where it can't be put off (it would run into the plan's next key or a stop line), the car stops short of it
@@ -2119,7 +2284,7 @@ class MapDrive:
         lw = self.lc_wait = {"since": t, "side": side, "defers": 0, "late": False, "s0": s0, "v0": v}
         self._event("lane_gap", t, phase="wait", side=side, why=why, started=started)
       lw["why"] = why
-      keys = self._deferred_keys(route, s0, route.at + max(v * LC_DEFER_S, LC_DEFER_MIN), v)
+      keys = self._deferred_off_hatched(route, s0, route.at + max(v * LC_DEFER_S, LC_DEFER_MIN), v)
       if keys is not None and self._replan_keys(route, state, t, keys):
         lw.update(defers=lw["defers"] + 1, late=False)
         if started:
@@ -2253,6 +2418,27 @@ class MapDrive:
       upto, nxt = (placed[n + 1][0][0], placed[n + 1][1]) if n + 1 < len(placed) else (rest, math.inf)
       out += [k for k in keys[b + 1:upto] if end + EPS < k[0] < nxt - EPS]
     return out + list(keys[rest:])
+
+  def _deferred_off_hatched(self, route, s0: float, start: float, v: float) -> list[tuple[float, float]] | None:
+    """_deferred_keys, kept off the hatched areas: a change put off onto one (_hatch_hit) it wasn't on is put off past
+    it (from HATCH_PAD after it), and where that can't be, it isn't put off (None): stopped short of it, or its fork's
+    other branch taken, rather than across a gore's chevrons."""
+    keys = self._deferred_keys(route, s0, start, v)
+    if keys is None or not self.c["hatched"] or route.lanes is None or not route.lanes.hatched:
+      return keys
+    old = {(self.keys[a][0], self.keys[b][0]): self._hatch_hit(route, self.keys, a, b) is not None for a, b in chains(self.keys)}
+    rs0 = float(np.interp(s0, self.s_path, self.route_s))
+    if any(hit and abs(k0 - rs0) < 1.0 for (k0, _), hit in old.items()):
+      return keys  # on one already, with no room off it (a hatched_change): put off as before
+    for _ in range(3):
+      hit = next((h for a, b in chains(keys) if not old.get((keys[a][0], keys[b][0]), False) and keys[b][0] > route.at and
+                  (h := self._hatch_hit(route, keys, a, b)) is not None), None)
+      if hit is None:
+        return keys
+      keys = self._deferred_keys(route, s0, hit[1] + HATCH_PAD, v)
+      if keys is None:
+        return None
+    return None
 
   def _other_branch(self, route, s0: float, v: float) -> tuple[list, tuple, float] | None:
     """For the lane change starting at path m s0 that can't be put off any more, where it and the changes of its run

@@ -436,13 +436,13 @@ def test_deadlock_backs_off():
 
 
 def lane_gap_drive(route, keep: float, seconds: float, lane0_x: float, behind: float = 0.0, v_other: float | None = None,
-                   seed: int = 1):
+                   seed: int = 1, cfg: dict | None = None):
   """A trip from the right lane of `route` (north) with a car in the left lane `behind` m back of ours, kept there
   (alongside, our speed) until the car is `keep` m along the route, then left to drive on at v_other (our speed + 6 m/s
   by default; "pace": our speed then, kept alongside while we keep it)."""
   x, y, h = ms.start_pose(route, 1, 0.0)
   other = ms.Vehicle(lane0_x, y - behind, h)
-  trip = ms.drive(route, {"seed": seed}, lane=1, v0=12.0, vehicles=[other], reach=REACH, seconds=0.05, until_done=False)
+  trip = ms.drive(route, {"seed": seed, **(cfg or {})}, lane=1, v0=12.0, vehicles=[other], reach=REACH, seconds=0.05, until_done=False)
   car, md = trip.car, trip.md
   kept, pace = True, None
   while car.t < seconds and md.finished is None:
@@ -580,6 +580,33 @@ def test_fork_change_gives_up_the_branch():
   avoid = trip.md.avoid  # not taken in the sim (no navigator): the link past the fork on the branch given up
   assert avoid and len(avoid) == 1 and 600.0 <= float(np.hypot(*avoid[0][0])) <= 640.0, avoid
   print("fork change gives up the branch: ok")
+
+
+def test_lane_gap_wait_stays_off_hatched():
+  """A change waiting for its lane is put off no further than a hatched area lets it (_deferred_off_hatched): the
+  fork's left branch from the right lane of two, a gore's V between the lanes from 450 m (its nose) to 560 m (the fork at 590).
+  A car alongside in the left lane until 300 m: the change made then, before the nose. Alongside until 430 m: no room
+  left before the nose, so the fork's other branch is taken rather than the change across the chevrons (with hatched
+  off, it was put off into them). Never a touch, nor our body in the V."""
+  from openpilot.tools.sim.bridge.gta5.map.router import Fork
+  ring = np.asarray([(5.5, 450.0), (6.5, 520.0), (6.5, 560.0), (4.5, 560.0), (4.5, 520.0)])
+
+  def run(keep: float, cfg=None):
+    r = ms.junction_turn("left", lead=600.0, stop=None)
+    r.classes = ["motorway"] * len(r.classes)
+    r.forks = [Fork(590.0, "left", 1, 2, True)]
+    r._lanes.hatched = [(ring, 0.0, r.length)]
+    trip = lane_gap_drive(r, keep=keep, seconds=120.0, lane0_x=ms.start_pose(r, 0, 0.0)[0], cfg=cfg)
+    x, y, h = trip.col(1), trip.col(2), trip.col(3)
+    inside = any(ms.overlap(ms.Vehicle(x[k], y[k], h[k]).corners(), part) for k in range(len(x)) for part in (ring[[0, 1, 4]], ring[1:]))
+    return trip, [e["phase"] for e in trip.events if e["event"] == "lane_gap"], inside
+  trip, gaps, inside = run(300.0)
+  assert "go" in gaps and "other_branch" not in gaps and not inside and trip.car.collisions == 0, gaps
+  trip, gaps, inside = run(430.0)
+  assert "other_branch" in gaps and not inside and trip.car.collisions == 0, gaps
+  trip, gaps, inside = run(430.0, {"hatched": False})
+  assert "other_branch" not in gaps and inside, gaps
+  print("lane gap wait stays off hatched: ok")
 
 
 def test_cut_in():
@@ -939,6 +966,7 @@ if __name__ == "__main__":
   test_lane_change_waits_for_its_lane()
   test_two_lane_change()
   test_fork_change_gives_up_the_branch()
+  test_lane_gap_wait_stays_off_hatched()
   test_lane_window_speeding_up()
   test_cut_in()
   test_nudge_two_in_a_row()

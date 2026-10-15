@@ -284,9 +284,10 @@ def section(ours: int = 2, back: int = 2, w: float = LANE_W, median: float = 0.0
 
 
 def made_route(points, sec: Section | list, junctions=(), turns: dict | None = None, stops=(), road_class: str = "primary",
-               limit: float = 0.0) -> Route:
+               limit: float = 0.0, hatched=()) -> Route:
   """A Route on made lanes: `sec` for every segment (or one per segment), junction nodes at the given point indices,
-  turn maneuvers {point index: type} and stop lines [(m along, kind)]."""
+  turn maneuvers {point index: type}, stop lines [(m along, kind)] and hatched areas painted beside it (outlines
+  [[x, y], ...])."""
   pts = np.asarray(points, float)
   n = len(pts)
   mans = [{"type": START, "begin_shape_index": 0}] + [{"type": t, "begin_shape_index": i, "street_names": ["Out St"]}
@@ -296,6 +297,7 @@ def made_route(points, sec: Section | list, junctions=(), turns: dict | None = N
   r.osm_lanes = True
   r.junctions = [float(r.along[i]) for i in junctions]
   r._lanes = RouteLanes(pts, secs, junctions=r.junctions)
+  r._lanes.hatched = [(np.asarray(ring, float), 0.0, float(r.along[-1])) for ring in hatched]
   r.lane_counts = [s.lanes for s in secs]
   r.classes = [road_class] * (n - 1)
   r.limits = np.full(n - 1, limit)

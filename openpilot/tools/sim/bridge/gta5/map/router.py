@@ -11,7 +11,7 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map.dest_snap import DestinationSnapper, Snap
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game, to_lat_lon
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, FORWARD, Lane, OsmLanes, RouteLanes, Section, Span, \
-  oneway_of, ways_from_nodes
+  oneway_of, route_nodes, ways_from_nodes
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT, SLIP_LANE, Link, Paths, wrap
 from openpilot.tools.sim.bridge.gta5.map.stop_lines import StopLines
 
@@ -46,6 +46,8 @@ PAINT_CELL, PAINT_ENDS, PAINT_LEVEL = 10.0, 1.0, 2.5
 # a link through a hatched area (crosses_hatched): m of it inside, m in from the area's outline (a link grazing a gore's
 # edge or tip stays), and m between the points it's measured at
 HATCH_IN, HATCH_ERODE, HATCH_STEP = 0.5, 0.3, 0.05
+# a hatched area beside a route (hatched_near): m from its line, m between their heights, m between the places looked at
+HATCH_NEAR, HATCH_LEVEL, HATCH_SAMPLE = 15.0, 3.0, 2.0
 HAIRPIN = 90.0  # deg: a shortcut link every way through which turns back more than this, in and out again, is a hairpin
 # a shortcut link into the oncoming carriageway (oncoming): deg at least between the ways the carriageways at its ends
 # run, the road classes it's never taken on, and m from its middle another road meets for it to be at a junction
@@ -178,6 +180,7 @@ class Route:
     if self.osm_lanes:
       ways_along = ways_from_nodes(points, osm)
       self._lanes = RouteLanes.from_osm(points, ways_along, osm)
+      self._lanes.hatched = hatched_near(points, osm)
       for w, _, i0, i1 in ways_along:
         for k in range(max(i0, 0), min(i1, len(self.classes))):
           self.classes[k] = osm.ways[w][0].get("highway", "")
@@ -789,6 +792,41 @@ def crosses_hatched(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> bool:
     return False
   za, zb = (float(t['ele']) if 'ele' in (t := osm.data.node_tags.get(n, {})) else math.nan for n in (na[0], nb[0]))
   return lines.inside(osm.node_xy(na[0]), osm.node_xy(nb[0]), za, zb) >= HATCH_IN
+
+
+def hatched_near(points, osm: OsmLanes) -> list[tuple[np.ndarray, float, float]]:
+  """The hatched areas the map paints (LaneLines.rings) beside a route (points [N, 2]): each one's outline [K, 2] and
+  the m along the route from and to which it's within HATCH_NEAR of the route's line and on its level (within
+  HATCH_LEVEL of the outline's height, where both are known: an area under an overpass isn't the bridge's)."""
+  lines = LaneLines.of(osm)
+  pts = np.asarray(points, float)[:, :2]
+  if lines is None or not lines.rings or len(pts) < 2:
+    return []
+  along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))))
+  s = np.append(np.arange(0.0, along[-1], HATCH_SAMPLE), along[-1])
+  q = np.stack([np.interp(s, along, pts[:, 0]), np.interp(s, along, pts[:, 1])], axis=1)
+  ele = np.array([float(osm.data.node_tags.get(n, {}).get('ele', 'nan')) if n is not None else math.nan for n in route_nodes(pts, osm)])
+  known = np.isfinite(ele)
+  z = np.interp(s, along[known], ele[known]) if known.any() else np.full(len(s), math.nan)
+  reach = int(math.ceil(HATCH_NEAR / PAINT_CELL))
+  found: dict[int, set[int]] = {}
+  for i, (cx, cy) in enumerate(np.floor(q / PAINT_CELL).astype(int).tolist()):
+    for dx in range(-reach, reach + 1):
+      for dy in range(-reach, reach + 1):
+        for n in lines.ring_cells.get((cx + dx, cy + dy), ()):
+          found.setdefault(n, set()).add(i)
+  out = []
+  for n, idx in sorted(found.items()):
+    ring, rz = lines.rings[n]
+    i = np.array(sorted(idx))
+    a, ab = ring[:-1], np.diff(ring, axis=0)
+    t = np.clip(np.einsum('pij,ij->pi', q[i][:, None] - a[None], ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-12), 0.0, 1.0)
+    d = np.hypot(*(a[None] + ab[None] * t[..., None] - q[i][:, None]).transpose(2, 0, 1)).min(axis=1)
+    level = float(np.nanmean(rz)) if np.isfinite(rz).any() else math.nan
+    near = (d <= HATCH_NEAR) & ~(np.abs(z[i] - level) > HATCH_LEVEL)
+    if near.any():
+      out.append((ring, float(s[i][near].min()), float(s[i][near].max())))
+  return out
 
 
 def clear_point(osm: OsmLanes, pa: np.ndarray, pb: np.ndarray) -> np.ndarray:

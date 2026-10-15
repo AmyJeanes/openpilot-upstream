@@ -71,6 +71,7 @@ PROMPTS = {  # an arrow key's prompt: kind -> (sound, text), {side} and {road} f
   "lane": ("", "Changing lane {side}"), "wait": ("", "Waiting to change lane {side}"),
   "blocked": ("refuse", "Lane {side} not clear"), "busy": ("refuse", "Already changing lane"),
   "lane_no": ("refuse", "Can't change lane {side} here"), "lane_cancel": ("", "Lane change cancelled"),
+  "hatched": ("refuse", "No {side} here: hatched"),
 }
 
 

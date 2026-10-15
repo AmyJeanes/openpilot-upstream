@@ -1378,6 +1378,9 @@ class RouteLanes:
     # the raised islands beside the route at its height (outlines [K, 2]), which no lane drives over (blocked)
     self.islands: list[np.ndarray] = islands or []
     self._blocked: list[tuple[float, float, int, int]] | None = None
+    # the painted hatched areas beside the route at its height (router.hatched_near: each one's outline [K, 2] and the m
+    # along the route it's beside), which no lane change crosses
+    self.hatched: list[tuple[np.ndarray, float, float]] = []
 
   @classmethod
   def from_osm(cls, points, ways_along: list[tuple[int, bool, int, int]], osm: OsmLanes) -> 'RouteLanes':

@@ -318,6 +318,75 @@ def test_asked_lane_change():
   assert md.ask_lane("left", trip.car.t) == "ok" and md.ask_lane("right", trip.car.t) == "cancel" and md.asked is None
 
 
+# a diverge's hatched V between a two-lane road's lanes (their line 5.5 m right of the route's), its nose 500 m along,
+# 2 m wide from 590 m (an exit's gore); and a painted island between them from 100 to 250 m
+GORE = [(5.5, 500.0), (6.5, 590.0), (6.5, 700.0), (4.5, 700.0), (4.5, 590.0)]
+ISLAND = [(4.5, 100.0), (6.5, 100.0), (6.5, 250.0), (4.5, 250.0)]
+
+
+def body_in_area(md, ring) -> list[float]:
+  """Path m where our body along the planned path is in a hatched area (outline [[x, y], ...])."""
+  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import inside_ring
+  out = []
+  for i in range(len(md.path)):
+    f = np.array([math.cos(md.theta[i]), math.sin(md.theta[i])])
+    pts = md.path[i] + np.array([f * a + np.array([f[1], -f[0]]) * b for a in np.linspace(-md.rear, md.front, 9)
+                                 for b in np.linspace(-md.half_width, md.half_width, 5)])
+    if inside_ring(pts, np.asarray(ring, float)).any():
+      out.append(float(md.s_path[i]))
+  return out
+
+
+def test_lane_change_off_hatched():
+  """Amy (15 Oct): a lane change doesn't sweep the car's body across a hatched area (a gore's chevrons, taking or
+  leaving an exit; a painted median): off_hatched moves it off. Across the V before its nose (530-585): moved to end
+  by the nose, its length kept; across the island from the car's place inside its span (no room before): started
+  as it ends; across the V from the car short of the nose (no room before it, the V on to the next key): kept and
+  flagged, a hatched_change anomaly; with hatched off, left as it was. The built path's body never in them."""
+  def plan(ring, keys, along=0.0, cfg=None):
+    r = ms.made_route(ms.line((800.0, 0.0)), ms.section(2, 2), road_class="motorway", hatched=[ring])
+    md = ms.drive(r, {"seed": 1, **(cfg or {})}, pose=ms.start_pose(r, keys[0][1], along), v0=25.0, seconds=0.1, until_done=False).md
+    out = md.off_hatched(r, keys, 0.0)
+    assert md._replan_keys(r, md.last_state, 0.0, out)
+    return md, out
+  md, out = plan(GORE, [(0.0, 0.0), (530.0, 0.0), (585.0, 1.0), (800.0, 1.0)])
+  assert out[1][0] < out[2][0] <= 500.0 + 1e-6 and abs(out[2][0] - out[1][0] - 55.0) < 1e-6 and len(md.hatch_moves) == 1, out
+  assert not body_in_area(md, GORE) and not kinds(md, "hatched_change")
+  md, out = plan(ISLAND, [(120.0, 1.0), (150.0, 1.0), (205.0, 0.0), (800.0, 0.0)], along=120.0)
+  assert out[1][0] > 240.0 and abs(out[2][0] - out[1][0] - 55.0) < 1e-6, out
+  assert not body_in_area(md, ISLAND) and not kinds(md, "hatched_change")
+  keys = [(480.0, 0.0), (480.0, 0.0), (535.0, 1.0), (700.0, 1.0)]
+  md, out = plan(GORE, keys, along=480.0)
+  assert out == keys and kinds(md, "hatched_change") and not md.hatch_moves, (out, md.anomalies)
+  keys = [(0.0, 0.0), (530.0, 0.0), (585.0, 1.0), (800.0, 1.0)]
+  md, out = plan(GORE, keys, cfg={"hatched": False})
+  assert out == keys and body_in_area(md, GORE)
+  # driven: nav's change for a left turn at 600 m from the right lane (399-474 m) across a painted V before the turn
+  # bay (from 440 m) is made before it; the car's body never in it
+  ring = np.asarray([(5.5, 440.0), (6.5, 500.0), (6.5, 600.0), (4.5, 600.0), (4.5, 500.0)])
+  r = ms.junction_turn("left", lead=600.0, stop=None)
+  r._lanes.hatched = [(ring, 0.0, r.length)]
+  trip = ms.drive(r, {"seed": 1}, lane=1, v0=15.0, seconds=90.0)
+  assert trip.finished == "arrived" and trip.md.hatch_moves and trip.md.changes[0][1] < 440.0, (trip.finished, trip.md.hatch_moves)
+  x, y, h = trip.col(1), trip.col(2), trip.col(3)
+  assert not any(ms.overlap(ms.Vehicle(x[k], y[k], h[k]).corners(), part) for k in range(len(x)) for part in (ring[[0, 1, 4]], ring[1:]))
+  print("lane change off hatched: ok")
+
+
+def test_asked_lane_change_past_hatching():
+  """An arrow key's change across a hatched area beside us (a long painted median between the lanes) is refused,
+  "hatched" (the HUD's "No right here: hatched"); past its end it's made."""
+  from openpilot.tools.sim.bridge.gta5.gta5_events import prompt
+  median = [(4.5, 0.0), (6.5, 0.0), (6.5, 400.0), (4.5, 400.0)]
+  r = ms.made_route(ms.line((1200.0, 0.0)), ms.section(2, 2), road_class="motorway", hatched=[median])
+  trip = ms.drive(r, {"seed": 1}, lane=0, v0=15.0, seconds=2.0, until_done=False)
+  assert r.lane()[0] == 0 and trip.md.ask_lane("right", trip.car.t) == "hatched"
+  assert prompt("hatched", "right") == ("refuse", "No right here: hatched")
+  trip = ms.drive(r, {"seed": 1}, pose=ms.start_pose(r, 0, 450.0), v0=15.0, seconds=2.0, until_done=False)
+  assert trip.md.ask_lane("right", trip.car.t) == "ok"
+  print("asked lane change past hatching: ok")
+
+
 def test_corner_kerb():
   """A junction's inside corner kerb from its legs' cross-sections: a car over it is a kerb_contact, the plan's own
   line isn't."""
@@ -749,6 +818,40 @@ def test_live_starts():
   print(f"live starts: ok ({live} replanned)" if live else "live starts: skipped (no live map or router)")
 
 
+# live19b trips past motorway gores (Amy's list, 15 Oct): (-705,-1988), (-754,-2147), the run (724,-585), (623,-534),
+# (568,-326), (327,-483) (this one under hatched areas on the overpass 9 m above)
+LIVE_GORES = ["-756,-1841,25,-161,0>-715,-1861", "-830,-2278,12,-28,0>-838,-2233", "955,-773,35,65,0>607,-517",
+              "907,-719,35,54,0>504,-483", "730,-58,35,142,0>474,-422", "482,-502,33,83,0>199,-473"]
+
+
+def test_hatched_live_routes():
+  """Trips on the live map past motorway gores: each lane change's body clear of every hatched area beside the route at
+  its level as planned (off_hatched), and as a wait for its lane puts it off on towards them (_deferred_off_hatched,
+  every 20 m up to 200 m on)."""
+  live = 0
+  for spec in LIVE_GORES:
+    got = ms.trip_route(spec)
+    if got is None or not got[0].lanes.hatched:
+      continue
+    route, pose = got
+    md = ms.drive(route, {"seed": 1}, pose=pose, v0=20.0, seconds=0.1).md
+    keys = list(md.keys)
+    assert md.plans and all(md._hatch_hit(route, keys, a, b) is None for a, b in chains(keys)), spec
+    deferred = 0
+    for a, b in chains(keys):
+      s0 = float(np.interp(keys[a][0], md.route_s, md.s_path))
+      for start in np.arange(keys[a][0] + 20.0, min(keys[a][0] + 200.0, route.length), 20.0):
+        got = md._deferred_off_hatched(route, s0, float(start), 20.0)
+        if got is None:
+          break
+        deferred += 1
+        assert all(md._hatch_hit(route, got, x, y) is None for x, y in chains(got) if got[x][0] >= keys[a][0]), (spec, start)
+    print(f"  {spec}: {len(md.changes)} changes, moved {len(md.hatch_moves)}, flagged {len(kinds(md, 'hatched_change'))}, "
+          f"{deferred} deferrals checked, {len(route.lanes.hatched)} areas beside")
+    live += 1
+  print(f"hatched live routes: ok ({live} trips)" if live else "hatched live routes: skipped (no live map or router)")
+
+
 class FakeSlots:
   """Lane slots with these moves (along, turn, need) and no targets to read lanes from: follow_slots takes each
   mismatch's own want."""
@@ -1172,6 +1275,9 @@ if __name__ == "__main__":
   test_lane_end_past_a_junction()
   test_oncoming_abort()
   test_lane_change_kept_off_a_jog()
+  test_lane_change_off_hatched()
+  test_asked_lane_change_past_hatching()
+  test_hatched_live_routes()
   test_arrival()
   test_aborts()
   test_no_oscillation()
