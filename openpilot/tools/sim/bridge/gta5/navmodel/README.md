@@ -14,6 +14,8 @@ findings and the GTA test plan are in `CLOUD_RESULT_NAVMODEL.md` at the reposito
 | `check_crossings.py` | how the map's overpasses draw (cut, bridge over bridge, untagged) |
 | `gta5_mapsd.py` | comma's mapsd over the bridge's navRoute and GNSS fix, from the local tiles, in either frame |
 | `modeld_nav_inputs.patch` | comma's modeld hunk for the two inputs (8b8ce13), for the fork's modeld |
+| `smoke_onnx.py` | a CPU smoke test of a nav model's ONNX with a GTA map frame and navigation vector |
+| `trips_navmodel.txt` | e2e.py trips for the GTA test (city turns, freeway keeps and exits) |
 | `samples/` | frames and contact sheets (kept out of LFS by its `.gitattributes`) |
 
 ```bash
@@ -22,7 +24,7 @@ python build_pmtiles.py ~/gta5map/gta5.osm.pbf ~/gta5map/gta5_roads.pmtiles
 # terminal 3, beside openpilot and the bridge: the map frames
 python -m openpilot.tools.sim.bridge.gta5.navmodel.gta5_mapsd --tiles ~/gta5map/gta5_roads.pmtiles
 # the bridge publishes navRoute and navInstruction, with the model's maneuvers
-GTA5_NAV_MSGS=1 GTA5_NAV_MODEL=1 GTA5_MAP=~/gta5map GTA5_ROUTER=http://localhost:8002 ./openpilot/tools/sim/run_bridge.py --simulator gta5
+GTA5_NAV_MSGS=1 GTA5_NAV_MODEL=1 GTA5_NOO=off GTA5_MAP=~/gta5map GTA5_ROUTER=http://localhost:8002 ./openpilot/tools/sim/run_bridge.py --simulator gta5
 ```
 
 Tests: `python test_nav_input.py`, `python test_map_frames.py` (with `GTA5_MAP` also the whole map),
