@@ -13,7 +13,7 @@ from openpilot.selfdrive.navigation.pmtiles import PMTiles
 from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, STREET, TRACK, EGO, MapRenderer, project, mercator, road_style
 from openpilot.selfdrive.navigation.vector_tile import decode_roads
 from openpilot.tools.sim.bridge.gta5.navmodel import build_pmtiles as bp
-from openpilot.tools.sim.bridge.gta5.navmodel.frame import game, lat_lon
+from openpilot.tools.sim.bridge.gta5.navmodel.frame import LAT0, game, lat_lon, tiles_lat0
 
 # GTA's road classes, as the map guesses them (README: Road classes), and the renderer's style for each
 STYLES = {"motorway": MAJOR, "trunk": MAJOR, "primary": MAJOR, "secondary": MEDIUM, "tertiary": MEDIUM,
@@ -29,7 +29,7 @@ def archive(roads, lat0: float = 0.0) -> str:
     out.append((np.column_stack((lon, lat)), bp.road_properties(tags)))
   tiles = {k: bp.encode_tile(v) for k, v in bp.tile_features(out).items()}
   path = tempfile.mktemp(suffix=".pmtiles")
-  bp.write_pmtiles(path, tiles)
+  bp.write_pmtiles(path, tiles, lat0=lat0)
   return path
 
 
@@ -91,6 +91,11 @@ def test_one_game_metre_is_a_pixel_in_either_frame():
   assert math.isclose(lat_lon(1.0, 2.0)[0], lat_lon(1.0, 2.0, 0.0)[0])
 
 
+def test_tiles_carry_their_frame():
+  for lat0 in (0.0, LAT0):
+    assert tiles_lat0(archive([([(0, 0), (50, 0)], {"highway": "service"})], lat0)) == lat0
+
+
 def test_local_tiles_read_and_close():
   path = archive([([(0, 0), (50, 0)], {"highway": "service"})])
   src = LocalTiles(path)
@@ -108,9 +113,10 @@ def test_whole_map():
   out = tempfile.mktemp(suffix=".pmtiles")
   stats = bp.build(str(Path(folder) / "gta5.osm.pbf"), out)
   assert stats["tiles"] > 40 and stats["bridges"] > 1000, stats
+  assert tiles_lat0(out) == LAT0
   r = MapRenderer(PMTiles(LocalTiles(out)))
-  lat, lon = lat_lon(215.0, -810.0)  # Mission Row
-  route = np.array([lat_lon(215.0, -900.0)[::-1], lat_lon(215.0, -700.0)[::-1]])
+  lat, lon = lat_lon(215.0, -810.0, LAT0)  # Mission Row
+  route = np.array([lat_lon(215.0, -900.0, LAT0)[::-1], lat_lon(215.0, -700.0, LAT0)[::-1]])
   image, valid = r.render(lon, lat, 0.0, route)
   assert valid and (image == 255).mean() > 0.1
 

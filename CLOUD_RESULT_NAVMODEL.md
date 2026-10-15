@@ -15,7 +15,8 @@ Brief: `CLOUD_TASK_NAVMODEL.md`. Status: done here; GTA runs are the TODOs at th
   precompiled for their eGPU. I couldn't download any model here (HuggingFace is blocked), so the smoke test is yours.
 - **Where GTA looks different from a real map to the model:** freeways split into lane groups, which give runs of
   "keep left" 10-30 m apart (folded into one) and freeway bands on the map about twice as wide (not fixed: a TODO if it
-  matters). GTA sits on the equator, so roads draw about 10 % wider than in California (`--lat0 34` option). There
+  matters). GTA sits on the equator, so roads would draw about 10 % wider than in California; the map frame now
+  defaults to 34 N (`build_pmtiles.py` stores it in the tiles; mapsd reads it from there). There
   are no on-ramp maneuvers and no roundabouts in GTA's map. Bridges cut correctly at 1208 of 1752 overpasses; 542 are
   bridges over bridges (mostly car parks), drawn without a cut, as on a real map.
 - **Next:** item 6 gives the steps, the trips (`navmodel/trips_navmodel.txt`) and the comparison against today's model.
@@ -285,10 +286,10 @@ hunk, the `SubMaster` list, where master added `controlsState` on the same line:
 
 **Once.**
 1. `git fetch origin navmodel-cloud && git checkout navmodel-cloud` (= `gta5` + this work). In the map venv:
-   `uv pip install shapely mapbox-vector-tile pmtiles onnxruntime`.
-2. Tiles: `python openpilot/tools/sim/bridge/gta5/navmodel/build_pmtiles.py ~/gta5map/gta5.osm.pbf
-   ~/gta5map/gta5_roads.pmtiles` (and `--lat0 34` into `gta5_roads_lat34.pmtiles` for variant F). Check:
-   `check_crossings.py ~/gta5map/gta5.osm.pbf` gives 1208 cut / 542 bridge on bridge / 2 untagged for this map, and
+   `uv pip install shapely mapbox-vector-tile pmtiles onnxruntime pillow`.
+2. Tiles (the live map is `~/gta5map_lanes`): `python openpilot/tools/sim/bridge/gta5/navmodel/build_pmtiles.py
+   ~/gta5map_lanes/gta5.osm.pbf ~/gta5map_lanes/gta5_roads.pmtiles` (34 N by default; `--lat0 0` into
+   `gta5_roads_lat0.pmtiles` for variant F). Check: `check_crossings.py ~/gta5map_lanes/gta5.osm.pbf` gives 1208 cut / 542 bridge on bridge / 2 untagged for this map, and
    `render_frames.py` sheets look like `navmodel/samples/`.
 3. The rl nav model's ONNX, `big_driving_supercombo.onnx` from comma's `nav-model-integration` (added by `a03bb1d`,
    unchanged at `afbf2e5`; LFS on comma's HuggingFace host):
@@ -299,17 +300,19 @@ hunk, the `SubMaster` list, where master added `controlsState` on the same line:
    ~/gta5map/gta5_roads.pmtiles`. Prints the graph's inputs (record `nav_map` / `navigation` shapes and dtypes and any
    other new input here, answering item 1's open points), runs one frame with a GTA map frame and "right turn in 50 m",
    and again with both zero: outputs finite, and different. (Tested here on a stand-in ONNX with the same input names.)
-5. modeld: `git apply openpilot/tools/sim/bridge/gta5/navmodel/modeld_nav_inputs.patch`. First a regression drive with
-   the current default model (2 min, no nav: unchanged driving, modelV2 at 20 Hz). Then compile:
-   `MODELD_DEV=CUDA MODELD_BIG_ONNX=<onnx> scons -j8 openpilot/selfdrive/modeld` (writes
-   `local_big_driving_tinygrad.pkl`: back up any one you use; or copy it aside and run with `MODELD_PKL=<it>`).
+5. modeld: `git apply openpilot/tools/sim/bridge/gta5/navmodel/modeld_nav_inputs.patch` (applied on `navmodel-local`).
+   First a regression drive with the current default model (2 min, no nav: unchanged driving, modelV2 at 20 Hz). Then
+   compile to its own pkl, leaving `local_big_driving_tinygrad.pkl` alone, and run it with
+   `MODELD_PKL=$PWD/openpilot/selfdrive/modeld/models/local_big_nav_rl_tinygrad.pkl` in place of `MODELD_BIG=1`:
+   `PYTHONPATH=$PWD:$PWD/tinygrad_repo DEV=CUDA python3 tinygrad_repo/examples/openpilot/compile_onnx.py <onnx>
+   $PWD/openpilot/selfdrive/modeld/models/local_big_nav_rl_tinygrad.pkl --out-of-band --benchmark-runs 1`.
 
 **Processes** (same `OPENPILOT_PREFIX=gta5` everywhere):
 ```bash
 valhalla_service ~/gta5map/valhalla.json 2                                                      # 1 router
-MODELD_BIG=1 MODELD_DEV=CUDA FINGERPRINT=TESLA_MODEL_3 GALLIUM_DRIVER=d3d12 BLOCK=soundd \
+MODELD_PKL=<local_big_nav_rl_tinygrad.pkl> MODELD_DEV=CUDA FINGERPRINT=TESLA_MODEL_3 GALLIUM_DRIVER=d3d12 BLOCK=soundd \
   ./openpilot/tools/sim/launch_openpilot.sh                                                      # 2 openpilot + the nav model
-python -m openpilot.tools.sim.bridge.gta5.navmodel.gta5_mapsd --tiles ~/gta5map/gta5_roads.pmtiles --dump ~/navmaps  # 3
+python -m openpilot.tools.sim.bridge.gta5.navmodel.gta5_mapsd --tiles ~/gta5map_lanes/gta5_roads.pmtiles --dump ~/navmaps  # 3
 GTA5_NAV_MSGS=1 GTA5_NAV_MODEL=1 GTA5_NOO=off GTA5_MAP=~/gta5map GTA5_ROUTER=http://localhost:8002 \
   GTA5_LOG=~/gta5test/nm.log ./openpilot/tools/sim/run_bridge.py --simulator gta5               # 4 bridge
 python openpilot/tools/sim/bridge/gta5/e2e.py run --trips openpilot/tools/sim/bridge/gta5/navmodel/trips_navmodel.txt \
@@ -333,7 +336,7 @@ routes GTA's roundabouts as turns (a TODO below, or drive one as a turn trip for
 | C model + NavDesire | rl nav | map + navigation | drives | `GTA5_NAV_MODEL=1 GTA5_NOO=on` + mapsd |
 | D no nav | rl nav | none (zeros) | guidance only | `GTA5_NAV_MSGS=0 GTA5_NOO=off`, no mapsd |
 | E (N2, N3) | as B | raw keeps | | `GTA5_NAV_KEEP_RUN=0` |
-| F (all) | as B | map at 34 N | | tiles `--lat0 34`, `gta5_mapsd --lat0 34` |
+| F (all) | as B | map at the equator | | tiles built `--lat0 0` (mapsd follows the tiles) |
 
 **Measure** (`e2e.py summary` / `scensum` per results file): maneuvers done vs missed (e2e scores each route maneuver;
 missed = a reroute within 150 m), by kind: turns (9-16), keeps (22-24), exits (20/21); missed exits on N2/N3; trip
@@ -342,9 +345,27 @@ collisions; for B, turns taken with no desire at all. Compare B and C against A 
 nav inputs add, E and F against B. A good result: B misses no more maneuvers than A on N1-N3 and interventions/km are
 no worse; if keeps or exits fail, try E and F before anything else.
 
+## Local results (15 Oct)
+
+- **rl ONNX** fetched (sha256 matches). Its inputs: `nav_map` float32 [1, 1, 256, 256] (modeld fills it with the
+  frame's raw 0-255 values), `navigation` float32 [1, 47], and two new recurrent queues, `state_map_features_q` and
+  `state_navigation_features_q` [128, 1, 64] each, with `next_` outputs; modeld's generic state pairs carry them. Its
+  checkpoint is `cf8f6120…/56320/80eedcdd…`.
+- **Smoke test** (CPU, GTA map frame at 34 N, a right turn 50 m ahead vs both zero): all outputs finite; `outputs`
+  differ by up to 10.0, the map and navigation feature queues by 1.28 and 0.41. The nav inputs reach the plan.
+- **Compiled for the RTX 5090** (CUDA, 33 s): `models/local_big_nav_rl_tinygrad.pkl`, 825 MB, 23.9 ms a run. The
+  modeld patch is applied on `navmodel-local` and compiles; not yet run live.
+- **No newer nav ONNX on HuggingFace.** `commaai/openpilot_driving_models` holds four big ONNX (newest `8d736683…`,
+  "upload MD", 14 Oct = MD v3): none has nav inputs. n16's pkl names checkpoint `96244b1f…/12800`, which isn't
+  published there. comma's other branches (`betterwm`, `worldmodel-plan-5fps`) have no nav model.
+- **Map frame at 34 N by default** (`frame.LAT0`): the tiles store their lat0 in the metadata, and `gta5_mapsd` and
+  `render_frames` read it, so they can't disagree. Tiles of the live map (`~/gta5map_lanes`): 72 559 roads, 3 297
+  bridges, 72 tiles, 603 KB; crossings 1208 cut / 542 bridge on bridge / 2 untagged, as here; 43 sample frames along the
+  three fixture routes, all valid (`E:\gta5_audit\navmodel_20261015\frames`). 16 unit tests pass.
+
 ## TODOs for a local session
 
-1. Fetch the rl ONNX, run `smoke_onnx.py`, record the input specs here (item 1's open points).
+1. ~~Fetch the rl ONNX, run `smoke_onnx.py`, record the input specs here~~ (done, above).
 2. Apply `modeld_nav_inputs.patch`, regression-drive the current model, compile and run the rl nav model.
 3. The live checks, then conditions A-F; put the e2e summaries in this file.
 4. n16 nav-wm: no ONNX on comma's branch (only a chestnut pkl), so it can't be compiled for the PC; ask or wait.

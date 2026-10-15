@@ -3,7 +3,9 @@
 navigation/mapsd.py: the pose on the route at the car's projected progress, headed along the route), from a local
 PMTiles file (build_pmtiles.py):
 
-  python render_frames.py gta5_roads.pmtiles out_dir [--route fixtures/routes.json:city] [--every 250] [--lat0 0]
+  python render_frames.py gta5_roads.pmtiles out_dir [--route fixtures/routes.json:city] [--every 250]
+
+The route goes into the frame the tiles were built in (their metadata's lat0).
 
 Writes one PNG per frame (frame_<route>_<m along>.png) and contact_<route>.png, a sheet of them, labelled.
 """
@@ -17,7 +19,7 @@ from openpilot.selfdrive.navigation.local_tiles import LocalTiles
 from openpilot.selfdrive.navigation.pmtiles import PMTiles
 from openpilot.selfdrive.navigation.renderer import MapRenderer
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.tools.sim.bridge.gta5.navmodel.frame import lat_lon
+from openpilot.tools.sim.bridge.gta5.navmodel.frame import lat_lon, tiles_lat0
 
 
 def route_coordinates(points: np.ndarray, lat0: float = 0.0) -> np.ndarray:
@@ -74,8 +76,8 @@ def main():
   ap.add_argument("--route", default=str(Path(__file__).parent / "fixtures" / "routes.json") + ":city")
   ap.add_argument("--every", type=float, default=250.0, help="m between frames")
   ap.add_argument("--at", type=float, nargs="*", help="m along the route for frames, in place of --every")
-  ap.add_argument("--lat0", type=float, default=0.0)
   args = ap.parse_args()
+  args.lat0 = tiles_lat0(args.tiles)
   path, name = args.route.rsplit(":", 1)
   points = np.array(json.loads(Path(path).read_text())[name]["points"], dtype=float)
   length = float(np.hypot(*np.diff(points, axis=0).T).sum())

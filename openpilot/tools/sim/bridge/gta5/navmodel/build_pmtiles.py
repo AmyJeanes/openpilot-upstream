@@ -3,7 +3,7 @@
 (selfdrive/navigation/{pmtiles,vector_tile,renderer}.py, comma nav-model-integration afbf2e5), from the map's
 gta5.osm.pbf:
 
-  python build_pmtiles.py ~/gta5map/gta5.osm.pbf ~/gta5map/gta5_roads.pmtiles [--lat0 0]
+  python build_pmtiles.py ~/gta5map/gta5.osm.pbf ~/gta5map/gta5_roads.pmtiles [--lat0 34]
 
 What the renderer reads, as Protomaps' basemap gives it: layer `roads`, line features, gzip MVT tiles at zoom 15
 (extent 4096, a 64-unit buffer) in a gzip PMTiles v3 archive, with
@@ -16,8 +16,9 @@ What the renderer reads, as Protomaps' basemap gives it: layer `roads`, line fea
 Tracks are minor roads here, so the renderer draws them in its track style (`--tracks path` leaves them out, as a
 basemap that files tracks under paths would).
 
-The roads are taken where the pbf has them, in the bridge's frame (map/gta5_map.py), or with --lat0 moved into the
-frame about that latitude (frame.py), for the renderer's road widths there.
+The roads are moved from the bridge's frame (map/gta5_map.py, on the equator) into the frame about --lat0 (frame.py,
+default Los Angeles' latitude), for the renderer's road widths there; --lat0 0 keeps the bridge's frame. The lat0 goes
+into the archive's metadata, where gta5_mapsd and render_frames read it.
 """
 import argparse
 import gzip
@@ -25,6 +26,8 @@ import math
 from collections import defaultdict
 
 import numpy as np
+
+from openpilot.tools.sim.bridge.gta5.navmodel.frame import LAT0
 
 ZOOM = 15
 EXTENT = 4096
@@ -121,7 +124,8 @@ def encode_tile(features: list[dict]) -> bytes:
   return gzip.compress(data, mtime=0)
 
 
-def write_pmtiles(path: str, tiles: dict[tuple[int, int], bytes], zoom: int = ZOOM, attribution: str = "") -> None:
+def write_pmtiles(path: str, tiles: dict[tuple[int, int], bytes], zoom: int = ZOOM, attribution: str = "",
+                  lat0: float = 0.0) -> None:
   from pmtiles.tile import Compression, TileType, zxy_to_tileid
   from pmtiles.writer import Writer
 
@@ -145,16 +149,16 @@ def write_pmtiles(path: str, tiles: dict[tuple[int, int], bytes], zoom: int = ZO
       "max_lon_e7": int(bounds[2] * 1e7), "max_lat_e7": int(bounds[3] * 1e7),
       "center_zoom": zoom, "center_lon_e7": int((bounds[0] + bounds[2]) / 2 * 1e7),
       "center_lat_e7": int((bounds[1] + bounds[3]) / 2 * 1e7),
-    }, {"name": "gta5 roads", "type": "baselayer", "format": "pbf", "attribution": attribution,
+    }, {"name": "gta5 roads", "type": "baselayer", "format": "pbf", "attribution": attribution, "lat0": lat0,
         "vector_layers": [{"id": "roads", "fields": {"kind": "String", "kind_detail": "String", "is_bridge": "Boolean",
                                                      "is_tunnel": "Boolean", "level": "Number", "name": "String",
                                                      "oneway": "String"}, "minzoom": zoom, "maxzoom": zoom}]})
 
 
-def build(pbf: str, out: str, lat0: float = 0.0, tracks: str = "minor_road") -> dict:
+def build(pbf: str, out: str, lat0: float = LAT0, tracks: str = "minor_road") -> dict:
   roads = read_roads(pbf, lat0, tracks)
   tiles = {xy: encode_tile(feats) for xy, feats in tile_features(roads).items()}
-  write_pmtiles(out, tiles, attribution=f"GTA V roads from {pbf.rsplit('/', 1)[-1]}, frame lat0={lat0}")
+  write_pmtiles(out, tiles, attribution=f"GTA V roads from {pbf.rsplit('/', 1)[-1]}, frame lat0={lat0}", lat0=lat0)
   kinds: dict[str, int] = defaultdict(int)
   for _, p in roads:
     kinds[p["kind"]] += 1
@@ -166,7 +170,7 @@ def main():
   ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
   ap.add_argument("pbf")
   ap.add_argument("out")
-  ap.add_argument("--lat0", type=float, default=0.0, help="frame latitude (frame.py); 0: the bridge's own")
+  ap.add_argument("--lat0", type=float, default=LAT0, help="frame latitude (frame.py); 0: the bridge's own")
   ap.add_argument("--tracks", choices=("minor_road", "path"), default="minor_road", help="tracks' kind (path: not drawn)")
   args = ap.parse_args()
   print(build(args.pbf, args.out, args.lat0, args.tracks))

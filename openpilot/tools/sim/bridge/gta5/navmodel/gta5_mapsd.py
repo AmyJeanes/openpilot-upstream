@@ -3,12 +3,12 @@
 (VISION_STREAM_MAP) from the bridge's navRoute (gta5_nav_msgs, GTA5_NAV_MSGS=1) and its simulated GNSS fix (gta5_gnss),
 rendered from a local PMTiles file (build_pmtiles.py):
 
-  python -m openpilot.tools.sim.bridge.gta5.navmodel.gta5_mapsd --tiles ~/gta5map/gta5_roads.pmtiles [--lat0 34]
+  python -m openpilot.tools.sim.bridge.gta5.navmodel.gta5_mapsd --tiles ~/gta5map/gta5_roads.pmtiles
       [--dump DIR --dump-every 20]
 
-It runs comma's MapsD as it is. In the bridge's own frame (--lat0 0, the default) this is just comma's mapsd with
-NAV_TILES set. With --lat0, the route's and the fix's coordinates are moved from the bridge's frame into the frame
-about that latitude (frame.py) on their way in (FrameSM), so the tiles must be built with the same --lat0.
+It runs comma's MapsD as it is. The route's and the fix's coordinates are moved from the bridge's frame into the frame
+the tiles were built in (their metadata's lat0, frame.py) on their way in (FrameSM); with tiles in the bridge's own
+frame (lat0 0) this is just comma's mapsd with NAV_TILES set.
 --dump saves every Nth frame as a PNG, with its pose's inputs in frames.jsonl, to look at or to record.
 """
 import argparse
@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
-from openpilot.tools.sim.bridge.gta5.navmodel.frame import lat_lon
+from openpilot.tools.sim.bridge.gta5.navmodel.frame import lat_lon, tiles_lat0
 
 GPS = ("gpsLocation", "gpsLocationExternal")
 
@@ -60,10 +60,11 @@ class FrameSM:
 def main():
   ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
   ap.add_argument("--tiles", required=True, help="the PMTiles file (build_pmtiles.py)")
-  ap.add_argument("--lat0", type=float, default=0.0, help="the frame's latitude, as the tiles were built (frame.py)")
   ap.add_argument("--dump", help="save frames here")
   ap.add_argument("--dump-every", type=int, default=20, help="frames between saves (20: one a second)")
   args = ap.parse_args()
+  args.lat0 = tiles_lat0(args.tiles)
+  print(f"gta5_mapsd: tiles {args.tiles}, frame lat0={args.lat0}", flush=True)
 
   import openpilot.cereal.messaging as messaging
   import openpilot.selfdrive.navigation.mapsd as mapsd
