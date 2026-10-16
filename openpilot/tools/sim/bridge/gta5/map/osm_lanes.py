@@ -730,10 +730,14 @@ class OsmLanes:
     from openpilot.tools.sim.bridge.gta5.map import osm_pbf
     lanes = cls(osm_pbf.read(path, relations=('connectivity',)), project, **kw)
     lanes.path = path
-    found = os.path.join(os.path.dirname(path), GEOMETRY_FILE)
-    if os.path.exists(found):
-      lanes.applied = json.load(open(found))
+    lanes.read_applied(path)
     return lanes
+
+  def read_applied(self, path: str) -> None:
+    """Reads the lane geometry applied beside the map file at `path` (GEOMETRY_FILE), where there is one."""
+    found = os.path.join(os.path.dirname(os.path.abspath(path)), GEOMETRY_FILE)
+    self.applied = json.load(open(found)) if os.path.exists(found) else {}
+    self._lanes.clear()
 
   def gta(self, node: int) -> str | None:
     """A node's GTA id (`area:index`, its gta:node tag), the key the applied geometry file uses."""
@@ -746,9 +750,25 @@ class OsmLanes:
     return bool(ga and gb and self.applied.get('diverges', {}).get(f'{ga}>{gb}', {}).get('keep'))
 
   def lanes(self, way: int) -> WayLanes:
+    """The way's lanes from its tags, with the applied geometry's for it over them (way_tags)."""
     if way not in self._lanes:
-      self._lanes[way] = WayLanes.from_tags(self.ways[way][0], self.drive_on_right, self.defaults)
+      self._lanes[way] = WayLanes.from_tags(self.way_tags(way), self.drive_on_right, self.defaults)
     return self._lanes[way]
+
+  def way_key(self, way: int) -> str | None:
+    """A way's key in the applied geometry: its end nodes' GTA ids, `a>b` in its direction; None without both."""
+    refs = self.ways[way][1]
+    a, b = self.gta(refs[0]), self.gta(refs[-1])
+    return f'{a}>{b}' if a and b else None
+
+  def way_tags(self, way: int) -> dict:
+    """The way's tags, with the applied geometry's lane placement and widths for it over them (GEOMETRY_FILE's
+    `ways`: {"a>b": {"tags": {...}}}, the lanes fitted to the paint by lane_fit.py)."""
+    tags = self.ways[way][0]
+    over = self.applied.get('ways') if self.applied else None
+    if over and (key := self.way_key(way)) in over:
+      tags = {**tags, **over[key]['tags']}
+    return tags
 
   def node_xy(self, node: int) -> np.ndarray:
     return self.xy[int(self.data.index([node])[0])]

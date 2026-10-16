@@ -258,3 +258,85 @@ planned line 3.51 -> 2.49 m, (-388.5, -975.8) 2.84 -> 2.40 m, (530.7, -498.4) 3.
 on-ramp ending at the middle node comes in to the kerb lane, a 3-lane link splitting into a 2-lane link and a 1-lane chain
 keeps the chain's lane straight on as the right lane, and a hatched gore where the moved lane would run leaves the exit
 as it was (the old code fails the first three).
+
+## Step 4: lane centres from the paint (cause 1)
+
+**Where the change lives, and why.** `lanegeom.json` beside the map's pbf (`osm_lanes.GEOMETRY_FILE`): its `ways`
+section gives, per way, the OSM tags that place its lanes on the paint (`width:lanes` or `width:lanes:forward` /
+`:backward`, `width`, `placement:offset`; null removes a tag), keyed by the way's end nodes' GTA ids (`a>b`), with the
+evidence (edges before and after, which edges sit on paint, the median shift, stations). `OsmLanes.way_tags` lays them
+over the pbf's tags when it reads a way's lanes (`OsmLanes.load` and `osm_to_roads.py` read the file;
+`validate_lanes.py` checks the result; `lane_match.map_hash` includes the file, so the bridge's junction and stop-line
+caches follow it). That is the smallest change that moves everything that reads lane geometry (lanes.json and
+roads.json via osm_to_roads, nav and the map driver via RouteLanes, lane_match, the labels) while the pbf, its ways,
+nodes, access and turn rules, and so Valhalla's routing, stay byte for byte; and it is one reviewable file, as the
+phase-1 rule asks. The same file carries step 3's kept diverges.
+
+**The fit** (`map/lane_fit.py`): the paint is the 2+-tile set only (`survey_paint.jsonl` lines with conf.mean >= 0.75,
+>= 2 m, drawn again by a second tile on at least half the length two tiles covered: 1,137 km). Each way is read with
+its strand (the ways it carries straight on into, 24 m past each end: GTA's links are mostly about 12 m), every 2 m,
+clear of junction nodes and stacked roads. Painted lines only, as the brief says (a kerb isn't a lane's edge); both
+sides of a lane on paint: its centre and width from the paint; one side: shifted to it, width kept (2.7-6.5 m).
+
+**Three variants were built and scored**; the third is kept:
+
+| variant | ways changed | student paint > 1 m (same samples) | drift planned line > 0.5 m | game-file paint > 1 m (out of sample) | game-file nearer / further by 0.5 m |
+|---|---|---|---|---|---|
+| A: kerbs as lane edges too | 7,527 | 8.6% -> 8.3% (40.6 km nearer / 3.5 km further) | 11.33% -> 10.14% | 7.05% -> 7.09% | 4.8 km / 4.4 km |
+| B: painted lines only | 2,652 | 8.6% -> 8.7% | 11.33% -> 11.10% | 7.08% -> 7.08% | 4.8 km / 3.7 km |
+| **C: B, and not where the build measured the lanes from the game files** | **1,383** | **8.6% -> 8.6% (2.0 km nearer / 1.0 km further)** | **11.33% -> 11.06%** | **7.11% -> 6.99%** | **2.9 km / 1.2 km** |
+
+A and B moved residential and motorway lines away from the game files' own paint where the map already sat on it
+(those ways' lanes were placed from the game files' survey, `source:width=survey`: median 0.05 m off the game-file
+paint before, 0.75 m after). The game files' paint (`gamefiles/polylines.jsonl`) is independent of the student, so
+C keeps the game files there (Amy's rule: prefer the game files where they and the paint disagree) and lists those
+ways instead: **1,308 surveyed ways where the paint seen from above disagrees with the game files by 0.25 m or more**
+(`cloud_lanegeom/step4/listed.csv`, "game files measured").
+
+**Result (C)**: 1383 ways changed (primary 641, residential 536, motorway 95, unclassified 61, motorway_link 28,
+trunk 20, trunk_link 2), 51 by more than 1 m, 10 by more than 2 m; 8,200 more fit the paint already within 0.25 m.
+Left alone and listed: stacked 2838; lane over 6.5 m 1401; game files measured it (paint disagrees) 1308; lane counts disagree 451; paint disagrees along it 402; lane under 4.0 m 374; no unique key 185; lanes widen or move along it 174; tags cannot place it 2. Largest changes:
+
+| key | class | where | moved m | edges before | after | on paint |
+|---|---|---|---|---|---|---|
+| 496:839>496:861 | residential | (96.2, -108.0) | 3.14 | -5.50|0.00|5.50 | -2.85|3.14|8.64 | PP. |
+| 431:51>431:68 | motorway | (-378.0, -1489.8) | 3.04 | -2.75|2.75 | 0.29|5.40 | PP |
+| 431:68>431:89 | motorway | (-376.0, -1478.7) | 3.01 | -2.75|2.75 | 0.26|5.42 | PP |
+| 462:730>462:729 | motorway | (-679.2, -556.0) | 2.93 | -2.75|2.75 | 0.18|5.48 | PP |
+| 653:114>653:117 | residential | (-1349.0, 2444.0) | 2.5 | -8.20|-2.70|2.70|8.20 | -10.54|-5.04|0.20|5.94 | ..PP |
+| 561:103>561:90 | unclassified | (630.5, 634.8) | 2.4 | -2.20|2.20 | -0.40|4.60 | PP |
+| 491:43>492:162 | primary | (-2040.8, -425.3) | 2.33 | -5.50|0.00|5.50 | -7.82|-2.33|3.20 | PPP |
+| 561:116>561:103 | unclassified | (634.8, 646.0) | 2.32 | -2.75|2.75 | -0.43|4.55 | PP |
+| 561:120>561:121 | unclassified | (650.5, 656.8) | 2.18 | -2.20|2.20 | -0.02|4.09 | PP |
+| 561:92>561:98 | unclassified | (659.2, 641.5) | 2.1 | -2.20|2.20 | -4.28|0.10 | PP |
+| 561:46>561:49 | unclassified | (643.5, 599.7) | 1.9 | -2.20|2.20 | -4.10|0.31 | PP |
+| 399:481>399:504 | primary | (-398.5, -1756.0) | 1.67 | -5.50|0.00|5.50 | -3.83|0.95|6.45 | PP. |
+
+By class (same samples before and after; before = step 3):
+
+| class | student paint > 1 m | nearer / further 0.5 m (m) | game files > 0.5 m | game files > 1 m | game files nearer / further (m) |
+|---|---|---|---|---|---|
+| all | 8.6% -> 8.6% | 2001 / 981 | 12.1% -> 11.9% | 7.1% -> 7.0% | 2895 / 1227 |
+| motorway | 7.7% -> 7.7% | 483 / 313 | 12.6% -> 12.5% | 8.6% -> 8.5% | 615 / 259 |
+| trunk | 5.4% -> 5.3% | 8 / 2 | 12.6% -> 12.3% | 9.6% -> 9.4% | 157 / 3 |
+| primary | 9.5% -> 9.5% | 980 / 375 | 13.4% -> 12.2% | 7.9% -> 7.4% | 1598 / 401 |
+| residential | 6.9% -> 6.9% | 486 / 231 | 10.2% -> 10.2% | 4.2% -> 4.3% | 477 / 484 |
+| unclassified | 20.4% -> 20.5% | 33 / 52 | 13.2% -> 13.5% | 8.7% -> 8.7% | 30 / 64 |
+
+Drift re-score (before = step 3): planned line > 0.5 m 11.3% -> 11.1%,
+> 1 m 4.3% -> 4.2%; `section_at` > 0.5 m
+10.0% -> 9.8%, > 1 m 3.4% -> 3.4%.
+The brief's offset places are all left alone, each for a listed reason: (901.4, -695.3) the lane fits 6.9 m wide (a line
+missed); (530.7, -498.4), (134.0, -492.0) and the Strawberry ramp are stacked interchanges; (-13.9, 274.6) a lane fits
+3.8 m wide (a bay or a false line); (-378, -2062) the paint disagrees along the chain links (shifts of +1.6 and -1.1 m,
+25% agree) and shows a line inside a lane (counts disagree); (125.6, -1367.1) has too little 2+-tile paint near it.
+These need Amy's labels or a drive.
+
+**Tests**: as the baseline (lane_numbering 29 + the cloud-router case, lane_slots 20, freeway_lanes 7, mapdrive 37 +
+`test_collision_routes`; lane_parity unchanged: it checks the pbf); validate_lanes **0 issues with the applied tags**
+(it now reads the file); map tests 153 passed; new `map/test_lane_fit.py` (7 cases: both sides set centre and width
+and the tags read back; one side keeps the width; a lane under 4 m and a line inside a lane left alone; a stacked way
+left alone; a one-lane link on a lane line of a wide carriageway ambiguous; the key).
+
+Amy's own labels (150 reviewed tiles) are not used: they're in tile pixels and the projection to the world isn't in the
+cloud data's tools; see open questions.
