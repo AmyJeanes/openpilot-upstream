@@ -152,6 +152,7 @@ class LaneHead:
     self.err_side = 1
     self.count_err = Markov(1.0 - cfg.count_acc, 3 * cfg.dwell, rng)
     self.count_side = 1
+    self.count_left = False
     self.out = Markov(cfg.drop, cfg.dwell, rng)
     self.history: list[tuple[float, list | None]] = []
 
@@ -166,13 +167,17 @@ class LaneHead:
       self.err_side = 1 if self.rng.random() < 0.5 else -1
     if cerr and not was_count:
       self.count_side = 1 if self.rng.random() < 0.5 else -1
+      self.count_left = bool(self.rng.random() < 0.5)
     if out or seen is None or seen[0] < 0:
       return None
     i, n = int(seen[0]), int(seen[1])
     if cerr:
+      # a lane counted on top (a wide kerb lane read as two, a hatched area) or one missed (parked cars in the kerb
+      # lane, a turn lane not yet painted), on the left or the right; the car's own lane is seen
       n_seen = max(1, n + self.count_side)
-      # a lane counted on top (a wide kerb lane) is on the kerb side; one missed, the kerb lane
-      i = min(i, n_seen - 1)
+      if self.count_left and (self.count_side > 0 or i > 0):
+        i += self.count_side
+      i = min(max(i, 0), n_seen - 1)
       n = n_seen
     if err:
       j = i + self.err_side
@@ -537,7 +542,7 @@ class NavSim:
     self.t = 0.0
     self.traffic = Traffic(self.road, traffic or TrafficCfg(), self.rng, self.s, self.lights)
     self.traffic.vs = [o for o in self.traffic.vs if not (abs(o.s - self.s) < CAR_LEN + 2 and abs(o.lane - self.lane) < 0.5)]
-    self.head = LaneHead(head, self.rng)
+    self.head = LaneHead(head, np.random.default_rng(seed + 7919))  # its own: the same traffic whatever the lane source
     t = Tune("")
     # the planner told the speed this model needs for a lane change, as the bridge would per model (unless the tune says)
     t.values.update({"lane_source": {"truth": "map", "model": "model", "fused": "fused"}[head.source],

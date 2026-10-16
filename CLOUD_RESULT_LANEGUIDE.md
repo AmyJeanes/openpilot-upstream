@@ -167,3 +167,49 @@ Tests: `test_nav.py` +4 (a change ends before the slowing for lights and starts 
 traffic; too slow near the turn isn't forced and the turn is left; slow beside a turn's lane signals the turn). Seven
 existing tests that exercise low-speed mechanics (5-8 m/s on made routes) pin `model_lc_speed: 0` or
 `turn_into_lane: 0`, with a comment: they test today's rules, which stay one setting away.
+
+## Step 3: the model's lane as the lane source
+
+### Changes (`planner.py`, `Tune`; `model_lane_robust: false` gives today's code exactly)
+
+- Hysteresis and confidence (`_read_model_lane_robust`): a new lane is taken once read at least `model_lane_prob`
+  (0.7) for `model_lane_hold` (1 s); the lane held stays while read at least `model_lane_keep` (0.4) sure, and through
+  unsure readings and dropouts for `model_lane_stale` (3 s), then None (today: None after 1 s unsure).
+- nav's own change: when the driver's stalk goes off after a change openpilot made, the lane it was into is expected:
+  a reading of it is taken after `model_lane_after_change` (0.3 s), and with no reading the lane held moves over.
+- Counts disagreeing (`_model_in_map`, `model_count_side`): nav plans in the map's lanes, so the model's lane is
+  numbered in the map's count at the car (`NavInputs.lane_counts`, Route.info's laneCounts, which the bridge now
+  passes, or the first lane map's), counting from the side the next maneuver that needs lanes has them on
+  (`_side_that_matters`: a right turn or exit from the right, a left from the left, a way straight on from the edge its
+  lanes touch). The edge the car is beside is what the model sees surely; a wide kerb lane with parked cars, or a lane
+  the map adds or drops on the far side, then doesn't move it.
+- Fused: as today (the model's where it counts as many lanes as the map's reading), now with the model's own count
+  kept for that test, and the model's where the map has no reading. Preferring the model over the map's reading cost
+  2-6 maneuvers here, because the map's reading in GTA is the truth.
+- Sure-wrong without truth (`_sure_wrong`): today it needs the bridge's `lane_frac`, so with the model alone nav never
+  leaves a turn to the route and would signal it from a wrong lane. Now: the model's lane held `model_sure_wrong` (3 s)
+  and read sure within the last second. Held 0 s (just taken) it cost 6 maneuvers on misreads; 3 s costs none.
+
+### Results (46 trips; lane heads with their own noise stream, so runs differ only by the lane source)
+
+The lane head stand-in: strict accuracy as given (the gta5-train README wasn't readable from here, so 80-90% per the
+brief), one lane off otherwise, 0.5 s lag, 5% dropouts, counts right 95% of the time (the miscounted lane on either
+side), errors lasting ~1 s (counts ~3 s). "hard": 85%, 1 s lag, 15% dropouts, counts right 70%.
+
+| run | truth | model 0.9 | model 0.85 | model 0.8 | fused 0.85 | hard (model) |
+|---|---|---|---|---|---|---|
+| n16, today's lane source | 247 (82%) | 249 | 250 | 246 | 243 | 237 (78%) |
+| n16, robust | 247 (82%) | 250 | 250 | 248 | 248 | 241 (80%) |
+| finetuned, today's | 261 (86%) | 254 | 255 | 252 | 258 | 239 (79%) |
+| finetuned, robust | 261 (86%) | 256 | 254 | 256 | 251 | 242 (80%) |
+
+(in a target lane at the commit point, of 302 maneuvers that need one; noise between seeds is about ±2)
+
+Reading it: at 80-90% strict accuracy with these error dynamics, the model's lane costs n16 nothing measurable (its
+misses are speed, not lane), and the finetune, which makes more changes, 5-7 maneuvers (2 points). The robust lane
+source is level with today's there and gains 3-4 where the head is worse (lag, dropouts, miscounts), which is where it's
+meant to help; most of its value is what the harness can't score: no truth needed at all (sure-wrong, dropouts, the
+map's count). Fused is worth keeping as today's rule while the map's reading is the game's truth.
+
+Tests: `selfdrive/navd/tests/test_lane_source.py` (9: a flicker, hysteresis, dropouts, counting from the side that
+matters, the side itself, the map's count, the lane a change was into, fused, sure-wrong without truth).

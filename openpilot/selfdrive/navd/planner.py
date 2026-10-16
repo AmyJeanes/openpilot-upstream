@@ -261,6 +261,20 @@ class Tune:
     "lane_source": os.getenv("NAVD_LANE_SOURCE", "fused"),
     "model_lane_prob": 0.7,  # the model's lane counts once its probability is at least this
     "model_lane_hold": 1.0,  # s, holding the same lane that sure
+    # The model's lane, made robust enough to plan from without the game's truth (model_lane_robust; off: as above,
+    # the lane None once unsure for model_lane_hold, and "fused" only where the counts agree):
+    "model_lane_robust": True,
+    "model_lane_keep": 0.4,  # the lane held stays while read at least this sure (hysteresis on the probability)
+    "model_lane_stale": 3.0,  # s the lane held is kept without a sure reading (a dropout, a junction), then None
+    "model_lane_after_change": 0.3,  # s a reading of the lane nav's own change was into must hold, not model_lane_hold
+    # where the model counts a different number of lanes from the map (a wide kerb lane, parked cars, a lane the map
+    # adds or drops), its lane is numbered in the map's lanes counting from the side the next maneuver needs (from the
+    # right for a right turn or exit): the edge it's beside is what it sees surely
+    "model_count_side": True,
+    # without the game's truth, "surely out of a maneuver's lanes" (which leaves it to the route) by the model's lane:
+    # held this many s, and read sure within the last second (0: never sure); a misread of a second or two that nav
+    # took up shouldn't give a turn up
+    "model_sure_wrong": 3.0,  # s
   }
   CHECK_EVERY = 1.0  # s
 
@@ -1040,6 +1054,7 @@ class Planner:
     self.change_clear_t: float | None = None  # since when its side has been clear
     self.change_bay: np.ndarray | None = None  # where the turn is whose bay the change under way is into
     self.change_map_lane: int | None = None  # the map's lane (map_read) the change started from
+    self.change_lane0: tuple[int, int] | None = None  # nav's lane the change started from
     self.map_read: dict | None = None  # the car's lane by the map's lanes alone (NavInputs.truth_lane_map)
     self.merge_waits = False  # a merge waiting on nav's and the map's lane readings to agree, as last logged
     self.change_need: str | None = None  # the side _change_for found a lane change needed to this step
@@ -1089,6 +1104,13 @@ class Planner:
     self.model_lane: tuple[int, int] | None = None
     self.model_seen: tuple[tuple[int, int] | None, float] = (None, 0.0)
     self.model_raw: list | None = None  # this step's laneHead reading [index, count, prob]
+    self.model_t = -1e9  # when the model's lane held was last read (model_lane_robust), at least model_lane_keep sure
+    self.model_sure_t = -1e9  # and at least model_lane_prob sure
+    self.model_since = -1e9  # when it was taken
+    self.model_count: int | None = None  # the lanes the model last counted, before numbering its lane in the map's
+    self.model_expect: tuple[tuple[int, int], float] | None = None  # the lane nav's own change was into, and when it ended
+    self.count_side = "left"  # the side lanes are counted from where the model's and the map's counts differ
+    self.map_count: int | None = None  # the map's lanes at the car, numbered as the bridge's lane reading has them
     self.lane_src = ""  # where self.lane is from: "map" or "model"
     self.lane_log = None  # NAVD_LANE_LOG's file, opened on the first step
     self.lane_disagree: bool | None = None
@@ -1120,6 +1142,7 @@ class Planner:
     self.driven += step
     route = inp.route
     pos = self.pos = np.array(inp.pos[:2], dtype=float)
+    self.map_count = self._map_count(inp)
     self._read_lane(inp.truth_lane, now, inp.model_lane)
     self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
     self.classes, self.limits = inp.road_classes, inp.limits
@@ -1238,6 +1261,7 @@ class Planner:
       ahead += [m for m in lane_ends(self.maps.maps, moves) if (turn is None or m.dist < turn.dist)
                 and not any(abs(d - m.dist) < MERGE_FORK_NEAR for d in left)]  # the branch the car now takes
     self._mark_barriers(ahead, pos, heading)
+    self.count_side = self._side_that_matters(sorted(ahead, key=lambda m: m.dist))
     self.change_need = None
     self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now)
     # a merge waiting on the blind spot isn't dropped while the lane reading is out (lanes merging read badly)
@@ -1376,6 +1400,9 @@ class Planner:
     until it has been sure of another, or unsure, that long: a flicker doesn't move it."""
     t = self.tune
     self.model_raw = list(model) if model else None
+    if t.model_lane_robust:
+      self._read_model_lane_robust(model, now)
+      return
     sure = None
     if model and 0 <= int(model[0]) < int(model[1]) and float(model[2]) >= t.model_lane_prob:
       sure = (int(model[0]), int(model[1]))
@@ -1384,13 +1411,84 @@ class Planner:
     if now - self.model_seen[1] >= t.model_lane_hold:
       self.model_lane = sure
 
+  def _read_model_lane_robust(self, model: list | None, now: float):
+    """model_lane_robust: the model's lane in the map's lanes (_model_in_map), taken once sure (model_lane_prob) for
+    model_lane_hold s (model_lane_after_change for the lane nav's own change was into), kept while read at least
+    model_lane_keep sure, and through unsure readings and dropouts for model_lane_stale s; a change of nav's that ends
+    meanwhile moves it over with the car."""
+    t = self.tune
+    reading = None
+    if model and 0 <= int(model[0]) < int(model[1]):
+      reading = (self._model_in_map(int(model[0]), int(model[1])), float(model[2]))
+      self.model_count = int(model[1])
+    held = self.model_lane
+    if held is not None and self.model_expect is not None and self.model_expect[0] != held and \
+       (reading is None or reading[1] < t.model_lane_keep):
+      held = self.model_lane = self.model_expect[0]  # moved over by nav's change while unread
+      self.model_since = now
+    if reading is not None and held is not None and reading[0] == held and reading[1] >= t.model_lane_keep:
+      self.model_t = now
+      self.model_seen = (held, now)
+      if reading[1] >= t.model_lane_prob:
+        self.model_sure_t = now
+    elif reading is not None and reading[1] >= t.model_lane_prob:
+      if reading[0] != self.model_seen[0]:
+        self.model_seen = (reading[0], now)
+      expected = self.model_expect is not None and self.model_expect[0] == reading[0]
+      if now - self.model_seen[1] >= (t.model_lane_after_change if expected else t.model_lane_hold):
+        self.model_lane, self.model_t, self.model_sure_t, self.model_since = reading[0], now, now, now
+        self.model_expect = None
+    else:
+      self.model_seen = (None, now)
+    if self.model_lane is not None and now - self.model_t > t.model_lane_stale:
+      self.model_lane = None
+
+  def _side_that_matters(self, ahead: list) -> str:
+    """The side the next maneuver that needs some lanes and not others has them on: a turn's or fork's side, else the
+    edge its lanes touch; the one before while none does."""
+    n = self.map_count or (self.lane[1] if self.lane is not None else 0)
+    for m in ahead:
+      if n <= 0:
+        break
+      lo, hi = m.lanes(n)
+      if (lo, hi) == (0, n - 1):
+        continue
+      if isinstance(m, (Turn, Fork)):
+        return m.side
+      return "left" if lo == 0 else "right" if hi == n - 1 else self.count_side
+    return self.count_side
+
+  @staticmethod
+  def _map_count(inp: NavInputs) -> int | None:
+    """The map's lanes at the car as the bridge's lane reading numbers them: the first lane map's (at the car, where a
+    lane still opening isn't one), else the route's count here."""
+    here = [m for m in inp.lane_maps or [] if m[0] <= 0.0]
+    if here:
+      return len(here[0][1])
+    n = value_at(inp.lane_counts, 0.0, 0) or 0
+    return int(n) if n > 0 else None
+
+  def _model_in_map(self, i: int, n: int) -> tuple[int, int]:
+    """The model's lane i of n, numbered in the map's lanes at the car where they count differently: from the side
+    the next maneuver needs (model_count_side), else from the left as the model does."""
+    m = self.map_count
+    if not m or m == n:
+      return i, n
+    if self.tune.model_count_side and self.count_side == "right":
+      return min(max(m - 1 - (n - 1 - i), 0), m - 1), m
+    return min(i, m - 1), m
+
   def _pick_lane(self) -> tuple[tuple[int, int] | None, str]:
     """The lane nav plans from, and its source: the map's, or the model's where lane_source allows it ("fused": once
-    the map has the car in one of as many lanes of ours as the model counts)."""
+    the map has the car in one of as many lanes of ours as the model counts; with model_lane_robust, also wherever the
+    map has no reading)."""
     src, mapped, model = self.tune.lane_source, self.map_lane, self.model_lane
+    if src == "fused" and self.tune.model_lane_robust and model is not None and mapped is None:
+      return model, "model"  # no map reading (a junction's area): the model's
     if src == "model":
       return model, "model" if model is not None else ""
-    if src == "fused" and model is not None and mapped is not None and mapped[0] >= 0 and mapped[1] == model[1]:
+    counted = self.model_count if self.tune.model_lane_robust else (model[1] if model is not None else None)
+    if src == "fused" and model is not None and mapped is not None and mapped[0] >= 0 and mapped[1] == counted:
       return model, "model"
     return mapped, "map" if mapped is not None else ""
 
@@ -1559,8 +1657,15 @@ class Planner:
 
   def _sure_wrong(self, lo: int, hi: int) -> bool:
     """Whether the car is surely out of lanes lo-hi, by its position on the route's link (not just between lanes, as
-    the model ends lane changes early on GTA's wide lanes), the plugin not disagreeing."""
-    return self.lane_frac is not None and (lo - self.lane_frac > SKIP_SURE or self.lane_frac - hi > SKIP_SURE)
+    the model ends lane changes early on GTA's wide lanes), the plugin not disagreeing; without that (no truth), by
+    the model's lane, read sure of within the last second and not mid-change."""
+    if self.lane_frac is not None:
+      return lo - self.lane_frac > SKIP_SURE or self.lane_frac - hi > SKIP_SURE
+    t = self.tune
+    if self.lane_src != "model" or self.lane is None or not t.model_lane_robust or t.model_sure_wrong <= 0:
+      return False
+    return (self.now - self.model_sure_t < 1.0 and self.now - self.model_since >= t.model_sure_wrong and self.changing is None
+            and not lo <= self.lane[0] <= hi)
 
   def _bay_beside(self, turn: Turn, bay: float) -> bool:
     """Whether the car is in the lane beside the turn ahead's bay, to change into it."""
@@ -1627,7 +1732,7 @@ class Planner:
           # past where the model could still change lanes, and too slow for it: not asked for, rather than forced at
           # the junction; a turn is then left to the route at its last place (_signal_due, which may also signal it
           # from beside its lanes: turn_into_lane), a fork here, where surely out of its lanes
-          if fork and (self.lane_frac is None or self._sure_wrong(lo, hi)):
+          if fork and (self._sure_wrong(lo, hi) or self.lane_frac is None and not self.tune.model_lane_robust):
             self._skip(route, m.dist, f"{m.side} fork (too slow to change lanes, {v:.1f} m/s)")
             self.skip_turns_to = self.driven + m.dist + FORK_TURN
         return
@@ -1882,6 +1987,7 @@ class Planner:
     self.change_side, self.change_by, self.change_went, self.change_planned = side, self.driven + by, False, planned
     self.change_end, self.change_held = None if end is None else self.driven + end, False
     self.change_map_lane = self.map_read.get("lane") if self.map_read else None
+    self.change_lane0 = self.lane
     if DEBUG:
       print(f"nav: lane change {side}, {why}")
     self._set_desire(self.change_t)
@@ -1894,6 +2000,9 @@ class Planner:
     self.change_shown |= indicator == self.changing
     # the bridge cancels the indicator once the lane change is done, as does the driver to stop it
     if self.change_shown and indicator != self.changing:
+      if self.change_went and self.change_lane0 is not None and self.change_lane0[0] >= 0:
+        i, n = self.change_lane0
+        self.model_expect = ((min(max(i + (-1 if self.changing == "left" else 1), 0), n - 1), n), now)
       self._end_change(indicator)
       return
     # never into a lane the map reads as oncoming, whatever nav's own lane says, until the car has moved over (a lane
