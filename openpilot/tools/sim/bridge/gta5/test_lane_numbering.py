@@ -530,13 +530,16 @@ def test_live_freeway_merge_exit_and_splits():
   dest = (-680.13, -2021.56)
   r, keys, ramps = live_plan(router, -193.62, -1196.23, 36.84, 96.3, dest)
   assert r.lane() == [1, 4] and not [c for c in ramps if c[0] < 440.0]
-  # Dutch London St ramp split (-741.9, -1838.4), the route's branch the right one: GTA's link from the split straight
-  # across the hatched gore to it is no way; the route takes the right branch's lane from the node at the car (its
-  # link off at 64 deg, which a route can't set off along: from just behind the car), with no lane change
-  r, keys, ramps = live_plan(router, -741.90, -1838.37, 26.97, 196.2, dest, lane=[0, 1])
-  assert r.length < 300.0 and not router.crossings(r.points) and not ramps, (r.length, ramps)
-  k = int(np.argmin(np.hypot(*(r.points - np.array([-752.0, -1851.0])).T)))
-  assert np.hypot(*(r.points[k] - np.array([-752.0, -1851.0]))) < 1.0  # onto the right branch's own lane
+  # Dutch London St ramp split (-762, -1798), the route's branch the right one: from the right of the two lanes before
+  # it, onto the right branch's own lane with no lane change
+  r, keys, ramps = live_plan(router, -763.2, -1788.0, 27.5, 185.5, dest)
+  assert r.lane() == [1, 2] and r.length < 300.0 and not router.crossings(r.points) and not ramps, (r.length, ramps)
+  k = int(np.argmin(np.hypot(*(r.points - np.array([-756.8, -1838.0])).T)))
+  assert np.hypot(*(r.points[k] - np.array([-756.8, -1838.0]))) < 1.0
+  # past the split on the left branch, beside the painted gore (-741.9, -1838.4): GTA's links across the gore to the
+  # right branch are no way, so the route goes round
+  r = live_route(router, -741.90, -1838.37, 26.97, 196.2, dest)
+  assert not router.crossings(r.points) and r.length > 1000.0, r.length
 
 
 def bridge_line(r: Route, lane) -> np.ndarray:
