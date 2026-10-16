@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fits each way's lanes to the paint seen from above: where confident paint lines (drawn by 2 or more tiles) bound its
 lanes, the lanes' edges are put on them, written as the OSM tags that place them (width:lanes[:forward|:backward],
-width, placement:offset) into the map's applied geometry file (osm_lanes.GEOMETRY_FILE, `ways`, keyed by the way's end
-nodes' GTA ids), which OsmLanes reads over the pbf's tags: lanes.json, nav, the map driver and its labels all follow,
-and the pbf, its routing and its nodes stay as they are.
+width, placement:offset) into the map's lane geometry file (osm_lanes.GEOMETRY_FILE, `ways`, keyed by the way's end
+nodes' GTA ids), which the build bakes into the pbf as those ways' tags (lane_geometry.py): lanes.json, nav, the map
+driver and its labels all follow, and the pbf's ways, nodes and routing stay as they are. Fit a map built without it.
 
 Each way is read with its strand (the ways the road carries straight on into with the same lane counts, WINDOW_M m
 past each end; GTA's links are mostly about 12 m long), every STATION_M m, clear of junction nodes and of other roads
@@ -373,7 +373,6 @@ def main():
   from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
   from openpilot.tools.sim.bridge.gta5.map.paint_score import PaintIndex
   osm = OsmLanes.load(os.path.join(args.map_dir, 'gta5.osm.pbf'), to_game)
-  osm.applied = {k: v for k, v in osm.applied.items() if k != 'ways'}  # fit to the pbf's own lanes
   paint = PaintIndex(args.paint)
   stacked = Stacked(os.path.join(args.map_dir, 'roads.json'))
   keys = Counter(osm.way_key(w) for w in osm.ways)

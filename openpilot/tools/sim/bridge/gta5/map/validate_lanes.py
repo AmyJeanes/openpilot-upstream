@@ -15,16 +15,14 @@
   python validate_lanes.py gta5.osm.pbf [--show 20]
 """
 import argparse
-import json
 import math
-import os
 import re
 from collections import Counter, defaultdict
 from typing import NamedTuple
 
 import osmium
 
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CHANGES, DIVIDERS, GEOMETRY_FILE, PER_LANE, PLACEMENT, SUFFIXES, TRANSITION_MAX, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import CHANGES, DIVIDERS, PER_LANE, PLACEMENT, SUFFIXES, TRANSITION_MAX, \
   TURNS, WayLanes, count, lane_counts, metres, oneway_of, signed_metres
 
 ROADS = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track',
@@ -256,12 +254,8 @@ class Network:
 
 
 def validate(path: str, drive_on_right: bool = True) -> list[Issue]:
-  """The issues in a map's lane tags, with the lane geometry applied beside it (osm_lanes.GEOMETRY_FILE's ways' tags
-  over theirs, as the build reads them) where there is one."""
-  ways, restrictions, connectivity, gta = {}, [], [], {}
+  ways, restrictions, connectivity = {}, [], []
   for o in osmium.FileProcessor(path).with_locations():
-    if o.is_node() and 'gta:node' in o.tags:
-      gta[o.id] = o.tags['gta:node']
     if o.is_way() and o.tags.get('highway') in ROADS:
       xy = [(n.location.lon * METRES_PER_DEGREE * math.cos(math.radians(n.location.lat)), n.location.lat * METRES_PER_DEGREE)
             for n in o.nodes]
@@ -276,14 +270,6 @@ def validate(path: str, drive_on_right: bool = True) -> list[Issue]:
         if len(wf) == 1 and len(wt) == 1:
           restrictions.append((kind, wf[0], tuple(r for t, r, role in members if t == 'w' and role == 'via'), wt[0]))
 
-  applied = os.path.join(os.path.dirname(os.path.abspath(path)), GEOMETRY_FILE)
-  over = json.load(open(applied)).get('ways', {}) if os.path.exists(applied) else {}
-  for wid, (refs, xy, tags) in ways.items():
-    key = f'{gta.get(refs[0])}>{gta.get(refs[-1])}'
-    if key in over:
-      tags.update(over[key]['tags'])
-      for k in [k for k, v in tags.items() if v is None]:
-        del tags[k]
   issues = []
   for wid, (_, xy, tags) in ways.items():
     length = sum(math.dist(p, q) for p, q in zip(xy, xy[1:], strict=False))

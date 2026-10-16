@@ -47,9 +47,7 @@ Geometry is in metres in a frame with y 90 degrees left of x (x east, y north): 
 travel. Traffic drives on the right unless `drive_on_right=False`, which mirrors where each direction's lanes are.
 """
 import bisect
-import json
 import math
-import os
 import re
 from dataclasses import dataclass
 from functools import cached_property
@@ -161,6 +159,12 @@ def oneway_of(tags: dict) -> int:
   if v is None and (tags.get('highway') == 'motorway' or tags.get('junction') in ('roundabout', 'circular')):
     return 1
   return 0
+
+
+def travelled(tags: dict, refs: list) -> list[tuple]:
+  """A way's links (node, next node) in each direction it may be travelled."""
+  oneway, links = oneway_of(tags), list(zip(refs, refs[1:], strict=False))
+  return (links if oneway >= 0 else []) + ([(q, p) for p, q in links] if oneway <= 0 else [])
 
 
 def parking_lane(tags: dict, side: str) -> float:
@@ -519,9 +523,12 @@ HOP_COS = math.cos(math.radians(HOP_TURN))
 # where a route leaves a freeway onto a branch with fewer lanes at a node (or joins one from it), the branch's lanes run
 # on as the road's on that side until they come out past them, at most DIVERGE_M from the node, else moving across to
 # the branch's own over its last DIVERGE_EASE (RouteLanes._diverges)
-# the lane geometry applied from the paint seen from above, beside the map's .osm.pbf: one reviewable file of changes with
-# GTA's node ids for keys, built by diverge_report.py and lane_fit.py from the confident paint (2+ tiles), read by load()
+# the lane geometry fitted to the paint seen from above: one reviewable file of changes beside the map, with GTA's node
+# ids for keys, written by diverge_report.py and lane_fit.py and baked into the .osm.pbf as its tags by lane_geometry.py
 GEOMETRY_FILE = 'lanegeom.json'
+# a branch way tagged so keeps its lanes on its own line from the node it leaves (joins) the road at (_diverges leaves it
+# be): where the paint has the branch's lanes as the map lays them
+RUN_ON_TAG, RUN_ON_NO = 'lanes:run_on', 'no'
 DIVERGES = True  # RouteLanes._diverges on; off (and where it leaves a branch be): a lane hop off (onto) one road alone as before (_hops)
 DIVERGE_M, DIVERGE_EASE = 100.0, 20.0  # m
 DIVERGE_PART = 0.3  # m: the branch's lanes this near where the road's lanes run on, or out past them, have parted
@@ -669,7 +676,7 @@ class OsmLanes:
     self._blends: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
     self._along: dict[int, np.ndarray] = {}
     self._carried: dict[tuple[int, int], int] = {}  # (way, node) -> the way a road carried across a junction there runs on to
-    self.applied: dict = {}  # the lane geometry applied from the paint (GEOMETRY_FILE beside the map: load())
+    self._own_line: set[tuple[int, int]] | None = None  # (node, node) along the ways tagged RUN_ON_TAG=no
 
   def carry_across(self, pairs) -> None:
     """Roads whose lines are painted on across a junction (junctions.py's Junction.carried): [(way, way)] meeting end to
@@ -726,50 +733,32 @@ class OsmLanes:
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
-    """The map in an .osm.pbf, with the lane geometry applied from the paint in GEOMETRY_FILE beside it, where there
-    is one (see applied())."""
     from openpilot.tools.sim.bridge.gta5.map import osm_pbf
     lanes = cls(osm_pbf.read(path, relations=('connectivity',)), project, **kw)
     lanes.path = path
-    lanes.read_applied(path)
     return lanes
 
-  def read_applied(self, path: str) -> None:
-    """Reads the lane geometry applied beside the map file at `path` (GEOMETRY_FILE), where there is one."""
-    found = os.path.join(os.path.dirname(os.path.abspath(path)), GEOMETRY_FILE)
-    self.applied = json.load(open(found)) if os.path.exists(found) else {}
-    self._lanes.clear()
-
   def gta(self, node: int) -> str | None:
-    """A node's GTA id (`area:index`, its gta:node tag), the key the applied geometry file uses."""
+    """A node's GTA id (`area:index`, its gta:node tag), the key GEOMETRY_FILE uses: the pbf's own ids change with
+    each build."""
     return self.data.node_tags.get(node, {}).get('gta:node')
 
   def kept_diverge(self, a: int, b: int) -> bool:
-    """Whether the applied geometry keeps the link a -> b's diverge (or merge) as the map has it, the paint saying so
-    (GEOMETRY_FILE's `diverges`: {"a>b": {"keep": true, ...}}, GTA ids)."""
-    ga, gb = self.gta(a), self.gta(b)
-    return bool(ga and gb and self.applied.get('diverges', {}).get(f'{ga}>{gb}', {}).get('keep'))
+    """Whether the link a -> b is on a way tagged to keep its lanes on its own line (RUN_ON_TAG), travelled its way."""
+    if self._own_line is None:
+      self._own_line = {link for v in self.ways.values() if v[0].get(RUN_ON_TAG) == RUN_ON_NO for link in travelled(*v[:2])}
+    return (a, b) in self._own_line
 
   def lanes(self, way: int) -> WayLanes:
-    """The way's lanes from its tags, with the applied geometry's for it over them (way_tags)."""
     if way not in self._lanes:
-      self._lanes[way] = WayLanes.from_tags(self.way_tags(way), self.drive_on_right, self.defaults)
+      self._lanes[way] = WayLanes.from_tags(self.ways[way][0], self.drive_on_right, self.defaults)
     return self._lanes[way]
 
   def way_key(self, way: int) -> str | None:
-    """A way's key in the applied geometry: its end nodes' GTA ids, `a>b` in its direction; None without both."""
+    """A way's key in GEOMETRY_FILE: its end nodes' GTA ids, `a>b` in its direction; None without both."""
     refs = self.ways[way][1]
     a, b = self.gta(refs[0]), self.gta(refs[-1])
     return f'{a}>{b}' if a and b else None
-
-  def way_tags(self, way: int) -> dict:
-    """The way's tags, with the applied geometry's lane placement and widths for it over them (GEOMETRY_FILE's
-    `ways`: {"a>b": {"tags": {...}}}, the lanes fitted to the paint by lane_fit.py)."""
-    tags = self.ways[way][0]
-    over = self.applied.get('ways') if self.applied else None
-    if over and (key := self.way_key(way)) in over:
-      tags = {**tags, **over[key]['tags']}
-    return tags
 
   def node_xy(self, node: int) -> np.ndarray:
     return self.xy[int(self.data.index([node])[0])]
@@ -1452,7 +1441,7 @@ class _RoadArc:
 
 
 def _kept(osm: 'OsmLanes', node_p: np.ndarray, next_p: np.ndarray, leaving: bool) -> bool:
-  """Whether the applied geometry keeps this diverge (merge) as it was: the link from the node on to the branch's
+  """Whether the map keeps this diverge (merge) as it lays it (RUN_ON_TAG): the link from the node on to the branch's
   next node (from the branch's last node on to the node)."""
   a, b = osm.nodes_at(node_p), osm.nodes_at(next_p)
   if not a or not b:
@@ -1669,7 +1658,7 @@ class RouteLanes:
     roads it reaches). Where they haven't parted within DIVERGE_M (a lane chain running alongside), they move across to
     the branch's own over the last DIVERGE_EASE. No lane is moved further into a hatched area (lanes.json's painted
     gores and islands beside the map, router.LaneLines) than it ran before: a branch whose lanes would be is left as
-    it was; so is one the applied geometry keeps, where the paint has it better as it was (OsmLanes.kept_diverge).
+    it was; so is one the map tags to keep its lanes on its own line (RUN_ON_TAG, OsmLanes.kept_diverge).
     Also m along from and to each."""
     out: dict[int, tuple[Section, Section, float, float]] = {}
     hatched = _hatched(osm)
@@ -1743,7 +1732,7 @@ class RouteLanes:
             shifts[j] = (a * fa, b * fb)
         if hatched is not None and _into_hatched(hatched, osm, pts, sections, shifts):
           continue
-        if osm is not None and osm.applied and _kept(osm, pts[k], pts[k + step], leaving):
+        if osm is not None and _kept(osm, pts[k], pts[k + step], leaving):
           continue
         for j, (a, b) in shifts.items():
           if abs(a) < EPS and abs(b) < EPS:

@@ -7,8 +7,8 @@ centres run inside a hatched area (lanes.json's, router.LaneLines.inside) each w
 usage: diverge_report.py MAP_DIR --paint paint_lanes_confident.json --out OUT_DIR [--keep]
 Writes OUT_DIR/diverges.csv (a row per place where a lane moves) and summary.json. With --keep, the places where the
 paint has the branch's lanes nearer where they were (by KEEP_WORSE m on average, the paint covering KEEP_KNOWN of the
-stretch) go into MAP_DIR's lanegeom.json as diverges to keep (osm_lanes.GEOMETRY_FILE, OsmLanes.kept_diverge), with the
-evidence; a second run then reports the map as it will be.
+stretch) go into MAP_DIR's lanegeom.json as diverges to keep (osm_lanes.GEOMETRY_FILE), with the evidence; the build
+bakes them into the pbf (lane_geometry.py: osm_lanes.RUN_ON_TAG), and a run on that map reports it as it will be.
 """
 import argparse
 import csv
@@ -184,7 +184,8 @@ def main():
              'paint_worse': sum(r['paint_err_after'] > r['paint_err_before'] + 0.1 for r in known),
              'hatched_m_before': round(sum(r['hatched_m_before'] for r in rows), 1), 'hatched_m_after': round(sum(r['hatched_m_after'] for r in rows), 1),
              'into_hatched': [r for r in rows if r['hatched_m_after'] > r['hatched_m_before'] + 0.5]}
-  summary['kept_by_paint_already'] = sorted(k for k, v in osm.applied.get('diverges', {}).items() if v.get('keep'))
+  summary['kept_by_paint_already'] = sorted({osm.way_key(w) for w, v in osm.ways.items()
+                                              if v[0].get(osm_lanes.RUN_ON_TAG) == osm_lanes.RUN_ON_NO} - {None})
   if args.keep:
     keep = {r['key']: {'keep': True, 'x': r['x'], 'y': r['y'], 'kind': r['kind'],
                        'why': f"paint lane centre {r['paint_err_before']} m off as the map has it, {r['paint_err_after']} m moved "

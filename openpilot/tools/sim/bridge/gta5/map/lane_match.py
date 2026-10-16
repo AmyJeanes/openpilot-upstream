@@ -168,16 +168,10 @@ class LaneMatcher:
 
 
 def map_hash(osm_path: str, version: int) -> str:
-  """A map file's caches' key: its contents, the lane geometry applied beside it (osm_lanes.GEOMETRY_FILE) and the
-  version of what's kept."""
-  from openpilot.tools.sim.bridge.gta5.map.osm_lanes import GEOMETRY_FILE
+  """A map file's caches' key: its contents and the version of what's kept."""
   h = hashlib.sha1(str(version).encode())
   with open(osm_path, 'rb') as f:
     h.update(f.read())
-  applied = os.path.join(os.path.dirname(osm_path), GEOMETRY_FILE)
-  if os.path.exists(applied):
-    with open(applied, 'rb') as f:
-      h.update(f.read())
   return h.hexdigest()[:16]
 
 

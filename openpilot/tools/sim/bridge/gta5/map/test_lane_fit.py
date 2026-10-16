@@ -51,7 +51,7 @@ def test_both_sides_set_centre_and_width():
   assert np.allclose(f['after'], [-4.9, 0.6, 6.3], atol=0.01) and f['paint_side'].all()
   tags = fit.tags_for(osm, 11, f['after'])
   assert tags['width:lanes'] == '5.5|5.7', tags
-  osm.applied = {'ways': {osm.way_key(11): {'tags': tags}}}
+  osm.ways[11] = ({**osm.ways[11][0], **tags}, *osm.ways[11][1:])  # as lane_geometry.bake tags it
   osm._lanes.clear()
   sec = osm.lanes(11).section(FORWARD)
   assert np.allclose([sec[0].left, sec[0].right, sec[1].right], [-4.9, 0.6, 6.3], atol=0.02)
@@ -96,8 +96,8 @@ def test_one_lane_among_many_is_ambiguous():
   assert f is None and info.get('matched', 0) == 0, info
 
 
-def test_applied_file_read_with_the_map():
-  # OsmLanes.load reads GEOMETRY_FILE beside the pbf; way_key is the end nodes' GTA ids
+def test_way_key():
+  # GEOMETRY_FILE's key for a way: its end nodes' GTA ids
   osm = made({10: (TWO, [1, 2])})
   assert osm.way_key(10) == '1:1>1:2'
 
