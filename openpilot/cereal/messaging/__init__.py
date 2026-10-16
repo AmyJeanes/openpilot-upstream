@@ -167,15 +167,16 @@ class FrequencyTracker:
 
   @property
   def valid(self) -> bool:
-    if self.avg_dt.count == 0:
+    # a backlog read in one update has all its gaps 0: no rate yet
+    if self.avg_dt.count == 0 or self.avg_dt.get_average() <= 0:
       return False
 
     avg_freq = 1.0 / self.avg_dt.get_average()
     if self.min_freq <= avg_freq <= self.max_freq:
       return True
 
-    avg_freq_recent = 1.0 / self.recent_avg_dt.get_average()
-    return self.min_freq <= avg_freq_recent <= self.max_freq
+    recent = self.recent_avg_dt.get_average()
+    return recent > 0 and self.min_freq <= 1.0 / recent <= self.max_freq
 
 
 class SubMaster:
