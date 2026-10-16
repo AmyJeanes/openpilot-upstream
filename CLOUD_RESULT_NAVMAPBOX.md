@@ -61,3 +61,47 @@ What `lanes` holds:
   before it in town (or the whole step when shorter), 1609 m or 3219 m on motorways.
 - **maxspeed**: per geometry segment, `{"speed": 48, "unit": "km/h"}` (UK mph as km/h: 32, 48, 64, 80, 97, 113...) or
   `{"unknown": true}` (5% of segments); congestion `low` / `moderate` / `unknown`.
+
+## Item 2: a Mapbox-compatible Directions server for GTA
+
+`openpilot/tools/sim/bridge/gta5/mapbox_server.py`: `Builder.directions(route)` makes the response from a
+`router.Route` on our map (in process: navd_sim uses it so), and `Server` answers
+`GET /directions/v5/mapbox/<profile>/<lon,lat;...>` over HTTP from a Valhalla route (`map/router.py`), in the map's
+lat/lon (`map/gta5_map.py`). Run: `python -m openpilot.tools.sim.bridge.gta5.mapbox_server --port 8003`.
+
+How it matches item 1:
+- **Steps** from the route's Valhalla maneuvers, tidied as `navmodel/nav_input.py` does (`junction_maneuvers`,
+  `fold_keeps`), typed with its Mapbox words (`words`); each turn's step starts at the junction with lanes within 30 m
+  ahead of Valhalla's point (GTA's link into a junction starts at its stop line; Mapbox's maneuver is at the junction
+  node). Distances as Mapbox measures its geometry (`navigation/route.cumulative_distance`); `polyline6`, `polyline` or
+  `geojson` as asked.
+- **Intersections** at every route node where three or more of the map's ways meet (bearings of all of them, `entry` by
+  one-way, `in`/`out`), at the ends, and at stop lines on a route node (`traffic_signal`, `stop_sign`, `yield_sign`).
+- **Lanes** only where the map has turn:lanes (`Route.info`'s laneArrows): the junction's lanes as at its stop line,
+  bays included, on every intersection of the way that carries them into the junction (as Mapbox repeats a way's
+  lanes), `valid`/`active`/`valid_indication` for the route's move there (`osm_lanes.turn_targets`, slight arrows for a
+  fork, arrow-less lanes valid straight on). `active` = `valid`, as in every real response.
+- **Banners** for each step's next maneuver, lane components from its intersection, from 402 m in town (the whole step
+  if shorter) and 2 / 1 mile on motorways.
+- **Annotations**: maxspeed per segment from the map's limits in mph (US-style signs; `speedLimitUnit` mph), else by
+  road class; congestion `unknown`; distance, duration.
+- **Nothing more**: no opening points, widths, lane geometry, lanes between junctions or truth lane (tested: lane
+  objects hold only Mapbox's keys).
+
+On the 46 navd_sim trips: 805 of 3104 intersections (26%) and 156 of 437 maneuvers (36%) have lanes, against 18% and
+22% in the UK responses: our map tags turn:lanes at more junctions than UK OSM does, so GTA, if anything, still gives
+nav a little more than a real car gets. 118 maneuver pairs within 100 m (30 with lanes at both), 11 forks/exits with
+lanes.
+
+**navd**: `navd.py` takes `MAPBOX_HOST` (env) or the `NavMapboxHost` param (new key, persistent string) as the
+Mapbox host, with `MAPBOX_TOKEN` if set and otherwise no token (no comma API token is fetched); unchanged otherwise.
+`MAPBOX_HOST=http://127.0.0.1:8003` routes navd on GTA. A live request through Valhalla checked by hand (MDT's trip,
+14 steps, 4.2 km).
+
+Tests: `tools/sim/bridge/gta5/test_mapbox_server.py` (10): schema parity with the fixtures (every key the emulator
+gives is one Mapbox gives, same JSON type; every key Mapbox always gives is there, but for Mapbox-internal weights),
+geometry/distances/geometry indexes, lanes only on intersections with Mapbox's keys only, a bay only as an extra
+lane at its junction (more lanes there than 100 m back, nothing saying where it opens), two close maneuvers (the first's
+banner shows the second's lanes), forks and exits (valid lanes side by side, on the branch's side), the lane builder,
+the polyline round trip, the HTTP server as navd calls it, and comma's `RouteEngine` routing through it by
+`MAPBOX_HOST` alone with no token.

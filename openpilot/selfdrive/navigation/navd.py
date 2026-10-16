@@ -51,8 +51,11 @@ class RouteEngine:
     self.reroute_counter = 0
 
     self.mapbox_token = os.environ.get("MAPBOX_TOKEN")
-    self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None else None
-    self.mapbox_host = "https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav'
+    # a Mapbox-compatible host instead (MAPBOX_HOST, else the NavMapboxHost param): a self-hosted router, or a
+    # simulator's (GTA's tools/sim/bridge/gta5/mapbox_server.py); it gets MAPBOX_TOKEN if set, else no token
+    self.custom_host = (os.environ.get("MAPBOX_HOST") or self.params.get("NavMapboxHost") or "").rstrip('/') or None
+    self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None and self.custom_host is None else None
+    self.mapbox_host = self.custom_host or ("https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav')
 
   def update(self):
     self.sm.update(0)
@@ -102,11 +105,11 @@ class RouteEngine:
       lang = lang.replace('main_', '')
 
     token = self.mapbox_token
-    if token is None:
+    if token is None and self.api is not None:
       token = self.api.get_token()
 
     params = {
-      'access_token': token,
+      **({'access_token': token} if token is not None else {}),
       'geometries': 'geojson',
       'overview': 'full',
       'steps': 'true',
