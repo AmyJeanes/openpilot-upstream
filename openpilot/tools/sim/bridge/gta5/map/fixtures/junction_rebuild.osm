@@ -1417,7 +1417,6 @@
     <tag k="maxspeed" v="40 mph"/>
     <tag k="name" v="Eclipse Blvd"/>
     <tag k="source:width" v="survey"/>
-    <tag k="turn:lanes:forward" v="through|through|through;right"/>
     <tag k="width" v="21.38"/>
     <tag k="width:lanes:backward" v="4.44|4.41"/>
     <tag k="width:lanes:forward" v="4.15|4.21|4.17"/>
