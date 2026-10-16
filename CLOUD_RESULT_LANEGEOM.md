@@ -408,3 +408,53 @@ touched the pavement), validate_lanes 0 issues, lane_parity unchanged, map tests
 median's kerb, so the clamp had nothing to push there; at 75 deg it reaches 0.79 m in, and the case still tests the
 push. Amy, please check this change: it alters a test's scenario, not what the test checks.
 
+
+## Step 6: candidate build `candidates/live21/`
+
+`lanes.json`, `roads.json` and `lanegeom.json` (the pbf is unchanged, sha256 `65e320c418bf…` = live19b's: no node
+moved). 17 MB gzipped, under the 50 MB limit, so the files are on the branch. A clean rebuild from this branch's head
+(`osm_to_roads.py` with build19b's flags, the live19b pbf and this `lanegeom.json`) gives them byte for byte. What
+changed, the 10 places to drive, the flags and the open questions are in `candidates/live21/README.md`. Its scores
+are in `cloud_lanegeom/live21/`.
+
+**live19b -> live21** (all steps together; `paint_score.py`, before = baseline):
+
+| measure | live19b | live21 |
+|---|---|---|
+| map vs paint > 1 m, same samples (all / primary / trunk / motorway) | 8.6 / 9.7 / 5.5 / 7.7% | 8.5 / 9.2 / 5.3 / 7.6% |
+| paint nearer / further by 0.5 m+ | | 4.4 km / 1.7 km |
+| map vs game-file paint > 1 m, same samples (out of sample) | 7.1% | 7.0% (2.9 km nearer, 1.2 km further) |
+| drift `section_at` > 1 m (all / j20) | 3.61 / 2.51% | 3.36 / 2.30% |
+| drift planned line > 0.5 m / > 1 m (all) | 11.45 / 4.46% | 10.86 / 4.18% |
+| target steps away from junctions (`section_at`), spurious | 58, 2 | 52, 1 |
+| freeway diverges with paint, branch lane vs paint lane centre | 0.50 m | 0.39 m |
+| events and named places (by max planned line) | | 5 better, 0 worse, rest same |
+
+## Tests against the baseline (final)
+
+| test | baseline | live21 + branch head |
+|---|---|---|
+| test_lane_numbering.py | 29 passed, 1 failed (`test_live_freeway_merge_exit_and_splits`, cloud router) | same: 29 passed, the same 1 failed |
+| test_lane_slots.py | 20 passed | 20 passed (2 tests updated to the step-2 taper) |
+| test_freeway_lanes.py | 7 passed | 7 passed |
+| test_mapdrive.py | 37 passed, 1 failed (`test_collision_routes`, known) | **38 passed** (one scenario changed in step 5) |
+| validate_lanes.py | 0 issues | 0 issues (reads `lanegeom.json`) |
+| lane_parity.py | 4,979 of 94,748 differ | unchanged (it checks the pbf, which is unchanged) |
+| map tests | 149 (route_lanes, osm_lanes, junctions, ...) | 160 passed, incl. new test_lane_continuity, test_paint_score, test_lane_fit |
+
+No regressions. `test_nav_msgs.py` needs pycapnp/cereal and wasn't run (it uses TAPER_M).
+
+## Open questions
+
+1. Amy's 150 labelled tiles aren't used: they're in tile pixels, and no world projection for them is in the cloud
+   data's tools. (-378,-2062), (68.7,-1146) and the stacked interchanges would need them, or a drive.
+2. Step 5's shorter fillets / earlier clamp settle measure better against the paint but break 2-4 mapdrive tests
+   (`test_no_oscillation` among them) and swing the line out at (-1521.4,-243.0). They need retuning with the lane line's
+   corner smoothing, and an in-game check.
+3. `test_clamp_corners`' median case changed from a 60 deg to a 75 deg left (step 5). Please confirm.
+4. lanes.json still draws exit links from the road's middle node; step 3 changes what the car follows, not the drawing.
+5. 1,308 surveyed ways where the paint and the game files disagree by 0.25 m+ (the game files kept), and 451 where the
+   lane counts disagree: `cloud_lanegeom/step4/listed.csv`. Worth a look at the largest.
+6. Two step-3 diverges ended further from the paint, both with little paint: (791.7,-633.3) and (-424.2,-1575.7).
+   If the drive confirms, add them to `lanegeom.json` `diverges`.
+7. The cloud Valhalla routes `test_live_freeway_merge_exit_and_splits` differently. Please run it on the PC.
