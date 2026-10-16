@@ -405,5 +405,5 @@ as `navd.request` (the same fields as the planner's `navRequest`).
   (native params need capnp's generated C++ headers); the new navd tests stub `Params` only where it's missing, as
   laneguide's approval tests do. `msgq` was built from its public source, so cereal messaging is real.
 - Lint (ruff) on the new and changed files: clean, but for findings in `osm_lanes.py` that predate this work.
-- Mapbox: 20 requests in all (1 preflight + 20 fetches, 12 kept), the token read from the environment only; no
+- Mapbox: 21 requests in all (1 preflight + 20 fetches, 12 kept), the token read from the environment only; no
   file, log or commit holds it (checked by value over the branch's files and history).
