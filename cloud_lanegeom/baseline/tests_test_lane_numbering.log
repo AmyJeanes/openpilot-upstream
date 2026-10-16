@@ -1,0 +1,5 @@
+E     AssertionError: (3063.154392248499, [(2017.5954310976254, 2042.2164319084684, 0.615525020271076, 0.0), (2807.795998665108, 2821.1, 0.0, 1.0)])
+E     assert (3063.154392248499 < 300.0)
+E      +  where 3063.154392248499 = <openpilot.tools.sim.bridge.gta5.map.router.Route object at 0x7efff92eb8c0>.length
+FAILED openpilot/tools/sim/bridge/gta5/test_lane_numbering.py::test_live_freeway_merge_exit_and_splits
+1 failed, 29 passed in 123.73s (0:02:03)

@@ -1,0 +1,5 @@
+E       AssertionError: ('029', np.float64(1.1226734166927526))
+E       assert (np.float64(1.1226734166927526) < 0.6)
+E        +  where np.float64(1.1226734166927526) = abs(np.float64(1.1226734166927526))
+FAILED openpilot/tools/sim/bridge/gta5/test_mapdrive.py::test_collision_routes
+1 failed, 37 passed in 55.65s

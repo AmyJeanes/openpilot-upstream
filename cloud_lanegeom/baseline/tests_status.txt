@@ -1,0 +1,7 @@
+test_lane_numbering exit 1
+test_lane_slots exit 0
+test_freeway_lanes exit 0
+test_mapdrive exit 1
+validate_lanes exit 0
+lane_parity exit 1
+done

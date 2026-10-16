@@ -76,3 +76,27 @@ Per-event status (24 j20 events, 5 recurring places, other named places): `cloud
 | lane_parity.py | 94,748 directed ways checked, 4,979 differ from GTA's links' layout (exit 1 when any differ) |
 
 (`python test_lane_numbering.py` as a script stops at the first test needing pytest fixtures, so pytest is used.)
+
+## Step 1: the geometry scorer (`map/paint_score.py`)
+
+`paint_score.py MAP_DIR --paint paint_lanes_confident.json --drift drift_20261016/ --out OUT [--base BASE_OUT]`
+(`--legs` reuses the routes rebuilt from the frames; `--roads` gives the road classes when MAP_DIR has no roads.json).
+It writes `report.json`, `report.md` (every number beside the baseline's with `--base`), `places_static.csv` (15 m cells
+by matched paint length more than 1 m from the map), `places_drift.csv` (15 m cells by driven time with the target more
+than 1 m off the paint), `events.csv` (the 24 j20 events, the 5 recurring places and the other places the brief names,
+each with its largest |target - paint centre| for the three targets, before and after), and `steps_*.csv`.
+
+- **Map vs paint**: the paint's lines (solid/dashed white, yellow centre lines, edges) sampled every 1 m; for each
+  sample the nearest map line of its family within 2.5 m, within 3 m of height and 25 deg of heading (`Segments`,
+  vectorised: about a minute for the whole map). With `--base`, the same samples are compared one for one (km moved
+  more than 0.5 m nearer or further).
+- **Drift re-score**: each trip's route is rebuilt from its frames (the route's line is the car less its recorded
+  route_right across its heading; the map's nodes along that line, at the car's height, chained through the map's ways),
+  so any map with the recorded map's ways re-scores the same frames. Three targets: the segment's own cross-section
+  (`Section.offset`, what `target_right` is), the cross-section where the car is (`RouteLanes.section_at`), and the line
+  the map driver plans through the recorded target lanes (`RouteLanes.lane_line`). On live19b the rebuilt static target
+  is within 0.1 m of the recorded one on 97.3% of frames.
+- `test_paint_score.py` (4 cases on made maps and paint) passes.
+
+Baseline numbers are under Preflight; `cloud_lanegeom/baseline/` holds the baseline's report and lists. A rerun of the
+baseline against itself gives identical numbers (deterministic).
