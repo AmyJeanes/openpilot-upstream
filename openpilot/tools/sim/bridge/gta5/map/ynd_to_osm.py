@@ -2310,6 +2310,8 @@ def main():
   p.add_argument('--lines-bare', help="lane boundaries the game files paint no line on that captured game images show "
                  "none on either (imgcheck.lane_paint's JSON: \"bare\": {\"<a>|<b>\": [m right of a -> b]}): no line drawn; nor on "
                  "those its \"carried\" says such a stretch carries on onto")
+  p.add_argument('--lanegeom', help="the lane geometry fitted to the paint (lanegeom.json: lane_fit.py, diverge_report.py), "
+                 "baked in as the ways' tags last (lane_geometry.py)")
   args = p.parse_args()
 
   nodes, links, streets = load(args.dump)
@@ -2827,6 +2829,12 @@ def main():
       print(f"{len(found)} painted islands (traffic_calming=painted_island), {len(strips)} flush edges' road surface (area:highway)")
       print(f"{len(raised)} raised islands (traffic_calming=island, {sum(f.centre_hit for f in raised)} under a lane's centre); " +
             "of the lanes' runs over kerb: " + ', '.join(f'{n} {k}' for k, n in why.items()))
+  if args.lanegeom:
+    from openpilot.tools.sim.bridge.gta5.map import lane_geometry
+    with open(args.lanegeom) as f:
+      found = lane_geometry.bake(args.out, json.load(f))
+    print(f"lane geometry baked in from {args.lanegeom}: {found['ways']} ways' tags, {found['diverges']} diverges kept "
+          f"({len(found['ways_not_found'])} ways and {len(found['diverges_not_found'])} diverges not found)")
   kinds = ', '.join(f'{sum(t[0] == k for t in turns)} {k}' for k in ('no_left_turn', 'no_right_turn', 'no_straight_on'))
   print(f"{u_turns} U-turns forbidden; GTA's turn flags: {len(turns)} turns forbidden ({kinds}), {skipped} through too many ways and {dead_ends} " +
         "approaches GTA leaves no way out of left out")
