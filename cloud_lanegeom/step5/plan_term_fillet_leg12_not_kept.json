@@ -1,0 +1,1009 @@
+{
+ "plan_867_-1746_map1011g-018": {
+  "spec": "953.00,-1869.23,30.77,355.8,0>849.73,-1643.84",
+  "finished": "arrived",
+  "corners": [
+   106.0,
+   240.0
+  ],
+  "entry": {
+   "plan": {
+    "frames": 181,
+    "known": 181,
+    "over_0.5": 0.486,
+    "over_1.0": 0.227,
+    "p90": 2.6,
+    "max": 4.64
+   },
+   "map": {
+    "frames": 181,
+    "known": 97,
+    "over_0.5": 0.412,
+    "over_1.0": 0.237,
+    "p90": 2.33,
+    "max": 2.48
+   },
+   "car": {
+    "frames": 181,
+    "known": 97,
+    "over_0.5": 0.546,
+    "over_1.0": 0.412,
+    "p90": 2.91,
+    "max": 3.1
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 182,
+    "known": 182,
+    "over_0.5": 0.5,
+    "over_1.0": 0.363,
+    "p90": 2.78,
+    "max": 4.37
+   },
+   "map": {
+    "frames": 182,
+    "known": 57,
+    "over_0.5": 0.07,
+    "over_1.0": 0.0,
+    "p90": 0.42,
+    "max": 0.71
+   },
+   "car": {
+    "frames": 182,
+    "known": 57,
+    "over_0.5": 0.053,
+    "over_1.0": 0.0,
+    "p90": 0.41,
+    "max": 0.75
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 570,
+    "known": 570,
+    "over_0.5": 0.398,
+    "over_1.0": 0.207,
+    "p90": 1.24,
+    "max": 6.32
+   },
+   "map": {
+    "frames": 570,
+    "known": 470,
+    "over_0.5": 0.206,
+    "over_1.0": 0.138,
+    "p90": 1.28,
+    "max": 3.15
+   },
+   "car": {
+    "frames": 570,
+    "known": 482,
+    "over_0.5": 0.467,
+    "over_1.0": 0.295,
+    "p90": 1.62,
+    "max": 2.87
+   }
+  }
+ },
+ "plan_867_-1746_map1011g-045": {
+  "spec": "1059.55,-1745.13,35.27,111.3,0>849.31,-1650.92",
+  "finished": "arrived",
+  "corners": [
+   240.0
+  ],
+  "entry": {
+   "plan": {
+    "frames": 79,
+    "known": 79,
+    "over_0.5": 0.582,
+    "over_1.0": 0.139,
+    "p90": 1.07,
+    "max": 4.07
+   },
+   "map": {
+    "frames": 79,
+    "known": 39,
+    "over_0.5": 1.0,
+    "over_1.0": 0.615,
+    "p90": 2.37,
+    "max": 2.46
+   },
+   "car": {
+    "frames": 79,
+    "known": 39,
+    "over_0.5": 1.0,
+    "over_1.0": 1.0,
+    "p90": 3.13,
+    "max": 3.15
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 85,
+    "known": 85,
+    "over_0.5": 0.612,
+    "over_1.0": 0.424,
+    "p90": 2.45,
+    "max": 3.96
+   },
+   "map": {
+    "frames": 85,
+    "known": 10,
+    "over_0.5": 0.1,
+    "over_1.0": 0.0,
+    "p90": 0.43,
+    "max": 0.54
+   },
+   "car": {
+    "frames": 85,
+    "known": 10,
+    "over_0.5": 0.2,
+    "over_1.0": 0.0,
+    "p90": 0.62,
+    "max": 0.76
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 698,
+    "known": 698,
+    "over_0.5": 0.404,
+    "over_1.0": 0.228,
+    "p90": 1.33,
+    "max": 5.16
+   },
+   "map": {
+    "frames": 698,
+    "known": 543,
+    "over_0.5": 0.269,
+    "over_1.0": 0.184,
+    "p90": 1.42,
+    "max": 3.16
+   },
+   "car": {
+    "frames": 698,
+    "known": 551,
+    "over_0.5": 0.401,
+    "over_1.0": 0.276,
+    "p90": 1.73,
+    "max": 2.78
+   }
+  }
+ },
+ "plan_-1521_-243_map1011g-062": {
+  "spec": "-1634.77,-83.63,58.77,209.5,0>-1573.01,-320.45",
+  "finished": "arrived",
+  "corners": [
+   228.0,
+   328.0
+  ],
+  "entry": {
+   "plan": {
+    "frames": 196,
+    "known": 196,
+    "over_0.5": 0.679,
+    "over_1.0": 0.49,
+    "p90": 2.03,
+    "max": 3.55
+   },
+   "map": {
+    "frames": 196,
+    "known": 157,
+    "over_0.5": 0.306,
+    "over_1.0": 0.096,
+    "p90": 0.95,
+    "max": 2.87
+   },
+   "car": {
+    "frames": 196,
+    "known": 157,
+    "over_0.5": 0.86,
+    "over_1.0": 0.529,
+    "p90": 1.82,
+    "max": 1.89
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 91,
+    "known": 91,
+    "over_0.5": 0.165,
+    "over_1.0": 0.11,
+    "p90": 1.06,
+    "max": 2.24
+   },
+   "map": {
+    "frames": 91,
+    "known": 90,
+    "over_0.5": 0.433,
+    "over_1.0": 0.178,
+    "p90": 1.9,
+    "max": 2.89
+   },
+   "car": {
+    "frames": 91,
+    "known": 90,
+    "over_0.5": 0.5,
+    "over_1.0": 0.067,
+    "p90": 0.91,
+    "max": 1.22
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 621,
+    "known": 621,
+    "over_0.5": 0.15,
+    "over_1.0": 0.105,
+    "p90": 1.05,
+    "max": 2.71
+   },
+   "map": {
+    "frames": 621,
+    "known": 490,
+    "over_0.5": 0.098,
+    "over_1.0": 0.053,
+    "p90": 0.49,
+    "max": 2.79
+   },
+   "car": {
+    "frames": 621,
+    "known": 490,
+    "over_0.5": 0.273,
+    "over_1.0": 0.2,
+    "p90": 1.66,
+    "max": 2.86
+   }
+  }
+ },
+ "plan_-1521_-243_map1011g-084": {
+  "spec": "-1634.32,-84.89,58.98,209.8,0>-1577.87,-357.42",
+  "finished": "arrived",
+  "corners": [
+   227.0
+  ],
+  "entry": {
+   "plan": {
+    "frames": 98,
+    "known": 98,
+    "over_0.5": 0.5,
+    "over_1.0": 0.235,
+    "p90": 1.12,
+    "max": 2.46
+   },
+   "map": {
+    "frames": 98,
+    "known": 98,
+    "over_0.5": 0.49,
+    "over_1.0": 0.173,
+    "p90": 1.42,
+    "max": 2.87
+   },
+   "car": {
+    "frames": 98,
+    "known": 98,
+    "over_0.5": 0.796,
+    "over_1.0": 0.306,
+    "p90": 1.21,
+    "max": 1.27
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 91,
+    "known": 91,
+    "over_0.5": 0.187,
+    "over_1.0": 0.121,
+    "p90": 1.18,
+    "max": 2.33
+   },
+   "map": {
+    "frames": 91,
+    "known": 90,
+    "over_0.5": 0.367,
+    "over_1.0": 0.178,
+    "p90": 1.76,
+    "max": 2.72
+   },
+   "car": {
+    "frames": 91,
+    "known": 90,
+    "over_0.5": 0.433,
+    "over_1.0": 0.0,
+    "p90": 0.8,
+    "max": 0.96
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 733,
+    "known": 733,
+    "over_0.5": 0.027,
+    "over_1.0": 0.019,
+    "p90": 0.2,
+    "max": 2.75
+   },
+   "map": {
+    "frames": 733,
+    "known": 511,
+    "over_0.5": 0.098,
+    "over_1.0": 0.055,
+    "p90": 0.47,
+    "max": 2.8
+   },
+   "car": {
+    "frames": 733,
+    "known": 511,
+    "over_0.5": 0.133,
+    "over_1.0": 0.065,
+    "p90": 0.73,
+    "max": 2.83
+   }
+  }
+ },
+ "plan_1135_-3115_map1011g-067": {
+  "spec": "1259.99,-3143.55,5.40,360.0,0>985.35,-3112.42",
+  "finished": "arrived",
+  "corners": [
+   158.0
+  ],
+  "entry": {
+   "plan": {
+    "frames": 125,
+    "known": 125,
+    "over_0.5": 0.904,
+    "over_1.0": 0.272,
+    "p90": 1.5,
+    "max": 2.78
+   },
+   "map": {
+    "frames": 125,
+    "known": 122,
+    "over_0.5": 0.82,
+    "over_1.0": 0.0,
+    "p90": 0.82,
+    "max": 0.9
+   },
+   "car": {
+    "frames": 125,
+    "known": 122,
+    "over_0.5": 0.902,
+    "over_1.0": 0.77,
+    "p90": 1.65,
+    "max": 2.09
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 104,
+    "known": 104,
+    "over_0.5": 0.577,
+    "over_1.0": 0.538,
+    "p90": 2.52,
+    "max": 3.89
+   },
+   "map": {
+    "frames": 104,
+    "known": 55,
+    "over_0.5": 0.418,
+    "over_1.0": 0.418,
+    "p90": 2.71,
+    "max": 2.75
+   },
+   "car": {
+    "frames": 104,
+    "known": 73,
+    "over_0.5": 0.397,
+    "over_1.0": 0.0,
+    "p90": 0.89,
+    "max": 0.98
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 686,
+    "known": 686,
+    "over_0.5": 0.05,
+    "over_1.0": 0.0,
+    "p90": 0.37,
+    "max": 0.85
+   },
+   "map": {
+    "frames": 686,
+    "known": 482,
+    "over_0.5": 0.315,
+    "over_1.0": 0.056,
+    "p90": 0.98,
+    "max": 1.23
+   },
+   "car": {
+    "frames": 686,
+    "known": 482,
+    "over_0.5": 0.33,
+    "over_1.0": 0.17,
+    "p90": 1.18,
+    "max": 1.56
+   }
+  }
+ },
+ "strawberry_exit_map1011g-021": {
+  "spec": "455.34,-1174.88,40.87,89.8,3>108.60,-1162.27",
+  "finished": "arrived",
+  "corners": [],
+  "entry": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 677,
+    "known": 677,
+    "over_0.5": 0.012,
+    "over_1.0": 0.0,
+    "p90": 0.1,
+    "max": 0.71
+   },
+   "map": {
+    "frames": 677,
+    "known": 292,
+    "over_0.5": 0.301,
+    "over_1.0": 0.168,
+    "p90": 1.22,
+    "max": 2.61
+   },
+   "car": {
+    "frames": 677,
+    "known": 287,
+    "over_0.5": 0.282,
+    "over_1.0": 0.129,
+    "p90": 1.05,
+    "max": 2.62
+   }
+  }
+ },
+ "strawberry_exit_map1011g-049": {
+  "spec": "455.62,-1174.83,40.80,89.9,3>108.78,-1162.36",
+  "finished": "arrived",
+  "corners": [],
+  "entry": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 688,
+    "known": 688,
+    "over_0.5": 0.013,
+    "over_1.0": 0.0,
+    "p90": 0.09,
+    "max": 0.76
+   },
+   "map": {
+    "frames": 688,
+    "known": 292,
+    "over_0.5": 0.295,
+    "over_1.0": 0.164,
+    "p90": 1.18,
+    "max": 2.61
+   },
+   "car": {
+    "frames": 688,
+    "known": 288,
+    "over_0.5": 0.278,
+    "over_1.0": 0.125,
+    "p90": 1.05,
+    "max": 2.65
+   }
+  }
+ },
+ "diverge_-378_-2062_map1011g-068": {
+  "spec": "-200.66,-2111.76,23.24,114.2,0>-459.40,-1941.89",
+  "finished": "arrived",
+  "corners": [],
+  "entry": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 698,
+    "known": 698,
+    "over_0.5": 0.15,
+    "over_1.0": 0.032,
+    "p90": 0.64,
+    "max": 1.66
+   },
+   "map": {
+    "frames": 698,
+    "known": 691,
+    "over_0.5": 0.243,
+    "over_1.0": 0.158,
+    "p90": 1.5,
+    "max": 2.65
+   },
+   "car": {
+    "frames": 698,
+    "known": 693,
+    "over_0.5": 0.241,
+    "over_1.0": 0.157,
+    "p90": 1.32,
+    "max": 2.87
+   }
+  }
+ },
+ "diverge_-378_-2062_map1011g-082": {
+  "spec": "-202.92,-2106.81,23.25,115.6,1>-459.10,-1941.83",
+  "finished": "arrived",
+  "corners": [],
+  "entry": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 730,
+    "known": 730,
+    "over_0.5": 0.103,
+    "over_1.0": 0.049,
+    "p90": 0.51,
+    "max": 1.66
+   },
+   "map": {
+    "frames": 730,
+    "known": 730,
+    "over_0.5": 0.171,
+    "over_1.0": 0.077,
+    "p90": 0.8,
+    "max": 2.55
+   },
+   "car": {
+    "frames": 730,
+    "known": 730,
+    "over_0.5": 0.185,
+    "over_1.0": 0.132,
+    "p90": 1.24,
+    "max": 2.03
+   }
+  }
+ },
+ "step_68_-1146_map1011f-004": {
+  "spec": "100.09,-1336.31,28.90,32.6,0>103.11,-1006.34",
+  "finished": "arrived",
+  "corners": [],
+  "entry": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "map": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 0,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 923,
+    "known": 923,
+    "over_0.5": 0.024,
+    "over_1.0": 0.0,
+    "p90": 0.25,
+    "max": 0.7
+   },
+   "map": {
+    "frames": 923,
+    "known": 552,
+    "over_0.5": 0.313,
+    "over_1.0": 0.228,
+    "p90": 1.12,
+    "max": 1.75
+   },
+   "car": {
+    "frames": 923,
+    "known": 552,
+    "over_0.5": 0.428,
+    "over_1.0": 0.216,
+    "p90": 1.15,
+    "max": 1.89
+   }
+  }
+ },
+ "step_68_-1146_map1011g-021": {
+  "spec": "249.18,-1173.36,37.76,70.0,0>101.53,-1039.12",
+  "finished": "arrived",
+  "corners": [
+   182.0
+  ],
+  "entry": {
+   "plan": {
+    "frames": 123,
+    "known": 123,
+    "over_0.5": 0.374,
+    "over_1.0": 0.317,
+    "p90": 4.51,
+    "max": 7.15
+   },
+   "map": {
+    "frames": 123,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   },
+   "car": {
+    "frames": 123,
+    "known": 0,
+    "over_0.5": null,
+    "over_1.0": null,
+    "p90": null,
+    "max": null
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 83,
+    "known": 83,
+    "over_0.5": 0.482,
+    "over_1.0": 0.265,
+    "p90": 1.24,
+    "max": 1.92
+   },
+   "map": {
+    "frames": 83,
+    "known": 72,
+    "over_0.5": 0.889,
+    "over_1.0": 0.653,
+    "p90": 1.95,
+    "max": 2.39
+   },
+   "car": {
+    "frames": 83,
+    "known": 72,
+    "over_0.5": 0.833,
+    "over_1.0": 0.653,
+    "p90": 3.0,
+    "max": 3.05
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 605,
+    "known": 605,
+    "over_0.5": 0.055,
+    "over_1.0": 0.023,
+    "p90": 0.22,
+    "max": 1.81
+   },
+   "map": {
+    "frames": 605,
+    "known": 307,
+    "over_0.5": 0.902,
+    "over_1.0": 0.746,
+    "p90": 1.93,
+    "max": 2.54
+   },
+   "car": {
+    "frames": 605,
+    "known": 311,
+    "over_0.5": 0.955,
+    "over_1.0": 0.765,
+    "p90": 2.17,
+    "max": 2.95
+   }
+  }
+ },
+ "all": {
+  "entry": {
+   "plan": {
+    "frames": 802,
+    "known": 802,
+    "over_0.5": 0.592,
+    "over_1.0": 0.304,
+    "p90": 2.13,
+    "max": 7.15
+   },
+   "map": {
+    "frames": 802,
+    "known": 513,
+    "over_0.5": 0.536,
+    "over_1.0": 0.154,
+    "p90": 2.22,
+    "max": 2.87
+   },
+   "car": {
+    "frames": 802,
+    "known": 513,
+    "over_0.5": 0.809,
+    "over_1.0": 0.558,
+    "p90": 1.88,
+    "max": 3.15
+   }
+  },
+  "exit": {
+   "plan": {
+    "frames": 636,
+    "known": 636,
+    "over_0.5": 0.432,
+    "over_1.0": 0.316,
+    "p90": 2.27,
+    "max": 4.37
+   },
+   "map": {
+    "frames": 636,
+    "known": 374,
+    "over_0.5": 0.439,
+    "over_1.0": 0.273,
+    "p90": 2.17,
+    "max": 2.89
+   },
+   "car": {
+    "frames": 636,
+    "known": 392,
+    "over_0.5": 0.454,
+    "over_1.0": 0.135,
+    "p90": 1.4,
+    "max": 3.05
+   }
+  },
+  "elsewhere": {
+   "plan": {
+    "frames": 7629,
+    "known": 7629,
+    "over_0.5": 0.119,
+    "over_1.0": 0.056,
+    "p90": 0.61,
+    "max": 6.32
+   },
+   "map": {
+    "frames": 7629,
+    "known": 5360,
+    "over_0.5": 0.263,
+    "over_1.0": 0.161,
+    "p90": 1.19,
+    "max": 3.16
+   },
+   "car": {
+    "frames": 7629,
+    "known": 5377,
+    "over_0.5": 0.335,
+    "over_1.0": 0.212,
+    "p90": 1.41,
+    "max": 2.95
+   }
+  }
+ }
+}

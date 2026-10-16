@@ -23,8 +23,8 @@ import numpy as np
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import METRES_PER_DEGREE, to_game
 from openpilot.tools.sim.bridge.gta5.map.junctions import Junctions, _left, _unit, apart, clip_outside, hull, off_islands
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, EDGE_LINE, FORWARD, MEDIAN, PARKING, OsmLanes, \
-  offset_line
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import BACKWARD, CENTRE, DIVIDER, EDGE, EDGE_LINE, FORWARD, GEOMETRY_FILE, MEDIAN, PARKING, \
+  OsmLanes, offset_line
 from openpilot.tools.sim.bridge.gta5.map.side_by_side import SideBySide
 
 ROAD_CLASSES = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track']
@@ -362,6 +362,10 @@ def main():
     def project(lat, lon):
       return (lon - lon0) * METRES_PER_DEGREE * np.cos(np.radians(lat0)), (lat - lat0) * METRES_PER_DEGREE
   osm = OsmLanes(data, project)
+  osm.read_applied(args.osm)  # the lane geometry applied from the paint beside the map (osm_lanes.GEOMETRY_FILE)
+  if osm.applied:
+    print(f"lane geometry applied from {GEOMETRY_FILE}: {len(osm.applied.get('ways', {}))} ways, "
+          f"{len(osm.applied.get('diverges', {}))} diverges kept")
 
   def points(nodes):
     return osm.xy[data.index(nodes)]

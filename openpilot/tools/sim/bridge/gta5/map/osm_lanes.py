@@ -47,7 +47,9 @@ Geometry is in metres in a frame with y 90 degrees left of x (x east, y north): 
 travel. Traffic drives on the right unless `drive_on_right=False`, which mirrors where each direction's lanes are.
 """
 import bisect
+import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from functools import cached_property
@@ -496,7 +498,17 @@ ROADS = frozenset({'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unc
                    'tertiary_link'})
 # tags that place lanes, beyond their counts: a map without any has no lane geometry to read
 GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward', 'placement:offset')
-TAPER_M = 30.0  # m: a lane begins (or ends) where a way's lane count changes, widening from (narrowing to) nothing over this
+# Where a road's lane count changes at a node it just carries on through, a lane begins (or ends) there: GTA lays each
+# link's lanes about its own line, so the lanes carrying on sit elsewhere either side of the node, and the paint seen from
+# above moves across with them within a few metres of it (16 Oct drift frames: lanes in as the way before has them up to
+# 3-6 m before the node, as the way after has them from 3-6 m past it; a lane ending, the lanes carrying on move from
+# 9 m before to 3 m past). So the lanes move across, the new lane widening from nothing on the side it opens (or the
+# lane ending narrowing to nothing), over a taper centred on the node: TAPER_BEFORE m before it to TAPER_AFTER past
+# it where a lane begins, DROP_BEFORE to DROP_AFTER where one ends; the lanes carrying on are counted from the other side.
+TAPER_BEFORE, TAPER_AFTER = 6.0, 6.0  # m
+DROP_BEFORE, DROP_AFTER = 9.0, 3.0  # m
+TAPER_M = 15.0  # m past the node where a lane that begins there is open, its line painted beside it (16 Oct frames: by 10-15 m)
+TAPER_REACH = max(TAPER_BEFORE, TAPER_AFTER, DROP_BEFORE, DROP_AFTER)  # m from the node a taper reaches at most
 # a run of one-lane freeway ways (HOP_ROADS) off a road with more lanes at a junction node, or onto one, at most HOP_M
 # long, within HOP_TURN of straight on there and straying HOP_SIDE m or more to one side: one of GTA's lane hops
 # (RouteLanes._hops)
@@ -504,13 +516,23 @@ HOP_M, HOP_TURN, HOP_SIDE = 60.0, 45.0, 3.0  # m, deg, m
 HOP_ROADS = frozenset({'motorway', 'motorway_link', 'trunk', 'trunk_link'})
 HOP_LEG = 5.0  # m back (on) from the node the road it leaves (joins) is read over
 HOP_COS = math.cos(math.radians(HOP_TURN))
+# where a route leaves a freeway onto a branch with fewer lanes at a node (or joins one from it), the branch's lanes run
+# on as the road's on that side until they come out past them, at most DIVERGE_M from the node, else moving across to
+# the branch's own over its last DIVERGE_EASE (RouteLanes._diverges)
+# the lane geometry applied from the paint seen from above, beside the map's .osm.pbf: one reviewable file of changes with
+# GTA's node ids for keys, built by diverge_report.py and lane_fit.py from the confident paint (2+ tiles), read by load()
+GEOMETRY_FILE = 'lanegeom.json'
+DIVERGES = True  # RouteLanes._diverges on; off (and where it leaves a branch be): a lane hop off (onto) one road alone as before (_hops)
+DIVERGE_M, DIVERGE_EASE = 100.0, 20.0  # m
+DIVERGE_PART = 0.3  # m: the branch's lanes this near where the road's lanes run on, or out past them, have parted
 CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m either side of a point has a corner there
 CORNER_CHORD = 10.0  # m
 FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a fillet
 FILLET_MIN = 1.0  # m: a corner nearer the route's start or end than this has no room for a fillet
 START_STUB = 0.5  # m: a route's points nearer its start than this are left out of its lane line (RouteLanes._lead)
 CORNER_SHARP, SHARP_SHARE = 10.0, 0.6  # a turn through a junction turns this share of its angle within this many m
-FILLET_RADIUS = {'left': 20.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns
+FILLET_RADIUS = {'left': 15.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns (left at 20
+# left the painted lane 10-15 m either side of the corner: paint_score drift, lanegeom step 5)
 MATCH_TOL = 0.5  # m between a route's shape point and a map node it is at
 DROP_SPAN = 25.0  # m: junction nodes this near each other along a route are one junction, for the lanes through it
 DROP_TURN = 30.0  # deg at most a route turns going straight on through a junction (over DROP_REACH m either side)
@@ -647,6 +669,7 @@ class OsmLanes:
     self._blends: dict[int, tuple[int, list[tuple[float, Section]]] | None] = {}
     self._along: dict[int, np.ndarray] = {}
     self._carried: dict[tuple[int, int], int] = {}  # (way, node) -> the way a road carried across a junction there runs on to
+    self.applied: dict = {}  # the lane geometry applied from the paint (GEOMETRY_FILE beside the map: load())
 
   def carry_across(self, pairs) -> None:
     """Roads whose lines are painted on across a junction (junctions.py's Junction.carried): [(way, way)] meeting end to
@@ -703,15 +726,50 @@ class OsmLanes:
 
   @classmethod
   def load(cls, path: str, project, **kw) -> 'OsmLanes':
+    """The map in an .osm.pbf, with the lane geometry applied from the paint in GEOMETRY_FILE beside it, where there
+    is one (see applied())."""
     from openpilot.tools.sim.bridge.gta5.map import osm_pbf
     lanes = cls(osm_pbf.read(path, relations=('connectivity',)), project, **kw)
     lanes.path = path
+    lanes.read_applied(path)
     return lanes
 
+  def read_applied(self, path: str) -> None:
+    """Reads the lane geometry applied beside the map file at `path` (GEOMETRY_FILE), where there is one."""
+    found = os.path.join(os.path.dirname(os.path.abspath(path)), GEOMETRY_FILE)
+    self.applied = json.load(open(found)) if os.path.exists(found) else {}
+    self._lanes.clear()
+
+  def gta(self, node: int) -> str | None:
+    """A node's GTA id (`area:index`, its gta:node tag), the key the applied geometry file uses."""
+    return self.data.node_tags.get(node, {}).get('gta:node')
+
+  def kept_diverge(self, a: int, b: int) -> bool:
+    """Whether the applied geometry keeps the link a -> b's diverge (or merge) as the map has it, the paint saying so
+    (GEOMETRY_FILE's `diverges`: {"a>b": {"keep": true, ...}}, GTA ids)."""
+    ga, gb = self.gta(a), self.gta(b)
+    return bool(ga and gb and self.applied.get('diverges', {}).get(f'{ga}>{gb}', {}).get('keep'))
+
   def lanes(self, way: int) -> WayLanes:
+    """The way's lanes from its tags, with the applied geometry's for it over them (way_tags)."""
     if way not in self._lanes:
-      self._lanes[way] = WayLanes.from_tags(self.ways[way][0], self.drive_on_right, self.defaults)
+      self._lanes[way] = WayLanes.from_tags(self.way_tags(way), self.drive_on_right, self.defaults)
     return self._lanes[way]
+
+  def way_key(self, way: int) -> str | None:
+    """A way's key in the applied geometry: its end nodes' GTA ids, `a>b` in its direction; None without both."""
+    refs = self.ways[way][1]
+    a, b = self.gta(refs[0]), self.gta(refs[-1])
+    return f'{a}>{b}' if a and b else None
+
+  def way_tags(self, way: int) -> dict:
+    """The way's tags, with the applied geometry's lane placement and widths for it over them (GEOMETRY_FILE's
+    `ways`: {"a>b": {"tags": {...}}}, the lanes fitted to the paint by lane_fit.py)."""
+    tags = self.ways[way][0]
+    over = self.applied.get('ways') if self.applied else None
+    if over and (key := self.way_key(way)) in over:
+      tags = {**tags, **over[key]['tags']}
+    return tags
 
   def node_xy(self, node: int) -> np.ndarray:
     return self.xy[int(self.data.index([node])[0])]
@@ -762,7 +820,7 @@ class OsmLanes:
 
   def _boundary(self, way: int, d: int, ahead: bool) -> tuple[float, 'Section'] | None:
     """Back (or on) from a way travelled d, while the road carries on with its layout: how far to where its lanes
-    change, and the cross-section beyond (seen travelling d); None past TAPER_M, a junction, or a tapered way."""
+    change, and the cross-section beyond (seen travelling d); None past TAPER_REACH, a junction, or a tapered way."""
     key = Section.of(self.lanes(way), d).key
     w, wd, dist = way, d, 0.0
     for _ in range(64):
@@ -780,16 +838,18 @@ class OsmLanes:
       if sec.key != key:
         return dist, sec
       dist += self.length(nb)
-      if dist >= TAPER_M:
+      if dist >= TAPER_REACH:
         return None
       w, wd = nb, nd
     return None
 
   def taper(self, way: int) -> tuple[int, list[tuple[float, 'Section']]] | None:
     """Where the way's lanes change along it: (the direction it's seen in, [(m along it that way, its cross-section
-    there)], the cross-section varying linearly between). From its width:lanes:start / :end tags; else, a lane a road
-    gains (or loses) at a node where it just carries on widens from (narrows to) nothing over TAPER_M from there, also
-    across the ways after it with the same lanes. None where its lanes don't change."""
+    there)], the cross-section varying linearly between). From its width:lanes:start / :end tags; else, near a node
+    where the road just carries on and gains (or loses) a lane, its part of the taper there (taper_u): on the way with
+    more lanes the new lane widening from nothing (narrowing to nothing), on the way with fewer its lanes moving across
+    to where they carry on (_toward_many), across the ways with the same lanes either side too. None where its lanes
+    don't change."""
     if way in self._tapers:
       return self._tapers[way]
     out = None
@@ -798,16 +858,24 @@ class OsmLanes:
       out = FORWARD, [(0.0, Section.of(self.lanes_at(way, 'start'))), (length, Section.of(self.lanes_at(way, 'end')))]
     else:
       for d in (FORWARD, BACKWARD):
-        many = Section.of(self.lanes(way), d)
+        own = Section.of(self.lanes(way), d)
         for ahead in (False, True):
           found = self._boundary(way, d, ahead)
-          if found is None or not (_taperable(found[1], many) and found[1].lanes < many.lanes):
+          if found is None or not _taperable(found[1], own):
             continue
-          dist, few = found
+          dist, other = found
+          more = other.lanes < own.lanes  # this way has the lanes the other lacks
+          # travelling d: from the other way into this one (ahead False), or from this one into it
+          opening = more != ahead
 
-          def state(along, dist=dist, few=few, many=many, ahead=ahead):
-            return _blend(few, many, (dist + (length - along if ahead else along)) / TAPER_M)
-          reach = TAPER_M - dist  # m of the way the taper runs into
+          def state(along, dist=dist, other=other, own=own, ahead=ahead, opening=opening, more=more):
+            x = (dist + along) if not ahead else -(dist + length - along)
+            u = taper_u(x, opening)
+            return _blend(other, own, u) if more else _toward_many(own, other, u)
+          before, after = (TAPER_BEFORE, TAPER_AFTER) if opening else (DROP_BEFORE, DROP_AFTER)
+          reach = (after if not ahead else before) - dist  # m of this way the taper runs into
+          if reach <= 0.0:
+            continue
           knots = [0.0, min(reach, length)] if not ahead else [max(length - reach, 0.0), length]
           knots = sorted({0.0, length, *knots})
           out = d, [(v, state(v)) for v in knots]
@@ -1336,6 +1404,95 @@ def inside_ring(pts: np.ndarray, ring: np.ndarray) -> np.ndarray:
   return (spans & cross).sum(axis=1) % 2 == 1
 
 
+DIVERGE_BEND = 30.0  # m of road before a diverge (after a merge) its bend is read over
+DIVERGE_RADIUS = 200.0  # m: a road bending tighter than this before a diverge (after a merge) isn't run on straight past it
+
+
+def _bend(pts: np.ndarray, along: np.ndarray, k: int, step: int) -> float:
+  """The route's curvature (1/m, left positive, travelling it) over DIVERGE_BEND of it from point k in the direction
+  `step` (-1 back, 1 on); 0 where it's shorter."""
+  def heading(a, b):
+    v = pts[b] - pts[a]
+    return math.atan2(v[1], v[0])
+  far = k
+  while 0 <= far + step < len(pts) and abs(along[far + step] - along[k]) <= DIVERGE_BEND:
+    far += step
+  if abs(along[far] - along[k]) < DIVERGE_BEND / 2:
+    return 0.0
+  mid = k + (far - k) // 2
+  if mid in (k, far):
+    return 0.0
+  a, b = (far, mid) if step < 0 else (mid, far)
+  c, e = (mid, k) if step < 0 else (k, mid)
+  h1, h2 = (heading(a, b), heading(c, e)) if step < 0 else (heading(c, e), heading(a, b))
+  turn = (h2 - h1 + math.pi) % (2 * math.pi) - math.pi  # travelling the route
+  span = abs(along[far] - along[k]) / 2
+  return float(turn / max(span, EPS))
+
+
+class _RoadArc:
+  """A road's line run on from a point p0 heading u (unit), bending at curvature `kappa` (1/m, left positive): m right
+  of it, and its heading, near any point."""
+  def __init__(self, p0: np.ndarray, u: np.ndarray, kappa: float):
+    self.p0, self.u, self.nrm = np.asarray(p0, float), np.asarray(u, float), _right_normal(u)
+    self.r = 1.0 / kappa if abs(kappa) > 1e-6 else None
+    self.c = self.p0 - self.nrm * self.r if self.r is not None else None  # its centre, on the left of a left bend
+
+  def lateral(self, p: np.ndarray) -> float:
+    if self.r is None:
+      return float((np.asarray(p, float) - self.p0) @ self.nrm)
+    return float(math.copysign(1.0, self.r) * (np.hypot(*(np.asarray(p, float) - self.c)) - abs(self.r)))
+
+  def tangent(self, p: np.ndarray) -> np.ndarray:
+    if self.r is None:
+      return self.u
+    v = (np.asarray(p, float) - self.c) / max(float(np.hypot(*(np.asarray(p, float) - self.c))), EPS)
+    t = np.array([-v[1], v[0]]) if self.r > 0 else np.array([v[1], -v[0]])  # anticlockwise round a left bend
+    return t
+
+
+def _kept(osm: 'OsmLanes', node_p: np.ndarray, next_p: np.ndarray, leaving: bool) -> bool:
+  """Whether the applied geometry keeps this diverge (merge) as it was: the link from the node on to the branch's
+  next node (from the branch's last node on to the node)."""
+  a, b = osm.nodes_at(node_p), osm.nodes_at(next_p)
+  if not a or not b:
+    return False
+  return osm.kept_diverge(a[0], b[0]) if leaving else osm.kept_diverge(b[0], a[0])
+
+
+def _hatched(osm: 'OsmLanes | None'):
+  """The hatched areas painted beside the map osm was read from (router.LaneLines, lanes.json's), None without them."""
+  if osm is None or osm.path is None:
+    return None
+  from openpilot.tools.sim.bridge.gta5.map.router import LaneLines  # router reads this module
+  lines = LaneLines.of(osm)
+  return lines if lines is not None and lines.rings else None
+
+
+HATCH_MORE = 0.5  # m more of a lane's centre inside a hatched area than before that a branch's lanes may not be moved
+
+
+def _into_hatched(hatched, osm: 'OsmLanes', pts: np.ndarray, sections: list, shifts: dict) -> bool:
+  """Whether moving the segments' lanes by shifts ({segment: (m right at its start, at its end)}) puts any lane's
+  centre HATCH_MORE m further inside a hatched area (LaneLines.inside, at the route's height) than it ran unmoved."""
+  def ele(p):
+    n = osm.nodes_at(p, 1.0)
+    return float(osm.data.node_tags.get(n[0], {}).get('ele', 'nan')) if n else math.nan
+  for j, (a, b) in shifts.items():
+    d = pts[j + 1] - pts[j]
+    length = float(np.hypot(*d))
+    if length < EPS or (abs(a) < EPS and abs(b) < EPS):
+      continue
+    nrm = np.array([d[1], -d[0]]) / length
+    za, zb = ele(pts[j]), ele(pts[j + 1])
+    for sp in sections[j].ours:
+      before = hatched.inside(pts[j] + nrm * sp.centre, pts[j + 1] + nrm * sp.centre, za, zb)
+      after = hatched.inside(pts[j] + nrm * (sp.centre + a), pts[j + 1] + nrm * (sp.centre + b), za, zb)
+      if after > before + HATCH_MORE:
+        return True
+  return False
+
+
 class RouteLanes:
   """A route's lanes (points [N, 2] in m): each segment's cross-section (Section, None where unknown), the turn arrows
   on the way into each junction, and the line through the lanes a plan takes, with fillets through its corners."""
@@ -1409,6 +1566,13 @@ class RouteLanes:
     fast = [wd is not None and osm.ways[wd[0]][0].get('highway') in HOP_ROADS for wd in ways]
     hopped, hops = cls._hops(pts, along, sections, degree, explicit, fast)
     explicit.update(hopped)
+    if DIVERGES:
+      diverged, spans = cls._diverges(pts, along, sections, degree, explicit, fast, osm)
+      explicit.update(diverged)
+      hops += spans
+    hopped, spans = cls._hops(pts, along, sections, degree, explicit, fast, both=False)  # those _diverges left as before
+    explicit.update(hopped)
+    hops = sorted(hops + spans)
     blended = cls._blended(pts, ways_along, osm, len(ways))
     for k, sec in enumerate(sections):
       nxt = sections[k + 1] if k + 1 < len(sections) else None
@@ -1448,13 +1612,14 @@ class RouteLanes:
 
   @staticmethod
   def _hops(pts: np.ndarray, along: np.ndarray, sections: list[Section | None], degree: list[int],
-            explicit: dict, fast: list[bool]) -> tuple[dict[int, tuple[Section, Section, float, float]], list[tuple[float, float]]]:
+            explicit: dict, fast: list[bool], both: bool = True) -> tuple[dict[int, tuple[Section, Section, float, float]], list[tuple[float, float]]]:
     """RouteLanes.explicit for GTA's lane hops: a run of one-lane freeway ways (`fast`, per segment) off a road with
-    more lanes at a junction node, or onto one (HOP_M, HOP_TURN, HOP_SIDE), as a lane split off as its own link or a
-    link across to a road alongside. GTA starts and ends their lines at that road's middle node, so its lane would swing
-    in to the road's middle and out again; instead it keeps to where that road's outer lane is on its side (measured
-    from the road's line run on straight), the road before's at the run's start and the road after's at its end,
-    blended between along the run. Also m along from and to each run."""
+    more lanes at a junction node and onto one (HOP_M, HOP_TURN, HOP_SIDE), a link across from one road to another
+    alongside. GTA starts and ends their lines at those roads' middle nodes, so its lane would swing in to the road's
+    middle and out again; instead it keeps to where that road's outer lane is on its side (measured from the road's
+    line run on straight), the road before's at the run's start and the road after's at its end, blended between along
+    the run. (A run off one road alone, or onto one, is a diverge or merge: _diverges; with `both` False, such a run
+    too, its far end on its own line, as before _diverges.) Also m along from and to each run."""
     out: dict[int, tuple[Section, Section, float, float]] = {}
     spans: list[tuple[float, float]] = []
     n = len(sections)
@@ -1474,7 +1639,7 @@ class RouteLanes:
           lead = _hop_road(pts, along, k, -1, pts[k:k1 + 2], pts[k + 1], prev, sec)
         if nxt is not None and nxt.lanes > sec.lanes and degree[k1 + 1] >= 3:
           tail = _hop_road(pts, along, k1 + 1, 1, pts[k:k1 + 2], pts[k1], nxt, sec)
-      if lead is not None or tail is not None:
+      if (lead is not None and tail is not None) or (not both and (lead is not None or tail is not None)):
         span = max(float(along[k1 + 1] - along[k]), EPS)
         for j in range(k, k1 + 1):
           d = pts[j + 1] - pts[j]
@@ -1489,6 +1654,102 @@ class RouteLanes:
           out[j] = (_shifted(sections[j], ends[0]), _shifted(sections[j], ends[1]), float(along[j]), float(along[j + 1]))
         spans.append((float(along[k]), float(along[k1 + 1])))
       k = k1 + 1
+    return out, spans
+
+  @staticmethod
+  def _diverges(pts: np.ndarray, along: np.ndarray, sections: list[Section | None], degree: list[int], explicit: dict,
+                fast: list[bool], osm: 'OsmLanes | None' = None) -> tuple[dict[int, tuple[Section, Section, float, float]], list[tuple[float, float]]]:
+    """RouteLanes.explicit where the route leaves a freeway (`fast`, HOP_ROADS) at a node onto a freeway way with fewer
+    lanes that strays to one side (an exit, a chain of GTA's lane links splitting off), or joins one from such a way (an
+    on-ramp, a chain merging back): GTA starts (ends) the branch's links at the road's middle node, so its lanes, laid
+    along them, would swing in to the road's middle and out again. Instead the branch's lanes run on as the road's
+    lanes on the side it leaves (joins) on, counted from that side and measured from the road's line run on straight,
+    until the branch's own lanes come out past them (within DIVERGE_PART), where the paint parts at the gore, and follow
+    the branch's from there; the branch may go on onto ways of any class with its lanes (a ramp GTA classes by the
+    roads it reaches). Where they haven't parted within DIVERGE_M (a lane chain running alongside), they move across to
+    the branch's own over the last DIVERGE_EASE. No lane is moved further into a hatched area (lanes.json's painted
+    gores and islands beside the map, router.LaneLines) than it ran before: a branch whose lanes would be is left as
+    it was; so is one the applied geometry keeps, where the paint has it better as it was (OsmLanes.kept_diverge).
+    Also m along from and to each."""
+    out: dict[int, tuple[Section, Section, float, float]] = {}
+    hatched = _hatched(osm)
+    spans: list[tuple[float, float]] = []
+    n = len(sections)
+    for k in range(1, n):
+      for leaving in (True, False):
+        # leaving: the road before node k (segment k - 1), the branch from it on; joining: the road after node k
+        # (segment k), the branch before it
+        r, b0 = (k - 1, k) if leaving else (k, k - 1)
+        road, branch = sections[r], sections[b0]
+        if degree[k] < 3 or road is None or branch is None or not (fast[r] and fast[b0]) or not branch.lanes or \
+           road.lanes <= branch.lanes or b0 in explicit or b0 in out:
+          continue
+        step = 1 if leaving else -1
+        run = [b0]  # the branch's segments, from the node out
+        while True:
+          j = run[-1] + step
+          if not 0 <= j < n or j in explicit or j in out or (s := sections[j]) is None or s.lanes != branch.lanes:
+            break
+          if abs(along[j + (0 if leaving else 1)] - along[k]) >= DIVERGE_M:
+            break
+          run.append(j)
+        # the road's line run on straight past the node: its heading over HOP_LEG on the road's side
+        i = k - step
+        while 0 < i < len(pts) - 1 and abs(along[i] - along[k]) < HOP_LEG:
+          i -= step
+        u = (pts[k] - pts[i]) * step
+        if float(np.hypot(*u)) < EPS:
+          continue
+        u = u / float(np.hypot(*u))
+        first = pts[k + step] - pts[k]  # the branch's way out of the node, along the route's travel either side
+        if float(np.hypot(*first)) < EPS or math.degrees(math.acos(min(max(float(u @ (first * step) / np.hypot(*first)), -1.0), 1.0))) > HOP_TURN:
+          continue
+        if abs(_bend(pts, along, k, -step)) > 1.0 / DIVERGE_RADIUS:  # run on straight, a bending road's line strays
+          continue
+        frame = _RoadArc(pts[k], u, 0.0)
+        idx = sorted({q for j in run for q in (j, j + 1)})
+        lat = np.array([frame.lateral(pts[q]) for q in idx])
+        side = float(lat[int(np.argmax(np.abs(lat)))])
+        if abs(side) < HOP_SIDE:
+          continue
+        m = branch.lanes
+        block = road.ours[-m:] if side > 0 else road.ours[:m]
+        anchor = sum(sp.centre for sp in block) / m  # the road's lanes the branch's carry on from, their middle
+        shifts: dict[int, tuple[float, float]] = {}
+        parted = False
+        for j in run:
+          sec = sections[j]
+          d = pts[j + 1] - pts[j]
+          d = d / max(float(np.hypot(*d)), EPS)
+          own_mid = sum(sp.centre for sp in sec.ours) / m
+          ends = []
+          for q in (j, j + 1):
+            cos = max(float(d @ frame.tangent(pts[q])), HOP_COS)
+            own = frame.lateral(pts[q]) + own_mid * cos  # the branch's lanes' middle, across the road's line
+            want = max(anchor, own) if side > 0 else min(anchor, own)
+            ends.append((want - own) / cos)
+          shifts[j] = (ends[0], ends[1])
+          if abs(ends[1] if leaving else ends[0]) < DIVERGE_PART:  # come out past the road's lanes: the gore
+            parted = True
+            break
+        if not shifts:
+          continue
+        lo = min(float(along[j]) for j in shifts)
+        hi = max(float(along[j + 1]) for j in shifts)
+        if not parted:  # a lane chain alongside: across to its own over the far end of the stretch
+          far = hi if leaving else lo
+          for j, (a, b) in shifts.items():
+            fa, fb = (min(abs(far - float(along[q])) / DIVERGE_EASE, 1.0) for q in (j, j + 1))
+            shifts[j] = (a * fa, b * fb)
+        if hatched is not None and _into_hatched(hatched, osm, pts, sections, shifts):
+          continue
+        if osm is not None and osm.applied and _kept(osm, pts[k], pts[k + step], leaving):
+          continue
+        for j, (a, b) in shifts.items():
+          if abs(a) < EPS and abs(b) < EPS:
+            continue
+          out[j] = (_shifted(sections[j], a), _shifted(sections[j], b), float(along[j]), float(along[j + 1]))
+        spans.append((lo, hi))
     return out, spans
 
   @property
@@ -1742,8 +2003,9 @@ class RouteLanes:
   def section_at(self, s: float, k: int | None = None) -> Section | None:
     """The cross-section s m along (on segment k, where s is at a point segments share): along a way whose lanes widen
     or narrow (width:lanes...:start / :end) as they do along it; near a node where the road carries on onto a way with
-    the same lanes elsewhere, moving across to them as the lines do (OsmLanes.blend); else a lane widening from nothing
-    over TAPER_M where the road's lane count has risen, or narrowing to nothing before it falls."""
+    the same lanes elsewhere, moving across to them as the lines do (OsmLanes.blend); else near a node where the road's
+    lane count rises (falls), its taper centred on the node (taper_u): a lane widening from nothing (narrowing to
+    nothing) on the way with more lanes, the lanes moving across to where they carry on on the way with fewer."""
     k = self.segment(s) if k is None else k
     sec = self.sections[k] if 0 <= k < len(self.sections) else None
     if sec is None:
@@ -1759,10 +2021,16 @@ class RouteLanes:
     if not self.tapers:
       return sec
     k0, k1 = self._run(k)
-    if k0 in self.tapers and s - self.along[k0] < TAPER_M and self.tapers[k0][0].lanes < sec.lanes:
-      return _blend(self.tapers[k0][0], sec, (s - self.along[k0]) / TAPER_M)
-    if k1 + 1 in self.tapers and self.along[k1 + 1] - s < TAPER_M and self.tapers[k1 + 1][1].lanes < sec.lanes:
-      return _blend(self.tapers[k1 + 1][1], sec, (self.along[k1 + 1] - s) / TAPER_M)
+    if k0 in self.tapers and (x := s - self.along[k0]) < TAPER_REACH:  # past a node where the lane count changed
+      prev = self.tapers[k0][0]
+      if prev.lanes < sec.lanes:
+        return _blend(prev, sec, taper_u(x, True))
+      return _toward_many(sec, prev, taper_u(x, False))
+    if k1 + 1 in self.tapers and (x := s - self.along[k1 + 1]) > -TAPER_REACH:  # before a node where it changes
+      nxt = self.tapers[k1 + 1][1]
+      if nxt.lanes < sec.lanes:
+        return _blend(nxt, sec, taper_u(x, False))
+      return _toward_many(sec, nxt, taper_u(x, True))
     return sec
 
   def opening(self, k: int) -> tuple[float, int, bool] | None:
@@ -2289,6 +2557,30 @@ def _blend(few: Section, many: Section, t: float) -> Section:
            for o, m in zip(old, many.spans, strict=True)]
   edges = tuple(o + (m - o) * t for o, m in zip(few.edges, many.edges, strict=True))
   return Section(spans, edges)
+
+
+def taper_u(x: float, opening: bool) -> float:
+  """How far (0-1) from the fewer lanes' layout to the more's the road is x m past the node where its lane count
+  changes (negative before it), travelling from the fewer to the more where a lane begins (`opening`), else the other
+  way: across the taper centred on the node (TAPER_BEFORE / TAPER_AFTER, DROP_BEFORE / DROP_AFTER)."""
+  before, after = (TAPER_BEFORE, TAPER_AFTER) if opening else (DROP_BEFORE, DROP_AFTER)
+  u = min(max((x + before) / (before + after), 0.0), 1.0)
+  return u if opening else 1.0 - u
+
+
+def _toward_many(few: Section, many: Section, u: float) -> Section:
+  """`few`'s lanes, u (0-1) of the way across to where they carry on in `many` (its lanes but the ones it gains, on the
+  side its arrows turn to, else the outer side: as _blend counts them), the kerbs with them."""
+  extra = many.lanes - few.lanes
+  left = _opens_left(few, many)
+  mo = many.ours
+  match = many.spans[:many.first] + (mo[extra:] if left else mo[:few.lanes]) + many.spans[many.first + many.lanes:]
+  if len(match) != len(few.spans) or extra <= 0:
+    return few
+  u = min(max(u, 0.0), 1.0)
+  spans = [Span(o.lane, o.left + (m.left - o.left) * u, o.right + (m.right - o.right) * u, o.heading)
+           for o, m in zip(few.spans, match, strict=True)]
+  return Section(spans, tuple(o + (m - o) * u for o, m in zip(few.edges, many.edges, strict=True)))
 
 
 RUN_ON_TURN = 20.0  # deg: a one-way way runs on into another at a node with others (_straight_on) this near straight
