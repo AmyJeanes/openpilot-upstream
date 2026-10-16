@@ -290,3 +290,120 @@ queue) and a short freeway lc_time (-2 for n16). `min_dist` never binds here (th
 maxspeed, so time decides first; it's for roads with no maxspeed). So the defaults stay: the timing isn't what limits
 the Mapbox path. What does: lanes ending unannounced, forks where Mapbox's lanes are thin, and n16's own lane change
 at low speed, which the finetune's numbers show (+8 over n16).
+
+## Item 5: hand-over
+
+### In short
+
+- **What Mapbox's lanes are** (item 1, 20 real UK responses, 12 kept as fixtures): lanes only where OSM has turn:lanes,
+  repeated on every intersection of that way and valid for the move at that way's junction; a bay is just one more
+  lane at the intersections nearest the junction, never flagged or located; the maneuver's own intersection sometimes
+  lists other lanes than its approach, but counted from the maneuver's side the target agrees; banner lanes = the
+  maneuver's intersection lanes from 402 m (town) or 1-2 miles (motorways); maxspeed per segment; 84% of forks/exits
+  and 22% of maneuvers overall have lanes.
+- **The GTA server matches it** (item 2): `mapbox_server.py` answers navd's Directions request from Valhalla on our
+  map with the same schema (tested key by key against the fixtures) and the same sparseness: lanes only where our map
+  has turn:lanes (plus diverges' lanes from their counts, as tagged UK diverges have), no opening points, widths,
+  lane geometry or truth. Our map tags more junctions than UK OSM (36% of maneuvers with lanes against 22%).
+- **Step 1 guidance in comma's navd** (item 3): `selfdrive/navigation/lane_guidance.py`, behind `NavLaneGuidance`.
+- **Measured** (item 4): on Mapbox data and the lane head alone, level with laneguide's full-map planner within the
+  noise (n16 247 vs 247 with a perfect head, 244 vs 250 at 0.85, 245 vs 242 with the hard head; seed 1: +2, +2);
+  turns better (the bay rule), forks/straight on a few worse, forced merges 3x (lane ends unknown); timing constants
+  don't matter within sensible ranges.
+
+### How to run GTA on the new path
+
+Everything as today (Valhalla on :8002 on the live map, the bridge with `GTA5_ROUTER`/`GTA5_MAP`), plus:
+
+```
+# 1. the Mapbox-compatible server on our map (needs Valhalla and GTA5_MAP)
+python -m openpilot.tools.sim.bridge.gta5.mapbox_server --port 8003
+
+# 2. openpilot: navd and mapsd run (NavigationEnabled), navd routes through the server and runs the lane guidance
+#    (params, or the env vars for the manager's processes: MAPBOX_HOST=http://127.0.0.1:8003 NAVD_LANE_GUIDANCE=1)
+NavigationEnabled=1  NavLaneGuidance=1  NavMapboxHost=http://127.0.0.1:8003  NavLaneChangeStage=3
+#    the finetuned model's lower lane change speed: NAVD_LANE_TUNE='{"lc_min_speed": 4}' (n16's 10 is the default)
+
+# 3. the bridge leaves nav to navd: no NavDesire, navInstruction or navRoute of its own; its simulated driver works
+#    the stalk from navd's navInstruction.request
+GTA5_NAV_PATH=navd   (with GTA5_NAV_MSGS unset or 0; GTA5_GPS default qcom3x: navd localizes from the simulated GNSS)
+```
+
+The bridge still writes `NavDestination` (from the game's waypoint) and its own Valhalla route for the overlay and map
+driver. Leaving `GTA5_NAV_PATH` unset (`bridge`) runs today's bridge planner unchanged. Navd's events go to its cloudlog
+as `navd.request` (the same fields as the planner's `navRequest`).
+
+### In-game checks (n16 unless said; what to watch)
+
+1. **The server's route vs the map**: any trip, `curl 'http://127.0.0.1:8003/directions/v5/mapbox/driving-traffic/<lon,lat;lon,lat>?steps=true&banner_instructions=true&overview=full&geometries=geojson'`
+   (lon = x / 111319.49, lat = y / 111319.49): steps at the junctions the overlay shows, lanes only on junction
+   approaches with turn:lanes, `valid` the lanes the route can use. And navd picks it up: navInstruction valid,
+   maneuverDistance counting down.
+2. **A bay that opens late, the bay rule** (the Mapbox path's main gain): R02 `808.6,-2076.0,28.4,265,1>-981.5,158.6`,
+   its left turn at (602.9, -372.0) (also R06, R40): Mapbox lists the bay (2 lanes) while the model counts 1; nav asks
+   nothing, then signals the turn below 10 m/s within 80 m (request kind turn). Does n16's turn desire take it into the
+   bay as it opens? If not, set `NAVD_LANE_TUNE='{"turn_into": 0}'` and compare. Same at (230.4, -222.3) (R11
+   `-244.4,-1050.5,26.2,159,1>434.6,882.6`, the lane opens 18 m before).
+3. **Counting from the turn's side with a miscounting model**: MD029 `-236.0,-597.2,33.2,20,9>-743.5,-168.0` and LANE_END
+   `123.0,-517.0,42.2,198,9>-418.0,-1444.2` (wide kerb lanes, parked cars): the lane nav asks from should follow the
+   maneuver's side; navInstruction.request.laneChanges should match the lanes the overlay shows.
+4. **Freeway exit across 3 lanes**: R02, the exit at (791.7, -633.2): requests come (3 x 8 + 4) s x speed before the
+   last place (~800 m at 29 m/s), one after another 2 s apart; watch they all happen and blind-spot holds behave.
+5. **On-ramp merges then an exit**: R01 `-1369.8,-554.1,29.2,125,1>586.6,-302.4`, the slip joining the Del Perro Fwy
+   at (-936.5, -564.7) and (-881.2, -546.5), then the exit right at (-694.0, -527.8): no lane change asked for the
+   merges (Valhalla's "keep left" there was a Mapbox fork before item 4's fix), then the exit from the right lane.
+6. **Two close maneuvers**: R10 `-78.0,-2058.9,21.8,109,0>639.4,-358.9`, the turns at (602.9, -372.2) and (662.8,
+   -403.2), 68 m apart: the first turn's lane is the one nearest the second's side.
+7. **No lanes from Mapbox**: MD029's turn at (-224.9, -393.2) and R34 `-753.2,-836.4,21.5,269,1>620.4,31.8` at (261.5,
+   -365.6): nav falls back to the outermost lane on the turn's side; misses here mean the map's turn:lanes are missing
+   or wrong there.
+8. **A lane ending**: R10 at (-253.0, -548.8), MDT `-357.8,-1658.9,18.3,331,0>1468.2,-1050.9` at (121.4, -1261.8),
+   FX1/R15 at (1107.7, -1644.4): Mapbox says nothing, so nav doesn't move the car out; watch how n16 merges at the end
+   (the sim's forced merges, 3x the full map's).
+9. **Withdrawal when slow**: R40 `1073.5,-1537.2,27.0,0,1>38.6,4.5`, stopped at the red light at (602.9, -372.1) in the
+   wrong lane: no lane change asked below 10 m/s (a request made before is withdrawn: `gave_up`), the turn signalled.
+10. **Stage 1 and the lanes UI**: `NavLaneChangeStage=1`, any city trip: the mici alert "Change lanes right for the
+    turn / signal to confirm" only while a request is open, NavDesire `laneChange:right`, only the right blinker
+    changes lanes below 20 mph; the lane strip only within 402 m of the maneuver (or with a request), its active
+    lanes Mapbox's valid ones.
+
+### What's still GTA-specific under `selfdrive/` (the debt)
+
+- `selfdrive/navd/lane_slots.py` imports `Section`, `LEFTS`, `RIGHTS` from `tools/sim/bridge/gta5/map/osm_lanes.py`
+  (route input v2's lane slots, on our map's sections). The only code import of `tools/sim` left under `selfdrive/`.
+  `planner.py` no longer has one (`turn_targets` moved to `selfdrive/navd/lane_targets.py`).
+- `selfdrive/navd/` as a whole (the planner, `inputs.py`'s truth fields, `map_match.py`, `route_input.py`) still plans on
+  the full map's lanes (`Route.info`), which only GTA has; it runs inside the bridge. The new path doesn't use it.
+- Mentions only (comments/docstrings): `navigation/navd.py` (the server as an example of a custom host),
+  `lane_guidance.py`, `modeld/route_input.py`, a few UI files and tests.
+
+### Open questions
+
+1. Does n16's turn desire take the car into a bay as it opens (check 2)? The Mapbox path's turn gains rest on it, as
+   laneguide's `turn_into_lane` did.
+2. Lane ends: Mapbox has none. Should nav react to the lane head's count dropping on the car's side (a lane ending
+   ahead is visible to the model before the end), or leave merges to the model? 3x the forced merges is the cost now.
+3. Diverges without turn:lanes in real Mapbox data (3 of 19 UK forks/exits here): the fallback picks the outermost lane
+   on the branch's side, wrong at a multi-lane split. Is the lane head good enough to count the branch's lanes, or
+   should nav prefer "any lane on that side" there?
+4. Bus and cycle lanes are in Mapbox's lane lists (`access`); cycle lanes are dropped here, bus lanes kept. Does the
+   lane head count a bus lane? Real-drive logs (Amy's UK drives) would say.
+5. Mapbox's maneuver intersection sometimes lists fewer lanes than its approach (Dale Rd); the guidance trusts the
+   maneuver's and counts from the side. Worth checking on real drives where the approach has the bay and the node
+   doesn't.
+6. The emulator's fork lanes are worth ~22 forks in navd_sim; they assume GTA's diverges would be tagged as UK ones
+   are. Should the GTA map get explicit turn:lanes at diverges (ynd_to_osm) instead, so the server needn't make them?
+7. comma's `test_navigation.py` couldn't run here (native params); its RouteEngine tests should be run on Amy's PC
+   with the navd change (`update(full=...)`, the guidance off by default).
+
+### Environment notes
+
+- Final suite (the preflight's set plus the new tests): 212 passed, 1 failed (the known
+  `test_live_freeway_merge_exit_and_splits`), 168 s. New tests: `test_mapbox_fixtures.py` 39, `test_mapbox_server.py`
+  10, `test_lane_guidance.py` 16, `test_navd_path.py` 1, `test_navd_sim.py` +1.
+- Not runnable here: comma's `selfdrive/navigation/tests/test_navigation.py` and anything constructing `Params()`
+  (native params need capnp's generated C++ headers); the new navd tests stub `Params` only where it's missing, as
+  laneguide's approval tests do. `msgq` was built from its public source, so cereal messaging is real.
+- Lint (ruff) on the new and changed files: clean, but for findings in `osm_lanes.py` that predate this work.
+- Mapbox: 20 requests in all (1 preflight + 20 fetches, 12 kept), the token read from the environment only; no
+  file, log or commit holds it (checked by value over the branch's files and history).
