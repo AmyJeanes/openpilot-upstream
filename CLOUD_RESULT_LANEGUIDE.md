@@ -262,3 +262,122 @@ bridge fills `navInstruction.request`).
 Not run here: openpilot's own `test_desire_helper.py` and mici's `test_nav.py` / `test_nav_state.py` need native
 `params` / raylib (a display), which this container doesn't have; the approval tests stub `Params` only where it's
 missing, and the mici wiring (`nav_card.py`) is untested beyond import-free logic.
+
+## Step 5: hand-over
+
+### Metrics per step (navd_sim, 46 trips, 302 maneuvers that need a lane; seed 0 unless said)
+
+| step | setting | n16 in lane | finetuned in lane | n16 turns | finetuned turns | n16 failed changes | n16 changes asked < v_ok |
+|---|---|---|---|---|---|---|---|
+| 1 baseline | truth | 248 (82%) | 257 (85%) | 68/107 | 79/107 | 80 | 98 |
+| 2 timing for the model | truth | 249 (82%) | 260 (86%) | 72/107 | 82/107 | 59 | 89 |
+| 2, seed 1 | truth | 244 → 245 | 258 → 261 | 67 → 71 | 81 → 83 | 65 → 55 | 98 → 96 |
+| 2, turn desire not taking a lane | truth | 248 → 244 | 257 → 259 | 68 → 67 | 79 → 81 | 75 → 57 | 98 → 89 |
+| 3 model lane, today's / robust | model 0.85 | 250 / 250 | 255 / 254 | 73 / 72 | 79 / 74 | | |
+| 3 model lane, today's / robust | model 0.8 | 246 / 248 | 252 / 256 | | | | |
+| 3 model lane, today's / robust | hard head | 237 / 241 | 239 / 242 | 68 / 66 | 70 / 70 | | |
+| 4 request and approve | truth, stage 3 | 247 (same as 3) | 261 | | | | |
+
+(step 3 and 4 runs use the head's own noise stream, so their truth rows, 247 / 261, differ from step 2's by traffic
+draws, not by code)
+
+Reproduce everything (venv, `GTA5_MAP` set, about 3 min per model x lane source on 4 cores; no router needed):
+
+```
+python -m openpilot.tools.sim.bridge.gta5.navd_sim --model n16,finetuned --lane truth --tune '{"model_lc_speed": 0}'   # step 1
+python -m openpilot.tools.sim.bridge.gta5.navd_sim --model n16,finetuned --lane truth [--sim-seed 1] [--no-turn-take]   # step 2
+python -m openpilot.tools.sim.bridge.gta5.navd_sim --model n16,finetuned --lane truth,model:0.9,model:0.85,model:0.8,fused:0.85,model:0.85:1.0:0.15:0.7 [--tune '{"model_lane_robust": false}']   # step 3
+python -m openpilot.tools.sim.bridge.gta5.navd_sim --model n16,finetuned --requests requests.jsonl   # step 4's request log
+```
+
+### The bottom line
+
+- Where the lane a maneuver needs exists more than ~80 m back, today's planner already gets n16 there (30 of 35 turns
+  needing a change). The misses are lanes the map opens late (a bay, a lane added at the last link: 33 of n16's 38
+  turn misses), usually with a light or a queue ahead, where n16's lane change doesn't move. No timing reaches those;
+  what helps is the turn desire taking the car over (`turn_into_lane`, if the game confirms it), the finetune's
+  low-speed lane change, and the map (faults below).
+- The timing change mostly stops nav asking n16 for changes it can't make (failed changes down 20-25%).
+- The model's lane, at 80-90% strict, is good enough to plan from: it costs n16 nothing measurable and the finetune
+  about 2 points; the robust lane source is what makes it usable with no truth at all.
+
+### What to check in game (n16, Navigate on openpilot on, `GTA5_NAV_STAGE=3`)
+
+1. **The turn desire into a late lane** (the assumption `turn_into_lane` rests on). R02
+   `808.6,-2076.0,28.4,265,1>-981.5,158.6`, its left turn at (602.9, -372.0) (the target lane opens ~37 m before the
+   junction; also R06, R10, R40 pass it). Watch: below ~8 m/s, one lane right of the turn lane, nav signals the turn
+   (`nav: one lane beside the left turn's lanes ...`); does n16 move into the turn lane on the turn desire, or carry
+   straight on / turn across from the wrong lane? If it doesn't move over, set `turn_into_lane: 0`.
+2. Same at (-224.9, -393.2) (MD029, left turn, lane opens ~36 m before) and (-755.7, -1758.5) (R10
+   `-78.0,-2058.9,21.8,109,0>639.4,-358.9`, its turn at s=846).
+3. **A change that now waits for the traffic**: R27 `194.9,-1030.5,28.3,253,0>-1284.0,-398.5`, the fork at
+   (-1257.0, -543.5): today's planner asks at ~7 m/s and n16 gets across as the car speeds up; the new one waits for
+   8 m/s (`lc_wait`) and sometimes runs out of room. If n16 manages changes at 6-8 m/s in practice, lower `lc_wait` (or
+   `model_lc_speed`).
+4. **A city change before the lights**: MDT `-357.8,-1658.9,18.3,331,0>1468.2,-1050.9`, its first right turn, at
+   ~(-268, -1431): the change is now asked ~225 m out at the road's speed (`nav: lane change right ... for the right
+   turn in 2xx m`), ahead of the slowing and the light's queue, and done before them. Its left turn at (93.5,
+   -1358.1) is the other kind: the lane opens ~40 m before the junction, so the change can only be asked ~58 m out.
+5. **Too slow near the junction: not forced.** R40 `1073.5,-1537.2,27.0,0,1>38.6,4.5`, the left turn at (602.9, -372.1):
+   stopped at the red light in the wrong lane, nav shouldn't ask (no blinker for a change), and leaves the turn to the
+   route if it can't be made; check the reroute that follows is sensible.
+6. **Freeway exit across 3 lanes**: R02, the exit at (791.7, -633.2) (needs 3 changes from the left lane): the
+   changes start km ahead (`fwy_lane_time`); watch they all happen and the blind spot holds behave.
+7. **Request log and prompt**: any trip with `GTA5_LOG` on: `navRequest` lines in the state log (one per request, with
+   its outcome); with `GTA5_NAV_STAGE=1` and the mici UI, the alert reads "Change lanes right for the exit / signal to
+   confirm", and only the right blinker does the change below 20 mph (the left one is a turn).
+8. **The model's lane as the source** (once the finetune with `laneHead` drives): `NAVD_LANE_SOURCE=model`, a trip with
+   wide kerb lanes or parked cars, e.g. LANE_END `123.0,-517.0,42.2,198,9>-418.0,-1444.2`; `NAVD_LANE_LOG` shows where
+   the model's count disagrees with the map's, and the lane nav uses should follow the side of the next maneuver.
+9. **The FX1 fork** `799.0,-1752.5,28.9,264,1>814.2,41.7` at (1084.7, -1508.7): nav never asks (map fault 1 below);
+   see what the game's lanes really are there.
+10. **The left bay at (-1437.7, -754.4)** (R01 `-1369.8,-554.1,29.2,125,1>586.6,-302.4`, R31): the bay opens ~47 m
+    before the turn while the car slows; `_enter_bay` vs `turn_into_lane` (n16 below 8 m/s takes the second).
+
+### Map target-lane faults (candidates; geometry not edited, per the brief)
+
+Places where, in every run, the lane the route needs opens too close to the commit point (the map's lane maps) or
+nav never had a lane to change into. Distances are from the commit point (stop line or gore). To confirm in game.
+
+| # | place (x, y) | maneuver | what the map says | missed |
+|---|---|---|---|---|
+| 1 | (1084.7, -1508.7) | fork, route keeps left (FX1, R15) | the road is one lane; a lane opens on the left 17.5 m before the gore and is the route's branch, while the car's lane carries on as the other branch's: no change possible | 32/32 |
+| 2 | (602.9, -372.0) | left turn / way straight on (R01, R02, R06, R10, R40) | the approach is one 5.5-6.7 m wide lane for ~70 m, two lanes only 37-49 m before the stop line; likely a wide lane that's two in the game | 25/40 |
+| 3 | (-631.5, -372.4) | left turn (R05, R13, R16) | the turn lane opens 31 m before the stop line | 24/48 |
+| 4 | (-44.0, 34.7) | fork (R03) | the route's lane opens 23 m before the gore | 16/16 |
+| 5 | (-447.5, -1859.6) | fork (R38) | the route's lane opens 18 m before the gore | 16/16 |
+| 6 | (61.8, -1132.2) | left turn (R04, R27) | the turn lane opens 10-22 m before the stop line | 16/16 |
+| 7 | (230.4, -222.3) | left turn (R11, R21) | the turn lane opens 18 m before the stop line | 16/24 |
+| 8 | (-664.1, 281.7) | left turn (R19, R26) | the turn lane opens 10 m before the stop line | 14/16 |
+| 9 | (-186.6, -892.3) | turn / straight on (R33, R34, R38) | a lane opens 9 m before the stop line | 11/32 |
+| 10 | (-1125.3, -158.4), (207.4, -721.8), (-384.8, -1203.1) | forks (R23, R35, R09) | the target lanes exist, but GTA's fork counts and the lane maps disagree, so nav never asks (no lane change for them in any run) | 16/16 each |
+| 11 | (~-26, ~-1606) MD012 near s=995 | straight on, then a right turn | the arrows call the route's move "right" at the junction, but it isn't a turn (under 50°), so there's no lane map through it: the two lanes before become one without nav knowing which carries on | (seen in traces) |
+
+### Open questions
+
+1. Does n16's turn desire move the car into a lane opening beside it on the turn's side, below ~8 m/s (check 1)? The
+   step 2 gain for n16 rests on it; without it the timing change is neutral for n16.
+2. n16's real lane-change rate between 5 and 10 m/s: the stand-in's squared fall-off is a guess from "under 2 m below
+   ~10 m/s". `model_lc_speed`/`lc_wait` should follow whatever the game shows; with the finetune, set
+   `model_lc_speed: 4` (the harness does per stand-in).
+3. Should nav leave a turn to the route when the model's lane says it's wrong, or let the model try (with the nav vector
+   it may turn from the wrong lane)? `model_sure_wrong` is 3 s now; 0 never leaves it.
+4. The gta5-train README's G1c accuracies weren't readable from this session; the 80-90% assumption and the error
+   dynamics (1 s spells, 0.5 s lag) are the brief's and mine. The step 3 table should be rerun with the real head's
+   numbers, or better, its logged readings (`NAVD_LANE_LOG`) replayed into `LaneHead`.
+5. Is stage 2 (nav's blinker, the driver's nudge) possible on Amy's car, and should the stage be per car (a param
+   default from the car's port) rather than global?
+6. For PLAN D's scoring: what counts as a model request matching nav's (same maneuver, side, and within what
+   distance)? The `navRequest` log has nav's side of it.
+7. The harness's traffic is simple (no lane changes of its own, merges by renumbering, ~1-2 contacts per trip from that);
+   blind-spot holds are therefore rarer than in GTA's traffic.
+
+### Environment notes
+
+- Not runnable here: openpilot's native `msgq` (a socket-free shim outside the repo stands in for capnp-only tests),
+  `params` (DesireHelper's own tests; the approval tests stub it), raylib (mici UI tests, `test_nav_state.py`).
+  `test_blindspot.py` aborts on a capnp duplicate-ID clash between cereal and PyPI's opendbc, on the brief's commit too.
+- Final suite: `test_nav.py`, `test_nav_msgs.py`, `test_lane_slots.py`, `test_lane_numbering.py`, `test_navd_sim.py`,
+  `selfdrive/navd/tests`, `test_nav_approval.py`, `test_nav_request.py`: 145 pass, 1 fail (the pre-existing
+  `test_live_freeway_merge_exit_and_splits`). New tests: 8 (step 1) + 4 (step 2) + 9 (step 3) + 12 (step 4).
+- Lint (ruff) on the changed files: only the three findings that predate this work.

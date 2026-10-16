@@ -6,7 +6,7 @@ import types
 from types import SimpleNamespace
 
 try:
-  from openpilot.common.params import Params  # noqa: F401
+  import openpilot.common.params  # noqa: F401  (native: fails where it isn't built)
 except OSError:  # params not built (a bare checkout): a dict stands in for NavDesire
   stub = types.ModuleType("openpilot.common.params")
 

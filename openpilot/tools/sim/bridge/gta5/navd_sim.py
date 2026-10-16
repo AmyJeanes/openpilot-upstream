@@ -1101,9 +1101,10 @@ def run(names_specs, models: list[str], heads: list[str], tune: dict | None = No
       for r in res:
         if not quiet:
           rel = [m for m in r["maneuvers"] if m["relevant"] and m["kind"] != "drop"]
-          print(f"{key:24s} {r['name']:9s} {r['driven']:6.0f}/{r['length']:6.0f} m {r['secs']:5.0f} s  in lane "
-                f"{sum(m['made'] for m in rel)}/{len(rel)}  LC {sum(c['outcome'] == 'done' for c in r['changes'])}/"
-                f"{len(r['changes'])}  ({r['wall_s']:.1f} s){'  ' + r['error'] if r['error'] else ''}", file=sys.stderr, flush=True)
+          made, done = sum(m["made"] for m in rel), sum(c["outcome"] == "done" for c in r["changes"])
+          err = "  " + r["error"] if r["error"] else ""
+          line = f"{key:24s} {r['name']:9s} {r['driven']:6.0f}/{r['length']:6.0f} m {r['secs']:5.0f} s  in lane {made}/{len(rel)}"
+          print(f"{line}  LC {done}/{len(r['changes'])}  ({r['wall_s']:.1f} s){err}", file=sys.stderr, flush=True)
       out[key] = {"summary": summarise(res), "trips": res}
   return out
 
