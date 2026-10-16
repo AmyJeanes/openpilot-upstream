@@ -1,4 +1,5 @@
-"""The real Mapbox responses (fixtures/mapbox, README.md there): what the lane guidance and the GTA emulator rely on."""
+"""The Mapbox response fixtures (fixtures/mapbox: invented routes in real responses' schema, README.md there): what the
+lane guidance and the GTA emulator rely on."""
 import json
 import os
 from pathlib import Path
@@ -58,14 +59,14 @@ def test_annotations(name):
 
 
 def test_bay_is_an_extra_lane():
-  """Winchester Rd into Dale Rd: two lanes 250 m out, three (a second right lane) just before the junction."""
-  steps = load("soton_uni_to_general")["response"]["routes"][0]["legs"][0]["steps"]
-  k = next(i for i, s in enumerate(steps) if s["name"] == "Dale Road")
+  """Into Marsh Lane: two lanes 250 m out, three (a second right lane) just before the junction."""
+  steps = load("turn_bay_right")["response"]["routes"][0]["legs"][0]["steps"]
+  k = next(i for i, s in enumerate(steps) if s["name"] == "Marsh Lane")
   approach = [[x["indications"] for x in it["lanes"]] for it in steps[k - 1]["intersections"] if it.get("lanes")]
   assert approach[0] == [["straight"], ["right"]]
   assert approach[-1] == [["straight"], ["right"], ["right"]]
 
 
 def test_no_lanes_on_a_rural_road():
-  route = load("newforest_lyndhurst_brockenhurst")["response"]["routes"][0]
+  route = load("rural_no_lanes")["response"]["routes"][0]
   assert not any(it.get("lanes") for s in route["legs"][0]["steps"] for it in s["intersections"])

@@ -1,30 +1,31 @@
-# Real Mapbox Directions responses (UK)
+# Mapbox Directions response fixtures
 
-What navd gets from Mapbox, kept as the ground truth for the GTA emulator (`tools/sim/bridge/gta5/mapbox_server.py`)
-and the step 1 lane guidance (`selfdrive/navigation/lane_guidance.py`). Fetched 16 Oct 2026 with a personal token
-(free tier, 20 requests in all; 12 kept), the token stripped: each file is `{name, place, features, fetched, request:
-{path, params}, response}`, the response exactly as returned.
+What navd gets from Mapbox, as the ground truth for the GTA emulator (`tools/sim/bridge/gta5/mapbox_server.py`) and the
+step 1 lane guidance (`selfdrive/navigation/lane_guidance.py`). The routes are invented (roads near 0°N 0°E, made-up
+names) and written by `make_fixtures.py`, in the schema and with the lane features of real UK responses: the findings
+below come from 20 real responses (16 Oct 2026), which are not kept. Each file is `{name, features, made, request:
+{path, params}, response}`.
 
 Request: `/directions/v5/mapbox/driving-traffic/<lon,lat;lon,lat>` with `steps=true`, `banner_instructions=true`,
 `annotations=maxspeed,congestion,distance,duration`, `overview=full`, `geometries=polyline6`, `alternatives=false`,
-`language=en` (navd's own request asks `geometries=geojson` and no annotations; the rest is the same).
+`language=en` (navd's own request asks `geometries=geojson` and, with the lane guidance, `maxspeed,congestion`).
 
-| fixture | place | what it shows |
-|---|---|---|
-| `soton_uni_to_general` | Southampton: University Rd, Burgess Rd (A35), Winchester Rd, Dale Rd | a right-turn bay: Winchester Rd has 2 lanes (`S R`) 250 m before Dale Rd and 3 (`S R R*`) in the last 33 m; lanes valid for each way's own junction |
-| `soton_central_to_ocean_village` | Southampton: Commercial Rd, West Quay Rd (A33), Town Quay | a right lane at some junctions of West Quay Rd only (added mid-block); two maneuvers 11 m apart; a roundabout |
-| `soton_bargate_to_portswood` | Southampton: Civic Centre Rd, Dorset St (A33), Onslow Rd | 3-4 lanes for 260 m into the slight right onto Onslow Rd (lanes that have always been there); a rotary |
-| `soton_shirley_to_west_quay` | Southampton: Shirley High St (A3057), West Quay Rd, Harbour Parade | two left turns 80 m apart, lanes for the first |
-| `m27_j5_west_exit_j3` | M27 westbound from J5, off at J3 | the exit with a lane drop: 3 lanes (`S* S S`) 43-270 m before the diverge, 4 at it (`l* S S S`, the exit lane appearing at the gore node); a lane gain (2 -> 4) past J4; banner lanes from 2 miles out |
-| `eastleigh_m3_m27_west` | Eastleigh, M27 J5 -> J3, M271, Nursling | the J3 off ramp with a shared lane (`l* l/S* S S`); lane gains on the M27; rotary on-slips |
-| `portsmouth_m275_south` | Cosham, A3, M275 south, Commercial Rd | two maneuvers 10 m apart (left onto Western Rd, right onto the A3), the fork onto the M275 259 m on (`l* S S`); lane gains and drops along the M275 |
-| `winchester_m3_j9_city` | Winchester: A31, the M3 J9/J10 roundabouts, Bar End Rd | roundabout entries gaining a lane at the give way (`S* S*` -> `S* S* S`); B-road steps with no lanes |
-| `newforest_lyndhurst_brockenhurst` | New Forest: Lyndhurst -> Brockenhurst (A337) | no lane data anywhere on a 6 km rural A-road; 40-60 mph limits |
-| `london_elephant_castle` | London: Blackfriars Rd (A201), Elephant and Castle, Walworth Rd | 2 right lanes (`L R R*`); a left lane added 21 m before Walworth Rd (`S* S*` -> `L* S S`); cycle lanes (`access`) |
-| `london_vauxhall_gyratory` | London: Vauxhall gyratory, Bessborough Gardens (A202) | 2 to 5 lanes along one step, added and dropped between junctions; two right lanes; bus lanes |
-| `london_old_street_roundabout` | London: City Rd (A501), Old Street roundabout | the junction's 4 lanes only in the last 5 m (`L R*` -> `L L R* R`) |
+| fixture | what it shows |
+|---|---|
+| `turn_bay_right` | a right-turn bay: 2 lanes (`S* R`) 250 m before Marsh Lane, 3 (`S R R*`) in the last 33 m, the turn's own intersection listing 2 (`S R*`); lanes valid for each way's own junction |
+| `motorway_exit_lane_drop` | an exit with a lane drop: 3 lanes (`S* S S`) 43-270 m before the diverge, 4 at the gore (`l* S S S`); a lane gain 2 -> 4; banner lanes from 2 miles out |
+| `motorway_exit_shared_lane` | an exit with a shared lane (`l* l/S* S S`); a rotary onto the slip road |
+| `two_left_turns_close` | two left turns 80 m apart, lanes for the first; a stop sign |
+| `close_pair_then_fork` | two maneuvers 10 m apart, a fork 259 m on (`l* S S`); lane gains and drops along a trunk road |
+| `roundabout_entry_gains_lane` | a roundabout entry gaining a lane at the give way (`S* S*` -> `S* S* S`); a B-road with no lanes |
+| `rural_no_lanes` | no lane data on 6 km of rural road; 40-60 mph limits, some unknown; a level crossing |
+| `right_lanes_cycle` | 2 right lanes (`L R R*`) and a cycle lane (`access`); a left lane added 21 m before the next turn (`S* S*` -> `L* S S`) |
+| `lanes_vary_bus` | 2 to 5 lanes along one step, added and dropped between junctions; two right lanes; bus lanes |
+| `lanes_added_midblock` | a right lane at some junctions of one road only; two maneuvers 11 m apart; a roundabout |
+| `lanes_always_there` | 3-4 lanes for 260 m into a slight right; a rotary |
+| `lanes_last_5m` | the junction's 4 lanes only in the last 5 m (`L R*` -> `L L R* R`) |
 
-## What `lanes` holds (all 20 responses: 2257 intersections, 169 maneuvers)
+## What `lanes` holds (the 20 real responses: 2257 intersections, 169 maneuvers)
 
 - **Where**: only where OSM has `turn:lanes` on the way. Then on **every intersection of that way** (crossings, signal
   nodes, side roads; 403 of 2257 intersections, 18%), repeated identically, up to and including the junction where the

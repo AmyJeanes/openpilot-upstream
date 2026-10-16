@@ -1,4 +1,4 @@
-"""The GTA Mapbox Directions emulator (mapbox_server.py) against real Mapbox responses (selfdrive/navigation/tests/
+"""The GTA Mapbox Directions emulator (mapbox_server.py) against Mapbox's response schema (selfdrive/navigation/tests/
 fixtures/mapbox): the same schema, the same sparseness. On the live map's navd_sim trips (GTA5_MAP; their routes are
 cached, so no router is needed)."""
 import json

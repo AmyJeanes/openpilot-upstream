@@ -1,4 +1,4 @@
-"""Step 1 lane guidance (lane_guidance.py) on Mapbox routes: made ones along the equator, and the real fixtures."""
+"""Step 1 lane guidance (lane_guidance.py) on Mapbox routes: made ones along the equator, and the fixtures."""
 import json
 import sys
 import types
@@ -212,18 +212,18 @@ def fixture_route(name: str) -> dict:
   return json.loads((FIXTURES / f"{name}.json").read_text())["response"]["routes"][0]
 
 
-def test_real_bay_dale_road():
-  """Winchester Rd into Dale Rd (left-hand traffic, the right turn's bay): counted from the right, in place in the right
-  lane of 2 before the third appears."""
-  mr = lg.MapboxRoute(fixture_route("soton_uni_to_general"))
-  m = next(x for x in mr.moves if x.name == "Dale Road")
+def test_bay_turn_fixture():
+  """Into Marsh Lane (left-hand traffic, the right turn's bay; its own intersection lists 2 lanes, its approach 3):
+  counted from the right, in place in the right lane of 2 before the third appears."""
+  mr = lg.MapboxRoute(fixture_route("turn_bay_right"))
+  m = next(x for x in mr.moves if x.name == "Marsh Lane")
   assert m.kind == "turn" and m.side == "right" and m.signal
   assert lg.targets(m, 2) == [0] and lg.targets(m, 3) == [0]
 
 
-def test_real_exit_m27_j3():
-  """M27 J3: the exit lane exists only at the gore (4 lanes there, 3 before): the left lane of 3 is in place."""
-  mr = lg.MapboxRoute(fixture_route("m27_j5_west_exit_j3"))
+def test_exit_lane_drop_fixture():
+  """The exit lane exists only at the gore (4 lanes there, 3 before): the left lane of 3 is in place."""
+  mr = lg.MapboxRoute(fixture_route("motorway_exit_lane_drop"))
   m = next(x for x in mr.moves if x.kind == "exit" and x.side == "left")
   assert m.freeway and len(m.lanes) == 4 and lg.targets(m, 3) == [0]
 
