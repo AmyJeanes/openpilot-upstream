@@ -3,8 +3,9 @@ that navd localizes from what a real car gives it.
 
 GTA5_GPS picks the profile, default qcom3x; off leaves the simulator's own gpsLocationExternal at (0, 0), as before:
 - qcom3x: a comma 3X. qcomgpsd's gpsLocation at 1 Hz with its fields (no horizontalAccuracy or flags, as the modem's
-  position report gives neither), 300 ms late, with a slowly wandering bias (Gauss-Markov, 3 m, 60 s) and 1 m white
-  noise on the position, and course noise that grows at low speed.
+  position report gives neither), 300 ms late, with a slowly drifting bias (a Gauss-Markov wander, 3 m, 60 s, smoothed
+  over BIAS_SMOOTH) and 0.1 m white noise on the position (the modem filters its fixes, so their error drifts rather
+  than jumping fix to fix), and course noise that grows at low speed.
 - ublox: a comma three's u-blox: ubloxd's gpsLocationExternal at 10 Hz, 100 ms late, 1.5 m / 30 s bias and 0.3 m noise.
 - perfect: qcom3x's message and rate without noise or delay.
 The noise is seeded (GTA5_GPS_SEED), so repeated drives get the same. The figures are starting points from general
@@ -35,8 +36,12 @@ class Profile(NamedTuple):
   altitude: float  # m, the altitude's sigma
 
 
+# s: the bias follows its Gauss-Markov wander through this low-pass, so it drifts (cm a second) rather than stepping
+# half a metre at each fix as the wander alone does, as a receiver's filtered position error does
+BIAS_SMOOTH = 20.0
+
 PROFILES = {
-  "qcom3x": Profile("gpsLocation", 1.0, 0.3, 3.0, 60.0, 1.0, 1.0, 10.0, 0.15, 7.0),
+  "qcom3x": Profile("gpsLocation", 1.0, 0.3, 3.0, 60.0, 0.1, 1.0, 10.0, 0.15, 7.0),
   "ublox": Profile("gpsLocationExternal", 10.0, 0.1, 1.5, 30.0, 0.3, 0.5, 5.0, 0.1, 5.0),
   "perfect": Profile("gpsLocation", 1.0, 0.0, 0.0, 60.0, 0.0, 0.0, 0.0, 0.0, 0.0),
 }
@@ -51,7 +56,8 @@ class Gnss:
     self.pm = pm if pm is not None else messaging.PubMaster([self.profile.service])
     self.rng = np.random.default_rng(seed)
     p = self.profile
-    self.bias = self.rng.normal(0.0, 1.0, 3) * np.array([p.bias, p.bias, p.altitude])  # east, north, up
+    self.wander = self.rng.normal(0.0, 1.0, 3) * np.array([p.bias, p.bias, p.altitude])  # east, north, up
+    self.bias = self.wander.copy()
     self.history: deque = deque()  # (t, wall, x, y, z, ve, vn, vu)
     self.next_fix = 0.0
     self.last_fix: float | None = None
@@ -73,7 +79,8 @@ class Gnss:
     dt = 1.0 / p.rate if self.last_fix is None else now - self.last_fix
     self.last_fix = now
     a = math.exp(-dt / p.bias_tau)
-    self.bias = self.bias * a + rng.normal(0.0, 1.0, 3) * np.array([p.bias, p.bias, p.altitude]) * math.sqrt(1.0 - a * a)
+    self.wander = self.wander * a + rng.normal(0.0, 1.0, 3) * np.array([p.bias, p.bias, p.altitude]) * math.sqrt(1.0 - a * a)
+    self.bias += (self.wander - self.bias) * (1.0 - math.exp(-dt / BIAS_SMOOTH))
     e, n, u = np.array([x, y, z]) + self.bias + rng.normal(0.0, 1.0, 3) * np.array([p.white, p.white, 0.0])
     lat, lon = to_lat_lon(float(e), float(n))
     v = math.hypot(ve, vn)
