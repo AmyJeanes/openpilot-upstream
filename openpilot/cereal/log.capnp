@@ -2494,6 +2494,38 @@ struct NavInstruction {
   bearingDeg @16 :Float32;  # the car's heading, clockwise from north
   laneDistance @17 :Float32;  # m ahead by which to be in an active lane, 0 when in one already
   laneOpenDistance @18 :Float32;  # m ahead to where the first active lane opens, 0 when open
+  request @19 :Request;  # navigation's request to the driver now, kind none without one
+
+  # A lane change or turn navigation asks for (PLAN D: today nav's, later the model's). How it's approved depends on
+  # the NavLaneChangeStage param: 1 suggest only (the driver signals to confirm), 2 nav puts the blinker on and the
+  # driver nudges the wheel to confirm (cars that allow it), 3 auto-approved (the simulator's driver)
+  struct Request {
+    kind @0 :Kind;
+    side @1 :Direction;  # left or right
+    reason @2 :Reason;
+    distance @3 :Float32;  # m ahead by which it's needed: the last place to start it
+    laneChanges @4 :Int8;  # lane changes still to go for the maneuver, this one included
+    stage @5 :UInt8;  # NavLaneChangeStage when asked
+    id @6 :UInt32;  # counts requests, to tell a new one from the same one again
+    approved @7 :Bool;  # the driver's (or nav's, stage 2-3) blinker is on its side: openpilot carries it out
+
+    enum Kind {
+      none @0;
+      laneChange @1;
+      turn @2;
+    }
+
+    enum Reason {
+      other @0;
+      turn @1;
+      fork @2;
+      exit @3;  # a freeway exit or fork
+      straightOn @4;  # past lanes that only turn
+      laneEnds @5;
+      turnBay @6;
+      oncoming @7;  # back out of the oncoming lanes
+    }
+  }
 }
 
 struct NavRoute {

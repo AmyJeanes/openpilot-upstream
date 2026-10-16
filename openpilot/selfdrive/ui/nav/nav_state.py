@@ -46,6 +46,80 @@ class Road:
   width: float  # m
 
 
+@dataclass(frozen=True)
+class NavRequest:
+  """Navigation's request to the driver (navInstruction.request): a lane change or turn, its side and why, the m by
+  which it's needed, the lane changes to go, the NavLaneChangeStage it was asked at, and whether it's approved (the
+  blinker on its side)."""
+  kind: str  # "laneChange" or "turn"
+  side: str  # "left" or "right"
+  reason: str  # navInstruction.Request.Reason's name
+  distance: float
+  lane_changes: int
+  stage: int
+  id: int
+  approved: bool
+
+
+def nav_request(ni) -> NavRequest | None:
+  r = ni.request
+  kind, side = str(r.kind), str(r.side)
+  if kind == "none" or side not in ("left", "right"):
+    return None
+  return NavRequest(kind, side, str(r.reason), float(r.distance), int(r.laneChanges), int(r.stage), int(r.id), bool(r.approved))
+
+
+REASONS = {"turn": "for the turn", "exit": "for the exit", "fork": "for the fork", "straightOn": "to go straight on",
+           "laneEnds": "the lane ends", "turnBay": "into the turn lane", "oncoming": "out of the oncoming lane"}
+
+
+def request_prompt(req: NavRequest | None) -> tuple[str, str] | None:
+  """The prompt for a request: (what, how to confirm). A lane change asks "Change lanes right for the exit" / "signal
+  to confirm" at stage 1 (suggest only), "nudge the wheel to confirm" once nav's blinker is on at stage 2, and says
+  "Changing lanes right ..." once approved or at stage 3 (auto-approved). A turn's is the turn's own."""
+  if req is None:
+    return None
+  why = tr(REASONS[req.reason]) if req.reason in REASONS else ""
+  side = tr("right") if req.side == "right" else tr("left")
+  doing = req.approved or req.stage >= 3
+  if req.kind == "turn":
+    what = tr("Turning {side}").format(side=side) if doing else tr("Turn {side}").format(side=side)
+    return what, "" if doing else tr("signal to confirm")
+  what = (tr("Changing lanes {side}") if doing else tr("Change lanes {side}")).format(side=side)
+  what = f"{what} {why}".strip()
+  if doing:
+    return what, ""
+  return what, tr("nudge the wheel to confirm") if req.stage == 2 else tr("signal to confirm")
+
+
+class RequestState:
+  """The request the UI shows: a new one (by id) once it has held on_s, kept through dropouts shorter than off_s, its
+  approval followed at once."""
+  def __init__(self, on_s: float = 0.3, off_s: float = 1.0):
+    self.on_s, self.off_s = on_s, off_s
+    self.shown: NavRequest | None = None
+    self._new: tuple[int, float] | None = None
+    self._gone: float | None = None
+
+  def update(self, req: NavRequest | None, now: float) -> NavRequest | None:
+    if req is None:
+      self._new = None
+      if self.shown is not None:
+        self._gone = self._gone if self._gone is not None else now
+        if now - self._gone >= self.off_s:
+          self.shown, self._gone = None, None
+      return self.shown
+    self._gone = None
+    if self.shown is not None and req.id == self.shown.id:
+      self.shown = req  # its approval, distance
+      return self.shown
+    if self._new is None or self._new[0] != req.id:
+      self._new = (req.id, now)
+    if now - self._new[1] >= self.on_s:
+      self.shown, self._new = req, None
+    return self.shown
+
+
 @dataclass
 class Guidance:
   maneuver: Maneuver | None = None
@@ -61,6 +135,7 @@ class Guidance:
   speed_limit: float = 0.0
   position: tuple[float, float] | None = None  # lat, lon
   bearing: float = 0.0
+  request: NavRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +167,7 @@ def instruction_guidance(ni) -> Guidance:
   if ni.position.latitude or ni.position.longitude:
     g.position = (ni.position.latitude, ni.position.longitude)
   g.bearing = ni.bearingDeg
+  g.request = nav_request(ni)
   return g
 
 

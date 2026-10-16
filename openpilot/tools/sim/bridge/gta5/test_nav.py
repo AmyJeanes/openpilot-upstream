@@ -33,11 +33,14 @@ class Drive:
     self.human = HumanDriver(self._send, lambda: None)
     self.lane, self.v = lane, v
     self.drives = True  # Navigate on openpilot
+    self.stage = 3  # PLAN D's: auto-approved, as GTA runs
+    self.request = None  # nav's request to the driver, as of the last step
 
   def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict) -> bool:
     """A step from the bridge's state, as the world takes it: the driver's game commands to `sent`, NavDesire to
     `desires`, and the game's waypoint off on arriving."""
-    out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
+    out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives, self.stage))
+    self.request = out.request
     self.human.act(out)
     self.desires += out.desires
     self.events += out.events
@@ -130,6 +133,7 @@ def test_lane_change_early_enough_for_two():
 def test_wrong_lane_turn_left_to_route():
   route = route_to_turn(40.0)
   d = Drive((0, 2), v=3.0)  # too near to change lanes for it
+  d.nav.tune.values["turn_into_lane"] = 0.0  # today's rule; turn_into_lane signals it for n16 (test_slow_beside_the_turn_signals_it)
   y, turned = 0.0, False
   while y < 38.0:
     d.step(route, y, {"laneFrac": 0.0})  # surely in the left lane
@@ -161,6 +165,7 @@ def test_lane_change_param_before_blinker():
   # openpilot reads NavDesire every 0.2 s: the blinker before it would ask for a turn below 19 mph
   route = route_to_turn(200.0)
   d = Drive((0, 2), v=7.0)
+  d.nav.tune.values["model_lc_speed"] = 0.0  # today's timing: these mechanics run below n16's lane change speed
   events, last_desire, last_ind = [], "", None
   y = 0.0
   while y < 190.0:
@@ -188,6 +193,8 @@ def test_lane_change_into_turn():
   route = route_to_turn(120.0, "left")
   d = Drive((0, 2), v=5.0)
   d.nav.tune.values["lane_change_into_turn"] = 30.0
+  d.nav.tune.values["model_lc_speed"] = 0.0  # today's timing: these mechanics run below n16's lane change speed
+
   y, changed_at, turned_at = 0.0, None, None
   while y < 100.0:
     if 120.0 - y < 47.0:
@@ -267,6 +274,7 @@ def test_doubtful_lane_still_signals():
   route = route_to_turn(60.0)
   for frac, signalled in ((0.75, True), (0.0, False)):
     d = Drive((0, 2), v=5.0)
+    d.nav.tune.values["turn_into_lane"] = 0.0  # today's rule; turn_into_lane signals it for n16 (test_slow_beside_the_turn_signals_it)
     y = 0.0
     while y < 45.0:
       d.step(route, y, {"laneFrac": frac, "routeEnd": 200.0})
@@ -471,7 +479,7 @@ def test_turn_from_beside_its_lanes():
   for lane, beside, want in (((0, 2), False, False), ((0, 2), True, True), ((0, 3), True, False)):
     d = Drive(lane, v=3.0)
     d.nav.tune = nav_mod.Tune("")
-    d.nav.tune.values.update(turn_from_beside=beside)
+    d.nav.tune.values.update(turn_from_beside=beside, turn_into_lane=0.0)  # today's rule (turn_into_lane: n16's)
     y, turned = 0.0, False
     while y < 38.0:
       d.step(route, y, {"laneFrac": 0.0})  # surely in the left lane
@@ -581,6 +589,7 @@ def test_lane_change_for_a_lane_that_ends():
   # straight on through a junction where the left lane ends (laneDrops: only the right one of two carries on)
   route = np.array([(0.0, y) for y in np.arange(0.0, 400.0, 5.0)])
   d = Drive((0, 2))
+  d.nav.tune.values["model_lc_speed"] = 0.0  # today's timing: these mechanics run below n16's lane change speed
   y, started = 0.0, None
   while y < 150.0 and started is None:
     d.step(route, y, {"laneDrops": [[150.0 - y, 1, 1, 2]], "routeEnd": 400.0 - y})
@@ -715,6 +724,7 @@ def test_turn_lane_changes_not_held_by_junction_nodes():
   route = route_to_turn(250.0)
   turn = find_turn(route, nav_mod.MIN_AHEAD_MAP).dist
   d = Drive((0, 3), v=8.0)
+  d.nav.tune.values["model_lc_speed"] = 0.0  # today's timing: these mechanics run below n16's lane change speed
   y, started, marker = 0.0, None, None
   while y < 200.0 and started is None:
     extra = {"stops": [turn - 16.0 - y], "junctions": [j - y for j in np.arange(20.0, turn, 20.0) if j > y]}
@@ -728,3 +738,133 @@ def test_turn_lane_changes_not_held_by_junction_nodes():
   lead = 30.0 + (2 * nav_mod.LANE_CHANGE_TIME + nav_mod.LANE_CHANGE_EARLY) * 8.0
   assert started is not None and started >= lead - 20.0, started
   assert marker is not None and abs(marker - (turn - lead)) < 5.0, marker
+
+
+def first_change(route, lane, v, extra=None, upto=None, tune=None):
+  """Where (m before route_to_turn's turn) nav first asks for a lane change, and the drive."""
+  turn = find_turn(route, nav_mod.MIN_AHEAD_MAP).dist
+  d = Drive(lane, v=v)
+  d.nav.tune.values.update(tune or {})
+  y = 0.0
+  while y < (upto if upto is not None else turn - 10.0):
+    d.step(route, y, {k: (v_(y) if callable(v_) else v_) for k, v_ in (extra or {}).items()})
+    if d.nav.changing:
+      return turn - y, d
+    y += d.v * 0.05
+  return None, d
+
+
+def test_city_change_before_the_slowing():
+  """model_lc_speed: a change for a turn with lights before it ends before the car slows for them (queue_room) or the
+  turn, timed at the road's limit: it starts further out than today's (city_lead at the car's speed from 30 m short)."""
+  route = route_to_turn(400.0)
+  turn = find_turn(route, nav_mod.MIN_AHEAD_MAP).dist
+  extra = {"stops": lambda y: [turn - 20.0 - y], "stopKinds": ["lights"], "limits": [[0.0, 13.3]], "routeEnd": lambda y: 600.0 - y}
+  old, _ = first_change(route, (0, 2), 9.0, extra, tune={"model_lc_speed": 0.0})
+  new, _ = first_change(route, (0, 2), 9.0, extra)
+  assert old is not None and new is not None
+  lead = nav_mod.city_lead(1, 13.3, nav_mod.TUNE)
+  assert abs(old - (nav_mod.LANE_CHANGE_DIST + nav_mod.city_lead(1, 9.0, nav_mod.TUNE))) < 5.0
+  assert abs(new - (20.0 + 30.0 + lead)) < 5.0 and new > old + 50.0
+
+
+def test_slow_city_change_waits_for_the_traffic():
+  """Slower than lc_wait of model_lc_speed well before the turn, the change isn't asked for; at speed it is."""
+  route = route_to_turn(300.0)
+  slow, _ = first_change(route, (0, 2), 5.0, {"routeEnd": 500.0}, upto=290.0)
+  fast, _ = first_change(route, (0, 2), 9.0, {"routeEnd": 500.0}, upto=290.0)
+  assert slow is None and fast is not None
+  # today's planner asks at 5 m/s
+  old, _ = first_change(route, (0, 2), 5.0, {"routeEnd": 500.0}, upto=290.0, tune={"model_lc_speed": 0.0})
+  assert old is not None
+
+
+def test_too_slow_near_the_turn_isnt_forced():
+  """Two lanes off a turn's lanes near it, slower than the model changes at: nothing asked, the turn left to the route."""
+  route = route_to_turn(120.0, "left")
+  d = Drive((2, 3), v=4.0)
+  y, asked = 0.0, False
+  while y < 110.0:
+    d.step(route, y, {"laneFrac": 2.0, "routeEnd": 300.0})
+    asked |= d.nav.changing is not None
+    y += d.v * 0.05
+  assert not asked and d.nav.skipped and not signals(d)
+
+
+def test_slow_beside_the_turn_signals_it():
+  """One lane beside a right turn's lane, slow, 70 m out (a bay opened late): nav signals the turn, whose desire takes
+  the model over, rather than asking for a lane change it can't make; today's planner asks for the change."""
+  route = route_to_turn(120.0)
+  for tune, want in (({}, "signal"), ({"model_lc_speed": 0.0}, "change")):
+    d = Drive((0, 2), v=5.0)
+    d.nav.tune.values.update(tune)
+    y, got = 50.0, None
+    while y < 110.0 and got is None:
+      d.step(route, y, {"laneFrac": 0.0, "routeEnd": 300.0})
+      got = "signal" if d.nav.signaling else "change" if d.nav.changing else None
+      y += d.v * 0.05
+    assert got == want and 120.0 - y > 40.0, (tune, got, 120.0 - y)
+
+
+def test_request_lifecycle():
+  """A change for a turn: the request (navInstruction.request's content) says what, which side, why, by when and the
+  stage; approved once the blinker is on its side; logged with its outcome once over (a navRequest event)."""
+  route = route_to_turn(400.0)
+  d = Drive((0, 2), v=15.0)
+  y = 0.0
+  while d.request is None and y < 300.0:
+    d.step(route, y)
+    y += d.v * 0.05
+  r = d.request
+  assert r is not None and (r["kind"], r["side"], r["reason"], r["laneChanges"], r["stage"], r["id"]) == ("laneChange", "right", "turn", 1, 3, 1)
+  assert 0.0 < r["distance"] < 400.0 - y and not r["approved"]
+  for _ in range(20):  # the driver's blinker comes on (stage 3: at once) and openpilot starts the change
+    d.step(route, y)
+    y += d.v * 0.05
+  assert d.request["approved"] and d.request["distance"] < r["distance"]
+  d.lane = (1, 2)
+  d._send({"type": "indicatorOff"})  # done: the driver's stalk off
+  d.step(route, y)
+  assert d.request is None
+  ev = [e for e in d.events if e["event"] == "navRequest"]
+  assert len(ev) == 1 and ev[0]["outcome"] == "done" and ev[0]["lane"] == [0, 2] and ev[0]["reason"] == "turn"
+  assert ev[0]["approved_after"] is not None and ev[0]["approved_after"] < 1.0 and ev[0]["target"] > 0
+  assert d.nav.request_log == ev
+
+
+def test_request_declined_and_turn_request():
+  """The driver's blinker off before openpilot could start it: declined. A turn's signal is a request too, closed when
+  nav is disengaged."""
+  route = route_to_turn(400.0)
+  d = Drive((0, 2), v=15.0)
+  y = 0.0
+  while d.indicator is None and y < 300.0:
+    d.step(route, y, {"blindspot": [False, True]})  # held by the blind spot
+    y += d.v * 0.05
+  d.step(route, y, {"blindspot": [False, True]})  # nav sees the blinker on
+  d._send({"type": "indicatorOff"})
+  d.step(route, y, {"blindspot": [False, True]})
+  assert [e["outcome"] for e in d.events if e["event"] == "navRequest"] == ["declined"]
+  d = Drive((1, 2), v=5.0)
+  route = route_to_turn(60.0)
+  y = 0.0
+  while not d.nav.signaling and y < 50.0:
+    d.step(route, y)
+    y += d.v * 0.05
+  assert d.request is not None and (d.request["kind"], d.request["side"], d.request["reason"]) == ("turn", "right", "turn")
+  d.update({"vEgo": d.v, "pos": [0.0, y, 0.0], "heading": 0.0, "lane": [1, 2], "route": []}, False, d.indicator, {})
+  assert d.request is None and [e["outcome"] for e in d.events if e["event"] == "navRequest"] == ["cancelled"]
+
+
+def test_sided_desire_when_the_driver_approves():
+  """Stages 1-2 (the driver approves): NavDesire names the request's side, so only that side's blinker is a lane
+  change at any speed (desire_helper); stage 3 (auto-approved, GTA) keeps today's "laneChange"."""
+  route = route_to_turn(400.0)
+  for stage, want in ((1, "laneChange:right"), (2, "laneChange:right"), (3, "laneChange")):
+    d = Drive((0, 2), v=15.0)
+    d.stage = stage
+    y = 0.0
+    while d.request is None and y < 300.0:
+      d.step(route, y)
+      y += d.v * 0.05
+    assert d.nav.desire == want and d.request["stage"] == stage, stage

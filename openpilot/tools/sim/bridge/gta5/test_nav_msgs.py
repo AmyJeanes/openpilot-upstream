@@ -238,3 +238,14 @@ if __name__ == '__main__':
     if name.startswith('test_'):
       test()
       print(f'{name} ok')
+
+
+def test_request_in_the_instruction():
+  """navd's request (NavOutputs.request) goes out in navInstruction.request, and none without one."""
+  msg = messaging.new_message("navInstruction")
+  npub.fill_instruction(msg.navInstruction, {"request": {"kind": "laneChange", "side": "right", "reason": "exit", "distance": 212.4,
+                                                          "laneChanges": 2, "stage": 3, "id": 9, "approved": True}})
+  r = messaging.log_from_bytes(msg.to_bytes()).navInstruction.request
+  assert (str(r.kind), str(r.side), str(r.reason), r.laneChanges, r.stage, r.id, r.approved) == ("laneChange", "right", "exit", 2, 3, 9, True)
+  assert abs(r.distance - 212.4) < 1e-3
+  assert str(messaging.new_message("navInstruction").navInstruction.request.kind) == "none"

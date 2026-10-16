@@ -16,7 +16,9 @@ LANE_CHANGE_START_TIME = 0.5
 BLINDSPOT_CLEAR_TIME = 0.5
 # below this a blinker asks the model to take the next turn instead, as sunnypilot's lane turn desire does
 LANE_TURN_SPEED = 19 * CV.MPH_TO_MS
-# a navigation source's request (the NavDesire param): "laneChange" makes the blinker ask for a lane change at any speed
+# a navigation source's request (the NavDesire param): "laneChange" makes the blinker ask for a lane change at any speed;
+# "laneChange:left" / "laneChange:right" only the blinker that side, which is how the driver approves navigation's
+# request (PLAN D: their blinker on its side; the other side is still a turn below LANE_TURN_SPEED)
 NAV_LANE_CHANGE = "laneChange"
 # or one of the model's keep desires, for a fork, which openpilot itself never asks for
 NAV_KEEP = {"keepLeft": log.Desire.keepLeft, "keepRight": log.Desire.keepRight}
@@ -63,10 +65,19 @@ def nav_split(nav: str) -> tuple[str, int]:
   return base, NAV_KEEP.get(stacked, log.Desire.none)
 
 
+def nav_lane_change(nav: str, left: bool, right: bool) -> bool:
+  """Whether NavDesire's own request (nav_split's) makes the blinker on now a lane change at any speed: "laneChange",
+  or "laneChange:<side>" with the blinker that side."""
+  if nav == NAV_LANE_CHANGE:
+    return True
+  base, _, side = nav.partition(":")
+  return base == NAV_LANE_CHANGE and ((side == "left" and left and not right) or (side == "right" and right and not left))
+
+
 def lane_turn_desire(CS, nav: str = "") -> int:
   """The turn a blinker asks for at low speed; overrides any lane change. Unlike sunnypilot, the blind spot doesn't hold it:
   at dual turn lanes a car turning beside us is normal, and dropping the desire would carry the car straight on."""
-  if CS.vEgo < LANE_TURN_SPEED and nav_split(nav)[0] != NAV_LANE_CHANGE:
+  if CS.vEgo < LANE_TURN_SPEED and not nav_lane_change(nav_split(nav)[0], CS.leftBlinker, CS.rightBlinker):
     if CS.leftBlinker and not CS.rightBlinker:
       return log.Desire.turnLeft
     if CS.rightBlinker and not CS.leftBlinker:
@@ -140,7 +151,7 @@ class DesireHelper:
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     # read afresh as a blinker comes on, which means a turn or a lane change by it
     nav, stacked = nav_split(self.nav.get(one_blinker and not self.prev_one_blinker))
-    below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN and nav != NAV_LANE_CHANGE
+    below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN and not nav_lane_change(nav, carstate.leftBlinker, carstate.rightBlinker)
     for side, occupied in (("left", carstate.leftBlindspot), ("right", carstate.rightBlindspot)):
       self.blindspot_clear[side] = 0.0 if occupied else self.blindspot_clear[side] + DT_MDL
 

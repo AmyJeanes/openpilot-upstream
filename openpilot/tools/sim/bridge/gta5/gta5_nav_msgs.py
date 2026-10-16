@@ -334,6 +334,7 @@ class NavMessages:
     self.busy = False
     self.lock = threading.Lock()
     self.model_nav = None  # (route, nav_input.ModelNav) for NAV_MODEL
+    self.request: dict | None = None  # navd's request to the driver now (NavOutputs.request), for navInstruction.request
 
   def update(self, route, v: float, osm=None, slots_for: Callable | None = None, now: float | None = None,
              pose: tuple | None = None) -> None:
@@ -377,6 +378,8 @@ class NavMessages:
     if NAV_MODEL:
       ni["allManeuvers"] = self._model_nav(route).all_maneuvers_at(pose[0] if pose is not None else point_at(route, route.at),
                                                                    self.project)
+    if self.request is not None:
+      ni["request"] = dict(self.request)
     return ni
 
   def _model_nav(self, route):
