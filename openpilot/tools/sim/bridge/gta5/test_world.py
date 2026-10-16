@@ -132,29 +132,6 @@ def test_lane_slots_failure_keeps_v1():
   assert w.route_input[1].slots is None and inputs[-1][ri.PRESENT] == 1.0 and not inputs[-1][ri.LANES].any()
 
 
-def test_nav_speed_cap(monkeypatch):
-  """nav's cap goes to openpilot's planner as navSpeed (the car's set speed stays the driver's), at most every
-  NAV_SPEED_EVERY unless its reason changes; with GTA5_NAV_SPEED=can, the simulated car shows it as its set speed."""
-  now = [100.0]
-  monkeypatch.setattr(brain_mod.time, "monotonic", lambda: now[0])
-  w = brain()
-  w.cap, w.cap_reason, w.next_nav_speed = 0.0, "", 0.0
-  w._set_cap(6.0, "turnLeft")
-  assert w.io.sent("nav_speed") == [(6.0, "turnLeft")] and w.io.inputs == {"cruise_cap": 6.0, "cap_set_speed": False}
-  now[0] += 0.01
-  w._set_cap(5.9, "turnLeft")
-  assert len(w.io.sent("nav_speed")) == 1 and w.cap == 5.9 and w.io.inputs["cruise_cap"] == 5.9
-  w._set_cap(5.8, "arrival")
-  assert w.io.sent("nav_speed")[-1] == (5.8, "arrival")
-  now[0] += brain_mod.NAV_SPEED_EVERY
-  w._set_cap(0.0, "")
-  assert w.io.sent("nav_speed")[-1] == (0.0, "none") and len(w.io.sent("nav_speed")) == 3
-
-  monkeypatch.setattr(brain_mod, "NAV_SPEED", "can")
-  w._set_cap(7.0, "bendLeft")
-  assert len(w.io.sent("nav_speed")) == 3 and w.io.inputs == {"cruise_cap": 7.0, "cap_set_speed": True}
-
-
 def test_mark_key(monkeypatch, tmp_path):
   """Each new mark press sends a userBookmark at once and, MARK_AFTER s later, is a line in GTA5_MARKS: where, what drove,
   the recording's segment and frame, the map driver's plan and the route about the car, and the car's track from

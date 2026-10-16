@@ -109,11 +109,10 @@ def test_link_round_trip(monkeypatch):
   remote.set_inputs(user_torque=0, left_blinker=True)
   remote.set_inputs(user_torque=0, left_blinker=True)  # unchanged: not sent again
   remote.nav_desire("turnLeft")
-  remote.nav_speed(6.0, "turnLeft")
   remote.bookmark()
   until(lambda: ("bookmark",) in local.calls, link)
   assert ("cruise", "cruise_down") in local.calls and ("nav_desire", "turnLeft") in local.calls
-  assert ("nav_speed", 6.0, "turnLeft") in local.calls and local.inputs == {"user_torque": 0, "left_blinker": True}
+  assert local.inputs == {"user_torque": 0, "left_blinker": True}
 
   remote.route_input([1.0, 2.0])
   remote.route_input([1.0, 3.0])  # replaces the first before it's sent

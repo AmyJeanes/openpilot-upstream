@@ -18,10 +18,9 @@ from collections.abc import Callable
 
 LINK_PORT = 8796  # the link's control port, on the address the link writes to its link file
 # the SimulatorState fields the brain sets each step (the link sets the rest from the game state itself)
-INPUTS = ("user_torque", "left_blinker", "right_blinker", "left_blindspot", "right_blindspot", "speed_limit",
-          "speed_limit_follow", "cruise_cap", "cap_set_speed")
+INPUTS = ("user_torque", "left_blinker", "right_blinker", "left_blindspot", "right_blindspot", "speed_limit")
 PARAMS = ("IsMetric", "NavigateOnOpenpilot", "TurnDesireRefresh", "NavDestination")  # the params the brain reads
-OPS = ("cruise", "set_inputs", "nav_desire", "nav_speed", "route_input", "lane_slots", "bookmark", "param_put", "param_remove",
+OPS = ("cruise", "set_inputs", "nav_desire", "route_input", "lane_slots", "bookmark", "param_put", "param_remove",
        "nav_instruction", "nav_route", "expert_control", "model_tap")
 COMMANDS = ("expert", "destination")  # what the link passes on to the brain from WSL (take_commands)
 STATUS_EVERY = 0.05  # s between the link's states
@@ -60,9 +59,6 @@ class OpenpilotIO:
 
   def nav_desire(self, desire: str) -> None:
     """The NavDesire param ("" removes it)."""
-
-  def nav_speed(self, cap: float, reason: str) -> None:
-    """navSpeed for openpilot's longitudinal planner (m/s, 0 for none)."""
 
   def route_input(self, vec) -> None:
     """The driving model's route input (navd/route_input.py)."""
@@ -220,9 +216,6 @@ class RemoteIO(OpenpilotIO):
 
   def nav_desire(self, desire: str) -> None:
     self.send("nav_desire", desire)
-
-  def nav_speed(self, cap: float, reason: str) -> None:
-    self.send("nav_speed", cap, reason)
 
   def route_input(self, vec) -> None:
     self._vector("route_input", vec)

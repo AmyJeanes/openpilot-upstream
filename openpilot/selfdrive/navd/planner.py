@@ -1,7 +1,7 @@
 """navd's planner: drives the route to the destination, as a driver would with openpilot's lane turn desire. It moves
-into the lane for each turn and fork on the route, slows for it, has it signalled, and stops at the destination. Each
-step (NavInputs) gives a cruise cap, NavDesire's changes and requests to the driver (NavOutputs): signal a turn, change
-lanes, cancel the signal; the driver works the stalk.
+into the lane for each turn and fork on the route, has it signalled, and tells when the car has arrived; the driving
+model drives the speed. Each step (NavInputs) gives NavDesire's changes and requests to the driver (NavOutputs): signal
+a turn, change lanes, cancel the signal; the driver works the stalk.
 
 Game-agnostic: nothing here reads a game. Until navd localizes itself and reads the lane from perception, the car's
 pose and lane in its inputs are the simulator's truth (inputs.py)."""
@@ -22,27 +22,17 @@ TURN_WINDOW = 30.0  # m
 TURN_HOLDS = 20.0  # m past the turn where the route still heads the new way: a jog between lanes comes back
 JOG_LINK = 25.0  # m: a turn off a link this short across a junction (a jog between offset roads) is one from the road before it
 U_TURN_ANGLE = 135.0  # deg: the model can't make a U-turn, so drive on until GTA routes round instead
-TURN_SPEED = 4.5  # m/s for a square turn: slower turns tighter, and the lane turn desire works below 19 mph
+# the speed a turn is taken at, for where turn_points draws its signal coming on
+TURN_SPEED = 4.5  # m/s for a square turn
 SHARP_TURN_SPEED = 4.0  # m/s beyond sharp_angle
 SOFT_TURN_SPEED = 6.0  # m/s for a turn of TURN_ANGLE
-TURN_SLOW_BY = 25.0  # m before the turn
-SLOW_DECEL = 0.6  # m/s^2, the approach the cruise cap allows
-SLOW_LAG = 1.0  # s: openpilot eases into a lower set speed
-LOOKAHEAD = 250.0  # m, turns further on don't cap the speed yet
-NO_CAP = (0.0, "")
+TURN_NEAR = 250.0  # m: a turn further on isn't signalled or its bay entered yet
 # Signal SIGNAL_TIME before a turn (no further out than SIGNAL_DIST) once below the lane change speed, which would ask
 # for a lane change instead: further out, the model stops short with a turn asked for and no turning to take.
 SIGNAL_TIME = 5.0  # s
 SIGNAL_DIST = 50.0  # m
 SIGNAL_MIN = 28.0  # m: signal anyway, if in the turn's lane, else leave it unless changing into it
 SIGNAL_LAST = 8.0  # m: signalling at the junction's entry, signal by here whatever the speed
-# How far the model turns depends on its speed in the turn: the turn's speed holds through the arc, until the car heads
-# its way out and is straight, and lifts gently after
-HOLD_RELEASE = 10.0  # deg from the way out
-HOLD_RELEASE_M = 40.0  # m past the turn's point, at the latest
-HOLD_RELEASE_ACCEL = 1.0  # m/s^2
-HOLD_ARC = 10.0  # deg turned: in the arc, for the speeds logged
-HOLD_DONE = 40.0  # m/s: lifted past anything
 SIGNAL_LAST_DIST = 26.0  # m: the last chance, while a lane change into the turn's lane finishes (the turn finder looks from MIN_AHEAD on)
 DONE_HEADING = 20.0  # deg from the turn's exit heading, straightened out
 DONE_YAW_RATE = 0.1  # rad/s
@@ -73,34 +63,27 @@ TURN_PAST_HEADING = 45.0  # deg
 CONFIRM = 0.5  # s a turn must stay in the route before it counts, past the route's jitter at junctions
 BEHIND_BY = 2.0  # m
 COOLDOWN = 3.0  # s after a turn without lane changes, while the car straightens out
-ARRIVE_DECEL = 0.7  # m/s^2
-ARRIVE_LAG = 1.0  # s: openpilot eases into a lower set speed
-ARRIVE_KEEP = 100.0  # m: GTA clears the waypoint as the car nears it, so stop on the straight distance left to it
-STOP_BEFORE = 8.0  # m before the waypoint
+ARRIVE_KEEP = 100.0  # m: GTA clears the waypoint as the car nears it, so arrive by the straight distance left to it
 ARRIVED_DIST = 15.0  # m: disengage once nearly stopped
 ROUTE_POINTS = 101  # the plugin's route covers 500 m; fewer points means it ends there
 # Lanes: a lane change takes the model several seconds, and the next needs a gap; plan them back from the last place
-# one may start, and slow down when there isn't room left. A turn or fork that can't be reached from the car's lane is
-# left for the route to come round again: a missed turn beats one across lanes, which the model won't take anyway.
+# one may start. A turn or fork that can't be reached from the car's lane is left for the route to come round again: a
+# missed turn beats one across lanes, which the model won't take anyway.
 LANE_CHANGE_DIST = 30.0  # m before a turn, the last a lane change for it starts
 LANE_CHANGE_TIME = 8.0  # s each, with the gap before the next
 LANE_CHANGE_EARLY = 4.0  # s more
 FAST, FAST_EARLY = 18.0, 8.0  # m/s, and s more at that speed, as on a freeway, where the exits come up fast
 LANE_CHANGE_SPEED = 2.0  # m/s
-LANE_CHANGE_MIN_SPEED = 5.0  # m/s, slowing down for room to change lanes for a turn
-FORK_MIN_SPEED = 10.0  # m/s, for a fork, as on a freeway
+LANE_CHANGE_MIN_SPEED = 5.0  # m/s at least, for the room the lane plan gives a turn's changes
 LANE_CHANGE_TIMEOUT = 10.0  # s
 LANE_CHANGE_GAP = 2.0  # s between lane changes
 LANE_CHANGE_TRIES = 3  # for one turn or fork, without getting nearer its lane
 # Out of a lane that ends (Ends, not at a fork the route may leave by instead) the car has to merge, so a change held
-# by the blind spot isn't given up at its last place: it waits on until the lane's end, and the car slows to a crawl
-# short of it, letting the vehicle alongside go by to fall in behind it. Late, it may start at any speed until the crawl
-# begins: nearer the end, a lane reading that only now puts the car in the ending lane is more likely a misread, and a
-# change from it can cross into the oncoming lane. A crawl rather than a stop (lowest's floor), as the model won't pull
-# away from a stop by itself.
-MERGE_DECEL = 1.0  # m/s^2
+# by the blind spot isn't given up at its last place: it waits on until the lane's end, for the vehicle alongside to go
+# by and fall in behind it. Late, it may start at any speed until MERGE_STOP_BEFORE: nearer the end, a lane reading
+# that only now puts the car in the ending lane is more likely a misread, and a change from it can cross into the
+# oncoming lane.
 MERGE_STOP_BEFORE = 10.0  # m before the lane's end
-MERGE_CRAWL = 0.5  # m/s from there
 MERGE_FORK_NEAR = 30.0  # m: lanes ending this near a fork end at the split, as the other branch's
 ANOMALY_NEAR = 20.0  # m: a map error found this near one already reported is the same
 CHANGE_CLEAR = 0.5  # s the blind spot stays clear before openpilot starts a change (desire_helper's BLINDSPOT_CLEAR_TIME)
@@ -127,7 +110,7 @@ FORK_KEEP = 4.0  # s before a fork that the keep desire starts
 FORK_KEEP_DIST = 60.0  # m, at least
 FORK_KEEP_PAST = 40.0  # m past it
 # A slip lane or turn bay (GTA's centre turn bays are the road's median) opening this near before a turn: the turn is
-# signalled, and slowed for, from where it opens, so that the model takes it into the bay
+# signalled from where it opens, so that the model takes it into the bay
 BAY_BEFORE = 70.0  # m
 BAY_SIGNAL = 5.0  # m before it opens
 # and the car changes lanes into it as it opens, from the lane beside it, then signals the turn (by BAY_LAST at the
@@ -135,17 +118,9 @@ BAY_SIGNAL = 5.0  # m before it opens
 BAY_CHANGE = os.getenv("NAVD_BAY", os.getenv("GTA5_BAY", "1")) != "0"
 BAY_OPEN = 3.0  # m before it opens
 BAY_LAST = 18.0  # m before the turn
-BAY_SPEED = 4.5  # m/s, changing into it
 # the lane plan's change into it: from this far past where the map opens it, where there's room for BAY_RAMP_MIN m of
 # change before the turn's stop line (else BAY_LAST before the turn); else from where it opens
 BAY_ENTER, BAY_RAMP_MIN = 6.0, 12.0  # m
-# Bends and ramps: no faster than this sideways acceleration, measured over CURVE_WINDOW m of route. The Tesla's
-# steering is limited to 3.6 m/s^2 (3 m/s^2 and road roll) and in our drives saturated at about 3.
-CURVE_ACCEL = 2.0  # m/s^2
-CURVE_WINDOW = 20.0  # m
-CURVE_STEP = 2.5  # m
-CURVE_LOOKAHEAD = 300.0  # m
-LIMIT_DECEL = 0.8  # m/s^2, slowing for a lower speed limit ahead
 # The model has no desire for straight on, and sometimes turns where the route doesn't, as from a lane that becomes a
 # turn lane; a keep desire away from that side (meant for forks) holds it on the road.
 KEEP_ABOVE = 0.25  # the model's probability of a turn the route doesn't take
@@ -196,10 +171,6 @@ class Tune:
     "turn_speed_square_right": 0.0,  # m/s for a square right turn (0: turn_speed_square)
     "turn_speed_sharp": SHARP_TURN_SPEED,  # m/s beyond sharp_angle
     "sharp_angle": 110.0,  # deg
-    "slow_decel": SLOW_DECEL,  # m/s^2
-    "slow_from": LOOKAHEAD,  # m before a turn the slowing for it may start
-    "slow_done": TURN_SLOW_BY,  # m before slow_ref the car is down to the turn's speed
-    "slow_ref": "turn",  # "turn" (its node, in the junction) or "entry" (the junction's entry: the stop line)
     "signal_mode": "time",  # "time": SIGNAL_TIME ahead; "entry": at signal_entry_offset from the junction's entry
     "signal_time": SIGNAL_TIME,  # s
     "signal_min": SIGNAL_MIN,  # m
@@ -233,15 +204,6 @@ class Tune:
     # m before a turn a lane change towards it still under way becomes the turn's signal (0: it's ended, though
     # openpilot's lane change carries on into the junction until the model is done with it)
     "lane_change_into_turn": 0.0,
-    "lane_change_min_speed": LANE_CHANGE_MIN_SPEED,  # m/s, slowing down for a lane change for a turn to finish before it
-    "bay_speed": BAY_SPEED,  # m/s while changing into a turn's bay (0: no cap)
-    "curve_accel": CURVE_ACCEL,  # m/s^2
-    # held from signalling a turn through its arc, until the car heads within turn_release deg of its way out and is
-    # straight, or is turn_release_m past it; then lifted at release_accel
-    "turn_hold_speed": 0.0,  # m/s, 0: the turn's approach speed
-    "turn_release": HOLD_RELEASE,  # deg
-    "turn_release_m": HOLD_RELEASE_M,  # m
-    "release_accel": HOLD_RELEASE_ACCEL,  # m/s^2
     "exit_cue_right": True,  # keepRight out of a right turn too, which can end across the new road's centre line
     "exit_cue_left": True,
     # share of a turn's angle come round by which its keepRight starts, stacked on the turn while its blinker is on (1:
@@ -536,61 +498,6 @@ def next_turn(route: np.ndarray, after: float, turns: list | None = None) -> Tur
     if d > after:
       return Turn(float(d), side, float(exit_heading), float(angle))
   return None
-
-
-def curve_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> float:
-  """The speed now that leaves room to slow for the bends ahead, 0 for none. A bend's curvature is its heading change
-  over CURVE_WINDOW m, but no more than over twice or four times the window: GTA's lanes jog sideways through junctions
-  and where a freeway splits, turning one way and back, which isn't a bend."""
-  return bend_cap(route, v, tune)[0]
-
-
-def bend_cap(route: np.ndarray, v: float, tune: Tune | None = None) -> tuple[float, str]:
-  """curve_cap, with the reason for it: the way the bend that sets it turns ("bendLeft" or "bendRight")."""
-  heads, starts = headings(route)
-  if len(heads) < 3:
-    return NO_CAP
-  h = np.unwrap(np.radians(heads))
-  mids = starts + np.diff(np.append(starts, starts[-1] + 5.0)) / 2
-  s = np.arange(0.0, min(CURVE_LOOKAHEAD, float(mids[-1])), CURVE_STEP)
-  if len(s) == 0:
-    return NO_CAP
-  w = CURVE_WINDOW / 2
-
-  def turned(a, b):
-    return np.abs(np.interp(b, mids, h) - np.interp(a, mids, h))
-  curvature = np.minimum.reduce([turned(s - k * w, s + k * w) for k in (1, 2, 4)]) / CURVE_WINDOW
-  # the turns themselves have their own speed
-  t = tune or TUNE
-  speed = np.maximum(np.sqrt(t.curve_accel / np.maximum(curvature, 1e-4)), t.turn_speed_square)
-  caps = np.sqrt(speed ** 2 + 2 * t.slow_decel * np.maximum(s - w - v * SLOW_LAG, 0.0))
-  i = int(np.argmin(caps))
-  left = np.interp(s[i] + w, mids, h) > np.interp(s[i] - w, mids, h)  # headings turn counterclockwise to the left
-  return float(caps[i]), "bendLeft" if left else "bendRight"
-
-
-def limit_cap(limits: list, v: float) -> float:
-  """The speed now: the limit where the car is, leaving room to slow for lower limits ahead ([[m ahead, m/s or 0
-  unknown], ...]); 0 for none. The set speed is the driver's, above or below it."""
-  caps = [math.sqrt(limit ** 2 + 2 * LIMIT_DECEL * max(0.0, d - v * SLOW_LAG)) for d, limit in limits if limit > 0]
-  return min(caps) if caps else 0.0
-
-
-def lowest(caps: list[tuple[float, str]]) -> tuple[float, str]:
-  """The lowest of the caps (m/s, 0 for none) with its reason, no lower than a crawl; NO_CAP with none."""
-  caps = [c for c in caps if c[0] > 0]
-  if not caps:
-    return NO_CAP
-  cap, reason = min(caps, key=lambda c: c[0])
-  return max(cap, 0.5), reason
-
-
-def turn_reason(side: str) -> str:
-  return "turnLeft" if side == "left" else "turnRight"
-
-
-def slow_for(speed: float, dist: float, v: float, decel: float = SLOW_DECEL) -> float:
-  return math.sqrt(speed ** 2 + 2 * decel * max(0.0, dist - v * SLOW_LAG))
 
 
 def value_at(changes: list | None, d: float, default=None):
@@ -1068,7 +975,6 @@ class Planner:
     self.was_engaged = False
     self.desire = ""  # what NavDesire is set to
     self.entry, self.entry_kind = 0.0, ""  # m to the junction entry of the turn ahead, and what it is
-    self.hold: dict | None = None  # the speed held through the turn signalled last, and the speeds through it
     self.turn: Turn | None = None  # the one being signaled
     self.cooldown_until = 0.0
     self.signaled: str | None = None
@@ -1156,16 +1062,16 @@ class Planner:
     self.route_ahead = np.zeros((1, 2))
 
   def update(self, inp: NavInputs) -> NavOutputs:
-    """The step's cruise cap, arrival, requests to the driver and NavDesire's changes."""
+    """The step's arrival, requests to the driver and NavDesire's changes."""
     self.requests, self.desires, self.events = [], [], []
-    (cap, reason), arrived = self._update(inp)
-    return NavOutputs(cap, arrived, self.requests, self.desires, reason, self.events)
+    arrived = self._update(inp)
+    return NavOutputs(arrived, self.requests, self.desires, self.events)
 
-  def _update(self, inp: NavInputs) -> tuple[tuple[float, str], bool]:
-    """The cruise cap (m/s, 0 for none) and its reason, and whether the car has arrived."""
+  def _update(self, inp: NavInputs) -> bool:
+    """Whether the car has arrived."""
     now = self.now = inp.t
     # guidance only (Navigate on openpilot off) takes no nav actions, as when disengaged: signals cancelled, no lane
-    # changes, turn or keep desires, turn slowing or arrival; but what keeps the car on its road stays (_guide)
+    # changes, turn or keep desires or arrival; but what keeps the car on its road stays (_guide)
     engaged, indicator, desire = inp.engaged and inp.drive, inp.blinker, inp.desire
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
@@ -1186,13 +1092,13 @@ class Planner:
       self._cancel(indicator)
       self._end_change(indicator)
       self.keeping, self.fork_keep = None, None
-      cap = self._guide(inp, now) if inp.engaged else NO_CAP
+      if inp.engaged:
+        self._guide(inp, now)
       self._set_desire(now)
       self.route_end, self.dest = None, None
       self.skipped.clear()
       self.taken.clear()
-      self.hold = None
-      return cap, False
+      return False
     self._watch_change(indicator, now, inp.left_blindspot if self.changing == "left" else inp.right_blindspot)
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
@@ -1210,10 +1116,9 @@ class Planner:
       if left is not None and left < ARRIVE_KEEP:
         # counted down by the distance driven, which doesn't grow again if the car runs past it
         self.route_end = left if self.route_end is None else min(self.route_end - step, left)
-        stop, arrived = self._arrive(v)
-        return (stop, "arrival"), arrived
+        return self._arrive(v)
       self.route_end, self.dest = None, None
-      return NO_CAP, False
+      return False
     route = self.route_ahead = np.array(route, dtype=float)
     waypoint = np.array(inp.dest or (0.0, 0.0), dtype=float)
     self.dest = waypoint if waypoint.any() else route[-1]  # (0, 0) as GTA clears it
@@ -1294,24 +1199,17 @@ class Planner:
                 and not any(abs(d - m.dist) < MERGE_FORK_NEAR for d in left)]  # the branch the car now takes
     self._mark_barriers(ahead, pos, heading)
     self.change_need = None
-    caps = [(self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now), "laneChange")]
+    self._change_lane(sorted(ahead, key=lambda m: m.dist), route, v, now)
     # a merge waiting on the blind spot isn't dropped while the lane reading is out (lanes merging read badly)
     unread = self.lane is None and self.change_end is not None and self.driven < self.change_end
     if self.changing is not None and self.change_planned and not self.change_went and self.change_need != self.changing and not unread:
       self._give_up(indicator, "the lanes ahead no longer need it")
-    if self.changing is not None and self.change_end is not None and self.change_held and not self.change_went:
-      caps.append((self._merge_cap(self.change_end - self.driven, v), "laneChange"))
     if turn is not None:
       self.entry, self.entry_kind = junction_entry(turn.dist, inp.stops or [], inp.junctions or [])
-    if turn is not None and turn.dist < t.slow_from:
+    if turn is not None and turn.dist < TURN_NEAR:
       bay = self._bay(forks, turn)
-      ref = self.entry if t.slow_ref == "entry" else turn.dist
-      caps.append((slow_for(turn.speed(t), min(ref - t.slow_done, turn.dist - bay - BAY_SIGNAL), v, t.slow_decel), turn_reason(turn.side)))
       self._enter_bay(turn, bay, v, now)
-      if self.changing is not None and self.driven < self.bay_to and t.bay_speed > 0:
-        caps.append((t.bay_speed, "bay"))
       self._signal(turn, route, indicator, v, now, heading, bay)
-    caps.append((self._hold_cap(heading, yaw_rate, v, now), turn_reason(self.hold['side']) if self.hold else ""))
     if self.turn is not None:
       if v < 0.3:
         self.stopped = True
@@ -1324,64 +1222,16 @@ class Planner:
           self.repeat_t = now
         self.stopped = False
     self._exit_watch(heading, yaw_rate, now)
-    caps.append(bend_cap(route, v, t))
-    caps.append((limit_cap(inp.limits or [], v), "speedLimit"))
     self._keep_fork(forks[0] if forks else None, turn, desire, v, now)
     self._keep_straight(turn, desire, v, now)
     self._set_desire(now)
+    return self._arrive(v) if self.route_end is not None else False
 
-    cap = lowest(caps)
-    if self.route_end is not None:
-      stop, arrived = self._arrive(v)
-      return (stop, "arrival") if not cap[0] or stop <= cap[0] else cap, arrived
-    return cap, False
-
-  def _guide(self, inp: NavInputs, now: float) -> tuple[float, str]:
-    """Guidance only, engaged: the cruise cap for the road's bends and speed limits ahead, the bends only up to the next
-    turn at a junction (the driver may not take it, and turns aren't slowed for), and keepRight out of the oncoming
-    lanes."""
+  def _guide(self, inp: NavInputs, now: float):
+    """Guidance only, engaged: keepRight out of the oncoming lanes."""
     self.yaw, self.one_way = inp.yaw_rate, inp.two_way is False
     near = [d for d in (inp.stops or []) + (inp.junctions or []) if abs(d) < ONCOMING_JUNCTION]
     self._oncoming_keep(inp.truth_lane_plugin, bool(near), now, inp.truth_lane_map)
-    caps = [(limit_cap(inp.limits or [], inp.v), "speedLimit")]
-    if inp.route:
-      route = np.array(inp.route, dtype=float)
-      turn = next_turn(route, MIN_AHEAD_MAP if inp.route_end is not None else MIN_AHEAD, inp.turns)
-      while turn is not None and not any(abs(d - turn.dist) < ENTRY_JUNCTION_BEFORE / 2 for d in inp.junctions or []):
-        turn = next_turn(route, turn.dist + TURN_HOLDS, inp.turns)  # a bend of the road, not a turn: slowed for
-      if turn is not None:
-        along = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))))
-        route = np.vstack([route[along < turn.dist], self._point(route, turn.dist)])
-      caps.append(bend_cap(route, inp.v, self.tune))
-    return lowest(caps)
-
-  def _hold_cap(self, heading: float, yaw_rate: float, v: float, now: float) -> float:
-    """The turn's speed, held through its arc and lifted gently once the car is out of it (0 for none); logs the
-    speeds through the turn as it lifts."""
-    h = self.hold
-    if h is None:
-      return 0.0
-    t = self.tune
-    if h['entry_v'] is None and self.driven >= h['entry_at']:
-      h['entry_v'] = v
-    turned = abs(wrap(heading - h['heading']))
-    if h['released'] is None:
-      if turned > HOLD_ARC:
-        h['arc'].append(v)
-      straight = abs(wrap(heading - h['exit'])) < t.turn_release and abs(yaw_rate) < DONE_YAW_RATE
-      if straight and h['arc'] or self.driven > h['end_at']:
-        h['released'] = now
-        if DEBUG:
-          arc = h['arc'] or [v]
-          entry = "-" if h['entry_v'] is None else f"{h['entry_v']:.1f}"
-          speeds = f"entry {entry}, arc min {min(arc):.1f} mean {np.mean(arc):.1f}, exit {v:.1f} m/s"
-          print(f"nav: turn speeds {h['side']} {h['angle']:.0f} deg: {speeds}, turned {turned:.0f} deg, held {h['speed']:.1f}")
-      return h['speed']
-    cap = h['speed'] + t.release_accel * (now - h['released'])
-    if cap > HOLD_DONE:
-      self.hold = None
-      return 0.0
-    return cap
 
   def _turned(self, heading: float) -> float:
     """deg the car has turned since signaling, either way: accumulated with turned_unwrapped, else wrapped."""
@@ -1543,10 +1393,6 @@ class Planner:
     elif not self._signal_due(turn, route, indicator, v, now, bay):
       return
     self.turn, self.signaled, self.turn_from, self.shown = turn, turn.side, self.driven, False
-    t = self.tune
-    self.hold = {'side': turn.side, 'angle': turn.angle, 'exit': turn.exit_heading, 'heading': heading,
-                 'speed': t.turn_hold_speed or turn.speed(t), 'entry_at': self.driven + self.entry, 'entry_v': None,
-                 'end_at': self.driven + turn.dist + t.turn_release_m, 'arc': [], 'released': None}
     self.turn_point = self._point(route, turn.dist)
     self.signaled_at = route[0].copy()
     self.signal_heading, self.repeat_t = heading, now
@@ -1578,8 +1424,8 @@ class Planner:
   def turn_points(self, route: np.ndarray, forks: list | None, stops: list | None, junctions: list | None,
                   turns: list | None = None) -> tuple[np.ndarray, np.ndarray | None] | None:
     """For the map overlay: where the turn nav signals next is (of the route's own turns where given), and where its
-    signal comes on by distance at the turn's own speed, which nav slows to for it and signals at, so the point holds
-    still while the car slows; where the car must change lanes for it first, where the first change's blinker comes on
+    signal comes on by distance at the turn's own speed, which the car slows to for it, so the point holds still while
+    it slows; where the car must change lanes for it first, where the first change's blinker comes on
     (city_lead, at the car's speed: from the car, once it's due); once signalled, where the car was when it did."""
     if self.turn is not None and self.turn_point is not None:
       return self.turn_point, self.signaled_at
@@ -1675,12 +1521,11 @@ class Planner:
       return False
     return self.lane[0] == (0 if turn.side == "left" else self.lane[1] - 1)
 
-  def _change_lane(self, ahead: list, route: np.ndarray, v: float, now: float) -> float:
+  def _change_lane(self, ahead: list, route: np.ndarray, v: float, now: float):
     """Into the lanes for the turns and forks ahead (nearest first), early enough for the changes the first the car isn't
-    in the lanes for needs, without leaving the lanes for those before it; returns a cruise cap that leaves room for
-    them (0 for none)."""
+    in the lanes for needs, without leaving the lanes for those before it."""
     if self.turn is not None or self.lane is None or self.lane[0] < 0:
-      return 0.0
+      return
     i, n = self.lane
     allowed = (0, n - 1)
     for m in ahead:
@@ -1689,13 +1534,13 @@ class Planner:
         allowed = (max(allowed[0], lo), min(allowed[1], hi))
         continue
       if (i > hi and i <= allowed[0]) or (i < lo and i >= allowed[1]):
-        return 0.0  # not until past the one before, whose lanes the car is in
+        return  # not until past the one before, whose lanes the car is in
       split = next((f for f in ahead if isinstance(f, Fork) and abs(f.dist - m.dist) < MERGE_FORK_NEAR), None) if isinstance(m, Ends) else None
-      return self._change_for(m, lo, hi, route, v, now, isinstance(m, Ends) and split is None, split)
-    return 0.0
+      self._change_for(m, lo, hi, route, v, now, isinstance(m, Ends) and split is None, split)
+      return
 
   def _change_for(self, m: Turn | Fork | Through | Ends, lo: int, hi: int, route: np.ndarray, v: float, now: float,
-                  must: bool = False, split: Fork | None = None) -> float:
+                  must: bool = False, split: Fork | None = None):
     """must: the car's lane ends, so it has to leave it (MERGE_); split: the fork lanes ending there split off at."""
     i, n = self.lane
     self.change_need = "left" if i > hi else "right"
@@ -1705,22 +1550,20 @@ class Planner:
     where = self._point(route, max(m.dist, 0.0))
     key = (fork, round(float(where[0])), round(float(where[1])))
     if self.change_tries.get(key, 0) >= LANE_CHANGE_TRIES:
-      return 0.0  # the model won't: there's no lane there
+      return  # the model won't: there's no lane there
     room = m.dist - last
-    need = changes * self.tune.lane_change_time
     if (fork or split is not None) and room < 0 and self.changing is None:
       if not self._sure_wrong(lo, hi):
-        return 0.0
+        return
       f = m if fork else split
       self._skip(route, f.dist, f"{f.side} fork")
       self.skip_turns_to = self.driven + f.dist + FORK_TURN
-      return 0.0
-    cap = max(FORK_MIN_SPEED if fork else self.tune.lane_change_min_speed, room / need) if room < need * v else 0.0
+      return
     side = "left" if i > hi else "right"
     if self.tune.fwy_lane_time > 0 and freeway_move(m, self.classes):
       first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
       if first and len(first[0][1]) != n:
-        return cap  # a lane reading from before the road's lanes changed (just past a split): its targets are a guess
+        return  # a lane reading from before the road's lanes changed (just past a split): its targets are a guess
       total = self._lanes_to(m, changes)
       start = fwy_start(m.dist, total, 0.0, [b - self.driven for b in self.fwy_marks], v, last, self.tune)
       slot = self._fwy_slot(where)
@@ -1736,10 +1579,6 @@ class Planner:
       if DEBUG:
         print(f"nav: the merge for the lane ending in {m.dist:.0f} m " +
               ("waits, nav's lane and the map's disagreeing" if self.merge_waits else "goes on, the lane readings agreeing"))
-    unstarted = self.changing == side and not self.change_went
-    late = room <= 0 and (unstarted or self.changing is None and self._lane_settled(side, now))
-    if must and (agreed or unstarted) and (late or unstarted and self.change_held):
-      cap = min(cap or math.inf, self._merge_cap(m.dist, v))
     ready = (self.changing is None and (room > 0 or must and m.dist > MERGE_STOP_BEFORE) and due and (v > LANE_CHANGE_SPEED or must)
              and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING
              and self._lane_settled(side, now) and agreed)
@@ -1759,12 +1598,6 @@ class Planner:
       what = "way straight on" if isinstance(m, Through) else ends if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
       self._start_change(side, f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
                          turn=isinstance(m, Turn), by=room, planned=True, end=m.dist if must else None, bay=bay)
-    return cap
-
-  @staticmethod
-  def _merge_cap(dist: float, v: float) -> float:
-    """The cruise cap out of a lane ending `dist` m on: slowing to a crawl MERGE_STOP_BEFORE m short of its end."""
-    return max(slow_for(0.0, dist - MERGE_STOP_BEFORE, v, MERGE_DECEL), MERGE_CRAWL)
 
   def _turn_bay(self, turn: Turn, side: str) -> bool:
     """Whether the lane a change `side` heads for, for the turn, is a turn bay: a lane opening on the way to it."""
@@ -1990,7 +1823,7 @@ class Planner:
       # a lane that ends), it's given up
       if DEBUG and not self.change_held and self.change_end is not None:
         print(f"nav: lane change {self.changing} held by the blind spot, the lane ending in {self.change_end - self.driven:.0f} m: " +
-              "waiting on, slowing to fall in behind")
+              "waiting on to fall in behind")
       self.change_t, self.change_held = now, True
       if self.change_end is None and self.driven > self.change_by:  # a merge waits as long as it takes
         self._give_up(indicator, "the blind spot still occupied at the last place to start it")
@@ -2016,13 +1849,12 @@ class Planner:
     self.change_hold_until = self.change_t + PARAM_HOLD
     self._set_desire(self.change_t)
 
-  def _arrive(self, v: float) -> tuple[float, bool]:
-    stop = max(math.sqrt(2 * ARRIVE_DECEL * max(0.0, self.route_end - STOP_BEFORE - v * ARRIVE_LAG)), 0.5)
-    # or stopped near it, short of the cap's aim (not at lights further back)
+  def _arrive(self, v: float) -> bool:
+    # or stopped near it, a little short (not at lights further back)
     arrived = v < 2.0 and self.route_end < ARRIVED_DIST or v < 0.3 and self.route_end < 2 * ARRIVED_DIST
     if arrived:
       self.route_end, self.dest = None, None
-    return stop, arrived
+    return arrived
 
   @staticmethod
   def _behind(route: np.ndarray, heading: float) -> bool:

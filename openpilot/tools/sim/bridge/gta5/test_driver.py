@@ -70,9 +70,9 @@ def test_stalk_cancels_after_the_turn_and_after_a_lane_change():
 
 def test_requests_become_the_stalk_and_arrival_cancels():
   d, sent = driver()
-  d.act(NavOutputs(0.0, False, ["laneChangeRight", "cancelSignal", "signalTurnLeft"], []))
+  d.act(NavOutputs(False, ["laneChangeRight", "cancelSignal", "signalTurnLeft"], []))
   assert sent == [{"type": "setIndicator", "side": "right"}, {"type": "indicatorOff"}, {"type": "setIndicator", "side": "left"}]
-  d.act(NavOutputs(3.0, True, [], []))
+  d.act(NavOutputs(True, [], []))
   assert sent[-1] == "cancel"
   d.indicator = "left"
   assert d.blinkers(False) == (True, False) and d.blinkers(True) == (False, False)

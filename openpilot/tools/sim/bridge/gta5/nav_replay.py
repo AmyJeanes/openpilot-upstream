@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Replays recorded drives through the bridge's navigation, open loop, and writes a decision log per trip: each step's
-game commands, NavDesire writes, cruise cap, the blinkers and steering torque openpilot gets, the bridge's cruise
+game commands, NavDesire writes, cruise cap (code versions with one), the blinkers and steering torque openpilot gets, the bridge's cruise
 commands, the route input and lane slots (hashed), the next turn's points and nav's printed lines. The world's
 read_sensors runs as live, with the game, openpilot and the router stubbed and a fake clock; routing is synchronous,
 and the router's answers are cached, so a replay is repeatable without a router. Two code versions given the same
@@ -404,7 +404,9 @@ def _split_world(head: dict, mp: Map, rec: dict):
   io.sm = SubMaster({"modelV2": w.model})
   io.params = Params(head["refresh"], rec["nd"])
   io.inputs = dict(gta5_world.DEFAULT_INPUTS)
-  io.nav_speed_pm, io.bookmark_pm = SimpleNamespace(send=lambda *a: None), None
+  io.bookmark_pm = None
+  if hasattr(gta5_world.LocalIO, "nav_speed"):  # code versions with nav's speed cap
+    io.nav_speed_pm = SimpleNamespace(send=lambda *a: None)
   io.route_writer, io.lanes_writer = Writer(), Writer()
   br = w.brain = gta5_brain.Brain.__new__(gta5_brain.Brain)
   br.io, br._send, br.log, br.recorder, br.nav_msgs, br.match = io, w._send, None, None, None, False
@@ -532,8 +534,10 @@ def replay(path: str, mp: Map, out: str):
         w.read_sensors(w.simulator_state)
         tp = _turn_points(w, navd)
       s = w.simulator_state
-      step = {"t": fr["mono"], "cmd": rec["cmd"], "q": rec["q"], "nd": rec["nd"], "cap": s.cruise_cap,
-              "bl": [s.left_blinker, s.right_blinker], "tq": s.user_torque, "sl": s.speed_limit, "slf": s.speed_limit_follow,
+      step = {"t": fr["mono"], "cmd": rec["cmd"], "q": rec["q"], "nd": rec["nd"],
+              **({"cap": s.cruise_cap} if hasattr(s, "cruise_cap") else {}),
+              "bl": [s.left_blinker, s.right_blinker], "tq": s.user_torque, "sl": s.speed_limit,
+              **({"slf": s.speed_limit_follow} if hasattr(s, "speed_limit_follow") else {}),
               "ri": writers.route_writer.last, "ls": writers.lanes_writer.last, "routes": core.routes, "tp": tp,
               "out": buf.getvalue().splitlines(), **({"why": core.cap_reason} if hasattr(core, "cap_reason") else {})}
       log.write(json.dumps(step) + "\n")

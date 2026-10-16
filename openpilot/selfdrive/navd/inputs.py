@@ -18,7 +18,7 @@ CANCEL_SIGNAL = "cancelSignal"
 class NavInputs:
   t: float = 0.0  # s, monotonic
   engaged: bool = False
-  drive: bool = True  # Navigate on openpilot: nav drives (desires, lane changes, speed caps); off, it only guides
+  drive: bool = True  # Navigate on openpilot: nav drives (desires, lane changes); off, it only guides
   v: float = 0.0  # m/s (carState.vEgo)
   yaw_rate: float = 0.0  # rad/s, left positive
   blinker: str | None = None  # "left" or "right" while the car's turn signal is on (carState blinkers)
@@ -57,10 +57,8 @@ class NavInputs:
 
 @dataclass
 class NavOutputs:
-  cap: float  # m/s, 0 for none
   arrived: bool  # stopped at the destination: the destination is done, and the driver disengages
   requests: list[str]  # to the driver, in order
   desires: list[str]  # NavDesire's values set this step, in order ("" clears it)
-  cap_reason: str = ""  # what sets the cap, as cereal's NavSpeed.Reason ("turnLeft", "bendRight", ...), "" with none
   # map errors found this step, for the map-fix work: {"event": "anomaly", "kind": ..., "pos": [x, y], ...}
   events: list[dict] = field(default_factory=list)

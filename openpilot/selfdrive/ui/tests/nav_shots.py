@@ -22,7 +22,7 @@ os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 STEP = 0.05  # s of virtual time a frame
 LONG_PRESS = 6  # frames a slide's finger moves over
 NAMES = ("none", "start", "open", "slide", "end", "split", "split_start", "turn", "alert", "drag", "long", "arrive", "metric",
-         "drive", "speed", "always", "check_x_input", "check_routes", "check_full_alert")
+         "drive", "always", "check_x_input", "check_routes", "check_full_alert")
 PERF_FROM = 1.0  # s, after the card is up
 
 
@@ -69,15 +69,6 @@ def scenarios(c):
     # a full-screen alert has the whole screen, in the split with the card open
     "check_full_alert": [(0.0, c.pin()), (0.0, c.scene("approach")), (2.0, c.alert("TAKE CONTROL IMMEDIATELY", "Calibration Invalid", "full")),
                          (2.5, c.shot("full_alert_split")), (2.55, c.check("the alert covers the screen", lambda: c.covered()))],
-    # navigation's speed cap under the MAX box (35 mph), for each reason; released, it fades; in the split, and metric
-    "speed": [(0.0, c.scene("approach")), (0.0, c.speed(5.4, "turnRight")), (1.5, c.shot("speed_turn")),
-              (1.6, c.speed(11.2, "bendRight")), (2.0, c.shot("speed_bend")), (2.05, c.speed(11.2, "bendLeft")),
-              (2.5, c.shot("speed_bend_left")), (2.6, c.speed(13.0, "speedLimit")), (3.5, c.shot("speed_limit")),
-              (3.6, c.speed(9.0, "laneChange")), (4.5, c.shot("speed_lane_change")), (4.6, c.speed(4.5, "bay")),
-              (5.5, c.shot("speed_bay")), (5.6, c.scene("arrive")), (5.6, c.speed(3.1, "arrival")), (6.5, c.shot("speed_arrival")),
-              (6.6, c.speed(20.0, "bend")), (6.7, c.shot("speed_above_set_fading")), (7.5, c.shot("speed_above_set_hidden")),
-              (7.6, c.speed(6.7, "turnLeft")), (7.7, c.shot("speed_fading_in")), (8.5, c.pin()), (9.5, c.shot("speed_split")),
-              (9.6, c.metric()), (10.5, c.shot("speed_split_metric")), (10.6, c.speed(0.0, "none")), (11.5, c.shot("speed_released"))],
     "perf": [(0.0, c.drive(450.0)), (30.0, c.pin()), (45.0, c.stop())],
     # NavShowLanesAlways: the road's lanes with no maneuver near, the car's by the model's lane head; none with it off
     "always": [(0.0, c.lanes_always(True)), (0.0, c.scene("cruise")), (1.0, c.tap("card")), (2.0, c.shot("always_lanes_open")),
@@ -127,11 +118,6 @@ class Context:
     def f(_):
       from openpilot.selfdrive.ui.tests.nav_fake import TURN_AT
       self.nav.scene, self.nav.drive_s = "drive", TURN_AT - before_turn
-    return f
-
-  def speed(self, cap: float, reason: str):
-    def f(_):
-      self.nav.speed = (cap, reason)
     return f
 
   def noo(self) -> bool:

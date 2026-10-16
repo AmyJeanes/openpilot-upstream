@@ -59,17 +59,10 @@ MARKS = os.path.expanduser(os.getenv("GTA5_MARKS", "~/gta5test/marks.jsonl"))  #
 MARK_BEFORE, MARK_AFTER = 30.0, 5.0  # s of the car's track a mark keeps before and after the press (a press comes late)
 TRACK_EVERY = 0.2  # s between the track's points
 PLAN_BEHIND, PLAN_AHEAD = 300.0, 80.0  # m of the plan about the car a mark keeps
-# the car's set speed follows the map's speed limits along the route (GTA5_FOLLOW_LIMIT=1, as before navSpeed, for A/B runs);
-# off, the set speed is the driver's alone and nav caps the speed at the limit (navSpeed, reason speedLimit)
-FOLLOW_LIMIT = os.getenv("GTA5_FOLLOW_LIMIT") == "1"
 # Navigate on openpilot: "param" (the default) follows the NavigateOnOpenpilot param the UI's nav button sets (off:
 # guidance only); "on" nav drives regardless, as test runs need; "off" guidance only
 NOO = os.getenv("GTA5_NOO", "param")
 NOO_CHECK = 0.5  # s between reads of the param
-# how nav's speed cap reaches openpilot: "plan" (the default) publishes it as navSpeed for openpilot's longitudinal
-# planner, below the driver's set speed, which stays the car's; "can" lowers the simulated car's set speed to it instead
-NAV_SPEED = os.getenv("GTA5_NAV_SPEED", "plan")
-NAV_SPEED_EVERY = 0.05  # s
 # routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
 # pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
 # lane for the car is wrong (replays ask for needless lane changes) until the lane comes from elsewhere.
@@ -145,9 +138,6 @@ class Brain:
     self.route: Route | None = None
     self.route_input: tuple | None = None  # (the Route it encodes, its RouteInput, which has its LaneSlots)
     self.routes = 0  # routes the navigator has made, counting reroutes, for tests to follow
-    self.cap = 0.0
-    self.cap_reason = ""
-    self.next_nav_speed = 0.0
     self.gps_route: list = []
     self.noo, self.noo_t = NOO != "off", 0.0
     self.matcher: MapMatcher | None = None  # with NAV_MATCH, once the map's roads are loaded
@@ -186,10 +176,8 @@ class Brain:
     if self.navigator is not None:
       state = self._map_route(state, bearing)
       limits = state.get("limits")
-      known = bool(limits) and limits[0][0] == 0 and limits[0][1] > 0
-      if known:
+      if limits and limits[0][0] == 0 and limits[0][1] > 0:
         inputs["speed_limit"] = limits[0][1]
-      inputs["speed_limit_follow"] = known and FOLLOW_LIMIT
     # the car's blind-spot monitor (gta5_blindspot.py), for openpilot (the Model 3's own signals), nav and the driver
     left, right = self.blindspot.update(state, time.monotonic())
     inputs.update(left_blindspot=left, right_blindspot=right)
@@ -208,7 +196,6 @@ class Brain:
     self.announcer.step(time.monotonic(), self.driver, self.openpilot, took_over(state), self.expert.on, self.route)
     if self.driving is not None and self.driving is not self.openpilot:
       # expert mode or another driver drives: openpilot stays disengaged, and nav and pull-away wait
-      self._set_cap(0.0, "")
       self._set_blinkers()
       self._update_buttons(state)
       if self._map_drive() is not None:
@@ -225,7 +212,6 @@ class Brain:
         self.log.write(json.dumps({"mono": round(time.monotonic(), 3), **e}) + "\n")
     for d in out.desires:
       self._set_nav_desire(d)
-    self._set_cap(out.cap, out.cap_reason)
     self._set_blinkers()
     if out.arrived:
       self.destination.arrived()
@@ -263,18 +249,6 @@ class Brain:
     """The driving model's lane for nav (modelV2.laneHead): [index from the left of ours, count, probability], None
     without a fresh one or from a model without the head."""
     return (self.io.model() or {}).get("lane_head")
-
-  def _set_cap(self, cap: float, reason: str):
-    """nav's speed cap (m/s, 0 for none) to openpilot: as navSpeed for its planner, or as the car's set speed (NAV_SPEED)."""
-    self.cap = cap
-    by_set_speed = NAV_SPEED == "can"
-    self.io.set_inputs(cruise_cap=cap, cap_set_speed=by_set_speed)
-    now = time.monotonic()
-    if by_set_speed or (now < self.next_nav_speed and reason == self.cap_reason):
-      self.cap_reason = reason
-      return
-    self.cap_reason, self.next_nav_speed = reason, now + NAV_SPEED_EVERY
-    self.io.nav_speed(cap, reason or "none")
 
   def _set_blinkers(self):
     # set once per step, from the indicator and nav's repeat gap: the car thread could read any value set in between
@@ -599,7 +573,7 @@ class Brain:
       "text": f"{state.get('street', '')}  {speed}{'  engaged' if self.driver.engaged or self.openpilot.engaged else ''}" +
               ("  cruising (no destination)" if cruising else "") + (f"  | {why}" if (why := self._map_status()) else ""),
       "nav": {"routes": self.routes, "cruise": cruising, "length": None if self.route is None else round(self.route.length, 1),
-              "at": None if self.route is None else round(self.route.at, 1), "cap": round(self.cap, 2)},
+              "at": None if self.route is None else round(self.route.at, 1)},
     })
 
   def _lane_line(self, state: dict, v: float) -> list:
