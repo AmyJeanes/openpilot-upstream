@@ -325,6 +325,7 @@ class NavMessages:
     self.osm = None
     self.busy = False
     self.lock = threading.Lock()
+    self.request: dict | None = None  # navd's request to the driver now (NavOutputs.request), for navInstruction.request
 
   def update(self, route, v: float, osm=None, slots_for: Callable | None = None, now: float | None = None,
              pose: tuple | None = None) -> None:
@@ -364,7 +365,10 @@ class NavMessages:
     except Exception as e:
       print(f"nav msgs: lanes: {e!r}")
       guide = NO_LANES
-    return instruction(route, route.at, v, self.project, guide, pose)
+    out = instruction(route, route.at, v, self.project, guide, pose)
+    if self.request is not None:
+      out["request"] = dict(self.request)
+    return out
 
   def _gather(self, route, at: float, osm):
     """On a thread: the roads near the route ahead of `at`, and the navRoute's content with them."""

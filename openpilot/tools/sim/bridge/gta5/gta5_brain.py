@@ -62,6 +62,9 @@ PLAN_BEHIND, PLAN_AHEAD = 300.0, 80.0  # m of the plan about the car a mark keep
 # Navigate on openpilot: "param" (the default) follows the NavigateOnOpenpilot param the UI's nav button sets (off:
 # guidance only); "on" nav drives regardless, as test runs need; "off" guidance only
 NOO = os.getenv("GTA5_NOO", "param")
+# PLAN D's stage for nav's requests (navInputs.stage, navInstruction.request): GTA runs 3, its simulated driver
+# approving each at once (gta5_driver.HumanDriver)
+NAV_STAGE = int(os.getenv("GTA5_NAV_STAGE", "3"))
 NOO_CHECK = 0.5  # s between reads of the param
 # routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
 # pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
@@ -205,8 +208,10 @@ class Brain:
     state = {**state, "modelLane": self._model_lane()}
     drives = self._nav_drives()
     out = self.nav.update(nav_inputs(state, self.openpilot.engaged, state.get("indicator"), model.get("turns") or {},
-                                     time.monotonic(), drives))
+                                     time.monotonic(), drives, NAV_STAGE))
     self.human.act(out)
+    if self.nav_msgs is not None:
+      self.nav_msgs.request = out.request
     for e in out.events:  # map errors nav found, in the state log as the map driver's anomalies are in its own
       if self.log:
         self.log.write(json.dumps({"mono": round(time.monotonic(), 3), **e}) + "\n")

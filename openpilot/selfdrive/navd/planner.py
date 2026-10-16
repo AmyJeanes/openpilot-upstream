@@ -1055,6 +1055,12 @@ class Planner:
     self.change_bay: np.ndarray | None = None  # where the turn is whose bay the change under way is into
     self.change_map_lane: int | None = None  # the map's lane (map_read) the change started from
     self.change_lane0: tuple[int, int] | None = None  # nav's lane the change started from
+    # the request to the driver now (NavOutputs.request), and what's logged of it once over (navRequest events)
+    self.stage = 1
+    self.request: dict | None = None
+    self.request_meta: dict = {}
+    self.request_id = 0
+    self.request_log: list[dict] = []  # every request once over, as its navRequest event
     self.map_read: dict | None = None  # the car's lane by the map's lanes alone (NavInputs.truth_lane_map)
     self.merge_waits = False  # a merge waiting on nav's and the map's lane readings to agree, as last logged
     self.change_need: str | None = None  # the side _change_for found a lane change needed to this step
@@ -1123,7 +1129,7 @@ class Planner:
     """The step's arrival, requests to the driver and NavDesire's changes."""
     self.requests, self.desires, self.events = [], [], []
     arrived = self._update(inp)
-    return NavOutputs(arrived, self.requests, self.desires, self.events)
+    return NavOutputs(arrived, self.requests, self.desires, self.events, self._request_now())
 
   def _update(self, inp: NavInputs) -> bool:
     """Whether the car has arrived."""
@@ -1131,7 +1137,9 @@ class Planner:
     # guidance only (Navigate on openpilot off) takes no nav actions, as when disengaged: signals cancelled, no lane
     # changes, turn or keep desires or arrival; but what keeps the car on its road stays (_guide)
     engaged, indicator, desire = inp.engaged and inp.drive, inp.blinker, inp.desire
-    self.indicator = indicator
+    self.indicator, self.stage = indicator, inp.stage
+    if self.request is not None and indicator == self.request["side"] and not self.request["approved"]:
+      self.request["approved"], self.request_meta["approved_t"] = True, now
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
     self.was_engaged = engaged
@@ -1153,7 +1161,7 @@ class Planner:
     self.map_read = inp.truth_lane_map
     if not engaged:
       self._cancel(indicator)
-      self._end_change(indicator)
+      self._end_change(indicator, "cancelled")
       self.keeping, self.fork_keep = None, None
       if inp.engaged:
         self._guide(inp, now)
@@ -1206,7 +1214,7 @@ class Planner:
     # the bridge cancels the indicator once the car has turned, as does the driver to take over from ours, once shown
     self.shown |= self.signaled is not None and indicator == self.signaled
     if self.signaled is not None and self.shown and indicator != self.signaled:
-      self._turn_over(now)
+      self._turn_over(now, "done" if self.turn is not None and self._turned(heading) >= TURN_STARTED else "declined")
       self.turn, self.signaled = None, None
 
     if self.turn is not None:
@@ -1236,7 +1244,7 @@ class Planner:
       if done or along > self.turn.dist + MISSED_BY or unturned:
         if DEBUG:
           print(f"nav: turn {'done' if done else 'missed'} after {along:.0f} m (car {heading:.0f})")
-        self._turn_over(now)
+        self._turn_over(now, "done" if done else "missed")
         self._cancel(indicator)
 
     turn = self._next_turn(route, inp.turns) if self.turn is None else None
@@ -1322,7 +1330,9 @@ class Planner:
         print(f"nav: {w['cue']}, {w['past']:.0f} deg past the {w['side']} turn's way out with its pulse maybe still queued")
       self.cue, self.cue_until, self.cue_hold = w["cue"], now + EXIT_CUE_FOR, False
 
-  def _turn_over(self, now: float):
+  def _turn_over(self, now: float, outcome: str = "done"):
+    if self.request is not None and self.request["kind"] == "turn":
+      self._close_request(outcome)
     if self.turn is not None and self.tune.exit_watch:
       sgn = 1.0 if self.turn.side == "left" else -1.0
       self.watch = {"side": self.turn.side, "sgn": sgn, "cue": "keepRight" if sgn > 0 else "keepLeft",
@@ -1539,6 +1549,7 @@ class Planner:
       lane = f"lane {self.lane} at {self.lane_frac}"
       entry = f"{self.entry_kind} in {self.entry:.0f} m"
       print(f"nav: signal {turn.side} in {turn.dist:.0f} m, {entry}, exit heading {turn.exit_heading % 360:.0f} (car {heading:.0f}, {v:.1f} m/s, {lane})")
+    self._open_request("turn", turn.side, "turn", turn.dist, 0, turn.dist, f"signal in {turn.dist:.0f} m")
     self.requests.append("signalTurn" + turn.side.capitalize())
 
   def _signal_window(self, v: float, bay: float) -> float:
@@ -1588,7 +1599,7 @@ class Planner:
       if DEBUG and self.signaled is None:
         print(f"nav: one lane beside the {turn.side} turn's lanes at {v:.1f} m/s, {turn.dist:.0f} m out: its signal, not a lane change, takes it over")
       if self.changing is not None:
-        self._end_change(indicator)
+        self._end_change(indicator, "turn")
       return now >= self.change_hold_until + PARAM_LEAD
     slow = v < 19 * CV.MPH_TO_MS and self.changing is None
     if t.signal_mode == "entry" and self.min_ahead == MIN_AHEAD_MAP:
@@ -1616,7 +1627,7 @@ class Planner:
         beside = t.turn_from_beside and self.lane[0] in (lo - 1, hi + 1) and (
           self.lane_frac is None or lo - 1 - SKIP_SURE <= self.lane_frac <= hi + 1 + SKIP_SURE)
         if self._sure_wrong(lo, hi) and not beside:
-          self._end_change(indicator)
+          self._end_change(indicator, "left")
           self._skip(route, turn.dist, f"{turn.side} turn")
           return False
         if beside and DEBUG:
@@ -1624,7 +1635,7 @@ class Planner:
     if self.changing is not None:
       if self.driven < self.bay_to and turn.dist > BAY_LAST:
         return False  # into the turn bay first
-      self._end_change(indicator)
+      self._end_change(indicator, "turn")
     # openpilot is to read NavDesire cleared before the blinker comes on for the turn
     return now >= self.change_hold_until + PARAM_LEAD
 
@@ -1650,7 +1661,8 @@ class Planner:
       self._bay_oncoming(where, turn.side, turn.dist)
       return
     self.bay_to = self.driven + turn.dist + TURN_HOLDS
-    self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m", by=turn.dist - BAY_LAST, bay=where)
+    self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m", by=turn.dist - BAY_LAST, bay=where,
+                       reason="turnBay", target=turn.dist)
 
   def _lanes_for(self, m) -> tuple[int, int]:
     return lanes_for(m, self.lane, self.maps)
@@ -1769,8 +1781,17 @@ class Planner:
       # lanes ending at a fork are the other branch's: staying in them leaves the route rather than running out of road
       ends = "lane ending" if must else "lane leaving at the fork"
       what = "way straight on" if isinstance(m, Through) else ends if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
+      if isinstance(m, Turn):
+        reason = "turn"
+      elif fork:
+        reason = "exit" if freeway_move(m, self.classes) else "fork"
+      elif isinstance(m, Through):
+        reason = "straightOn"
+      else:
+        reason = "laneEnds" if must else "exit" if freeway_move(m, self.classes) else "fork"
       self._start_change(side, f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
-                         turn=isinstance(m, Turn), by=by, planned=True, end=m.dist if must else None, bay=bay)
+                         turn=isinstance(m, Turn), by=by, planned=True, end=m.dist if must else None, bay=bay,
+                         reason=reason, changes=changes, target=m.dist)
 
   def _plan_speed(self, v: float) -> float:
     """The speed city changes are timed at: the car's, or with model_lc_speed the road's limit here if higher (the car
@@ -1928,6 +1949,10 @@ class Planner:
       self.cue = None
     keep = self.cue or self.recover or self.fork_keep or self.keeping or ""
     want = "laneChange" if self.changing is not None or now < self.change_hold_until else keep
+    if want == "laneChange" and self.stage < 3 and self.change_side is not None:
+      # the driver approves (PLAN D stages 1-2): only their blinker on the request's side is a lane change at any speed,
+      # the other side's still a turn (desire_helper's "laneChange:<side>"); auto-approved (3), as before
+      want = f"laneChange:{self.change_side}"
     if want == "keepLeft" and not self.one_way:
       want = ""  # on a two-way road, towards the oncoming lanes
     if want.startswith("keep"):
@@ -1952,7 +1977,7 @@ class Planner:
     self.wrong_side_t = self.wrong_side_t or now
     if (self.changing is None and self.turn is None and now - self.wrong_side_t > WRONG_SIDE_FOR and v > LANE_CHANGE_SPEED
         and now - self.change_t > LANE_CHANGE_GAP and not self._into_oncoming("right")):
-      self._start_change("right", f"out of oncoming lane {-lane[0]}")
+      self._start_change("right", f"out of oncoming lane {-lane[0]}", reason="oncoming", changes=-lane[0])
 
   def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float, map_lane: dict | None = None):
     """keepRight while the plugin's own lane reading has held in the oncoming lanes (oncoming_keep): it's right outside
@@ -1979,9 +2004,12 @@ class Planner:
     self.recover = "keepRight"
 
   def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False,
-                    end: float | None = None, bay: np.ndarray | None = None):
+                    end: float | None = None, bay: np.ndarray | None = None, reason: str = "other", changes: int = 1,
+                    target: float | None = None):
     """A lane change to `side`, which may start no later than `by` m on; or, out of a lane that ends `end` m on,
-    waiting on the blind spot as long as it takes; bay: into the bay of the turn there."""
+    waiting on the blind spot as long as it takes; bay: into the bay of the turn there. reason, changes (this one
+    included) and target (m on to the maneuver it's for) describe it to the driver (NavOutputs.request)."""
+    self._open_request("laneChange", side, reason, by if math.isfinite(by) else (end or 0.0), changes, target, why)
     self.changing, self.change_shown, self.change_t, self.change_turn = side, False, self.now, turn
     self.change_bay = bay
     self.change_side, self.change_by, self.change_went, self.change_planned = side, self.driven + by, False, planned
@@ -2003,7 +2031,8 @@ class Planner:
       if self.change_went and self.change_lane0 is not None and self.change_lane0[0] >= 0:
         i, n = self.change_lane0
         self.model_expect = ((min(max(i + (-1 if self.changing == "left" else 1), 0), n - 1), n), now)
-      self._end_change(indicator)
+      # done (the stalk off once over), or the driver's blinker off before openpilot could start it: declined
+      self._end_change(indicator, "done" if self.change_went else "declined")
       return
     # never into a lane the map reads as oncoming, whatever nav's own lane says, until the car has moved over (a lane
     # of its own way then has oncoming lanes beside it); nor into a turn bay that reads so, which is reported
@@ -2030,7 +2059,7 @@ class Planner:
       return
     self.change_went |= self.change_shown
     if now - self.change_t > LANE_CHANGE_TIMEOUT:
-      self._end_change(indicator)
+      self._end_change(indicator, "timeout")
 
   def _give_up(self, indicator: str | None, why: str):
     """Ends a lane change that hasn't started, the blinker off."""
@@ -2038,11 +2067,13 @@ class Planner:
       print(f"nav: lane change {self.changing} given up, {why}")
     if not self.change_shown and not self.change_send_at:
       self.requests.append("cancelSignal")  # asked for, but not on yet
-    self._end_change(indicator)
+    self._end_change(indicator, "gave_up")
 
-  def _end_change(self, indicator: str | None):
+  def _end_change(self, indicator: str | None, outcome: str = "ended"):
     if self.changing is None:
       return
+    if self.request is not None and self.request["kind"] == "laneChange":
+      self._close_request(outcome)
     if indicator == self.changing:
       self.requests.append("cancelSignal")
     self.changing, self.change_t, self.change_send_at, self.change_bay = None, self.now, 0.0, None
@@ -2067,7 +2098,45 @@ class Planner:
   def _cancel(self, indicator: str | None):
     if self.signaled is not None and (indicator == self.signaled or not self.shown):
       self.requests.append("cancelSignal")
+    if self.request is not None and self.request["kind"] == "turn":
+      self._close_request("cancelled")
     self.turn, self.signaled = None, None
+
+  def _open_request(self, kind: str, side: str, reason: str, distance: float, changes: int, target: float | None, why: str):
+    """A new request to the driver (NavOutputs.request), the one before closed as replaced."""
+    if self.request is not None:
+      self._close_request("replaced")
+    self.request_id += 1
+    self.request = {"kind": kind, "side": side, "reason": reason, "distance": round(max(distance, 0.0), 1),
+                    "laneChanges": int(changes), "stage": int(self.stage), "id": self.request_id, "approved": False}
+    self.request_meta = {"t": round(self.now, 2), "driven": self.driven, "pos": [round(float(c), 1) for c in self.pos],
+                         "lane": list(self.lane) if self.lane else None, "lane_src": self.lane_src, "v": round(self.v, 1),
+                         "target": None if target is None else round(target, 1), "why": why, "approved_t": None}
+
+  def _request_now(self) -> dict | None:
+    """The request as it stands: its distance counted down as the car drives on."""
+    if self.request is None:
+      return None
+    left = self.request["distance"] - (self.driven - self.request_meta["driven"])
+    return {**self.request, "distance": round(max(left, 0.0), 1)}
+
+  def _close_request(self, outcome: str):
+    """The request over: logged (a navRequest event, and request_log), with how it went: done, declined (the driver's
+    blinker off first), gave_up (nav withdrew it), timeout, turn (the turn's signal took over from a change), left (the
+    maneuver left to the route), missed (a turn not taken), cancelled (nav disengaged), replaced, ended."""
+    r, m = self.request, self.request_meta
+    if r is None:
+      return
+    approved = m.get("approved_t")
+    event = {"event": "navRequest", **{k: r[k] for k in ("id", "kind", "side", "reason", "laneChanges", "stage")},
+             "t": m["t"], "pos": m["pos"], "lane": m["lane"], "lane_src": m["lane_src"], "v": m["v"],
+             "distance": r["distance"], "target": m["target"], "why": m["why"],
+             "approved_after": None if approved is None else round(approved - m["t"], 2),
+             "driven": round(self.driven - m["driven"], 1), "secs": round(self.now - m["t"], 2), "outcome": outcome,
+             "lane_after": list(self.lane) if self.lane else None}
+    self.events.append(event)
+    self.request_log.append(event)
+    self.request, self.request_meta = None, {}
 
   def blinker_gap(self, now: float) -> bool:
     """Whether openpilot shouldn't see the blinker just now, to repeat the turn request."""

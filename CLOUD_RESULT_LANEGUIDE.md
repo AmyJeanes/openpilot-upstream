@@ -213,3 +213,52 @@ map's count). Fused is worth keeping as today's rule while the map's reading is 
 
 Tests: `selfdrive/navd/tests/test_lane_source.py` (9: a flicker, hysteresis, dropouts, counting from the side that
 matters, the side itself, the map's count, the lane a change was into, fused, sure-wrong without truth).
+
+## Step 4: request and approve (PLAN D)
+
+### What's there
+
+- **Message**: `navInstruction.request` (`cereal/log.capnp`, a fork field @19, struct `NavInstruction.Request`): kind
+  (none / laneChange / turn), side, reason (turn, fork, exit, straightOn, laneEnds, turnBay, oncoming, other), distance
+  (m ahead by which it's needed: the last place to start it, counted down), laneChanges (still to go), stage, id, and
+  approved (the blinker on its side).
+- **navd**: `NavOutputs.request` (the request now) and a `navRequest` event when each is over, which the bridge already
+  writes to its state log with nav's other events: id, kind, side, reason, time and place asked, nav's lane and its
+  source (map / model), speed, distance, the maneuver's distance, approved after (s), driven, outcome (done, declined,
+  gave_up, timeout, turn: the turn's signal took over, left: left to the route, missed, cancelled, replaced) and the
+  lane after. `Planner.request_log` keeps them; `navd_sim --requests FILE` dumps every run's as JSON lines, so a model's
+  own requests (PLAN D) can later be scored against nav's at the same places.
+- **Stage**: `NavLaneChangeStage` param (`params_keys.h`, persistent, default 1); `NavInputs.stage`. 1 suggest only:
+  nav asks, the driver's blinker approves; 2 nav's blinker (cars that allow it), the driver's nudge confirms; 3
+  auto-approved: GTA's simulated driver (`HumanDriver`) does both. The bridge runs 3 (`GTA5_NAV_STAGE`, default 3).
+- **Approval through DesireHelper, rules as now**: at stages 1-2 NavDesire becomes `laneChange:<side>`, so only the
+  driver's blinker on the request's side is a lane change below 20 mph (`desire_helper.nav_lane_change`); the other
+  side's blinker stays a turn. Then preLaneChange, the nudge, the blind spot clear for 0.5 s, the 10 s timeout, exactly
+  as for any lane change. Stage 3 keeps today's bare `laneChange`, so the GTA runs and a sunnypilot stack (which
+  doesn't know the sided value) are unchanged.
+- **UI**: `selfdrive/ui/nav/nav_state.py`: `NavRequest` read from the message (`Guidance.request`), `request_prompt`
+  (stage 1: "Change lanes right for the exit" / "signal to confirm"; stage 2: "... / nudge the wheel to confirm";
+  approved or stage 3: "Changing lanes right for the exit"), and `RequestState` (a new request shows once held 0.3 s,
+  its approval at once, kept through dropouts under 1 s). mici's existing lane-change alert (`nav_card.py`) now takes
+  nav's request where there is one, and its own lane inference otherwise.
+
+### In the harness (stage 3, truth lane; behaviour identical to step 3)
+
+| run | requests | lane changes: done / gave up / timeout / turn took over | turns: done | approved after (median) | asked at (median, m before the last place) |
+|---|---|---|---|---|---|
+| n16 | 381 | 205: 103 / 32 / 39 / 31 | 172 of 176 | 0.5 s | 102 m |
+| finetuned | 428 | 240: 127 / 34 / 39 / 40 | 182 of 188 | 0.5 s | 99 m |
+
+By reason (n16): turns 65 (26 done), turn bays 13 (all taken over by the turn's signal), forks 28 (15), freeway
+exits 42 (38), lanes ending 48 (20), straight on 8 (4). The turn bays and city turns are where requests go unmet,
+the freeway's almost always.
+
+Tests: `selfdrive/controls/tests/test_nav_approval.py` (5: sides, the driver's blinker on the request's side approves
+through preLaneChange and the nudge, the other side is a turn, the blind spot holds it, no request below 20 mph is a
+turn); `selfdrive/ui/tests/test_nav_request.py` (3: read, the prompt by stage, the UI state); `test_nav.py` +3 (the
+request's lifecycle and log, declined and turn requests, the sided NavDesire by stage); `test_nav_msgs.py` +1 (the
+bridge fills `navInstruction.request`).
+
+Not run here: openpilot's own `test_desire_helper.py` and mici's `test_nav.py` / `test_nav_state.py` need native
+`params` / raylib (a display), which this container doesn't have; the approval tests stub `Params` only where it's
+missing, and the mici wiring (`nav_card.py`) is untested beyond import-free logic.

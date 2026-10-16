@@ -13,7 +13,8 @@ import pyray as rl
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import Alert, AlertSize, AlertStatus
 from openpilot.selfdrive.ui.nav.draw import (Anim, draw_car, draw_maneuver, lane_arrow, lerp, max_blend, maneuver_kind, mix, premul,
                                              split_arrow, with_alpha)
-from openpilot.selfdrive.ui.nav.nav_state import CardLane, Guidance, NavState, card_lanes, format_distance, maneuver_phase
+from openpilot.selfdrive.ui.nav.nav_state import CardLane, Guidance, NavRequest, NavState, RequestState, card_lanes, format_distance, \
+  maneuver_phase, request_prompt
 from openpilot.selfdrive.ui.nav.session import NavSession
 from openpilot.selfdrive.ui.ui_state import UIStatus, ui_state
 from openpilot.system.ui.lib.application import FONT_SCALE, FontWeight, gui_app
@@ -83,11 +84,15 @@ def lane_request(g: Guidance, lanes: list[CardLane], here: int | None, phase: st
   return "right" if min(lit, key=lambda i: abs(i - here)) > here else "left"
 
 
-def request_alert(side: str) -> Alert:
-  """Navigation's lane change request, as mici draws a lane change prompt (the turn signal icon, the small height)."""
-  text = tr("move right") if side == "right" else tr("move left")
-  return Alert(text, tr("signal to confirm"), AlertSize.small, AlertStatus.normal,
-               alert_type=f"navLaneChange{side.capitalize()}/warning")
+def request_alert(side: str, req: NavRequest | None = None) -> Alert:
+  """Navigation's lane change request, as mici draws a lane change prompt (the turn signal icon, the small height):
+  nav's own request's words where it sent one (request_prompt: its reason and stage), else the card's "move right"."""
+  prompt = request_prompt(req) if req is not None and req.kind == "laneChange" else None
+  if prompt is not None:
+    text1, text2 = prompt
+  else:
+    text1, text2 = (tr("move right") if side == "right" else tr("move left")), tr("signal to confirm")
+  return Alert(text1, text2, AlertSize.small, AlertStatus.normal, alert_type=f"navLaneChange{side.capitalize()}/warning")
 
 
 _NOTHING = object()
@@ -140,6 +145,7 @@ class NavTurnCard:
     self.mode = "hidden"  # as drawn this frame
     self._shape = "chip"  # the last shown mode, kept while the card fades away
     self._request = Debounce(REQUEST_ON_S, REQUEST_OFF_S)
+    self._nav_request = RequestState()  # navigation's own request (navInstruction.request), where it sends one
     self._anims = {k: Anim(0.0) for k in ("w", "h", "y", "big", "row", "lanes", "shown", "lit")}
     self._lanes_key: tuple = ()
     self._lanes: tuple[list[CardLane], int | None] = ([], None)
@@ -163,13 +169,17 @@ class NavTurnCard:
       want = None
     if REQUEST_NEEDS_ENGAGED and ui_state.status == UIStatus.DISENGAGED:
       want = None
+    req = self._nav_request.update(self.nav.guidance.request if on else None, now)
+    if req is not None and req.kind == "laneChange":
+      want = req.side  # navigation's request wins over the card's own guess
     self._request.update(want, now)
     self._anims["lit"].set(1.0 if lanes_lit(self.session.noo, ui_state.status) else 0.0, now, LIT_S)
 
   def request_alert(self) -> Alert | None:
     """Navigation's lane request for the alert renderer, when openpilot has no alert of its own."""
     side = self._request.value
-    return request_alert(side) if side is not None and self.session.route_on else None
+    req = self._nav_request.shown
+    return request_alert(side, req if req is not None and req.side == side else None) if side is not None and self.session.route_on else None
 
   def _dist_text(self) -> tuple[str, str]:
     m = self.nav.guidance.maneuver

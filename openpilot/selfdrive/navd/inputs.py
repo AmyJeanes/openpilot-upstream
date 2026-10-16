@@ -43,6 +43,9 @@ class NavInputs:
   # the driving model's current-lane head (modelV2.laneHead): [lane from the left of ours, lanes, probability]; None
   # without a fresh one
   model_lane: list | None = None
+  # PLAN D's stage for nav's requests (the NavLaneChangeStage param): 1 suggest only, the driver signals to approve; 2
+  # nav's blinker, the driver nudges to approve (cars that allow it); 3 auto-approved (GTA's simulated driver)
+  stage: int = 1
   left_blindspot: bool = False  # a vehicle in the blind spot that side (carState's blind-spot monitor)
   right_blindspot: bool = False
   # truth
@@ -61,5 +64,9 @@ class NavOutputs:
   arrived: bool  # stopped at the destination: the destination is done, and the driver disengages
   requests: list[str]  # to the driver, in order
   desires: list[str]  # NavDesire's values set this step, in order ("" clears it)
-  # map errors found this step, for the map-fix work: {"event": "anomaly", "kind": ..., "pos": [x, y], ...}
+  # map errors found this step, for the map-fix work: {"event": "anomaly", "kind": ..., "pos": [x, y], ...}; and each
+  # request to the driver once it's over ({"event": "navRequest", ...}: what, where, outcome), to score requests by
   events: list[dict] = field(default_factory=list)
+  # the request to the driver now, for navInstruction.request: {"kind": "laneChange"|"turn", "side", "reason", "distance"
+  # (m by which it's needed), "laneChanges", "stage", "id", "approved"}; None without one
+  request: dict | None = None

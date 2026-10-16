@@ -22,10 +22,10 @@ MOVED = {"waypoint": 1.0, "mission": 30.0}
 
 
 def nav_inputs(state: dict, engaged: bool, indicator: str | None, desire: dict[str, float], now: float,
-               drive: bool = True) -> NavInputs:
+               drive: bool = True, stage: int = 3) -> NavInputs:
   """The world's state (after _map_route: the route's points and Route.info) as the planner's inputs."""
   return NavInputs(
-    t=now, engaged=engaged, drive=drive, v=state.get("vEgo", 0.0), yaw_rate=state.get("yawRate", 0.0), blinker=indicator, desire=desire,
+    t=now, engaged=engaged, drive=drive, stage=stage, v=state.get("vEgo", 0.0), yaw_rate=state.get("yawRate", 0.0), blinker=indicator, desire=desire,
     route=state.get("route"), dest=state.get("waypoint"), route_end=state.get("routeEnd"), forks=state.get("forks"),
     stops=state.get("stops"), stop_kinds=state.get("stopKinds"), junctions=state.get("junctions"), limits=state.get("limits"),
     lane_arrows=state.get("laneArrows"), lane_drops=state.get("laneDrops"), lane_maps=state.get("laneMaps"), lane_counts=state.get("laneCounts"), turns=state.get("turns"), two_way=state.get("twoWay"),

@@ -17,6 +17,11 @@ def fill_instruction(ni, content: dict) -> None:
         out.directions = lane["directions"]
         out.active, out.activeDirection = lane["active"], lane["activeDirection"]
         out.oncoming, out.current = lane["oncoming"], lane["current"]
+    elif key == "request":  # navd's NavOutputs.request
+      r = ni.request
+      r.kind, r.side, r.reason = value["kind"], value["side"], value.get("reason", "other")
+      r.distance, r.laneChanges = float(value.get("distance", 0.0)), int(value.get("laneChanges", 0))
+      r.stage, r.id, r.approved = int(value.get("stage", 0)), int(value.get("id", 0)), bool(value.get("approved", False))
     elif key == "position":
       ni.position.latitude, ni.position.longitude = value["latitude"], value["longitude"]
     else:

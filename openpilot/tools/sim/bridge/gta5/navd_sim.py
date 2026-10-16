@@ -522,14 +522,16 @@ class TripResult:
   changes: list = field(default_factory=list)
   collisions: int = 0
   skipped: int = 0  # turns and forks nav left to the route
+  requests: list = field(default_factory=list)  # nav's requests to the driver, as logged once over (navRequest events)
   wall_s: float = 0.0
   error: str | None = None
 
 
 class NavSim:
   def __init__(self, route: Route, lane: float, model: ModelCfg, head: HeadCfg, traffic: TrafficCfg | None = None,
-               tune: dict | None = None, seed: int = 0, name: str = "", s0: float = 0.0):
+               tune: dict | None = None, seed: int = 0, name: str = "", s0: float = 0.0, stage: int = 3):
     self.route, self.model, self.head_cfg = route, model, head
+    self.stage = stage  # PLAN D's: the simulated driver approves at any stage, as GTA's
     self.rng = np.random.default_rng(seed)
     self.road = Road(route, model)
     self.lights = Lights(self.road, self.rng)
@@ -614,7 +616,7 @@ class NavSim:
              "waypoint": [float(r.points[-1][0]), float(r.points[-1][1])]}
     desire = {self.pulse_side: 0.9} if self.pulse_side and self.t - self.pulse_t < PULSE_MEMORY else {}
     skipped = len(self.nav.skipped)
-    out = self.nav.update(nav_inputs(state, True, self.indicator, desire, self.t, True))
+    out = self.nav.update(nav_inputs(state, True, self.indicator, desire, self.t, True, self.stage))
     self.result.skipped += max(len(self.nav.skipped) - skipped, 0)
     for req in out.requests:
       if req == "cancelSignal":
@@ -652,10 +654,12 @@ class NavSim:
     nav_desire = self.nav.desire.partition("+")[0]
     one = self.indicator is not None
     side = self.indicator
+    # desire_helper's nav_lane_change: "laneChange", or "laneChange:<side>" with the blinker that side
+    nav_lc = nav_desire == "laneChange" or (one and nav_desire == f"laneChange:{side}")
     lane = int(round(self.lane))
     for sd, off in (("left", -1), ("right", 1)):
       self.clear[sd] = 0.0 if self.traffic.beside(self.s, lane, off) else self.clear[sd] + DT
-    below = self.v < LANE_CHANGE_SPEED_MIN and nav_desire != "laneChange"
+    below = self.v < LANE_CHANGE_SPEED_MIN and not nav_lc
     rising = one and not self.prev_one_blinker
     if self.lc_state == "off" and rising and not below:
       self.lc_state, self.lc_timer, self.lc_dir = "pre", 0.0, side
@@ -696,7 +700,7 @@ class NavSim:
           self._close_change("done" if self.lc_p >= 0.5 else "failed")
     self.prev_one_blinker = one
     # the turn desire's pulse: a blinker below the lane change speed, NavDesire not a lane change
-    if rising and self.v < LANE_TURN_SPEED and nav_desire != "laneChange":
+    if rising and self.v < LANE_TURN_SPEED and not nav_lc:
       self.pulse_t, self.pulse_side = self.t, side
     self._turn_take()
     # the driver cancels a turn's signal once the car has come round
@@ -849,6 +853,9 @@ class NavSim:
       import traceback
       self.result.error = f"{type(e).__name__}: {e} @ {traceback.format_exc().splitlines()[-3].strip()}"
     self._close_change("gave_up")
+    if self.nav.request is not None:
+      self.nav._close_request("trip over")
+    self.result.requests = list(self.nav.request_log)
     self.result.driven, self.result.secs = round(self.s, 1), round(self.t, 1)
     self.result.maneuvers = [asdict(m) for m in self.moves if m.judged]
     self.result.changes = [{**asdict(c), "hanging": round(c.hanging, 2)} for c in self.changes]
@@ -999,7 +1006,20 @@ def summarise(results: list[dict]) -> dict:
     "hanging_s": round(sum(c["hanging"] for c in cs), 1),
     "hanging_per_lc": round(sum(c["hanging"] for c in cs) / max(len(cs), 1), 2),
     "collisions": sum(r["collisions"] for r in results),
+    "requests": request_outcomes([q for r in results for q in r.get("requests", [])]),
   }
+
+
+def request_outcomes(reqs: list[dict]) -> dict:
+  """nav's logged requests (navRequest events) by kind and outcome, and the lane changes' by reason."""
+  out: dict = {}
+  for q in reqs:
+    k = out.setdefault(q["kind"], {})
+    k[q["outcome"]] = k.get(q["outcome"], 0) + 1
+    if q["kind"] == "laneChange":
+      r = out.setdefault("byReason", {}).setdefault(q["reason"], {})
+      r[q["outcome"]] = r.get(q["outcome"], 0) + 1
+  return out
 
 
 COLUMNS = [("in lane", lambda s: f"{s['in_lane']}/{s['relevant']} ({s['in_lane_pct']:.0f}%)"),
@@ -1052,12 +1072,12 @@ def _one(k: int) -> dict:
   if j.get("no_turn_take"):
     model = ModelCfg(**{**asdict(model), "turn_takes_lane": False})
   sim = NavSim(route, lane, model, parse_head(j["head"]), TrafficCfg(density=j["density"]), j["tune"],
-               seed=j["seed"] * 1000 + k, name=name, s0=s0)
+               seed=j["seed"] * 1000 + k, name=name, s0=s0, stage=j.get("stage", 3))
   return asdict(sim.run())
 
 
 def run(names_specs, models: list[str], heads: list[str], tune: dict | None = None, density: float = 10.0, seed: int = 0,
-        quiet: bool = False, jobs: int = 1, no_turn_take: bool = False) -> dict:
+        quiet: bool = False, jobs: int = 1, no_turn_take: bool = False, stage: int = 3) -> dict:
   """Each model x lane source over the trips: {"model / head": {"summary": ..., "trips": [TripResult, ...]}}."""
   import multiprocessing
   _LOADED.clear()
@@ -1072,7 +1092,7 @@ def run(names_specs, models: list[str], heads: list[str], tune: dict | None = No
   for model in models:
     for head in heads:
       key = f"{model} / {head}"
-      _JOB.update(model=model, head=head, density=density, tune=tune, seed=seed, no_turn_take=no_turn_take)
+      _JOB.update(model=model, head=head, density=density, tune=tune, seed=seed, no_turn_take=no_turn_take, stage=stage)
       if jobs > 1:
         with multiprocessing.get_context("fork").Pool(jobs) as pool:
           res = pool.map(_one, range(len(_LOADED)), chunksize=1)
@@ -1099,6 +1119,8 @@ def main():
   ap.add_argument("--tune", default="{}", help="planner Tune overrides, JSON")
   ap.add_argument("--only", default="", help="comma-separated trip names")
   ap.add_argument("--out", default="", help="the full results, JSON")
+  ap.add_argument("--requests", default="", help="every request nav made (navRequest events, with the run and trip), JSON lines")
+  ap.add_argument("--stage", type=int, default=3, help="PLAN D's stage nav's requests are made at (the driver approves any)")
   ap.add_argument("--no-turn-take", action="store_true", help="the stand-in's turn desire doesn't take it a lane over")
   ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="trips run in parallel")
   args = ap.parse_args()
@@ -1108,7 +1130,7 @@ def main():
     keep = set(args.only.split(","))
     todo = [t for t in todo if t[0] in keep]
   res = run(todo, args.model.split(","), args.lane.split(","), json.loads(args.tune), args.density, args.sim_seed,
-            jobs=args.jobs, no_turn_take=args.no_turn_take)
+            jobs=args.jobs, no_turn_take=args.no_turn_take, stage=args.stage)
   save_routes([spec for _, spec in todo])
   print(table([(k, v["summary"]) for k, v in res.items()]))
   print()
@@ -1116,6 +1138,12 @@ def main():
   if args.out:
     with open(args.out, "w") as f:
       json.dump(res, f)
+  if args.requests:
+    with open(args.requests, "w") as f:
+      for key, v in res.items():
+        for trip in v["trips"]:
+          for q in trip["requests"]:
+            f.write(json.dumps({"run": key, "trip": trip["name"], **q}) + "\n")
 
 
 if __name__ == "__main__":
