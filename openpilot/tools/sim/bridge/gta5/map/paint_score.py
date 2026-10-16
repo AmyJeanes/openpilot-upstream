@@ -218,6 +218,84 @@ def static(map_dir: str, paint_path: str, cache: dict | None = None) -> tuple[di
   return rep, places, {'d': d, 'matched': matched}
 
 
+# *** paint beside any point ***
+
+PAINT_KINDS = {'solid': 0, 'dashed': 1, 'centre': 2, 'centre_dashed': 3, 'edge': 4}  # drift_frames.py's line kinds
+BESIDE_CELL, BESIDE_ALIGN, BESIDE_LAT, BESIDE_ALONG, BESIDE_LEVEL = 10.0, 25.0, 9.0, 1.5, 4.0  # m, deg, m, m, m
+
+
+class PaintIndex:
+  """The paint's lines (lanes.json format) by 10 m cells, for the lines across a point's lateral axis as
+  drift_frames.py found them for the drift frames: [(m right of the point, kind)], left to right, within BESIDE_LAT,
+  running within BESIDE_ALIGN of its heading, at its height (BESIDE_LEVEL), pieces within 0.3 m of each other one."""
+  def __init__(self, path: str):
+    j = json.load(open(path))
+    a, b, z, kind = [], [], [], []
+    for line, h in zip(j['lines'], j['heights'], strict=True):
+      k = PAINT_KINDS.get(j['kinds'][line[0]])
+      if k is None:
+        continue
+      p = np.asarray(line[1:], float).reshape(-1, 2)
+      hz = np.asarray(h if isinstance(h, list) else [h] * len(p), float)
+      if len(hz) != len(p):
+        hz = np.full(len(p), hz.mean() if len(hz) else 0.0)
+      a.append(p[:-1]); b.append(p[1:]); z.append((hz[:-1] + hz[1:]) / 2); kind.append(np.full(len(p) - 1, k))
+    self.a, self.b, self.z, self.kind = np.concatenate(a), np.concatenate(b), np.concatenate(z), np.concatenate(kind)
+    self.cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+    lo = np.floor(np.minimum(self.a, self.b) / BESIDE_CELL).astype(int)
+    hi = np.floor(np.maximum(self.a, self.b) / BESIDE_CELL).astype(int)
+    for i in range(len(self.a)):
+      for cx in range(lo[i, 0], hi[i, 0] + 1):
+        for cy in range(lo[i, 1], hi[i, 1] + 1):
+          self.cells[(cx, cy)].append(i)
+    self._cache: dict[tuple[int, int], np.ndarray] = {}
+
+  def _near(self, x: float, y: float) -> np.ndarray:
+    cx, cy = int(math.floor(x / BESIDE_CELL)), int(math.floor(y / BESIDE_CELL))
+    key = (cx, cy)
+    if key not in self._cache:
+      idx = [self.cells.get((i, j), []) for i in (cx - 1, cx, cx + 1) for j in (cy - 1, cy, cy + 1)]
+      self._cache[key] = np.unique(np.concatenate([np.asarray(v, int) for v in idx])) if any(idx) else np.zeros(0, int)
+    return self._cache[key]
+
+  def beside(self, p, u, z: float = math.nan) -> list[tuple[float, int]]:
+    """The paint's lines across the lateral axis at point p heading u (unit): [(m right of p, kind)]."""
+    idx = self._near(float(p[0]), float(p[1]))
+    if not len(idx):
+      return []
+    if math.isfinite(z):
+      idx = idx[np.abs(self.z[idx] - z) < BESIDE_LEVEL]
+    a, b = self.a[idx] - p, self.b[idx] - p
+    d = b - a
+    L = np.hypot(*d.T) + 1e-9
+    keep = np.abs(d @ u) / L > math.cos(math.radians(BESIDE_ALIGN))
+    r = np.array([u[1], -u[0]])
+    af, bf, ar, br, kd = a[keep] @ u, b[keep] @ u, a[keep] @ r, b[keep] @ r, self.kind[idx][keep]
+    out = []
+    for f0, f1, r0, r1, k in zip(af, bf, ar, br, kd, strict=True):
+      if f0 * f1 <= 0 and abs(f1 - f0) > 1e-6:
+        lat = r0 + (r1 - r0) * (0 - f0) / (f1 - f0)
+      elif min(abs(f0), abs(f1)) < BESIDE_ALONG:
+        lat = r0 if abs(f0) < abs(f1) else r1
+      else:
+        continue
+      if abs(lat) < BESIDE_LAT:
+        out.append((float(lat), int(k)))
+    out.sort()
+    merged: list[tuple[float, int]] = []
+    for lat, k in out:
+      if merged and lat - merged[-1][0] < 0.3:
+        continue
+      merged.append((lat, k))
+    return merged
+
+  def lane_error(self, p, u, z: float = math.nan) -> float:
+    """m right of the centre of the paint lane a point is in (between the lines either side, LANE_MIN-LANE_MAX
+    apart), NaN where it's in none."""
+    left, right = bracket(self.beside(p, u, z), 0.0)
+    return -(left[0] + right[0]) / 2 if lane_ok(left, right) else math.nan
+
+
 # *** drift re-score ***
 
 def _ele(osm, node: int) -> float:

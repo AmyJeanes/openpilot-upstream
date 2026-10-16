@@ -1,0 +1,106 @@
+{
+ "diverges": {
+  "399:205>399:214": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.29 m off as the map has it, 0.46 m moved (over 1 m 0.087 -> 0.212, paint on 0.95 of it)",
+   "x": -463.0,
+   "y": -1890.0
+  },
+  "399:266>399:254": {
+   "keep": true,
+   "kind": "diverge",
+   "why": "paint lane centre 0.1 m off as the map has it, 0.37 m moved (over 1 m 0.0 -> 0.143, paint on 0.76 of it)",
+   "x": -447.7,
+   "y": -1859.7
+  },
+  "399:757>399:778": {
+   "keep": true,
+   "kind": "diverge",
+   "why": "paint lane centre 0.1 m off as the map has it, 0.3 m moved (over 1 m 0.0 -> 0.132, paint on 0.43 of it)",
+   "x": -422.7,
+   "y": -1591.2
+  },
+  "431:705>431:647": {
+   "keep": true,
+   "kind": "diverge",
+   "why": "paint lane centre 0.38 m off as the map has it, 1.32 m moved (over 1 m 0.089 -> 0.558, paint on 0.39 of it)",
+   "x": -126.7,
+   "y": -1235.0
+  },
+  "434:43>434:13": {
+   "keep": true,
+   "kind": "diverge",
+   "why": "paint lane centre 0.57 m off as the map has it, 0.76 m moved (over 1 m 0.262 -> 0.328, paint on 0.95 of it)",
+   "x": 1044.5,
+   "y": -1503.0
+  },
+  "462:701>462:702": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.12 m off as the map has it, 0.69 m moved (over 1 m 0.034 -> 0.294, paint on 0.47 of it)",
+   "x": -936.5,
+   "y": -564.7
+  },
+  "462:770>462:721": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.39 m off as the map has it, 0.84 m moved (over 1 m 0.133 -> 0.354, paint on 0.45 of it)",
+   "x": -991.7,
+   "y": -557.8
+  },
+  "462:777>462:774": {
+   "keep": true,
+   "kind": "diverge",
+   "why": "paint lane centre 0.37 m off as the map has it, 1.8 m moved (over 1 m 0.297 -> 1.0, paint on 0.77 of it)",
+   "x": -947.0,
+   "y": -538.3
+  },
+  "494:70>494:79": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.19 m off as the map has it, 0.35 m moved (over 1 m 0.009 -> 0.1, paint on 0.6 of it)",
+   "x": -634.0,
+   "y": -473.3
+  },
+  "496:89>496:111": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.6 m off as the map has it, 0.83 m moved (over 1 m 0.164 -> 0.344, paint on 0.42 of it)",
+   "x": 380.7,
+   "y": -471.7
+  },
+  "565:33>564:97": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.4 m off as the map has it, 0.65 m moved (over 1 m 0.1 -> 0.236, paint on 0.77 of it)",
+   "x": 2559.2,
+   "y": 788.5
+  },
+  "596:243>596:233": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.08 m off as the map has it, 0.32 m moved (over 1 m 0.0 -> 0.033, paint on 0.64 of it)",
+   "x": 2105.3,
+   "y": 1370.0
+  },
+  "846:344>846:353": {
+   "keep": true,
+   "kind": "diverge",
+   "why": "paint lane centre 0.26 m off as the map has it, 1.76 m moved (over 1 m 0.071 -> 0.756, paint on 0.63 of it)",
+   "x": -848.5,
+   "y": 5442.0
+  },
+  "912:192>912:178": {
+   "keep": true,
+   "kind": "merge",
+   "why": "paint lane centre 0.18 m off as the map has it, 0.67 m moved (over 1 m 0.0 -> 0.282, paint on 0.74 of it)",
+   "x": 105.0,
+   "y": 6483.0
+  }
+ },
+ "notes": {
+  "diverges": "freeway diverges and merges whose branch lanes osm_lanes._diverges would move further from the confident paint (diverge_report.py --keep): kept as the map has them"
+ },
+ "version": 1
+}

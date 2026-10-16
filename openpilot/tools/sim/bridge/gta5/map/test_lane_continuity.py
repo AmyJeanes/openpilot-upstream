@@ -134,6 +134,113 @@ def test_target_right_follows_section_at():
   assert np.abs(np.diff(rights)).max() < 0.3 and rights[0] == -2.75 and rights[-1] == -5.5, rights
 
 
+# *** freeway exits, on-ramps and lane chains (RouteLanes._diverges) ***
+
+MOTORWAY3 = {'highway': 'motorway', 'lanes': '3', 'oneway': 'yes', 'width': '18'}  # lanes at -6, 0, 6
+RAMP = {'highway': 'motorway_link', 'lanes': '1', 'oneway': 'yes', 'width': '6'}
+
+
+def freeway(ways: dict, nodes: dict, path: str | None = None) -> OsmLanes:
+  ids = np.array(sorted(nodes), np.int64)
+  data = OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, dict(ways), {})
+  osm = OsmLanes(data, lambda lat, lon: (np.asarray(lon, float), np.asarray(lat, float)))
+  osm.path = path
+  return osm
+
+
+EXIT_NODES = {1: (0.0, 0.0), 2: (0.0, 200.0), 3: (0.0, 400.0), 4: (8.0, 240.0), 5: (30.0, 300.0), 6: (60.0, 380.0)}
+EXIT_WAYS = {10: (MOTORWAY3, [1, 2]), 11: (MOTORWAY3, [2, 3]), 12: (RAMP, [2, 4]), 13: (RAMP, [4, 5]), 14: (RAMP, [5, 6])}
+
+
+def exit_lane(osm, ids=(1, 2, 4, 5, 6)):
+  pts = np.array([EXIT_NODES[i] for i in ids], float)
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  out = []
+  for v in np.arange(200.5, lanes.along[-1] - 0.5, 0.5):
+    k = lanes.segment(v)
+    sec = lanes.section_at(float(v), k)
+    p = np.array([np.interp(v, lanes.along, pts[:, 0]), np.interp(v, lanes.along, pts[:, 1])])
+    d = (pts[k + 1] - pts[k]) / np.hypot(*(pts[k + 1] - pts[k]))
+    out.append(p + np.array([d[1], -d[0]]) * sec.ours[0].centre)
+  return lanes, np.array(out)
+
+
+def test_exit_leaves_from_the_kerb_lane():
+  # GTA's ramp link starts at the motorway's middle node and angles out across its lanes: the exit lane runs on as the
+  # kerb lane (6 m right of the line) until the ramp's own line comes out past it, then follows the ramp, never
+  # swinging in towards the motorway's middle
+  osm = freeway(EXIT_WAYS, EXIT_NODES)
+  lanes, line = exit_lane(osm)
+  assert lanes.explicit, 'no diverge'
+  assert line[:, 0].min() > 5.9, line[:, 0].min()  # never inside the kerb lane's middle
+  assert abs(line[0, 0] - 6.0) < 0.05, line[0]  # from the kerb lane at the node
+  assert np.all(np.diff(line[line[:, 1] < 300.0, 0]) > -0.01)  # and only ever out from it
+  far = line[-1]
+  assert np.hypot(*(far - EXIT_NODES[6])) < 1.0  # on the ramp's own lane by its end
+  steps = np.hypot(*np.diff(line, axis=0).T)
+  assert steps.max() < 1.0, steps.max()  # no step
+
+
+def test_exit_kept_off_a_hatched_gore():
+  # a hatched gore painted where the moved lane would run (lanes.json beside the map): the branch is left as it was
+  import json
+  import tempfile
+  with tempfile.TemporaryDirectory() as d:
+    ring = [[4.0, 210.0], [9.0, 210.0], [9.0, 260.0], [4.0, 260.0], [4.0, 210.0]]
+    json.dump({'kinds': ['hatched'], 'lines': [[0] + [v for p in ring for v in p]], 'heights': [[0.0] * len(ring)],
+               'layers': [0]}, open(os.path.join(d, 'lanes.json'), 'w'))
+    from openpilot.tools.sim.bridge.gta5.map.router import LaneLines
+    LaneLines._loaded.clear()
+    osm = freeway(EXIT_WAYS, EXIT_NODES, os.path.join(d, 'gta5.osm.pbf'))
+    lanes, _ = exit_lane(osm)
+    LaneLines._loaded.clear()
+  assert not lanes.explicit
+
+
+def test_on_ramp_joins_as_the_kerb_lane():
+  # the mirror: a ramp link ending at the motorway's middle node; its lane comes in to the kerb lane and runs on in it
+  nodes = {1: (60.0, 20.0), 2: (30.0, 100.0), 3: (8.0, 160.0), 4: (0.0, 200.0), 5: (0.0, 400.0), 6: (0.0, 0.0)}
+  ways = {10: (RAMP, [1, 2]), 11: (RAMP, [2, 3]), 12: (RAMP, [3, 4]), 13: (MOTORWAY3, [6, 4]), 14: (MOTORWAY3, [4, 5])}
+  osm = freeway(ways, nodes)
+  pts = np.array([nodes[i] for i in (1, 2, 3, 4, 5)], float)
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  assert lanes.explicit
+  xs = []
+  for v in np.arange(0.5, lanes.along[-1] - 0.5, 0.5):
+    k = lanes.segment(v)
+    sec = lanes.section_at(float(v), k)
+    p = np.array([np.interp(v, lanes.along, pts[:, 0]), np.interp(v, lanes.along, pts[:, 1])])
+    d = (pts[k + 1] - pts[k]) / np.hypot(*(pts[k + 1] - pts[k]))
+    q = p + np.array([d[1], -d[0]]) * (sec.ours[-1].centre if sec.lanes > 1 else sec.ours[0].centre)
+    xs.append(q)
+  xs = np.array(xs)
+  assert xs[:, 0].min() > 5.9, xs[:, 0].min()  # it never cuts in past the kerb lane's middle towards the middle node
+  assert np.hypot(*np.diff(xs, axis=0).T).max() < 1.0
+
+
+def test_chain_split_runs_straight_on():
+  # a 3-lane link splitting at its middle node into a 2-lane link and GTA's 1-lane chain alongside on the right (as
+  # 402:719 -> 738 into 738 -> 762 and 738 -> 763): the chain's lane runs straight on as the right lane, from where
+  # it is, not from the middle node
+  nodes = {1: (0.0, 0.0), 2: (0.0, 100.0), 3: (-3.0, 160.0), 4: (2.0, 140.0), 5: (4.0, 200.0), 6: (5.0, 300.0)}
+  two = {'highway': 'motorway', 'lanes': '2', 'oneway': 'yes', 'width': '12'}
+  ways = {10: (MOTORWAY3, [1, 2]), 11: (two, [2, 3]), 12: (RAMP, [2, 4]), 13: (RAMP, [4, 5]), 14: (RAMP, [5, 6])}
+  osm = freeway(ways, nodes)
+  pts = np.array([nodes[i] for i in (1, 2, 4, 5, 6)], float)
+  lanes = RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm)
+  xs = []
+  for v in np.arange(80.0, lanes.along[-1] - 0.5, 0.5):
+    k = lanes.segment(v)
+    sec = lanes.section_at(float(v), k)
+    p = np.array([np.interp(v, lanes.along, pts[:, 0]), np.interp(v, lanes.along, pts[:, 1])])
+    d = (pts[k + 1] - pts[k]) / np.hypot(*(pts[k + 1] - pts[k]))
+    xs.append(p + np.array([d[1], -d[0]]) * sec.ours[-1].centre)
+  xs = np.array(xs)
+  first = xs[xs[:, 1] < 140.0]  # (to the chain's last link within DIVERGE_M, over which it eases back onto its own)
+  assert np.abs(first[:, 0] - 6.0).max() < 0.3, first[:, 0]  # the right lane, straight on through the split
+  assert np.hypot(*np.diff(xs, axis=0).T).max() < 1.0
+
+
 LIVE_MAP = os.path.expanduser("~/gta5map_lanes")
 # real lane openings and drops on the live map (route points: its nodes), each a place the 16 Oct drives passed
 LIVE_PLACES = {

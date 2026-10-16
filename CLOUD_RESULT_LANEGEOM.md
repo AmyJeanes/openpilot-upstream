@@ -173,3 +173,88 @@ uses TAPER_M but needs pycapnp/cereal and doesn't run here.
 lanes.json: 69,714 lines (69,666 before); roads.json changes too (32,224 drawn ways, 26,443 junction areas, against
 32,201 and 26,420): the ways beside a taper are drawn as their own strips now, and turn bays opening less than 30 m
 before a junction are fully open at it, so those junctions' outlines follow.
+
+## Step 3: exits, on-ramps and lane chains anchored where they part (cause 2)
+
+**Change** (`osm_lanes.py`, `RouteLanes._diverges`): where a route leaves a freeway (motorway/trunk and their links) at
+a node onto a freeway way with fewer lanes that strays to one side, or joins one from such a way, the branch's lanes
+run on as the road's lanes on that side (counted from that side), measured from the road's line run on straight past the
+node, until the branch's own lanes come out past them (within 0.3 m: where GTA's link has crossed the road's lanes, at
+the gore), and follow the branch from there. GTA starts every exit and chain split at the road's middle node, so before
+the branch's lanes swung in to the middle and out. The branch may continue onto ways of any class (the Strawberry ramp
+is `residential` after its first link); at most 100 m (then it eases onto its own lanes over its last link). Guards:
+- **Never further into a hatched area**: the moved lane centres are checked against lanes.json's hatched rings
+  (`router.LaneLines.inside`, at the route's height); a branch whose lanes would run further inside one (0.5 m) is left
+  as it was. (A first version without this ran a lane diagonally across the gore at (1005, -935).)
+- Not where the road itself bends tighter than 200 m radius over the 30 m before the node (a straight run-on strays).
+- **The paint**: `diverge_report.py --keep` writes the places where the moved lanes sit further from the confident
+  paint (0.1 m on average, paint on 30%+ of the stretch) into `lanegeom.json` beside the map as diverges to keep
+  (`osm_lanes.GEOMETRY_FILE`, read by `OsmLanes.load`, keyed by GTA node ids `from>to`, with the evidence). A kept
+  diverge, and any `_diverges` leaves be, keeps the lane-hop handling it had before (`_hops` single-ended).
+- `_hops` now takes only links between two roads (both ends); one-ended hops are diverges/merges. `DIVERGES = False`
+  restores the step-2 behaviour exactly (the report uses it for "before").
+
+No nodes move and the pbf is unchanged: this is route geometry (what the map driver plans, nav's lanes, target_right).
+lanes.json's lines are unchanged by step 3 (the ramp links are still drawn where GTA has them; see open questions).
+
+**Map-wide** (`diverge_report.py`, `cloud_lanegeom/step3/diverges.csv`, `summary.json`): 583 freeway diverges and
+merges; **109 change** (68 diverges, 41 merges), 97 by more than 1 m, 78 by more than 3 m. On the 107 with paint, the
+branch lanes' mean distance from the paint lane's centre goes **0.50 -> 0.39 m**, the share over 1 m **17.8% -> 12.3%**;
+42 places nearer the paint by 0.1 m+, 2 further. Lane-centre metres inside hatched areas at the changed places:
+4.4 -> 0.0. Largest moves:
+
+| key (GTA from>to) | node | kind | moved m | paint err before | after | paint on |
+|---|---|---|---|---|---|---|
+| 462:804>462:766 | (-646.0, -527.8) | diverge | 12.19 | 0.1 | 0.1 | 0.68 |
+| 464:986>464:957 | (37.0, -524.2) | diverge | 12.15 | 0.26 | 0.26 | 0.55 |
+| 465:713>465:774 | (637.2, -558.5) | diverge | 11.81 | 1.43 | 1.45 | 0.31 |
+| 465:565>465:618 | (755.7, -614.5) | diverge | 11.66 | 1.01 | 1.01 | 0.04 |
+| 465:578>465:644 | (743.7, -608.8) | diverge | 11.17 | 0.81 | 0.86 | 0.08 |
+| 497:8>496:64 | (515.0, -506.5) | diverge | 10.92 | 0.65 | 0.7 | 0.37 |
+| 497:5>496:57 | (527.8, -509.5) | diverge | 10.41 | 0.9 | 0.7 | 0.28 |
+| 465:673>465:731 | (660.0, -571.2) | diverge | 10.07 | 1.52 | 1.52 | 0.33 |
+| 495:41>495:63 | (-136.3, -497.8) | diverge | 9.96 | 0.86 | 0.82 | 0.48 |
+| 464:979>464:974 | (1.0, -524.2) | diverge | 9.85 | 0.54 | 0.4 | 0.55 |
+
+Kept as they were by the paint (`lanegeom.json` `diverges`, 14 places):
+
+| key | node | kind | why |
+|---|---|---|---|
+| 399:205>399:214 | (-463.0, -1890.0) | merge | paint lane centre 0.29 m off as the map has it, 0.46 m moved (over 1 m 0.087 -> 0.212, paint on 0.95 of it) |
+| 399:266>399:254 | (-447.7, -1859.7) | diverge | paint lane centre 0.1 m off as the map has it, 0.37 m moved (over 1 m 0.0 -> 0.143, paint on 0.76 of it) |
+| 399:757>399:778 | (-422.7, -1591.2) | diverge | paint lane centre 0.1 m off as the map has it, 0.3 m moved (over 1 m 0.0 -> 0.132, paint on 0.43 of it) |
+| 431:705>431:647 | (-126.7, -1235.0) | diverge | paint lane centre 0.38 m off as the map has it, 1.32 m moved (over 1 m 0.089 -> 0.558, paint on 0.39 of it) |
+| 434:43>434:13 | (1044.5, -1503.0) | diverge | paint lane centre 0.57 m off as the map has it, 0.76 m moved (over 1 m 0.262 -> 0.328, paint on 0.95 of it) |
+| 462:701>462:702 | (-936.5, -564.7) | merge | paint lane centre 0.12 m off as the map has it, 0.69 m moved (over 1 m 0.034 -> 0.294, paint on 0.47 of it) |
+| 462:770>462:721 | (-991.7, -557.8) | merge | paint lane centre 0.39 m off as the map has it, 0.84 m moved (over 1 m 0.133 -> 0.354, paint on 0.45 of it) |
+| 462:777>462:774 | (-947.0, -538.3) | diverge | paint lane centre 0.37 m off as the map has it, 1.8 m moved (over 1 m 0.297 -> 1.0, paint on 0.77 of it) |
+| 494:70>494:79 | (-634.0, -473.3) | merge | paint lane centre 0.19 m off as the map has it, 0.35 m moved (over 1 m 0.009 -> 0.1, paint on 0.6 of it) |
+| 496:89>496:111 | (380.7, -471.7) | merge | paint lane centre 0.6 m off as the map has it, 0.83 m moved (over 1 m 0.164 -> 0.344, paint on 0.42 of it) |
+| 565:33>564:97 | (2559.2, 788.5) | merge | paint lane centre 0.4 m off as the map has it, 0.65 m moved (over 1 m 0.1 -> 0.236, paint on 0.77 of it) |
+| 596:243>596:233 | (2105.3, 1370.0) | merge | paint lane centre 0.08 m off as the map has it, 0.32 m moved (over 1 m 0.0 -> 0.033, paint on 0.64 of it) |
+| 846:344>846:353 | (-848.5, 5442.0) | diverge | paint lane centre 0.26 m off as the map has it, 1.76 m moved (over 1 m 0.071 -> 0.756, paint on 0.63 of it) |
+| 912:192>912:178 | (105.0, 6483.0) | merge | paint lane centre 0.18 m off as the map has it, 0.67 m moved (over 1 m 0.0 -> 0.282, paint on 0.74 of it) |
+
+Still further from the paint after the change, with too little paint to decide (under 30% of the stretch): 465:521>465:543 at (791.7, -633.3): 0.65 -> 0.97 m, paint on 16%; 399:790>399:824 at (-424.2, -1575.7): 0.22 -> 0.48 m, paint on 29%.
+
+The brief's places: the **Strawberry -> Olympic exit** (432:955 > 432:982) moves 4.7 m: the exit lane now runs on in the
+kerb lane, between the paint's lines at y -1170 and -1176.3 (centre -1173.2), and leaves along the ramp past x 250,
+instead of dipping to -1177 towards the motorway's middle node; along the branch, the share of it more than 1 m off the
+paint goes 24% -> 6% (`diverge_report`). On the drift frames it is unmeasurable afterwards (the frames there have the
+car following the old dip, so the paint lane the new target sits in isn't bracketed from the car's pose). The chain split
+**(1079.5, -1546.2)** was already right in the planner (14 Oct hop logic: target 1.37 m / line 1.10 m from the paint,
+against 2.91 m for the recorded target); its 2-lane side (402:738 > 402:762) moves 1.6 m nearer the paint (0.55 -> 0.47 m).
+**(-378, -2062)** is not a diverge in the map's terms: it is GTA's parallel one-lane chains, one surveyed link with its
+lane 2.7 m off its line between unsurveyed links centred on theirs: step 4 (lane offsets from the paint).
+
+**Drift re-score** (`cloud_lanegeom/step3/report.md`, before = step 2): `section_at` target over 1 m 3.41% -> 3.39%
+(j20 2.35% -> 2.32%); planned line 4.34% -> 4.34%; target steps away from junctions 57 -> 54. Events: (-127.7, -1182.5)
+planned line 3.51 -> 2.49 m, (-388.5, -975.8) 2.84 -> 2.40 m, (530.7, -498.4) 3.03 -> 1.81 m; the rest unchanged. (The
+97 trips pass few exits; the map-wide report is the measure here.)
+
+**Tests**: as the baseline (lane_numbering 29 + the cloud-router case; lane_slots 20; freeway_lanes 7; mapdrive 37 +
+`test_collision_routes`; validate_lanes 0 issues; lane_parity unchanged); map tests 153 passed, with new cases in
+`test_lane_continuity.py`: an exit leaving from the middle node runs on from the kerb lane and only ever outward, an
+on-ramp ending at the middle node comes in to the kerb lane, a 3-lane link splitting into a 2-lane link and a 1-lane chain
+keeps the chain's lane straight on as the right lane, and a hatched gore where the moved lane would run leaves the exit
+as it was (the old code fails the first three).
