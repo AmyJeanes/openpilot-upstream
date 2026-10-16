@@ -3,6 +3,10 @@
 nav_inputs: the planner's inputs (navd/inputs.py) from the world's state, which still carries the game's truth (pose,
 heading, the lane from the route and the plugin) until navd localizes itself and estimates the lane.
 
+NavdRequests (GTA5_NAV_PATH=navd): comma navd's own requests, from its navInstruction (its step 1 lane guidance on
+the Mapbox-compatible server's routes: selfdrive/navigation/lane_guidance.py, mapbox_server.py), as the planner's
+NavOutputs, for the simulated driver to work the stalk by.
+
 Destination: the game map's waypoint (else the end of a mission's GPS route) or a pick on the map view, whichever was
 set last, kept in game metres for the router and written to the NavDestination param as lat/lon, as a phone or the UI
 sets it for navd; cleared when the car arrives (and then the game's waypoint too, never a mission's blip).
@@ -12,7 +16,7 @@ import time
 
 import numpy as np
 
-from openpilot.selfdrive.navd.inputs import NavInputs
+from openpilot.selfdrive.navd.inputs import CANCEL_SIGNAL, NavInputs, NavOutputs
 from openpilot.selfdrive.navd.planner import Tune
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 
@@ -21,6 +25,9 @@ from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 LANE_SOURCE = os.getenv("NAVD_LANE_SOURCE", "fused")
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 ENDED_CHECK = 0.5  # s between looks at NavDestination for a route the driver ended (the UI's slide to end removes it)
+# where nav runs: "bridge" (navd's planner in the bridge, on the full map: GTA as it runs today) or "navd" (comma navd's
+# own process with its lane guidance on Mapbox-equivalent data: MAPBOX_HOST at mapbox_server.py, NavLaneGuidance on)
+NAV_PATH = os.getenv("GTA5_NAV_PATH", "bridge")
 # m the game's target moves before it's a new destination: a mission's blip can be on a moving car or ped, and each new
 # destination drops the route until the router has another
 MOVED = {"waypoint": 1.0, "mission": 30.0}
@@ -150,3 +157,36 @@ class Destination:
     except Exception as e:  # params built before the key existed: navd's runtime doesn't read it yet
       print(f"gta5: no NavDestination param: {e}")
       self.param_ok = False
+
+
+class NavdRequests:
+  """comma navd's request now (navInstruction.request) as NavOutputs for the simulated driver (HumanDriver.act): a new
+  lane change or turn puts the indicator on its side; one that ends without another takes it off (the driver cancels a
+  done change's indicator itself, as for the planner's)."""
+  def __init__(self, sm=None):
+    if sm is None:
+      import openpilot.cereal.messaging as messaging
+      sm = messaging.SubMaster(["navInstruction"])
+    self.sm = sm
+    self.last: tuple | None = None  # (id, kind, side) of the request seen last
+
+  @property
+  def signaling(self) -> bool:
+    return self.last is not None and self.last[1] == "turn"
+
+  def step(self) -> NavOutputs:
+    self.sm.update(0)
+    r = self.sm["navInstruction"].request
+    kind, side = str(r.kind), str(r.side)
+    now = (int(r.id), kind, side) if kind != "none" and side in ("left", "right") else None
+    requests: list[str] = []
+    if now != self.last:
+      if self.last is not None and (now is None or now[2] != self.last[2] or now[1] != self.last[1]):
+        requests.append(CANCEL_SIGNAL)
+      if now is not None and (self.last is None or now[1:] != self.last[1:] or CANCEL_SIGNAL in requests):
+        requests.append(("laneChange" if kind == "laneChange" else "signalTurn") + side.capitalize())
+    self.last = now
+    request = None if now is None else {"kind": kind, "side": side, "reason": str(r.reason), "distance": float(r.distance),
+                                        "laneChanges": int(r.laneChanges), "stage": int(r.stage), "id": int(r.id),
+                                        "approved": bool(r.approved)}
+    return NavOutputs(False, requests, [], [], request)

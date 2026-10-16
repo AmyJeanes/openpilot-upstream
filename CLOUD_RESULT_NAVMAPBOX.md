@@ -105,3 +105,64 @@ lane at its junction (more lanes there than 100 m back, nothing saying where it 
 banner shows the second's lanes), forks and exits (valid lanes side by side, on the branch's side), the lane builder,
 the polyline round trip, the HTTP server as navd calls it, and comma's `RouteEngine` routing through it by
 `MAPBOX_HOST` alone with no token.
+
+## Item 3: step 1 lane guidance in comma's navd
+
+`openpilot/selfdrive/navigation/lane_guidance.py` (imports nothing from `tools/sim`), run by comma's
+`selfdrive/navigation/navd.py` in its own process.
+
+What it does, as agreed ("Step 1 lane guidance"):
+- **Route** (`MapboxRoute`): from navd's Mapbox response (`routes[0]`, geojson or polyline6), the moves to plan lanes
+  for: each maneuver at its step's start (turn / end of road left-right-slight, fork, off ramp = exit, roundabout /
+  rotary; side from the modifier) with its intersection's lanes (else the approach's last within 60 m), and each
+  junction the route goes straight on through where not all lanes are valid (the last intersection of each run of
+  repeated lanes, side = the edge the valid lanes touch); cycle-only lanes dropped. `maxspeed` by distance along;
+  freeway = Mapbox's `motorway` class or a 60 mph limit (UK A-road "trunk"s aren't).
+- **Targets** (`targets`): the valid lanes, counted from the move's side; where the next maneuver follows within
+  `pair_gap` (100 m), narrowed to those nearest its side (`narrowed`). No lanes at a turn, fork or exit: the outermost
+  lane on its side (`fallback`).
+- **The car's lane** (`LaneReader`): `modelV2.laneHead` taken once 0.7 sure for 1 s, kept while 0.4 sure and through
+  dropouts for 3 s, moved over by nav's own completed change; counted from the move's side. Where the model counts fewer
+  lanes than Mapbox lists (a bay not open), the missing ones are taken to be on the turn's side: the target is the
+  outermost lane there and the car is in place in it (`bay`).
+- **Timing** (`_due`): asked once `deadline / v_plan <= changes x lc_time + margin` or `deadline <= changes x
+  min_dist`, deadline = m to `done_before` before the maneuver (turns 35 m, forks/exits 60 m, straight on 30 m),
+  `v_plan = max(v, maxspeed_share x maxspeed)`; `lc_time_fwy` from 22 m/s. The rest of a maneuver's changes follow
+  `change_gap` after each. A change not started below `lc_min_speed` (the model's: n16 10 m/s) is withdrawn
+  (`gave_up`); none is asked below it. Changes for a later move never take the car away from an earlier move's lanes.
+- **Turns**: the turn's signal (request kind `turn`) once below the lane turn speed within `signal_time` x v (28-50 m), or
+  at `signal_min` whatever the speed, or within `turn_into` (80 m) when slower than `lc_min_speed` and either one lane
+  beside its lanes on its side or in place before its bay: the turn desire takes the car over (laneguide's
+  `turn_into_lane` / `BAY_SIGNAL`). A change towards it gives way to it by `signal_last`; the blinker goes off and on
+  again so the model sees the turn's pulse.
+- **Request and approve**: `navInstruction.request` (kind, side, reason turn/fork/exit/straightOn, distance, laneChanges,
+  stage, id, approved = the blinker on its side) and `NavDesire` `laneChange:<side>` at stages 1-2, `laneChange` at 3,
+  held 0.5 s after; the stalk actions in `requests` (the blinker 0.4 s after NavDesire, so openpilot has read it).
+  Outcomes logged as the planner's (`navRequest`: done, declined, timeout, gave_up, turn, replaced).
+- **Lane UI**: `navInstruction.lanes` (directions, active, activeDirection, current where the model counts as many) for
+  the next move with lanes, only within its banner's lane distance (402 m town, 1-2 miles motorway) or with a request
+  open; `laneDistance` = m to the deadline while out of the lanes.
+
+**navd** (`navd.py`): with the `NavLaneGuidance` param (new, persistent bool) or `NAVD_LANE_GUIDANCE=1`, navd also
+subscribes `carState` and `modelV2`, runs at 10 Hz (route requests, rerouting and navRoute still at 1 Hz), asks Mapbox
+for `annotations=maxspeed,congestion`, steps the guidance from its progress along the route, fills `request`, `lanes`
+and `laneDistance` on `navInstruction` and writes `NavDesire`. `NAVD_LANE_TUNE` takes Tune overrides (JSON). Off (the
+default), navd is exactly as before.
+
+**GTA**: the existing bridge-driven planner path is unchanged and stays the default (`GTA5_NAV_PATH=bridge`). With
+`GTA5_NAV_PATH=navd` the bridge leaves nav to comma's navd: its planner no longer sets NavDesire or drives the stalk,
+its own navInstruction/navRoute (`GTA5_NAV_MSGS`) are off, and its simulated driver works the stalk from navd's
+`navInstruction.request` (`gta5_navd.NavdRequests`: a new lane change or turn puts the indicator on its side, its end
+takes it off). The bridge still writes `NavDestination` and the simulated GNSS navd localizes from.
+
+Also: `turn_targets` / `LEFTS` / `RIGHTS` moved to `selfdrive/navd/lane_targets.py` (re-exported by `osm_lanes`), so
+`planner.py` no longer imports `tools/sim`.
+
+Tests: `selfdrive/navigation/tests/test_lane_guidance.py` (13): timing by speed and lanes away, slowing traffic not
+putting the ask off, a freeway exit three lanes over (lc_time_fwy), counting from the turn's side with a bay not open
+(in place, then the turn's signal takes it over; one lane out, one change), two close maneuvers narrowed together, the
+no-lanes fallback (and off), withdrawal when too slow, the request and NavDesire by stage (approval, the blinker after
+NavDesire, done, the next change after change_gap), the lanes only under guidance, the lane reader, the real Dale Rd
+bay and M27 J3 exit counted right, and comma's `RouteEngine` running it end to end (request, lanes, laneDistance on
+navInstruction, NavDesire written). `tools/sim/bridge/gta5/test_navd_path.py` (1): the bridge's driver from navd's
+requests.

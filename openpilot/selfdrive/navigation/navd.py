@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import time
 
 import numpy as np
 import requests
@@ -9,6 +10,7 @@ from openpilot.common.api import API_HOST, Api
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.navigation import lane_guidance
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.route import along_path, local_meters
 
@@ -17,6 +19,8 @@ MANEUVER_TRANSITION_THRESHOLD = 10
 REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
 RECOMPUTE_HOLD = 10  # updates (seconds) between route requests
+GUIDANCE_RATE = 10  # Hz the lane guidance runs at (the route's updates stay at 1 Hz)
+LANE_CHANGING = ("laneChangeStarting", "laneChangeFinishing")
 
 
 def set_banner(instruction, banners, distance_to_maneuver):
@@ -57,7 +61,15 @@ class RouteEngine:
     self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None and self.custom_host is None else None
     self.mapbox_host = self.custom_host or ("https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav')
 
-  def update(self):
+    # step 1 lane guidance (lane_guidance.py), behind the NavLaneGuidance param or NAVD_LANE_GUIDANCE=1
+    self.guidance = lane_guidance.LaneGuidance(lane_guidance.tune_from_env()) if lane_guidance.enabled(self.params) else None
+    self.guided: lane_guidance.GuidanceOutputs | None = None
+    self.route_steps_along: list[float] = []  # m along the route to each step's start
+    self.updates = 0  # full (1 Hz) updates, while the guidance runs at GUIDANCE_RATE
+
+  def update(self, full: bool = True):
+    """A step: the route (requested, followed, resent: `full`, at 1 Hz) and the instruction; with the lane guidance,
+    run at GUIDANCE_RATE, its step and the instruction every time."""
     self.sm.update(0)
 
     source = latest_gps_source(self.sm)
@@ -66,12 +78,18 @@ class RouteEngine:
       self.last_position, self.last_bearing = (gps.longitude, gps.latitude), gps.bearingDeg
     route = self.route
     try:
-      self.recompute_route(gps_ok=source is not None)
+      if full:
+        self.recompute_route(gps_ok=source is not None)
+      self.guide()
       self.send_instruction()
     except Exception:
       cloudlog.exception("navd.failed_to_compute")
+    if not full:
+      return
     # mapsd dedupes repeats, so a periodic resend is how a restarted mapsd gets the route
-    if self.route is not route or self.sm.frame % ROUTE_RESEND_PERIOD == 0:
+    tick = self.sm.frame if self.guidance is None else self.updates
+    self.updates += 1
+    if self.route is not route or tick % ROUTE_RESEND_PERIOD == 0:
       self.send_route()
 
   def recompute_route(self, gps_ok: bool):
@@ -116,6 +134,7 @@ class RouteEngine:
       'banner_instructions': 'true',
       'alternatives': 'false',
       'language': lang,
+      **({'annotations': 'maxspeed,congestion'} if self.guidance is not None else {}),
     }
     if self.last_bearing is not None:
       params['bearings'] = f"{(self.last_bearing + 360) % 360:.0f},90;"
@@ -133,6 +152,9 @@ class RouteEngine:
         self.route = r['routes'][0]['legs'][0]['steps']
         self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
         self.step_idx = 0
+        self.route_steps_along = np.r_[0.0, np.cumsum([step['distance'] for step in self.route])].tolist()
+        if self.guidance is not None:
+          self.guidance.set_route(r['routes'][0])
       else:
         cloudlog.warning("Got empty route response")
         self.clear_route()
@@ -161,6 +183,7 @@ class RouteEngine:
 
     # Current instruction
     msg.navInstruction.maneuverDistance = distance_to_maneuver_along_geometry
+    self.fill_guidance(msg.navInstruction)
     set_banner(msg.navInstruction, banner_step['bannerInstructions'], distance_to_maneuver_along_geometry)
 
     # Total remaining distance and time: the rest of this step, then every step after it
@@ -195,6 +218,65 @@ class RouteEngine:
     self.route_geometry = None
     self.step_idx = None
     self.nav_destination = None
+    if self.guidance is not None and self.guidance.route is not None:
+      self.guidance.set_route(None)
+      self.guided = None
+      self.put_desire("")
+
+  # *** step 1 lane guidance ***
+
+  def progress(self) -> float | None:
+    """m along the whole route to the car (the current step's start, then along its geometry)."""
+    if self.step_idx is None or self.route_geometry is None or self.last_position is None:
+      return None
+    along, _ = along_path(self.route_geometry[self.step_idx], self.last_position)
+    return self.route_steps_along[self.step_idx] + min(along, self.route[self.step_idx]['distance'])
+
+  def guide(self):
+    """The lane guidance's step: from the route, carState and the driving model's lane head; NavDesire written as it
+    changes."""
+    if self.guidance is None:
+      return
+    along = self.progress()
+    if along is None or self.guidance.route is None:
+      self.guided = None
+      return
+    cs, md = self.sm['carState'], self.sm['modelV2']
+    head = md.laneHead
+    fresh = self.sm.alive['modelV2'] and self.sm.valid['modelV2'] and head.laneCount > 0 and head.laneIdx >= 0
+    blinker = "left" if cs.leftBlinker and not cs.rightBlinker else "right" if cs.rightBlinker and not cs.leftBlinker else None
+    stage = self.params.get("NavLaneChangeStage")
+    inp = lane_guidance.GuidanceInputs(time.monotonic(), along, cs.vEgo, [head.laneIdx, head.laneCount, head.prob] if fresh else None,
+                                       blinker, str(md.meta.laneChangeState) in LANE_CHANGING, cs.leftBlindspot,
+                                       cs.rightBlindspot, int(stage) if stage is not None else 1)
+    self.guided = self.guidance.update(inp)
+    for desire in self.guided.desires:
+      self.put_desire(desire)
+    for event in self.guided.events:
+      cloudlog.event("navd.request", **event)
+
+  def put_desire(self, desire: str):
+    if desire:
+      self.params.put("NavDesire", desire)
+    else:
+      self.params.remove("NavDesire")
+
+  def fill_guidance(self, instruction):
+    """navInstruction's request, lanes and laneDistance from the lane guidance's last step."""
+    g = self.guided
+    if g is None:
+      return
+    if g.request is not None:
+      r = g.request
+      req = instruction.request
+      req.kind, req.side, req.reason = r["kind"], r["side"], r["reason"]
+      req.distance, req.laneChanges, req.stage, req.id, req.approved = r["distance"], r["laneChanges"], r["stage"], r["id"], r["approved"]
+    if g.lanes is not None:
+      lanes = instruction.init("lanes", len(g.lanes))
+      for lane, want in zip(lanes, g.lanes, strict=True):
+        lane.directions = want["directions"]
+        lane.active, lane.activeDirection, lane.current = want["active"], want["activeDirection"], want["current"]
+    instruction.laneDistance = g.lane_distance
 
   def should_recompute(self):
     if self.step_idx is None:
@@ -215,12 +297,16 @@ class RouteEngine:
 
 def main():
   pm = messaging.PubMaster(['navInstruction', 'navRoute'])
-  sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal'])
+  params = Params()
+  guided = lane_guidance.enabled(params)
+  sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal'] + (['carState', 'modelV2'] if guided else []),
+                           ignore_alive=['carState', 'modelV2'], ignore_valid=['carState', 'modelV2'])
 
-  rk = Ratekeeper(1.0)
-  route_engine = RouteEngine(sm, pm)
+  rate = GUIDANCE_RATE if guided else 1
+  rk = Ratekeeper(float(rate))
+  route_engine = RouteEngine(sm, pm, params)
   while True:
-    route_engine.update()
+    route_engine.update(full=rk.frame % rate == 0)
     rk.keep_time()
 
 

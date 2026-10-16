@@ -91,6 +91,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NavDesire", {CLEAR_ON_MANAGER_START, STRING}},
     {"NavigationEnabled", {PERSISTENT, BOOL, "0"}},
     {"NavLaneChangeStage", {PERSISTENT, INT, "1"}},
+    {"NavLaneGuidance", {PERSISTENT, BOOL, "0"}},
     {"NavMapboxHost", {PERSISTENT, STRING}},
     {"NavDestination", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"NavigateOnOpenpilot", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},

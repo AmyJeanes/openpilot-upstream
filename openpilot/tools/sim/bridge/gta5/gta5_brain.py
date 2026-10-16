@@ -25,7 +25,7 @@ from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
 from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
-from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, bridge_tune, nav_inputs
+from openpilot.tools.sim.bridge.gta5.gta5_navd import NAV_PATH, Destination, NavdRequests, bridge_tune, nav_inputs
 from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
@@ -109,7 +109,8 @@ class Brain:
     self.match = match
     self.recorder = None  # gta5_record.Recorder, with GTA5_RECORD; marks and the overlay read its state
     self.map_view = None  # map_view.MapView, made by whoever runs the brain
-    self.nav_msgs = NavMessages(io) if NAV_MSGS else None  # openpilot's navInstruction and navRoute, through io
+    # openpilot's navInstruction and navRoute, through io (not with GTA5_NAV_PATH=navd: navd publishes its own)
+    self.nav_msgs = NavMessages(io) if NAV_MSGS and NAV_PATH != "navd" else None
     self.metric = bool(io.params.get_bool("IsMetric"))
     self.next_hud = 0.0
     self.presses: dict[str, int] = {}
@@ -134,6 +135,9 @@ class Brain:
     """navd's planner, and the GTA layer's parts around it: the simulated person at the wheel and the destination."""
     self.io.params.remove("NavDesire")  # a killed bridge can leave one
     self.nav = Planner(bridge_tune(os.getenv("GTA5_NAVTUNE")), refresh=self.io.params.get_bool("TurnDesireRefresh"))
+    # GTA5_NAV_PATH=navd: comma navd guides (its own process, on mapbox_server's routes) and writes NavDesire itself; the
+    # bridge's planner only draws, and the simulated driver acts on navd's requests
+    self.navd_requests = NavdRequests() if NAV_PATH == "navd" else None
     self.human = HumanDriver(self._send, lambda: self.io.cruise("cruise_cancel"))
     self.destination = Destination(self.io.params, self._send, ends=NOO != "on")
     self.next_map = 0.0
@@ -186,8 +190,9 @@ class Brain:
     inputs.update(left_blindspot=left, right_blindspot=right)
     state = {**state, "blindspot": [left, right]}
     indicator = state.get("indicator")
+    signaling = self.navd_requests.signaling if self.navd_requests is not None else self.nav.signaling
     inputs["user_torque"] = self.human.stalk(indicator, state["heading"], state["yawRate"], model.get("lane_change", 0),
-                                              self.nav.signaling, left if indicator == "left" else right if indicator == "right" else False)
+                                              signaling, left if indicator == "left" else right if indicator == "right" else False)
     self.io.set_inputs(**inputs)
     if self.nav_msgs is not None:
       # the game's pose stands in for the car's localizer (GPS and odometry)
@@ -207,8 +212,11 @@ class Brain:
       return
     state = {**state, "modelLane": self._model_lane()}
     drives = self._nav_drives()
-    out = self.nav.update(nav_inputs(state, self.openpilot.engaged, state.get("indicator"), model.get("turns") or {},
-                                     time.monotonic(), drives, NAV_STAGE))
+    if self.navd_requests is not None:
+      out = self.navd_requests.step()  # navd's own NavDesire, navInstruction and navRoute: none from here
+    else:
+      out = self.nav.update(nav_inputs(state, self.openpilot.engaged, state.get("indicator"), model.get("turns") or {},
+                                       time.monotonic(), drives, NAV_STAGE))
     self.human.act(out)
     if self.nav_msgs is not None:
       self.nav_msgs.request = out.request
