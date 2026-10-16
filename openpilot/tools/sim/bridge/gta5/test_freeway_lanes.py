@@ -4,6 +4,7 @@ import numpy as np
 
 import openpilot.selfdrive.navd.planner as nav_mod
 from openpilot.selfdrive.navd.planner import lane_plan
+from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune
 from openpilot.tools.sim.bridge.gta5.test_nav import Drive
 
 V = 29.0
@@ -55,7 +56,7 @@ class Freeway:
     Drive, and the ribbon drawn at the start."""
     d = d or Drive((lane, self.n), v=v)
     if tune:
-      d.nav.tune = nav_mod.Tune("")
+      d.nav.tune = bridge_tune("")
       d.nav.tune.values.update(tune)
     y, changes, done_at = start, [], None
     ribbon = None
@@ -186,7 +187,7 @@ def test_fused_lane_source():
   # map alone, or the model alone
   for src, want in (("map", ((1, 3), "map")), ("model", ((2, 4), "model"))):
     d = Drive((1, 3), v=0.0)
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(lane_source=src)
     assert lanes_of(d, lambda k: model_lane(2, 4))[-1] == want, src
 

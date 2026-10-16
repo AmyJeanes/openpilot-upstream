@@ -3,7 +3,7 @@ import numpy as np
 import openpilot.selfdrive.navd.planner as nav_mod
 from openpilot.selfdrive.navd.planner import Fork, Planner, find_turn, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
-from openpilot.tools.sim.bridge.gta5.gta5_navd import nav_inputs
+from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune, nav_inputs
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
@@ -29,7 +29,7 @@ class Drive:
     self.clock = Clock()
     self.sent, self.desires, self.events = [], [], []
     self.indicator = None
-    self.nav = Planner()
+    self.nav = Planner(bridge_tune())
     self.human = HumanDriver(self._send, lambda: None)
     self.lane, self.v = lane, v
     self.drives = True  # Navigate on openpilot
@@ -98,7 +98,7 @@ def test_entry_signal_past_the_entry():
   # sparse approach nodes, signalling 3 m past the default entry (12 m out): the turn must still be found there
   route = np.array([(0.0, y) for y in np.arange(0.0, 200.0, 20.0)] + [(x, 200.0) for x in np.arange(0.0, 100.0, 10.0)])
   d = Drive((1, 2), v=5.0)
-  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune = bridge_tune("")
   d.nav.tune.values.update(signal_mode="entry", signal_entry_offset=3.0)
   y = 0.0
   while y < 200.0 and not d.nav.signaling:
@@ -286,7 +286,7 @@ def test_turn_done_at_its_way_out_without_repulse():
   # once the car has turned, the blinker drops at the way out even while still yawing, and isn't pulsed again
   route = route_to_turn(40.0, "left")
   d = Drive((0, 1), v=5.0)
-  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune = bridge_tune("")
   d.nav.tune.values.update(left_signal_max_entry=0.0)  # signalled at 25 m, without a stop line
   for k in range(60):
     d.step(route, k * 0.25)
@@ -307,7 +307,7 @@ def test_exit_cue_stacked_within_the_turn():
   # exit_cue_at: the keepRight starts halfway round, stacked on the turn while its blinker is on, then plain past it
   route = route_to_turn(40.0, "left")
   d = Drive((0, 1), v=5.0)
-  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune = bridge_tune("")
   d.nav.tune.values.update(exit_cue_at=0.5, left_signal_max_entry=0.0)
   for k in range(60):
     d.step(route, k * 0.25)
@@ -328,7 +328,7 @@ def test_left_signal_waits_for_the_stop_line():
   at = {}
   for wait in (0.0, 3.0):
     d = Drive((0, 2), v=5.0)
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(left_signal_max_entry=wait)
     y = 0.0
     while y < 100.0 and not signals(d):
@@ -338,7 +338,7 @@ def test_left_signal_waits_for_the_stop_line():
   assert at[0.0] > 5.0 and 2.0 < at[3.0] <= 3.0
   # not held just after a lane change towards it, whose desire would carry on into the junction instead
   d = Drive((0, 2), v=5.0)
-  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune = bridge_tune("")
   d.nav.tune.values.update(left_signal_max_entry=3.0)
   y = 0.0
   while y < 100.0 and not signals(d):
@@ -355,7 +355,7 @@ def test_unturned_turn_given_up_past_its_point():
   gone = {}
   for cancel in (0.0, 10.0):
     d = Drive((0, 1), v=5.0)
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(unturned_cancel=cancel, unturned_keep_pulses=False, left_signal_max_entry=0.0)
     y, pulses = 0.0, []
     while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
@@ -372,7 +372,7 @@ def test_unturned_turn_given_up_past_its_point():
 def test_unturned_cancel_can_keep_pulses():
   route = route_to_turn(40.0, "left")
   d = Drive((0, 1), v=5.0)
-  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune = bridge_tune("")
   d.nav.tune.values.update(unturned_cancel=25.0, unturned_keep_pulses=True, left_signal_max_entry=0.0)
   y, pulses = 0.0, []
   while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
@@ -414,13 +414,12 @@ def test_signal_at_the_junction_entry():
   import os as _os
   import tempfile
   import json as _json
-  from openpilot.selfdrive.navd.planner import Tune
   path = _os.path.join(tempfile.mkdtemp(), "tune.json")
   with open(path, "w") as f:
     _json.dump({"signal_mode": "entry", "signal_entry_offset": 1.0}, f)
   route = route_to_turn(120.0)
   d = Drive((1, 2), v=5.0)
-  d.nav.tune = Tune(path)
+  d.nav.tune = bridge_tune(path)
   y, at = 0.0, None
   while y < 118.0 and at is None:
     d.step(route, y, {"stops": [105.0 - y], "junctions": [120.0 - y], "routeEnd": 300.0 - y})
@@ -478,7 +477,7 @@ def test_turn_from_beside_its_lanes():
   route = route_to_turn(40.0)
   for lane, beside, want in (((0, 2), False, False), ((0, 2), True, True), ((0, 3), True, False)):
     d = Drive(lane, v=3.0)
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(turn_from_beside=beside, turn_into_lane=0.0)  # today's rule (turn_into_lane: n16's)
     y, turned = 0.0, False
     while y < 38.0:
@@ -512,7 +511,7 @@ def test_exit_watch_counter_cue_past_the_way_out():
   round_on = [(85.0 + 2.9 * k, 0.5) for k in range(1, 21)]  # on to 143 deg in 2 s
   for watch, wait, want in ((False, 0.0, False), (True, 0.0, True), (True, 8.0, False)):
     d = Drive((0, 1), v=5.0)
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(left_signal_max_entry=0.0, exit_cue_left=False, exit_watch=watch)
     cues = left_turn_then_on(d, round_on, wait)
     assert d.nav.signaled is None
@@ -527,7 +526,7 @@ def test_turned_unwrapped_and_no_repulse_past_the_way_out():
   route = route_to_turn(40.0, "left")
   for unwrapped, past_exit, want in ((False, False, True), (True, False, False), (False, True, False)):
     d = Drive((0, 1), v=5.0)
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(left_signal_max_entry=0.0, turned_unwrapped=unwrapped, no_repulse_past_exit=past_exit)
     k = 0
     while d.nav.signaled is None:
@@ -552,7 +551,7 @@ def test_blinker_steady_when_openpilot_refreshes_the_turn():
   for refresh in (False, True):
     d = Drive((0, 1), v=5.0)
     d.nav.refresh = refresh
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(left_signal_max_entry=0.0)
     y, gaps = 0.0, 0
     while y < 100.0 and (d.nav.signaled is not None or not signals(d)):
@@ -569,7 +568,7 @@ def test_keep_right_out_of_oncoming_by_the_map():
 
   def desires(lane_map, extra=None, **tune):
     d = Drive((0, 2))
-    d.nav.tune = nav_mod.Tune("")
+    d.nav.tune = bridge_tune("")
     d.nav.tune.values.update(tune)
     for k in range(40):  # 2 s
       d.step(route, k * 0.4, {"laneMap": lane_map, "routeEnd": 400.0, **(extra or {})})
@@ -597,7 +596,7 @@ def test_lane_change_for_a_lane_that_ends():
     y += d.v * 0.05
   assert started and started[0] == "right" and started[1] > nav_mod.LANE_CHANGE_DIST
   d = Drive((0, 2))
-  d.nav.tune = nav_mod.Tune("")
+  d.nav.tune = bridge_tune("")
   d.nav.tune.values.update(lane_drops=False)
   for k in range(100):
     d.step(route, k * 0.4, {"laneDrops": [[150.0 - k * 0.4, 1, 1, 2]], "routeEnd": 400.0})
@@ -642,7 +641,7 @@ def jogging_route() -> Route:
 def replay_turns(r: Route, upto: float, own: bool) -> list:
   """The next turn nav finds as the car drives along the route every 2 m, as the bridge gives it the route (points
   every 5 m from the car), with (own) or without the route's own turns: [(m along the car, m along the turn)]."""
-  p = Planner()
+  p = Planner(bridge_tune())
   p.min_ahead = nav_mod.MIN_AHEAD_MAP
   out = []
   for s in np.arange(0.0, upto, 2.0):
@@ -668,7 +667,7 @@ def test_signal_point_holds_still():
   r = jogging_route()
   r.locate(np.array([0.0, 100.0]))
   route, turns = r.ahead(1000.0, 5.0), r.turns(r.length)
-  p = Planner()
+  p = Planner(bridge_tune())
   p.min_ahead = nav_mod.MIN_AHEAD_MAP
   points = []
   for v in (4.0, 9.0, 15.0):

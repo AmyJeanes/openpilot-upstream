@@ -19,13 +19,13 @@ import numpy as np
 
 from openpilot.selfdrive.navd.lane_slots import preview
 from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
-from openpilot.selfdrive.navd.planner import Planner, Tune, lane_plan
+from openpilot.selfdrive.navd.planner import Planner, lane_plan
 from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
 from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages
-from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, nav_inputs
+from openpilot.tools.sim.bridge.gta5.gta5_navd import Destination, bridge_tune, nav_inputs
 from openpilot.tools.sim.bridge.gta5.gta5_opio import OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_overlay import PROCESS as OVERLAY_PROCESS, ROUTE_LEAD as OVERLAY_LEAD, GpsRoute, Overlay, \
   OverlayProcess
@@ -133,7 +133,7 @@ class Brain:
   def _init_nav(self):
     """navd's planner, and the GTA layer's parts around it: the simulated person at the wheel and the destination."""
     self.io.params.remove("NavDesire")  # a killed bridge can leave one
-    self.nav = Planner(Tune(os.getenv("GTA5_NAVTUNE")), refresh=self.io.params.get_bool("TurnDesireRefresh"))
+    self.nav = Planner(bridge_tune(os.getenv("GTA5_NAVTUNE")), refresh=self.io.params.get_bool("TurnDesireRefresh"))
     self.human = HumanDriver(self._send, lambda: self.io.cruise("cruise_cancel"))
     self.destination = Destination(self.io.params, self._send, ends=NOO != "on")
     self.next_map = 0.0

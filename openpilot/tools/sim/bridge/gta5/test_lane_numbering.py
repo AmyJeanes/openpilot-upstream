@@ -7,6 +7,7 @@ import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.test_lane_slots import START, DEST, osm_map
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M
+from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
 # Vinewood Blvd as the map has it: three lanes our way (a left-turn lane, straight, straight or right) and two back,
@@ -413,7 +414,7 @@ def test_turn_markers_on_the_lane_line():
 def test_live_lanes_follow_the_maps():
   # nav's live targets at a junction, followed back to the car's lanes across where they change on the way
   from openpilot.selfdrive.navd.planner import LaneMaps, Planner, Through, Turn
-  p = Planner()
+  p = Planner(bridge_tune())
   p.lane = (1, 2)
   through = Through(100.0, (1, 1, 3))  # left | through | right at the junction, a right-turn bay opening on the way
   p.maps = LaneMaps([[50.0, [0, 1], 3]])
@@ -543,7 +544,7 @@ def bridge_line(r: Route, lane) -> np.ndarray:
   from openpilot.selfdrive.navd.planner import Planner
   from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
   w = Brain.__new__(Brain)
-  w.nav, w.route, w.lane_line = Planner(), r, (None, 0.0, [])
+  w.nav, w.route, w.lane_line = Planner(bridge_tune()), r, (None, 0.0, [])
   w.expert, w.driver = SimpleNamespace(md_driving=False), None  # no map driver driving
   return np.array(w._lane_line({"lane": lane}, 0.0))
 

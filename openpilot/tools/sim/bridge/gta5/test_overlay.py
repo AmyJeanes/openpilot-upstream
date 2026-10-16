@@ -14,6 +14,7 @@ import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay as ov
 from openpilot.selfdrive.navd.planner import Planner
+from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.paths import Paths, wrap
@@ -392,7 +393,7 @@ def overlay_update(paths: Paths, place: str, overlay: ov.Overlay | None = None, 
   x, y, z, heading = PLACES[place]
   state = {"pos": [x, y, z + ov.CAR_HEIGHT], "heading": heading, "vEgo": 10.0, **route.info(1000.0),
            "route": route.ahead(1000.0, 5.0).round(1).tolist()}
-  nav = Planner()
+  nav = Planner(bridge_tune())
   nav.v = 10.0
   snap = {"pos": state["pos"], "layers": ov.DEFAULT_LAYERS + "f", "route": route, "paths": paths, "osm": osm,
           "recording": False, "lane_line": route.rest() if lane else None, "v": 10.0, "full": full}

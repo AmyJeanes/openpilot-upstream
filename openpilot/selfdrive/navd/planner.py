@@ -257,8 +257,8 @@ class Tune:
     "lc_wait": 0.8,
     # the lane nav plans from: "map" (the bridge's reading on the route, a stand-in for the truth), "model" (the driving
     # model's current-lane head, modelV2.laneHead, as a real car has, once sure), or "fused" (the model's once sure and
-    # counting as many lanes as the map, else the map's)
-    "lane_source": os.getenv("NAVD_LANE_SOURCE", "fused"),
+    # counting as many lanes as the map, else the map's); a real car has no truth, so "model" unless the caller has one
+    "lane_source": os.getenv("NAVD_LANE_SOURCE", "model"),
     "model_lane_prob": 0.7,  # the model's lane counts once its probability is at least this
     "model_lane_hold": 1.0,  # s, holding the same lane that sure
     # The model's lane, made robust enough to plan from without the game's truth (model_lane_robust; off: as above,
@@ -278,9 +278,11 @@ class Tune:
   }
   CHECK_EVERY = 1.0  # s
 
-  def __init__(self, path: str | None = None):
+  def __init__(self, path: str | None = None, base: dict | None = None):
+    """`base`: the caller's own defaults over DEFAULTS, which the file's keys go over."""
     self.path = path
-    self.values = dict(self.DEFAULTS)
+    self.defaults = {**self.DEFAULTS, **(base or {})}
+    self.values = dict(self.defaults)
     self.mtime: float | None = None
     self.next_check = 0.0
     self.refresh(0.0)
@@ -311,11 +313,11 @@ class Tune:
     unknown = sorted(set(given) - set(self.DEFAULTS))
     if unknown:
       print(f"nav: tune ignores {unknown}")
-    self.values = {**self.DEFAULTS, **{k: v for k, v in given.items() if k in self.DEFAULTS}}
+    self.values = {**self.defaults, **{k: v for k, v in given.items() if k in self.DEFAULTS}}
     return True
 
   def changed(self) -> dict:
-    return {k: v for k, v in self.values.items() if v != self.DEFAULTS[k]}
+    return {k: v for k, v in self.values.items() if v != self.defaults[k]}
 
 
 TUNE = Tune("")  # the defaults

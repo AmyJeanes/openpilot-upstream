@@ -7,18 +7,28 @@ Destination: the game map's waypoint (else the end of a mission's GPS route) or 
 set last, kept in game metres for the router and written to the NavDestination param as lat/lon, as a phone or the UI
 sets it for navd; cleared when the car arrives (and then the game's waypoint too, never a mission's blip).
 """
+import os
 import time
 
 import numpy as np
 
 from openpilot.selfdrive.navd.inputs import NavInputs
+from openpilot.selfdrive.navd.planner import Tune
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 
+# nav's lane source: the game gives nav a lane reading from the map that is the truth, so GTA runs "fused" where a real
+# car runs "model" (navd's default); NAVD_LANE_SOURCE=model drives GTA as a real car would
+LANE_SOURCE = os.getenv("NAVD_LANE_SOURCE", "fused")
 CANCELLED_FROM = 100.0  # m: GTA clears the waypoint as the car nears it; farther off, the player cleared it
 ENDED_CHECK = 0.5  # s between looks at NavDestination for a route the driver ended (the UI's slide to end removes it)
 # m the game's target moves before it's a new destination: a mission's blip can be on a moving car or ped, and each new
 # destination drops the route until the router has another
 MOVED = {"waypoint": 1.0, "mission": 30.0}
+
+
+def bridge_tune(path: str | None = None) -> Tune:
+  """navd's Tune as the bridge runs it: the file's keys (GTA5_NAVTUNE) over the bridge's lane source."""
+  return Tune(path, base={"lane_source": LANE_SOURCE})
 
 
 def nav_inputs(state: dict, engaged: bool, indicator: str | None, desire: dict[str, float], now: float,
