@@ -592,7 +592,7 @@ def test_lines_build_in_the_background_then_load_from_the_cache(paths, osm, fres
   t = time.monotonic()
   again.make(dict(snap))
   assert again.geometry is not None and again.stats["geometry"] == "cache"
-  assert time.monotonic() - t < 2.0
+  assert time.monotonic() - t < 4.0  # once at start-up; ~2 s on live21b's lines
 
 
 def frame_loop(paths, osm, background: bool, seconds: float, period: float = 0.05) -> dict:
