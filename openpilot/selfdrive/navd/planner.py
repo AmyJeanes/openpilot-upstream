@@ -151,6 +151,7 @@ MAINLINE = frozenset({"motorway", "trunk"})
 FWY_RAMP_TIME = 4.0  # s a lane change takes on the lane line
 FWY_NEAR = 20.0  # m: a barrier or a move's frozen spacing (FwyState) this near a move is its own
 FWY_MARKS_BEHIND = 1000.0  # m: barriers further behind are forgotten
+MODEL_LC_SPEED = 10.0  # m/s, Tune's model_lc_speed
 # by the model's lane, which may lag a lane change: no change after one until it reads the new lane or this long has
 # passed, nor one back the other way this soon after
 MODEL_CATCHUP = 4.0  # s
@@ -237,6 +238,23 @@ class Tune:
     "fwy_clear": 300.0,  # m
     "fwy_settle": 5.0,  # s
     "fwy_min_gap": LANE_CHANGE_TIME,  # s
+    # the speed the driving model needs to make a lane change (0: off, nav times city changes as it did): n16 barely
+    # moves for a lane change pulse below ~10 m/s (the 16 Oct probe). City moves' changes then end before the car
+    # slows below it, for a turn (at slow_decel down to the turn's speed by its junction's entry) or a red light's queue
+    # (queue_room m before the last lights before the move), and are timed at the road's speed (its limit, or the car's
+    # speed if higher) rather than the car's, so slowing traffic doesn't put them off; past that point and slower than
+    # this, nav stops asking and leaves the move to the route (a reroute) rather than forcing a change at the junction
+    "model_lc_speed": MODEL_LC_SPEED,  # m/s
+    "slow_decel": 1.5,  # m/s^2
+    "queue_room": 30.0,  # m
+    # m before a turn within which, slower than model_lc_speed (and the lane turn speed) and one lane beside its lanes
+    # on its side (as a bay opening late beside the car), nav signals the turn rather than asking for a lane change:
+    # the model's turn desire takes it over (the probe: 2-12 m of plan movement the right way, even from a standstill),
+    # where its lane change wouldn't (0: off)
+    "turn_into_lane": 80.0,  # m
+    # share of model_lc_speed under which, before that point, a city change waits for the car to be faster (traffic, a
+    # light) rather than being asked for (0: never waits); partly across at once, the model gets there as it speeds up
+    "lc_wait": 0.8,
     # the lane nav plans from: "map" (the bridge's reading on the route, a stand-in for the truth), "model" (the driving
     # model's current-lane head, modelV2.laneHead, as a real car has, once sure), or "fused" (the model's once sure and
     # counting as many lanes as the map, else the map's)
@@ -1059,6 +1077,10 @@ class Planner:
     self.keep_stopped = False
     self.classes: list | None = None  # the road classes ahead (NavInputs.road_classes)
     self.crossings: list[float] = []  # m ahead to stop lines (a junction's, a crossing's), which a lane change doesn't cross
+    self.indicator: str | None = None  # the car's turn signal, this step
+    self.stops: list[float] = []  # m ahead to stop lines, behind the car too (NavInputs.stops)
+    self.lights: list[float] = []  # m ahead to those at lights
+    self.junctions: list[float] = []  # m ahead to junction nodes
     self.limits: list | None = None
     self.fwy_marks: list[float] = []  # self.driven at the barriers seen (fwy_free), behind the car too
     self.fwy_slots: list[tuple[float, float, float]] = []  # FwyState.slots
@@ -1087,6 +1109,7 @@ class Planner:
     # guidance only (Navigate on openpilot off) takes no nav actions, as when disengaged: signals cancelled, no lane
     # changes, turn or keep desires or arrival; but what keeps the car on its road stays (_guide)
     engaged, indicator, desire = inp.engaged and inp.drive, inp.blinker, inp.desire
+    self.indicator = indicator
     if self.tune.refresh(now) or engaged and not self.was_engaged:
       print(f"nav: tune {json.dumps(self.tune.changed())} from {self.tune.path or 'defaults'}")
     self.was_engaged = engaged
@@ -1101,6 +1124,9 @@ class Planner:
     self.maps = LaneMaps(inp.lane_maps) if inp.lane_maps is not None else None
     self.classes, self.limits = inp.road_classes, inp.limits
     self.crossings = sorted(d for d in inp.stops or [] if d > 0.0)
+    self.stops = list(inp.stops or [])
+    self.lights = sorted(d for d, k in zip(inp.stops or [], inp.stop_kinds or [], strict=False) if k == "lights" and d > 0.0)
+    self.junctions = list(inp.junctions or [])
     self.map_read = inp.truth_lane_map
     if not engaged:
       self._cancel(indicator)
@@ -1460,6 +1486,12 @@ class Planner:
   def _signal_due(self, turn: Turn, route: np.ndarray, indicator: str | None, v: float, now: float, bay: float) -> bool:
     """Whether to signal the turn now, ending any lane change towards it, or leaving it to the route."""
     t = self.tune
+    if self._turn_into(turn, v):
+      if DEBUG and self.signaled is None:
+        print(f"nav: one lane beside the {turn.side} turn's lanes at {v:.1f} m/s, {turn.dist:.0f} m out: its signal, not a lane change, takes it over")
+      if self.changing is not None:
+        self._end_change(indicator)
+      return now >= self.change_hold_until + PARAM_LEAD
     slow = v < 19 * CV.MPH_TO_MS and self.changing is None
     if t.signal_mode == "entry" and self.min_ahead == MIN_AHEAD_MAP:
       # at the junction's entry, as a driver does (too early, the model takes it for a lane change or turns short)
@@ -1498,9 +1530,20 @@ class Planner:
     # openpilot is to read NavDesire cleared before the blinker comes on for the turn
     return now >= self.change_hold_until + PARAM_LEAD
 
+  def _turn_into(self, turn: Turn, v: float) -> bool:
+    """turn_into_lane: whether the car, slower than the model can change lanes at, is one lane beside the turn's
+    lanes on its side, near enough for the turn's signal to take it over."""
+    t = self.tune
+    if t.model_lc_speed <= 0 or t.turn_into_lane <= 0 or turn.dist > t.turn_into_lane or self.lane is None or self.lane[0] < 0:
+      return False
+    if v >= min(t.model_lc_speed, 19 * CV.MPH_TO_MS) or self.change_went:
+      return False
+    lo, hi = self._lanes_for(turn)
+    return self.lane[0] == (hi + 1 if turn.side == "left" else lo - 1)
+
   def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):
     """Into the turn bay or slip lane for the turn ahead as it opens, from the lane beside it."""
-    if not self._bay_beside(turn, bay) or self.driven < self.bay_to or self.changing is not None:
+    if not self._bay_beside(turn, bay) or self.driven < self.bay_to or self.changing is not None or self._turn_into(turn, v):
       return
     if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED:
       return
@@ -1564,6 +1607,7 @@ class Planner:
       self.skip_turns_to = self.driven + f.dist + FORK_TURN
       return
     side = "left" if i > hi else "right"
+    by = room
     if self.tune.fwy_lane_time > 0 and freeway_move(m, self.classes):
       first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
       if first and len(first[0][1]) != n:
@@ -1576,7 +1620,27 @@ class Planner:
     else:
       # not across a stop line on the way: from past it, unless there's no room after it
       across = self.tune.plan_city_early and any(d < min(LANE_LINE_CHANGE, room) for d in self.crossings)
-      due, each = room < city_lead(changes, v, self.tune) and not across, None
+      fast = self._fast_room(m, room)
+      t = self.tune
+      if t.model_lc_speed > 0 and not must and fast < 0.0 and v < t.model_lc_speed:
+        if self.changing is None:
+          # past where the model could still change lanes, and too slow for it: not asked for, rather than forced at
+          # the junction; a turn is then left to the route at its last place (_signal_due, which may also signal it
+          # from beside its lanes: turn_into_lane), a fork here, where surely out of its lanes
+          if fork and (self.lane_frac is None or self._sure_wrong(lo, hi)):
+            self._skip(route, m.dist, f"{m.side} fork (too slow to change lanes, {v:.1f} m/s)")
+            self.skip_turns_to = self.driven + m.dist + FORK_TURN
+        return
+      if t.model_lc_speed > 0 and not must and v < t.lc_wait * t.model_lc_speed:
+        if self.changing == side and self.change_planned and not self.change_went:
+          # asked for, but the car has slowed (traffic, a light) before it could start: off until it's faster again,
+          # which isn't a try that got nowhere
+          self._give_up(self.indicator, f"too slow for the model ({v:.1f} m/s); waiting for the traffic to move")
+          self.change_from = None
+        return  # meanwhile, the change waits for the car to be faster
+      due, each = fast < city_lead(changes, self._plan_speed(v), self.tune) and not across, None
+      if 0.0 < fast < room and not must:
+        by = fast  # held by the blind spot past where the model is still fast enough: given up there
     agreed = not must or self._lanes_agree(side)
     if must and agreed == self.merge_waits:
       self.merge_waits = not agreed
@@ -1601,7 +1665,30 @@ class Planner:
       ends = "lane ending" if must else "lane leaving at the fork"
       what = "way straight on" if isinstance(m, Through) else ends if isinstance(m, Ends) else f"{m.side} {'fork' if fork else 'turn'}"
       self._start_change(side, f"from lane {i + 1} of {n} for the {what} in {m.dist:.0f} m ({changes} to go)",
-                         turn=isinstance(m, Turn), by=room, planned=True, end=m.dist if must else None, bay=bay)
+                         turn=isinstance(m, Turn), by=by, planned=True, end=m.dist if must else None, bay=bay)
+
+  def _plan_speed(self, v: float) -> float:
+    """The speed city changes are timed at: the car's, or with model_lc_speed the road's limit here if higher (the car
+    slowed by traffic or a light gets back up to it, mostly)."""
+    if self.tune.model_lc_speed <= 0:
+      return v
+    return max(v, value_at(self.limits, 0.0, 0.0) or 0.0)
+
+  def _fast_room(self, m, room: float) -> float:
+    """m on to where a city move's lane changes must end: `room` (lane_change_last before it), or with model_lc_speed
+    nearer, where the car will still be fast enough for the model: before a turn's slowing (slow_decel down to its
+    speed, by its junction's entry) and queue_room before the last lights before the move."""
+    t = self.tune
+    if t.model_lc_speed <= 0:
+      return room
+    end = room
+    if isinstance(m, Turn):
+      entry, _ = junction_entry(m.dist, self.stops, self.junctions)
+      end = min(end, entry - max(t.model_lc_speed ** 2 - m.speed(t) ** 2, 0.0) / (2.0 * t.slow_decel))
+    lights = [d for d in self.lights if d < m.dist + 1.0]
+    if lights:
+      end = min(end, max(lights) - t.queue_room)
+    return end
 
   def _turn_bay(self, turn: Turn, side: str) -> bool:
     """Whether the lane a change `side` heads for, for the turn, is a turn bay: a lane opening on the way to it."""

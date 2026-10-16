@@ -93,3 +93,77 @@ What the misses are (n16; finetuned in brackets):
 
 So the finetune helps (+11 turns), but timing is half the problem: changes asked too late even for a model that can
 change at 4 m/s.
+
+## Step 2: lane changes timed for the model
+
+### What the baseline says the problem is
+
+Turns needing a change, split by where their target lane begins (`Maneuver.opens`, from the route's lane maps):
+
+| turns needing a change | n16 | finetuned |
+|---|---|---|
+| target lane there more than 80 m before the commit point | 30/35 | 32/36 |
+| target lane begins less than 80 m before (a bay, a lane the map adds there) | 5/38 | 14/37 |
+
+So where the lane exists early, today's planner already gets n16 there (86%). The misses are lanes that open late,
+usually with a red light or a queue ahead: the car is slow by the time the lane exists, and n16's lane change doesn't
+move below ~10 m/s. Timing can only partly help there; the finetune and the turn desire are the levers.
+
+### Changes (`planner.py`, all `Tune` keys; `model_lc_speed: 0` gives today's planner exactly, checked: identical runs)
+
+- `model_lc_speed` (10 m/s, n16's): the speed the model needs for a lane change. With it, a city move's changes
+  (`_change_for`, not freeway moves, which `fwy_` already times far ahead) must end before the car slows below it:
+  before a turn's slowing (`slow_decel` 1.5 m/s² from it down to `Turn.speed`, by the junction's entry) and
+  `queue_room` (30 m) before the last lights before the move (`_fast_room`). They start `city_lead` before that, timed
+  at the road's limit, not the car's speed (`_plan_speed`), so slowing traffic doesn't put them off.
+- `lc_wait` (0.8 of `model_lc_speed`): before that point, a change waits while the car is slower than that (a queue,
+  a light); one asked for that hasn't started when the car slows is withdrawn, and doesn't count as a try that got
+  nowhere (LANE_CHANGE_TRIES). Lower waits gain nothing in lanes and ask for more futile changes (wait 0: 211 requests,
+  116 late; 0.8: 183, 89).
+- Past that point and slower than `model_lc_speed`: not asked for, rather than forced at the junction. A turn is then
+  left to the route at its last place (`_signal_due`'s existing rule), a fork at once (where surely out of its lanes).
+- `turn_into_lane` (80 m): slower than the model changes lanes at (and the lane turn speed), one lane beside a turn's
+  lanes on its side, nav signals the turn rather than asking for a lane change: the probe found n16 takes a turn
+  pulse well even from a standstill (2-12 m the right way), unlike a lane change pulse. This is what takes a car into a
+  bay that opens late beside it; the stand-in models it (`turn_takes_lane`), which is an assumption to check in game.
+- Unchanged: the blind spot and nudge rules (desire_helper, `_watch_change`), merges out of an ending lane (`must`),
+  freeway timing, bays at speed (`_enter_bay` runs as before unless `turn_into_lane` applies).
+
+### Before / after (46 trips, truth lane, two traffic/light seeds)
+
+| run | in lane | needing a change | missed | LC req/done/gave up/failed | LC late (asked < v_ok) | hanging s |
+|---|---|---|---|---|---|---|
+| seed 0, before, n16 | 248/302 (82%) | 95/148 (64%) | 54 | 200/114/6/80 | 98 | 111 |
+| seed 0, after, n16 | 249/302 (82%) | 90/142 (63%) | 53 | 183/115/9/59 | 89 | 138 |
+| seed 1, before, n16 | 244/302 (81%) | 95/153 (62%) | 58 | 198/121/12/65 | 98 | 41 |
+| seed 1, after, n16 | 245/302 (81%) | 91/148 (62%) | 57 | 187/123/9/55 | 96 | 51 |
+| seed 0, before, finetuned | 257/302 (85%) | 107/151 (71%) | 45 | 204/140/8/56 | 8 | 130 |
+| seed 0, after, finetuned | 260/302 (86%) | 106/147 (72%) | 42 | 218/146/8/64 | 11 | 128 |
+| seed 1, before, finetuned | 258/302 (85%) | 112/156 (72%) | 44 | 199/145/12/42 | 7 | 55 |
+| seed 1, after, finetuned | 261/302 (86%) | 109/150 (73%) | 41 | 222/149/16/57 | 8 | 62 |
+
+| run | turns | forks / exits | straight on |
+|---|---|---|---|
+| seed 0 before / after, n16 | 68 → 72 /107 | 97 → 94 /108 | 83 → 83 /87 |
+| seed 1 before / after, n16 | 67 → 71 /107 | 95 → 94 /108 | 82 → 80 /87 |
+| seed 0 before / after, finetuned | 79 → 82 /107 | 96 → 97 /108 | 82 → 81 /87 |
+| seed 1 before / after, finetuned | 81 → 83 /107 | 95 → 97 /108 | 82 → 81 /87 |
+
+Ablations (seed 0): without `turn_into_lane`, n16 246 (turns 69), finetuned 259 (81). With the stand-in's turn desire
+not taking it a lane over (`--no-turn-take`): before 248 / 257, after 244 / 259 (n16 turns 68 → 67).
+
+Reading it: the noise between seeds is about ±2 maneuvers. The gain is real but small: +3-4 turns for each setting,
+most of it from `turn_into_lane`, which depends on the turn desire doing what the probe suggests; n16 loses a few forks
+it used to make with changes started at 6-8 m/s that came good as the car sped up. What the timing does reliably is
+cut the changes n16 can't make: failed changes down 20-25% (80 → 59, 65 → 55), late requests down a little. Without
+the turn-desire assumption the change is neutral for n16 (within noise) and slightly positive for the finetune.
+
+The constants that matter, and why: `model_lc_speed` 10 (the probe's n16 threshold; set it to the finetune's 4 when
+that model drives, as the harness does per stand-in), `slow_decel` 1.5 (the stand-in's and roughly the game's comfort
+braking for a turn), `queue_room` 30 m (a few cars queued at a light), `lc_wait` 0.8, `turn_into_lane` 80 m (a bay's
+typical length in the map). `LANE_CHANGE_*`, `FORK_*`, `BAY_*`, `SIGNAL_*` are unchanged.
+
+Tests: `test_nav.py` +4 (a change ends before the slowing for lights and starts further out; a slow change waits for the
+traffic; too slow near the turn isn't forced and the turn is left; slow beside a turn's lane signals the turn). Seven
+existing tests that exercise low-speed mechanics (5-8 m/s on made routes) pin `model_lc_speed: 0` or
+`turn_into_lane: 0`, with a comment: they test today's rules, which stay one setting away.

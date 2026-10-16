@@ -71,6 +71,7 @@ STOP_SIGN_HOLD = 1.5  # s stopped at a stop sign
 LIGHT_CYCLE, LIGHT_GREEN = 40.0, 20.0  # s
 CAR_LEN, GAP_MIN, HEADWAY = 4.8, 3.0, 1.2  # m, m, s
 BLIND_BEHIND, BLIND_AHEAD = 7.0, 2.0  # m of the lane beside, from the car's middle, the blind spot monitor covers
+TURN_TAKE, TURN_TAKE_TIME = 80.0, 3.0  # m before the turn, s to move over a lane at 2 m/s or more
 APPROACH = 400.0  # m before a maneuver's commit point the changes it needs are counted from
 COMMIT_BEFORE = 2.0  # m before a fork's gore, or where lanes end, it's judged
 
@@ -85,6 +86,10 @@ class ModelCfg:
   v_min: float = 5.0
   lc_time: tuple = (4.0, 6.0)
   turn_needs_pulse: bool = False
+  # a turn desire's pulse moves the car one lane towards the turn's side (where there's a lane and a gap) within
+  # TURN_TAKE m of the turn, at any speed it's moving at: the probe's 2-12 m of plan movement the right way for a turn
+  # pulse, even from a standstill (an assumption to check in game: it's what takes a car into a bay opening late)
+  turn_takes_lane: bool = True
 
   def rate(self, v: float, base: float) -> float:
     """Lane change progress per s at speed v, for a change taking `base` s above v_ok: falling off steeply (squared)
@@ -419,6 +424,7 @@ class Maneuver:
   need: int | None = None  # the most lane changes it needed over its approach (APPROACH m before its commit point on)
   v: float = 0.0
   pulsed: bool = False  # nav's turn signal pulsed the model before it
+  opens: float | None = None  # m before its commit point its nearest target lane begins (a bay, a lane added), None: further
 
   def move(self, dist: float):
     if self.kind == "turn":
@@ -533,7 +539,9 @@ class NavSim:
     self.traffic.vs = [o for o in self.traffic.vs if not (abs(o.s - self.s) < CAR_LEN + 2 and abs(o.lane - self.lane) < 0.5)]
     self.head = LaneHead(head, self.rng)
     t = Tune("")
-    t.values.update(lane_source={"truth": "map", "model": "model", "fused": "fused"}[head.source], **(tune or {}))
+    # the planner told the speed this model needs for a lane change, as the bridge would per model (unless the tune says)
+    t.values.update({"lane_source": {"truth": "map", "model": "model", "fused": "fused"}[head.source],
+                     "model_lc_speed": model.v_ok, **(tune or {})})
     self.nav = Planner(t)
     self.nav.was_engaged = True  # no tune line per trip
     # openpilot and the driver
@@ -562,6 +570,8 @@ class NavSim:
     self.prev_heading = float(self.road.heading[self.road.at(self.s)])
     self.yaw = 0.0
     self.touching: set[int] = set()  # the vehicles the car is in contact with
+    self.take: list | None = None  # a turn desire moving the car over: [from lane, to lane, progress]
+    self.took = -1.0  # the pulse that last did
 
   # the car's lane on the road, as the bridge reads it
   def _truth(self) -> tuple[list | None, float | None, float]:
@@ -683,11 +693,36 @@ class NavSim:
     # the turn desire's pulse: a blinker below the lane change speed, NavDesire not a lane change
     if rising and self.v < LANE_TURN_SPEED and nav_desire != "laneChange":
       self.pulse_t, self.pulse_side = self.t, side
+    self._turn_take()
     # the driver cancels a turn's signal once the car has come round
     if one and self.nav.signaling:
       turned = abs((self.road.heading[self.road.at(self.s)] - self.ind_heading + 180) % 360 - 180)
       if turned > TURN_CANCEL_DEG and abs(self.yaw) < TURN_CANCEL_YAW:
         self._indicator(None)
+
+  def _turn_take(self):
+    """turn_takes_lane: a pulsed turn desire moving the car one lane towards its side, once per pulse."""
+    if not self.model.turn_takes_lane or self.lc_state == "starting":
+      self.take = None
+      return
+    live = self.pulse_side is not None and self.t - self.pulse_t < PULSE_MEMORY and self.nav.signaling
+    nxt = self.turn_moves[self.turn_k] if self.turn_k < len(self.turn_moves) else None
+    if self.take is None:
+      if not live or self.took == self.pulse_t or nxt is None or nxt.args[0] != self.pulse_side or nxt.s - self.s > TURN_TAKE:
+        return
+      d = -1 if self.pulse_side == "left" else 1
+      here = int(round(self.lane))
+      if not 0 <= here + d < self.road.count(self.s):
+        return
+      self.take, self.took = [float(here), float(here + d), 0.0], self.pulse_t
+    a, b, p = self.take
+    if p < 0.5 and self.traffic.in_gap(self.s, self.v, int(b)):
+      return
+    p = min(1.0, p + min(self.v / 2.0, 1.0) / TURN_TAKE_TIME * DT)
+    self.take[2] = p
+    self.lane = a + (b - a) * p
+    if p >= 1.0:
+      self.lane, self.take = b, None
 
   def step_car(self):
     road = self.road
@@ -716,6 +751,8 @@ class NavSim:
       if sm > s0 - 1e-9 and len(mp):
         if self.lc_state == "starting":
           self.lc_from = carry_lane(self.lc_from, mp, n_after)
+        if self.take is not None:
+          self.lane, self.take = self.take[1], None
         before = self.lane
         self.lane = carry_lane(self.lane, mp, n_after)
         i = int(math.floor(before + 0.5))
@@ -726,13 +763,14 @@ class NavSim:
     while self.turn_k < len(turns) and turns[self.turn_k].s + 10.0 <= self.s:
       m = turns[self.turn_k]
       out = self._turn_lane(m)
+      self.take = None
       self.lane = out(self.lane)
       self.lc_state = "off" if self.lc_state == "starting" else self.lc_state
       lo, hi = (m.lanes[0], m.lanes[1]) if m.lanes is not None else (0, 0)
       turn_reset = (m.s + 10.0, out, lambda lane, lo=lo, hi=hi: lo - 0.5 <= lane <= hi + 0.5)
       self.turn_k += 1
     n = road.count(self.s)
-    if n > 0 and self.lc_state != "starting":
+    if n > 0 and self.lc_state != "starting" and self.take is None:
       # lane keeping: into the nearest lane there is
       self.lane = float(min(max(self.lane, 0.0), n - 1))
     self.traffic.step(self.t, DT, self, turn_reset)
@@ -761,11 +799,23 @@ class NavSim:
         lanes = lanes_for(m.move(m.s - self.s), (i, n), None)
         m.lane = [i, n]
       m.lanes = (int(lanes[0]), int(lanes[1]), int(m.lane[1]))
+      m.opens = self._opens(m, lanes)
       m.relevant = (lanes[0], lanes[1]) != (0, m.lane[1] - 1)
       m.made = lanes[0] <= m.lane[0] <= lanes[1]
       if m.kind == "turn" and self.model.turn_needs_pulse and not m.pulsed:
         m.made = False
       self.judge_k += 1
+
+  def _opens(self, m: Maneuver, lanes: tuple[int, int]) -> float | None:
+    """m before the commit point where the target lane nearest the car's begins, within APPROACH m; None if before.
+    Lanes are numbered as the road's sections at the commit point (the car's own count there)."""
+    before = [(s, mp, n) for s, mp, n in self.road.maps if m.commit - APPROACH < s <= m.commit + 0.5]
+    if not before:
+      return None
+    i = int(round(self.lane))
+    want = lanes[0] if i < lanes[0] else lanes[1] if i > lanes[1] else i
+    at = nav.bay_opens(before, want)
+    return None if at is None else round(m.commit - at, 1)
 
   def run(self, seconds: float | None = None) -> TripResult:
     t0 = time.perf_counter()
@@ -993,13 +1043,16 @@ _JOB: dict = {}
 def _one(k: int) -> dict:
   name, _spec, route, lane, s0 = _LOADED[k]
   j = _JOB
-  sim = NavSim(route, lane, PRESETS[j["model"]], parse_head(j["head"]), TrafficCfg(density=j["density"]), j["tune"],
+  model = PRESETS[j["model"]]
+  if j.get("no_turn_take"):
+    model = ModelCfg(**{**asdict(model), "turn_takes_lane": False})
+  sim = NavSim(route, lane, model, parse_head(j["head"]), TrafficCfg(density=j["density"]), j["tune"],
                seed=j["seed"] * 1000 + k, name=name, s0=s0)
   return asdict(sim.run())
 
 
 def run(names_specs, models: list[str], heads: list[str], tune: dict | None = None, density: float = 10.0, seed: int = 0,
-        quiet: bool = False, jobs: int = 1) -> dict:
+        quiet: bool = False, jobs: int = 1, no_turn_take: bool = False) -> dict:
   """Each model x lane source over the trips: {"model / head": {"summary": ..., "trips": [TripResult, ...]}}."""
   import multiprocessing
   _LOADED.clear()
@@ -1014,7 +1067,7 @@ def run(names_specs, models: list[str], heads: list[str], tune: dict | None = No
   for model in models:
     for head in heads:
       key = f"{model} / {head}"
-      _JOB.update(model=model, head=head, density=density, tune=tune, seed=seed)
+      _JOB.update(model=model, head=head, density=density, tune=tune, seed=seed, no_turn_take=no_turn_take)
       if jobs > 1:
         with multiprocessing.get_context("fork").Pool(jobs) as pool:
           res = pool.map(_one, range(len(_LOADED)), chunksize=1)
@@ -1041,6 +1094,7 @@ def main():
   ap.add_argument("--tune", default="{}", help="planner Tune overrides, JSON")
   ap.add_argument("--only", default="", help="comma-separated trip names")
   ap.add_argument("--out", default="", help="the full results, JSON")
+  ap.add_argument("--no-turn-take", action="store_true", help="the stand-in's turn desire doesn't take it a lane over")
   ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="trips run in parallel")
   args = ap.parse_args()
   use_routes()
@@ -1049,7 +1103,7 @@ def main():
     keep = set(args.only.split(","))
     todo = [t for t in todo if t[0] in keep]
   res = run(todo, args.model.split(","), args.lane.split(","), json.loads(args.tune), args.density, args.sim_seed,
-            jobs=args.jobs)
+            jobs=args.jobs, no_turn_take=args.no_turn_take)
   save_routes([spec for _, spec in todo])
   print(table([(k, v["summary"]) for k, v in res.items()]))
   print()

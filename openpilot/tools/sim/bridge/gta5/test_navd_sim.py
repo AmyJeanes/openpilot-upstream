@@ -43,14 +43,19 @@ def test_city_turn_made_from_afar():
 
 
 def test_slow_road_needs_the_finetune():
-  """At 7 m/s n16's lane change doesn't get across in desire_helper's 10 s; the finetune's does, and the turn is made."""
+  """At 7 m/s n16's lane change doesn't get across in desire_helper's 10 s; the finetune's does, and the turn is made.
+  Told n16's speed (model_lc_speed 10), nav asks n16 for no lane change at all, but signals the turn from the lane
+  beside (turn_into_lane), whose desire takes it over; without the turn desire doing so, n16 misses it."""
   r = slow_turn("right", limit=7.0)
   _, n16 = drive(r, 0, "n16")
+  _, asked = drive(r, 0, "n16", tune={"model_lc_speed": 0.0})
   _, fine = drive(r, 0, "finetuned")
-  t16 = [m for m in n16.maneuvers if m["kind"] == "turn"][0]
-  tf = [m for m in fine.maneuvers if m["kind"] == "turn"][0]
-  assert not t16["made"] and tf["made"]
-  assert n16.changes and all(c["outcome"] != "done" for c in n16.changes)
+  turn = lambda res: [m for m in res.maneuvers if m["kind"] == "turn"][0]  # noqa: E731
+  assert turn(n16)["made"] and not turn(asked)["made"] and turn(fine)["made"]
+  assert not n16.changes and turn(n16)["pulsed"]
+  sim = ns.NavSim(r, 0, ns.ModelCfg("n16", 10.0, 5.0, turn_takes_lane=False), ns.HeadCfg("truth"), ns.TrafficCfg(density=0.0), seed=1)
+  assert not turn(sim.run())["made"]
+  assert asked.changes and all(c["outcome"] != "done" for c in asked.changes)
   assert fine.changes[0]["outcome"] == "done"
 
 
@@ -108,7 +113,7 @@ def test_model_lane_source_without_truth():
 def test_summary():
   r = ms.junction_turn("right", lead=400.0, tail=200.0, ours=3, back=2, stop="lights")
   _, a = drive(r, 0, "n16")
-  _, b = drive(slow_turn("right", limit=7.0), 0, "n16")
+  _, b = drive(slow_turn("right", limit=7.0), 0, "n16", tune={"model_lc_speed": 0.0})
   from dataclasses import asdict
   s = ns.summarise([asdict(a), asdict(b)])
   assert s["relevant"] == 2 and s["in_lane"] == 1 and s["missed"] == 1
