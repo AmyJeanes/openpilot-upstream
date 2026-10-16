@@ -10,7 +10,7 @@ import numpy as np
 
 from openpilot.selfdrive.navd.planner import Through, Turn, aim, lane_plan, parse_arrows, throughs
 from openpilot.tools.sim.bridge.gta5.map import osm_pbf
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes, RouteLanes, Section, WayLanes, _curve_jogs, _ease_jogs, _keyed, \
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_AFTER, TAPER_BEFORE, OsmLanes, RouteLanes, Section, WayLanes, _curve_jogs, _ease_jogs, _keyed, \
   continuing, \
   turn_targets, ways_from_nodes, ways_from_trace
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
@@ -83,14 +83,22 @@ def test_route_lanes():
   assert lanes.arrows == [(100.0, lanes.sections[1].turns)] and lanes.arrows_near(100.0) == lanes.sections[1].turns
   assert list(lanes.junctions) == [100.0]
   assert len(lanes.corners) == 1 and abs(lanes.corners[0][0] - 100.0) < 2 and abs(lanes.corners[0][1] - 90.0) < 1
-  # the bay widens from nothing on the left over TAPER_M from where the way's lane count rises
+  # the bay widens from nothing on the left over the taper centred where the way's lane count rises: from
+  # TAPER_BEFORE before that node to TAPER_AFTER past it, half open at the node
   assert 1 in lanes.tapers
   start = lanes.section_at(70.0, 1)
-  assert start.lanes == 3 and start.ours[0].right - start.ours[0].left < 0.01
-  assert abs(start.ours[1].left - lanes.sections[0].ours[0].left) < 0.01  # the old lanes go on where they were
-  assert abs(lanes.section_at(85.0, 1).ours[0].right - lanes.section_at(85.0, 1).ours[0].left - 1.75) < 0.01
+  assert start.lanes == 3 and abs(start.ours[0].right - start.ours[0].left - 1.75) < 0.01
+  # the old lanes half way across from where the way before has them to where this way has them, and the way before's
+  # at the node the same: no step
+  assert abs(start.ours[1].left - (lanes.sections[0].ours[0].left + lanes.sections[1].ours[1].left) / 2) < 0.01
+  end = lanes.section_at(70.0, 0)
+  assert [round(sp.left, 3) for sp in end.ours] == [round(sp.left, 3) for sp in start.ours[1:]]
   assert lanes.section_at(10.0, 0) is lanes.sections[0]
-  assert 3.3 < lanes.section_at(99.0, 1).ours[0].right - lanes.section_at(99.0, 1).ours[0].left < 3.5
+  before = lanes.section_at(70.0 - TAPER_BEFORE + 0.01, 0)  # the way before: its own lanes until the taper
+  assert before.lanes == 2 and abs(before.edges[0] - lanes.sections[0].edges[0]) < 0.01
+  edge = lanes.section_at(67.0, 0).edges[0]  # half way across the taper's first half, the kerb a quarter of the way out
+  assert abs(edge - (lanes.sections[0].edges[0] * 0.75 + lanes.sections[1].edges[0] * 0.25)) < 0.01
+  assert abs(lanes.section_at(70.0 + TAPER_AFTER, 1).ours[0].right - lanes.section_at(70.0 + TAPER_AFTER, 1).ours[0].left - 3.5) < 0.01
   # the leftmost lane: into the bay as it opens, then through the corner on a fillet, into the left lane out
   line = lanes.lane_line(0.0, [(0.0, 0.0)])
   before = line[line[:, 1] < -45.0]
@@ -133,16 +141,20 @@ def test_fillets_near_the_route_ends():
 
 
 def test_taper_lines():
-  # the bay's way: its lines move with the lanes over TAPER_M from where it opens; the white line beside the opening
-  # lane starts once it has opened (on the next way, here none)
+  # the bay's way: its lines move with the lanes over the taper's second half (TAPER_AFTER from the node where it
+  # opens, half open there); the way before takes the first half, its kerb moving out over TAPER_BEFORE to the node
   osm = junction_map()
   d, knots = osm.taper(11)
-  assert d == 1 and [round(s) for s, _ in knots] == [0, 30]
+  assert d == 1 and [round(s) for s, _ in knots] == [0, round(TAPER_AFTER), 30]
   lines = osm.line_geometry(11)
   left = next(g for line, g in lines if line.kind == 'edge' and g[0, 0] < 0)
-  assert np.allclose(left[0], (-3.5, -30.0), atol=0.01) and np.allclose(left[-1], (-5.25, 0.0), atol=0.01)
-  assert len([line for line, _ in lines if line.kind == 'divider']) == 1  # between the old lanes only
-  assert osm.taper(10) is None and osm.taper(13) is None
+  assert np.allclose(left[0], (-4.375, -30.0), atol=0.01) and np.allclose(left[-1], (-5.25, 0.0), atol=0.01)
+  assert len([line for line, _ in lines if line.kind == 'divider']) == 2  # the bay is half open (1.75 m) at the node
+  d, knots = osm.taper(10)
+  assert d == 1 and [round(s) for s, _ in knots] == [0, round(70.0 - TAPER_BEFORE), 70]
+  left = next(g for line, g in osm.line_geometry(10) if line.kind == 'edge' and g[0, 0] < 0)
+  assert np.allclose(left[0], (-3.5, -100.0), atol=0.01) and np.allclose(left[-1], (-4.375, -30.0), atol=0.01)
+  assert osm.taper(13) is None
 
 
 def test_explicit_taper():

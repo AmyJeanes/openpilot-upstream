@@ -143,15 +143,16 @@ def test_mirror():
 
 def test_turn_bay_change_lanes():
   # a left turn bay opens 40 m before the junction from the one lane forward, change:lanes=no along it: it's the
-  # target once its taper has ended, 30 m on, and due straight away; before, the one lane forward needs no target
+  # target once it has opened, TAPER_M on, and due straight away; before, the one lane forward needs no target
   osm, nodes = fixture('turn_bay.osm')
   slots = ls.LaneSlots(route(osm, nodes, [1, 2, 3, 5], {2: LEFT}))
   move = slots.moves[0]
-  assert move.targets == {0} and abs(move.opens - 90.0) < 0.01 and move.bans == [(move.opens, move.along)]
-  assert abs(move.window(0.0)[2] - 90.0) < 0.01  # not in it before it's there
-  for s in (40.0, 70.0, 89.0):
+  opens = 60.0 + TAPER_M
+  assert move.targets == {0} and abs(move.opens - opens) < 0.01 and move.bans == [(move.opens, move.along)]
+  assert abs(move.window(0.0)[2] - opens) < 0.01  # not in it before it's there
+  for s in (40.0, 60.0, opens - 1.0):
     assert rows(slots, s) == ('ao......', 'ao......', None, None), s
-  assert rows(slots, 91.0) == ('aTo.....', 'ao......', 0.0, 0.0)
+  assert rows(slots, opens + 1.0) == ('aTo.....', 'ao......', 0.0, 0.0)
 
 
 def test_bay_opens_after_its_taper():
@@ -163,8 +164,8 @@ def test_bay_opens_after_its_taper():
     assert all(slots.section_here(s).lanes == 2 for s in np.arange(0.0, opens - 0.01, 1.0))
     assert slots.section_here(opens + 0.01).lanes == 3
     assert abs(slots.moves[0].opens - opens) < 0.01
-    assert rows(slots, 20.0, 10.0) == ('aToo....', 'aToo....', 50.0, 250.0), right
-    assert rows(slots, 250.0, 10.0) == ('aToo....', 'aToo....', 0.0, 20.0), right  # in the taper: not yet the bay
+    assert rows(slots, 20.0, 10.0) == ('aToo....', 'aToo....', 50.0, opens - 20.0), right
+    assert rows(slots, opens - 5.0, 10.0) == ('aToo....', 'aToo....', 0.0, 5.0), right  # opening: not yet the bay
     assert rows(slots, 285.0, 10.0) == ('aaToo...', 'aToo....', 0.0, 0.0), right
     for v in (5.0, 15.0):
       check_targets(slots, r, v)

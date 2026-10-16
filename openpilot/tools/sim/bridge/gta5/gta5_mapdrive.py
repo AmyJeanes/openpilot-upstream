@@ -659,6 +659,15 @@ def segment_of(route, s: float) -> int:
   return int(min(max(np.searchsorted(route.along, s, side="right") - 1, 0), max(len(route.points) - 2, 0)))
 
 
+def target_centre(route, s: float, lane: float) -> float:
+  """m right of the route's line to lane `lane`'s centre s m along it, as the lane line runs through it (section_at:
+  tapers, hops, blends), not by the segment's own cross-section, which steps at its ends; NaN where unknown."""
+  k = segment_of(route, s)
+  lanes = route.lanes
+  sec = lanes.section_at(s, k) if lanes is not None and 0 <= k < len(lanes.sections) else route.section(k)
+  return round(sec.offset(lane), 2) if sec is not None and sec.lanes and not math.isnan(lane) else math.nan
+
+
 def road_speed(route, k: int) -> float:
   """The road's speed on route segment k: the map's limit, else by its class."""
   limits = getattr(route, "limits", None)
@@ -3794,8 +3803,7 @@ class MapDrive:
     s = self.s
     rs = float(np.interp(s, self.s_path, self.route_s))
     self.target_lane = lane_at(self.keys, rs)
-    sec = route.section(segment_of(route, rs))
-    self.target_right = round(sec.offset(self.target_lane), 2) if sec is not None and sec.lanes else math.nan
+    self.target_right = target_centre(route, rs, self.target_lane)
     self.lc_tau = self.lc_dir = math.nan
     side = label = None
     for s0, s1, d, _ in self.changes:

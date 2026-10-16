@@ -686,7 +686,7 @@ def main():
   if args.base and os.path.exists(os.path.join(args.base, 'static.npz')):
     report['compare'] = static_compare(arr, dict(np.load(os.path.join(args.base, 'static.npz'))), cache['classes'])
   with open(os.path.join(args.out, 'places_static.csv'), 'w', newline='') as f:
-    w = csv.DictWriter(f, fieldnames=list(places[0].keys()) if places else ['x'])
+    w = csv.DictWriter(f, fieldnames=list(places[0].keys()) if places else ['x'], lineterminator='\n')
     w.writeheader()
     for r in places[:500]:
       w.writerow({**r, 'families': '+'.join(r['families'])})
@@ -704,7 +704,7 @@ def main():
     np.savez_compressed(os.path.join(args.out, 'legs.npz'), legs=np.array(legs, dtype=object))
     for key, rows in steps.items():
       with open(os.path.join(args.out, f'steps_{key}.csv'), 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ['x'])
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ['x'], lineterminator='\n')
         w.writeheader()
         [w.writerow(s) for s in rows]
     base = None
@@ -714,12 +714,12 @@ def main():
     report['events'] = ev
     with open(os.path.join(args.out, 'events.csv'), 'w', newline='') as f:
       keys = list(dict.fromkeys(k for r in ev for k in r))
-      w = csv.DictWriter(f, fieldnames=keys)
+      w = csv.DictWriter(f, fieldnames=keys, lineterminator='\n')
       w.writeheader()
       [w.writerow(r) for r in ev]
     dp = drift_places(args.drift, darr, base)
     with open(os.path.join(args.out, 'places_drift.csv'), 'w', newline='') as f:
-      w = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in dp for k in r)) or ['x'])
+      w = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in dp for k in r)) or ['x'], lineterminator='\n')
       w.writeheader()
       [w.writerow(r) for r in dp[:500]]
   if base_rep:

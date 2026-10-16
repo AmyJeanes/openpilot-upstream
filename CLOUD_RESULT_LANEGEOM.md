@@ -100,3 +100,76 @@ each with its largest |target - paint centre| for the three targets, before and 
 
 Baseline numbers are under Preflight; `cloud_lanegeom/baseline/` holds the baseline's report and lists. A rerun of the
 baseline against itself gives identical numbers (deterministic).
+
+## Step 2: lanes carry on across nodes (cause 2)
+
+**What the paint says.** On the drift frames, at the 49 places the routes pass where a way's lane count rises or falls
+at a node it just carries on through (the map's `tapers`), the paint lane the target lane is in was compared, every 3 m
+from 24 m before the node to 24 m past it, with where the way before and the way after each put that lane (counted from
+the side the lane opens or closes on):
+
+| m from node | -24..-12 | -12..-6 | -6..0 | 0..+6 | +6..+12 | +12..+24 |
+|---|---|---|---|---|---|---|
+| lane added: mean error, way before / way after | 0.5 / 1.5 | 0.4-0.6 / 1.3 | 0.7-0.9 / 0.9-1.2 | 1.3-1.5 / 0.5 | 1.6 / 0.4 | 1.6-1.8 / 0.5-0.7 |
+| lane ending: way before / way after | 0.5-0.7 / 1.5-1.7 | 0.5 / 1.3 | 0.5-0.7 / 1.3 | 0.7-1.1 / 0.7-1.1 | 1.2 / 0.6 | 1.1-1.2 / 0.6 |
+
+So GTA's lanes really do move across at these nodes (each link's lanes sit about its own line), and the paint makes
+the move within a few metres of the node: a lane added, from about 6 m before to 6 m past; a lane ending, from about
+9 m before to 3 m past. The map instead kept the way before's lanes for **30 m past the node** (`TAPER_M`, a taper on
+the way with more lanes only): inside those tapers the planner's cross-section was more than 1 m off the paint on 52%
+of frames (lane added) and 49% (lane ending), against 19% and 29% for each way's own lanes. The paint shows the new
+lane's own line appearing over the first 10-15 m past the node (a paint line at its place on 38-42% of frames by the
+node, 61% by 10-15 m, 68-71% at the plateau from 15 m).
+
+**Change** (`osm_lanes.py`):
+- The taper is centred on the node: `TAPER_BEFORE`/`TAPER_AFTER` = 6/6 m where a lane begins, `DROP_BEFORE`/`DROP_AFTER`
+  = 9/3 m where one ends (`taper_u`). The new lane widens from nothing on the side it opens (the lane ending narrows to
+  nothing), and the lanes carrying on are counted from the other side, as before (`_blend`, `_opens_left`). The way with
+  fewer lanes now takes its part of the taper too: its lanes move across to where they carry on (`_toward_many`), in
+  `RouteLanes.section_at` (the planner, nav, labels) and `OsmLanes.taper` (lanes.json's lines and kerbs), so the two
+  ways meet at the node with no step.
+- `TAPER_M` (where a new lane counts as open, its line painted: nav's `opening`/`opened_at`, lane slots) is 15 m past
+  the node, from the paint, instead of 30 m.
+- `gta5_mapdrive.target_centre`: the map driver's `target_right` is the target lane's centre where the plan is, as
+  `section_at` has it (tapers, hops, blends), not the segment's own cross-section, which stepped at every node where
+  the next way's lanes sit elsewhere (most of the brief's 4.9 steps per km). The planned line was never stepped (it used
+  `section_at`), only the logged target was.
+- `_ease_jogs` is unchanged: with the tapers continuous it no longer fires at them; it remains for the real jogs
+  (junction-node lane count changes, a divided road's carriageway onto the two-way road), where JOG_REACH 10 m matches
+  the paint's few-metre move. Per-node paint taper lengths are not read (the measured window is the same at every node).
+
+**Scores** (`cloud_lanegeom/step2/report.md`, before = baseline):
+
+| | before | after |
+|---|---|---|
+| map vs paint > 1 m, all (same samples) | 8.7% | 8.6% |
+| primary | 9.8% | 9.3% |
+| trunk | 5.5% | 5.3% |
+| motorway | 7.7% | 7.6% |
+| paint length moved > 0.5 m nearer / further | | 2,471 m / 781 m |
+| drift, `section_at` target > 1 m (all / j20) | 3.61% / 2.51% | 3.41% / 2.35% |
+| drift, planned line > 1 m (all / j20) | 4.46% / 2.57% | 4.34% / 2.47% |
+| inside the old tapers, `section_at` > 1 m: lane added / lane ending | 52% / 49% | 22% / 39% |
+| inside the old tapers, planned line > 1 m: lane added / lane ending | 40% / 51% | 30% / 39% |
+| target steps (target_right as now logged = `section_at`), per km | 4.93 (recorded) | 3.27 |
+| ... away from junctions | 142 (0.88/km), 47 > 2 m | 57 (0.36/km), 43 > 2 m |
+| ... spurious (paint lane did not move) | 24 of 68 | 1 of 29 |
+
+The rebuilt static target (the old target_right) is unchanged by construction; its steps are the ones the planner never
+had. Events: the 2-to-1 drop at (1190.9, 441.6) improves (planned line 3.36 -> 2.79 m), the rest are unchanged (their
+errors are offsets, exits and plan logic: steps 3-5).
+
+**Tests** (live map = this build): lane_numbering 28 passed + `test_live_freeway_merge_exit_and_splits` (baseline's
+cloud-router failure); lane_slots 20; freeway_lanes 7; mapdrive 37 + `test_collision_routes` (baseline's); validate_lanes
+0 issues; lane_parity 4,979 of 94,748 (unchanged); map tests (route_lanes, osm_lanes, lane_continuity, paint_score,
+junctions, lane_match, carriageway, validate_lanes, stop_lines) 149 passed. Updated to the new taper: `test_route_lanes`
+(`test_route_lanes`, `test_taper_lines`), `test_lane_slots` (`test_turn_bay_change_lanes`,
+`test_bay_opens_after_its_taper`: the bay opens TAPER_M past its node), `test_lane_numbering`
+(`test_right_turn_bay_beside_an_open_left_lane`). New: `map/test_lane_continuity.py` (2 -> 3 opening left by its arrows,
+opening right, 3 -> 2 dropping, a two-way 1+1 -> 2+1, lines meeting at the node, target_right without a step, and four
+live places: lane added at (-460,-221), (644,-1244), (-74,-1552), lane dropped at (1183,434)). `test_nav_msgs.py` also
+uses TAPER_M but needs pycapnp/cereal and doesn't run here.
+
+lanes.json: 69,714 lines (69,666 before); roads.json changes too (32,224 drawn ways, 26,443 junction areas, against
+32,201 and 26,420): the ways beside a taper are drawn as their own strips now, and turn bays opening less than 30 m
+before a junction are fully open at it, so those junctions' outlines follow.

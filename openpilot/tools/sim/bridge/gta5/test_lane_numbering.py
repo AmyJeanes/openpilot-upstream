@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from openpilot.tools.sim.bridge.gta5.test_lane_slots import START, DEST, osm_map
+from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M
 from openpilot.tools.sim.bridge.gta5.map.router import Route
 
 # Vinewood Blvd as the map has it: three lanes our way (a left-turn lane, straight, straight or right) and two back,
@@ -125,7 +126,7 @@ def test_right_turn_bay_beside_an_open_left_lane():
   # the new one, for the taper's lane as for the lane maps (the taper opened on the left by the arrows alone)
   r = road((150.0, one_way(2, 'left_of:1')), (100.0, one_way(3, 'left_of:1', 'left|through|right')), (100.0, one_way(3, 'left_of:1')))
   assert maps(r) == [(150, [0, 1], 3)]
-  assert r.lanes.opening(1) == (180.0, 1, False)
+  assert r.lanes.opening(1) == (150.0 + TAPER_M, 1, False)
   at = ribbon(r, 1, 2)
   assert all(abs(at(y) - 5.25) < 0.05 for y in (100.0, 160.0, 190.0))
 

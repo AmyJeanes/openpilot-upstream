@@ -496,7 +496,17 @@ ROADS = frozenset({'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unc
                    'tertiary_link'})
 # tags that place lanes, beyond their counts: a map without any has no lane geometry to read
 GEOMETRY = ('width', 'placement', 'placement:forward', 'placement:backward', 'placement:offset')
-TAPER_M = 30.0  # m: a lane begins (or ends) where a way's lane count changes, widening from (narrowing to) nothing over this
+# Where a road's lane count changes at a node it just carries on through, a lane begins (or ends) there: GTA lays each
+# link's lanes about its own line, so the lanes carrying on sit elsewhere either side of the node, and the paint seen from
+# above moves across with them within a few metres of it (16 Oct drift frames: lanes in as the way before has them up to
+# 3-6 m before the node, as the way after has them from 3-6 m past it; a lane ending, the lanes carrying on move from
+# 9 m before to 3 m past). So the lanes move across, the new lane widening from nothing on the side it opens (or the
+# lane ending narrowing to nothing), over a taper centred on the node: TAPER_BEFORE m before it to TAPER_AFTER past
+# it where a lane begins, DROP_BEFORE to DROP_AFTER where one ends; the lanes carrying on are counted from the other side.
+TAPER_BEFORE, TAPER_AFTER = 6.0, 6.0  # m
+DROP_BEFORE, DROP_AFTER = 9.0, 3.0  # m
+TAPER_M = 15.0  # m past the node where a lane that begins there is open, its line painted beside it (16 Oct frames: by 10-15 m)
+TAPER_REACH = max(TAPER_BEFORE, TAPER_AFTER, DROP_BEFORE, DROP_AFTER)  # m from the node a taper reaches at most
 # a run of one-lane freeway ways (HOP_ROADS) off a road with more lanes at a junction node, or onto one, at most HOP_M
 # long, within HOP_TURN of straight on there and straying HOP_SIDE m or more to one side: one of GTA's lane hops
 # (RouteLanes._hops)
@@ -762,7 +772,7 @@ class OsmLanes:
 
   def _boundary(self, way: int, d: int, ahead: bool) -> tuple[float, 'Section'] | None:
     """Back (or on) from a way travelled d, while the road carries on with its layout: how far to where its lanes
-    change, and the cross-section beyond (seen travelling d); None past TAPER_M, a junction, or a tapered way."""
+    change, and the cross-section beyond (seen travelling d); None past TAPER_REACH, a junction, or a tapered way."""
     key = Section.of(self.lanes(way), d).key
     w, wd, dist = way, d, 0.0
     for _ in range(64):
@@ -780,16 +790,18 @@ class OsmLanes:
       if sec.key != key:
         return dist, sec
       dist += self.length(nb)
-      if dist >= TAPER_M:
+      if dist >= TAPER_REACH:
         return None
       w, wd = nb, nd
     return None
 
   def taper(self, way: int) -> tuple[int, list[tuple[float, 'Section']]] | None:
     """Where the way's lanes change along it: (the direction it's seen in, [(m along it that way, its cross-section
-    there)], the cross-section varying linearly between). From its width:lanes:start / :end tags; else, a lane a road
-    gains (or loses) at a node where it just carries on widens from (narrows to) nothing over TAPER_M from there, also
-    across the ways after it with the same lanes. None where its lanes don't change."""
+    there)], the cross-section varying linearly between). From its width:lanes:start / :end tags; else, near a node
+    where the road just carries on and gains (or loses) a lane, its part of the taper there (taper_u): on the way with
+    more lanes the new lane widening from nothing (narrowing to nothing), on the way with fewer its lanes moving across
+    to where they carry on (_toward_many), across the ways with the same lanes either side too. None where its lanes
+    don't change."""
     if way in self._tapers:
       return self._tapers[way]
     out = None
@@ -798,16 +810,24 @@ class OsmLanes:
       out = FORWARD, [(0.0, Section.of(self.lanes_at(way, 'start'))), (length, Section.of(self.lanes_at(way, 'end')))]
     else:
       for d in (FORWARD, BACKWARD):
-        many = Section.of(self.lanes(way), d)
+        own = Section.of(self.lanes(way), d)
         for ahead in (False, True):
           found = self._boundary(way, d, ahead)
-          if found is None or not (_taperable(found[1], many) and found[1].lanes < many.lanes):
+          if found is None or not _taperable(found[1], own):
             continue
-          dist, few = found
+          dist, other = found
+          more = other.lanes < own.lanes  # this way has the lanes the other lacks
+          # travelling d: from the other way into this one (ahead False), or from this one into it
+          opening = more != ahead
 
-          def state(along, dist=dist, few=few, many=many, ahead=ahead):
-            return _blend(few, many, (dist + (length - along if ahead else along)) / TAPER_M)
-          reach = TAPER_M - dist  # m of the way the taper runs into
+          def state(along, dist=dist, other=other, own=own, ahead=ahead, opening=opening, more=more):
+            x = (dist + along) if not ahead else -(dist + length - along)
+            u = taper_u(x, opening)
+            return _blend(other, own, u) if more else _toward_many(own, other, u)
+          before, after = (TAPER_BEFORE, TAPER_AFTER) if opening else (DROP_BEFORE, DROP_AFTER)
+          reach = (after if not ahead else before) - dist  # m of this way the taper runs into
+          if reach <= 0.0:
+            continue
           knots = [0.0, min(reach, length)] if not ahead else [max(length - reach, 0.0), length]
           knots = sorted({0.0, length, *knots})
           out = d, [(v, state(v)) for v in knots]
@@ -1742,8 +1762,9 @@ class RouteLanes:
   def section_at(self, s: float, k: int | None = None) -> Section | None:
     """The cross-section s m along (on segment k, where s is at a point segments share): along a way whose lanes widen
     or narrow (width:lanes...:start / :end) as they do along it; near a node where the road carries on onto a way with
-    the same lanes elsewhere, moving across to them as the lines do (OsmLanes.blend); else a lane widening from nothing
-    over TAPER_M where the road's lane count has risen, or narrowing to nothing before it falls."""
+    the same lanes elsewhere, moving across to them as the lines do (OsmLanes.blend); else near a node where the road's
+    lane count rises (falls), its taper centred on the node (taper_u): a lane widening from nothing (narrowing to
+    nothing) on the way with more lanes, the lanes moving across to where they carry on on the way with fewer."""
     k = self.segment(s) if k is None else k
     sec = self.sections[k] if 0 <= k < len(self.sections) else None
     if sec is None:
@@ -1759,10 +1780,16 @@ class RouteLanes:
     if not self.tapers:
       return sec
     k0, k1 = self._run(k)
-    if k0 in self.tapers and s - self.along[k0] < TAPER_M and self.tapers[k0][0].lanes < sec.lanes:
-      return _blend(self.tapers[k0][0], sec, (s - self.along[k0]) / TAPER_M)
-    if k1 + 1 in self.tapers and self.along[k1 + 1] - s < TAPER_M and self.tapers[k1 + 1][1].lanes < sec.lanes:
-      return _blend(self.tapers[k1 + 1][1], sec, (self.along[k1 + 1] - s) / TAPER_M)
+    if k0 in self.tapers and (x := s - self.along[k0]) < TAPER_REACH:  # past a node where the lane count changed
+      prev = self.tapers[k0][0]
+      if prev.lanes < sec.lanes:
+        return _blend(prev, sec, taper_u(x, True))
+      return _toward_many(sec, prev, taper_u(x, False))
+    if k1 + 1 in self.tapers and (x := s - self.along[k1 + 1]) > -TAPER_REACH:  # before a node where it changes
+      nxt = self.tapers[k1 + 1][1]
+      if nxt.lanes < sec.lanes:
+        return _blend(nxt, sec, taper_u(x, False))
+      return _toward_many(sec, nxt, taper_u(x, True))
     return sec
 
   def opening(self, k: int) -> tuple[float, int, bool] | None:
@@ -2289,6 +2316,30 @@ def _blend(few: Section, many: Section, t: float) -> Section:
            for o, m in zip(old, many.spans, strict=True)]
   edges = tuple(o + (m - o) * t for o, m in zip(few.edges, many.edges, strict=True))
   return Section(spans, edges)
+
+
+def taper_u(x: float, opening: bool) -> float:
+  """How far (0-1) from the fewer lanes' layout to the more's the road is x m past the node where its lane count
+  changes (negative before it), travelling from the fewer to the more where a lane begins (`opening`), else the other
+  way: across the taper centred on the node (TAPER_BEFORE / TAPER_AFTER, DROP_BEFORE / DROP_AFTER)."""
+  before, after = (TAPER_BEFORE, TAPER_AFTER) if opening else (DROP_BEFORE, DROP_AFTER)
+  u = min(max((x + before) / (before + after), 0.0), 1.0)
+  return u if opening else 1.0 - u
+
+
+def _toward_many(few: Section, many: Section, u: float) -> Section:
+  """`few`'s lanes, u (0-1) of the way across to where they carry on in `many` (its lanes but the ones it gains, on the
+  side its arrows turn to, else the outer side: as _blend counts them), the kerbs with them."""
+  extra = many.lanes - few.lanes
+  left = _opens_left(few, many)
+  mo = many.ours
+  match = many.spans[:many.first] + (mo[extra:] if left else mo[:few.lanes]) + many.spans[many.first + many.lanes:]
+  if len(match) != len(few.spans) or extra <= 0:
+    return few
+  u = min(max(u, 0.0), 1.0)
+  spans = [Span(o.lane, o.left + (m.left - o.left) * u, o.right + (m.right - o.right) * u, o.heading)
+           for o, m in zip(few.spans, match, strict=True)]
+  return Section(spans, tuple(o + (m - o) * u for o, m in zip(few.edges, many.edges, strict=True)))
 
 
 RUN_ON_TURN = 20.0  # deg: a one-way way runs on into another at a node with others (_straight_on) this near straight
