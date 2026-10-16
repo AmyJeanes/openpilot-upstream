@@ -947,6 +947,20 @@ def _mapped_plan(ahead: list, maps: LaneMaps, lane, lanes_at, v: float, t: Tune,
   return keys
 
 
+def lanes_for(m, lane: tuple[int, int], maps: LaneMaps | None) -> tuple[int, int]:
+  """The lanes of the car's road (`lane`'s: [i, of n]) to be in for a turn, fork or way straight on: its own lanes at
+  its junction, followed back to the car across where the road's lanes change (laneMaps); without them, or with a lane
+  reading from before a change, its lanes counted from its side."""
+  i, n = lane
+  if maps is not None:
+    before = maps.between(-1.0, m.dist)
+    lo, hi = m.lanes(before[-1][2] if before else n)
+    found = maps.lanes(i, n, m.dist, lo, hi)
+    if found is not None:
+      return found
+  return m.lanes(n)
+
+
 def junction_entry(turn_dist: float, stops: list, junctions: list) -> tuple[float, str]:
   """Where the car enters a turn's junction (m ahead, from the same point as turn_dist): its stop line within
   ENTRY_STOP_BEFORE m before the turn, else the first of the junction's nodes leading up to it, else ENTRY_DEFAULT m
@@ -1498,17 +1512,7 @@ class Planner:
     self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m", by=turn.dist - BAY_LAST, bay=where)
 
   def _lanes_for(self, m) -> tuple[int, int]:
-    """The lanes of the car's road (self.lane's) to be in for a turn, fork or way straight on: its own lanes at its
-    junction, followed back to the car across where the road's lanes change (laneMaps); without them, or with a
-    lane reading from before a change, its lanes counted from its side."""
-    i, n = self.lane
-    if self.maps is not None:
-      before = self.maps.between(-1.0, m.dist)
-      lo, hi = m.lanes(before[-1][2] if before else n)
-      found = self.maps.lanes(i, n, m.dist, lo, hi)
-      if found is not None:
-        return found
-    return m.lanes(n)
+    return lanes_for(m, self.lane, self.maps)
 
   def _sure_wrong(self, lo: int, hi: int) -> bool:
     """Whether the car is surely out of lanes lo-hi, by its position on the route's link (not just between lanes, as
