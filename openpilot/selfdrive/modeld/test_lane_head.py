@@ -2,7 +2,7 @@ import numpy as np
 
 from openpilot.cereal import log
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.modeld.fill_model_msg import fill_lane_head, lane_head_marginals
+from openpilot.selfdrive.modeld.fill_model_msg import fill_lane_head, lane_head_from_kerb, lane_head_marginals
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 
 N = ModelConstants.LANE_HEAD_MAX
@@ -36,6 +36,21 @@ class TestLaneHead:
   def test_default_without_head(self):
     lh = log.ModelDataV2.new_message().laneHead
     assert (lh.laneIdx, lh.laneCount) == (-1, -1)
+
+  def test_from_kerb(self):
+    # a kerb-counted head's (count, index from the kerb): right-hand traffic's kerb is on the right, a right-hand drive
+    # car's (left-hand traffic) on the left
+    for k, (c, i) in enumerate(CLASSES):
+      probs = np.full(len(CLASSES), 1e-4, np.float32)
+      probs[k] = 1.0
+      for is_rhd, want in ((False, (c, c - 1 - i)), (True, (c, i))):
+        lh = log.ModelDataV2.new_message().laneHead
+        fill_lane_head(lh, lane_head_from_kerb(probs / probs.sum(), is_rhd))
+        assert (lh.laneCount, lh.laneIdx) == want
+    p = np.random.default_rng(3).random(len(CLASSES)).astype(np.float32)
+    assert np.array_equal(lane_head_from_kerb(lane_head_from_kerb(p, False), False), p)
+    outs = Parser(ignore_missing=True).parse_policy_outputs({'lane_head_kerb': p[None].copy()})
+    assert np.isclose(outs['lane_head_kerb'].sum(), 1)
 
 
 # n16 (comma's nav model) as gta5-train exports it with the head: n16's own slices unchanged, its pad included, then
