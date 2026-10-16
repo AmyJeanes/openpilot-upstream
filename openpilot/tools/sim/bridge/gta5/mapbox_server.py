@@ -64,6 +64,9 @@ SIGNALS = {"lights": "traffic_signal", "stop": "stop_sign", "give_way": "yield_s
 STOP_AT = 10.0  # m: a stop line this near a route point is at it (its signal node), else not given
 LANE_JUNCTION = 1.0  # m between where laneArrows end and the junction's route point
 SNAP_BEHIND, SNAP_AHEAD = 5.0, 30.0  # m: a maneuver is at the junction with lanes this near it
+FORK_STEP_NEAR = 30.0  # m: a fork with no maneuver this near gets a step of its own
+KEEP_TYPES = (22, 23, 24)  # Valhalla's keep straight / right / left
+KEEP_FORK_NEAR = 15.0  # m between a keep and the map's fork it's at
 
 
 # *** polylines ***
@@ -141,8 +144,11 @@ def banner_lanes(lanes: list[dict]) -> list[dict]:
 class Builder:
   """A Mapbox Directions response for a router.Route on our map. `osm` (OsmLanes) gives the junctions' other roads;
   without it the intersections hold the route's own two."""
-  def __init__(self, osm=None):
+  def __init__(self, osm=None, fork_lanes: bool = os.getenv("GTA5_MAPBOX_FORK_LANES", "1") != "0"):
     self.osm = osm
+    # forks' lanes from their lane counts where turn:lanes don't say, and fork steps (see directions);
+    # GTA5_MAPBOX_FORK_LANES=0: only the map's turn:lanes, Valhalla's maneuvers
+    self.fork_lanes = fork_lanes
 
   def _nodes(self, route):
     if self.osm is None:
@@ -205,6 +211,12 @@ class Builder:
       it[SIGNALS[kind]] = True
       ints[float(k)] = it
 
+    for pos, it in ints.items():  # the road's class, out of each
+      cls = classes[min(int(pos), n - 2)] if n > 1 else ""
+      it["mapbox_streets_v8"] = {"class": STREET_CLASS.get(cls, "street")}
+      if cls in ("motorway", "motorway_link"):
+        it["classes"] = ["motorway"]
+
     # lanes: each junction's from its turn:lanes, on the intersections of the way that carries them there
     forks = {round(f.along, 1): f for f in route.forks}
     turns = ri["turns"]
@@ -226,8 +238,50 @@ class Builder:
       if float(kj) not in ints:  # the junction itself, though the map's nodes don't meet there
         ints[float(kj)] = {**self._intersection(kj, [], pts, heading_at, False, False), "lanes": lanes}
 
+    # a fork in the road whose arrows don't single out the route's branch (or with none): its lanes from the map's lane
+    # counts, the branch's taking the route's side (Fork.lanes of lanes_in), as a tagged diverge's turn:lanes say
+    fork_steps = []
+    for f in route.forks if self.fork_lanes else []:
+      if not f.keep:
+        continue  # GTA splitting a road's lanes before a junction: the car keeps to its lane, nothing to show
+      kj = idx_at(f.along)
+      if abs(route.along[kj] - f.along) > 6.0:
+        continue
+      have = ints.get(float(kj), {}).get("lanes")
+      if have and 0 < sum(x["valid"] for x in have) < len(have):
+        continue  # the junction's own arrows say which lanes go the route's way: no fork of its own
+      fork_steps.append((kj, f.side))
+      if not (f.lanes_in >= 2 and 0 < f.lanes < f.lanes_in):
+        continue
+      branch = range(f.lanes_in - f.lanes, f.lanes_in) if f.side == "right" else range(f.lanes)
+      lanes = [{"indications": [f"slight {f.side}"], "valid": True, "active": True, "valid_indication": f"slight {f.side}"}
+               if i in branch else {"indications": ["straight"], "valid": False, "active": False} for i in range(f.lanes_in)]
+      i0 = next((i0 for _, _, i0, i1 in ways if i0 < kj <= i1), max(kj - 1, 0))
+      for pos, it in ints.items():
+        if i0 <= pos <= kj and not (pos == 0.0 and kj > 0) and not it.get("lanes"):
+          it["lanes"] = [dict(x) for x in lanes]
+      if float(kj) not in ints:
+        ints[float(kj)] = self._intersection(kj, [], pts, heading_at, False, False)
+      ints[float(kj)]["lanes"] = [dict(x) for x in lanes]
+
     # steps, one per maneuver
     mans = fold_keeps(junction_maneuvers(route), lambda m: float(route.along[min(m.get("begin_shape_index", 0), n - 1)]))
+    # a fork step where the road forks and Valhalla, unlike Mapbox (OSRM), names no maneuver: "fork" left / right
+    have = [min(int(m.get("begin_shape_index", 0)), n - 1) for m in mans]
+    for kj, side in fork_steps:
+      if not any(abs(route.along[b] - route.along[kj]) <= FORK_STEP_NEAR for b in have):
+        mans.append({"type": 24 if side == "left" else 23, "begin_shape_index": kj})
+    mans.sort(key=lambda m: (min(int(m.get("begin_shape_index", 0)), n - 1), m.get("type") in (4, 5, 6)))
+    # Valhalla's keeps as Mapbox (OSRM) has them: a fork only where the road's lanes split (a Fork with fewer lanes on
+    # the route's branch), a merge where it joins a road with more, and no maneuver where the map has no fork at all
+    for m in mans:
+      if m.get("type") in KEEP_TYPES:
+        a = float(route.along[min(int(m.get("begin_shape_index", 0)), n - 1)])
+        f = next((f for f in route.forks if abs(f.along - a) <= KEEP_FORK_NEAR), None)
+        if f is None:
+          m["type"] = 8  # continue
+        elif f.lanes >= f.lanes_in:
+          m["type"] = 38 if f.side == "left" else 37  # merge slight left / right
     lane_ends = sorted(idx_at(float(entry[0])) for entry in ri["laneArrows"])
     starts, kept = [], []
     for m in mans:

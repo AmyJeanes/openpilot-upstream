@@ -31,6 +31,12 @@ merge, not a miss.
 
   python -m openpilot.tools.sim.bridge.gta5.navd_sim                     # the scenario trips and 40 real routes
   python -m openpilot.tools.sim.bridge.gta5.navd_sim --routes 10 --model n16 --lane truth,model:0.85 --out r.json
+  python -m openpilot.tools.sim.bridge.gta5.navd_sim --nav map,mapbox --lane model:0.85   # full map vs Mapbox data
+
+With `--nav mapbox`, nav is comma navd's step 1 lane guidance (selfdrive/navigation/lane_guidance.py) fed only what a real
+car gets: the trip's Mapbox-compatible response from mapbox_server.Builder (in process; the same as the GTA server
+answers), the car's progress along it, its speed, blinker and blind spots, openpilot's lane change state and the lane
+head stand-in ("truth": a perfect lane head). The judge still uses the full map's lanes.
 
 Needs the live map (GTA5_MAP) and, for trips not yet in GTA5_TRIP_ROUTES' cache, Valhalla on :8002."""
 import argparse
@@ -47,6 +53,7 @@ from openpilot.common.constants import CV
 from openpilot.selfdrive.navd import planner as nav
 from openpilot.selfdrive.navd.planner import Fork, LaneMaps, Planner, Through, Tune, Turn, Ends, aim, aim_fork, \
   junction_entry, lane_ends, lanes_for, parse_arrows, throughs
+from openpilot.selfdrive.navigation import lane_guidance as lg
 from openpilot.tools.sim.bridge.gta5.gta5_navd import nav_inputs
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import Section
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -430,6 +437,7 @@ class Maneuver:
   v: float = 0.0
   pulsed: bool = False  # nav's turn signal pulsed the model before it
   opens: float | None = None  # m before its commit point its nearest target lane begins (a bay, a lane added), None: further
+  mapbox: str | None = None  # with --nav mapbox: "lanes" where Mapbox's data gives its lanes, "none" where it has none
 
   def move(self, dist: float):
     if self.kind == "turn":
@@ -529,7 +537,7 @@ class TripResult:
 
 class NavSim:
   def __init__(self, route: Route, lane: float, model: ModelCfg, head: HeadCfg, traffic: TrafficCfg | None = None,
-               tune: dict | None = None, seed: int = 0, name: str = "", s0: float = 0.0, stage: int = 3):
+               tune: dict | None = None, seed: int = 0, name: str = "", s0: float = 0.0, stage: int = 3, nav: str = "map"):
     self.route, self.model, self.head_cfg = route, model, head
     self.stage = stage  # PLAN D's: the simulated driver approves at any stage, as GTA's
     self.rng = np.random.default_rng(seed)
@@ -549,8 +557,23 @@ class NavSim:
     # the planner told the speed this model needs for a lane change, as the bridge would per model (unless the tune says)
     t.values.update({"lane_source": {"truth": "map", "model": "model", "fused": "fused"}[head.source],
                      "model_lc_speed": model.v_ok, **(tune or {})})
-    self.nav = Planner(t)
-    self.nav.was_engaged = True  # no tune line per trip
+    self.mapbox: lg.MapboxRoute | None = None
+    if nav == "mapbox":
+      # comma navd's lane guidance on the trip's Mapbox-compatible response; the model's lane change speed as above
+      from openpilot.tools.sim.bridge.gta5.mapbox_server import Builder
+      from openpilot.tools.sim.bridge.gta5.mapdrive_sim import live_map
+      m = live_map()
+      gt = lg.Tune.of({"lc_min_speed": model.v_ok, **(tune or {})})
+      self.mapbox = lg.MapboxRoute(Builder(m["osm"] if m else None).directions(route)["routes"][0], gt)
+      self.mb_scale = self.mapbox.length / max(route.length, 1e-6)  # Mapbox's metres per the route's
+      self.nav = lg.LaneGuidance(gt)
+      self.nav.set_route(self.mapbox)
+      for mv in self.moves:
+        near = [x for x in self.mapbox.moves if abs(x.along - mv.s * self.mb_scale) < 40.0]
+        mv.mapbox = "lanes" if any(x.lanes for x in near) else "none"
+    else:
+      self.nav = Planner(t)
+      self.nav.was_engaged = True  # no tune line per trip
     # openpilot and the driver
     self.indicator: str | None = None
     self.lc_state = "off"  # desire_helper's: "off", "pre", "starting"
@@ -616,7 +639,14 @@ class NavSim:
              "waypoint": [float(r.points[-1][0]), float(r.points[-1][1])]}
     desire = {self.pulse_side: 0.9} if self.pulse_side and self.t - self.pulse_t < PULSE_MEMORY else {}
     skipped = len(self.nav.skipped)
-    out = self.nav.update(nav_inputs(state, True, self.indicator, desire, self.t, True, self.stage))
+    if self.mapbox is not None:
+      lane = head if self.head_cfg.source != "truth" else ([truth[0], truth[1], 1.0] if truth and truth[0] >= 0 else None)
+      bs = state["blindspot"]
+      out = self.nav.update(lg.GuidanceInputs(self.t, self.s * self.mb_scale, self.v, lane, self.indicator,
+                                              self.lc_state == "starting", bs[0], bs[1], self.stage))
+      out.arrived = False
+    else:
+      out = self.nav.update(nav_inputs(state, True, self.indicator, desire, self.t, True, self.stage))
     self.result.skipped += max(len(self.nav.skipped) - skipped, 0)
     for req in out.requests:
       if req == "cancelSignal":
@@ -1007,7 +1037,27 @@ def summarise(results: list[dict]) -> dict:
     "hanging_per_lc": round(sum(c["hanging"] for c in cs) / max(len(cs), 1), 2),
     "collisions": sum(r["collisions"] for r in results),
     "requests": request_outcomes([q for r in results for q in r.get("requests", [])]),
+    "missed_by": missed_by(rel),
   }
+
+
+LATE_LANE = 80.0  # m: a target lane beginning nearer its commit point than this opened late (a bay, a lane added)
+
+
+def missed_by(rel: list[dict]) -> dict:
+  """The misses by what nav had to go on: the target lane opening late (LATE_LANE m or less before the commit point:
+  where Mapbox, giving no opening points, can't time a change), and with --nav mapbox, no lanes from Mapbox there."""
+  out = {"late_lane": 0, "no_mapbox_lanes": 0, "other": 0}
+  for m in rel:
+    if m["made"]:
+      continue
+    if m.get("opens") is not None and m["opens"] <= LATE_LANE:
+      out["late_lane"] += 1
+    elif m.get("mapbox") == "none":
+      out["no_mapbox_lanes"] += 1
+    else:
+      out["other"] += 1
+  return out
 
 
 def request_outcomes(reqs: list[dict]) -> dict:
@@ -1072,13 +1122,13 @@ def _one(k: int) -> dict:
   if j.get("no_turn_take"):
     model = ModelCfg(**{**asdict(model), "turn_takes_lane": False})
   sim = NavSim(route, lane, model, parse_head(j["head"]), TrafficCfg(density=j["density"]), j["tune"],
-               seed=j["seed"] * 1000 + k, name=name, s0=s0, stage=j.get("stage", 3))
+               seed=j["seed"] * 1000 + k, name=name, s0=s0, stage=j.get("stage", 3), nav=j.get("nav", "map"))
   return asdict(sim.run())
 
 
 def run(names_specs, models: list[str], heads: list[str], tune: dict | None = None, density: float = 10.0, seed: int = 0,
-        quiet: bool = False, jobs: int = 1, no_turn_take: bool = False, stage: int = 3) -> dict:
-  """Each model x lane source over the trips: {"model / head": {"summary": ..., "trips": [TripResult, ...]}}."""
+        quiet: bool = False, jobs: int = 1, no_turn_take: bool = False, stage: int = 3, navs: tuple = ("map",)) -> dict:
+  """Each nav x model x lane source over the trips: {"[mapbox / ]model / head": {"summary": ..., "trips": [...]}}."""
   import multiprocessing
   _LOADED.clear()
   for name, spec in names_specs:
@@ -1089,23 +1139,23 @@ def run(names_specs, models: list[str], heads: list[str], tune: dict | None = No
       continue
     _LOADED.append((name, spec, *got))
   out = {}
-  for model in models:
-    for head in heads:
-      key = f"{model} / {head}"
-      _JOB.update(model=model, head=head, density=density, tune=tune, seed=seed, no_turn_take=no_turn_take, stage=stage)
-      if jobs > 1:
-        with multiprocessing.get_context("fork").Pool(jobs) as pool:
-          res = pool.map(_one, range(len(_LOADED)), chunksize=1)
-      else:
-        res = [_one(k) for k in range(len(_LOADED))]
-      for r in res:
-        if not quiet:
-          rel = [m for m in r["maneuvers"] if m["relevant"] and m["kind"] != "drop"]
-          made, done = sum(m["made"] for m in rel), sum(c["outcome"] == "done" for c in r["changes"])
-          err = "  " + r["error"] if r["error"] else ""
-          line = f"{key:24s} {r['name']:9s} {r['driven']:6.0f}/{r['length']:6.0f} m {r['secs']:5.0f} s  in lane {made}/{len(rel)}"
-          print(f"{line}  LC {done}/{len(r['changes'])}  ({r['wall_s']:.1f} s){err}", file=sys.stderr, flush=True)
-      out[key] = {"summary": summarise(res), "trips": res}
+  for nav_kind, model, head in [(a, b, c) for a in navs for b in models for c in heads]:
+    key = ("mapbox / " if nav_kind == "mapbox" else "") + f"{model} / {head}"
+    _JOB.update(model=model, head=head, density=density, tune=tune, seed=seed, no_turn_take=no_turn_take, stage=stage,
+                nav=nav_kind)
+    if jobs > 1:
+      with multiprocessing.get_context("fork").Pool(jobs) as pool:
+        res = pool.map(_one, range(len(_LOADED)), chunksize=1)
+    else:
+      res = [_one(k) for k in range(len(_LOADED))]
+    for r in res:
+      if not quiet:
+        rel = [m for m in r["maneuvers"] if m["relevant"] and m["kind"] != "drop"]
+        made, done = sum(m["made"] for m in rel), sum(c["outcome"] == "done" for c in r["changes"])
+        err = "  " + r["error"] if r["error"] else ""
+        line = f"{key:24s} {r['name']:9s} {r['driven']:6.0f}/{r['length']:6.0f} m {r['secs']:5.0f} s  in lane {made}/{len(rel)}"
+        print(f"{line}  LC {done}/{len(r['changes'])}  ({r['wall_s']:.1f} s){err}", file=sys.stderr, flush=True)
+    out[key] = {"summary": summarise(res), "trips": res}
   return out
 
 
@@ -1124,6 +1174,8 @@ def main():
   ap.add_argument("--stage", type=int, default=3, help="PLAN D's stage nav's requests are made at (the driver approves any)")
   ap.add_argument("--no-turn-take", action="store_true", help="the stand-in's turn desire doesn't take it a lane over")
   ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="trips run in parallel")
+  navs = "map (navd's planner on the full map, as the bridge runs it), mapbox (comma navd's lane guidance on Mapbox data)"
+  ap.add_argument("--nav", default="map", help=f"{navs}, or both: map,mapbox")
   args = ap.parse_args()
   use_routes()
   todo = trips(args.routes, args.seed)
@@ -1131,7 +1183,7 @@ def main():
     keep = set(args.only.split(","))
     todo = [t for t in todo if t[0] in keep]
   res = run(todo, args.model.split(","), args.lane.split(","), json.loads(args.tune), args.density, args.sim_seed,
-            jobs=args.jobs, no_turn_take=args.no_turn_take, stage=args.stage)
+            jobs=args.jobs, no_turn_take=args.no_turn_take, stage=args.stage, navs=tuple(args.nav.split(",")))
   save_routes([spec for _, spec in todo])
   print(table([(k, v["summary"]) for k, v in res.items()]))
   print()

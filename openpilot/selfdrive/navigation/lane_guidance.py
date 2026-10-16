@@ -15,8 +15,10 @@ signals turns, and shows the lanes under active guidance (navInstruction.lanes),
 - Timing: a change is asked for once time left <= lanes away x lc_time + margin, time left being the distance to the
   last place it must be done (`done_before` m before the maneuver) over the planning speed max(v, maxspeed_share x
   maxspeed), so slowing traffic doesn't put the ask off; at the latest `min_dist` m per lane away; with lc_time_fwy at
-  freeway speeds. Below `lc_min_speed` (the model's lane change speed: n16 ~10 m/s) a change not yet started is
-  withdrawn and left to the turn desire.
+  freeway speeds. The last place moves to `signal_room` m before the last traffic signal on the way (Mapbox's
+  traffic_signal: a queue there, where the model can't change lanes). A maneuver's remaining changes follow
+  `change_gap` after each. Below `lc_min_speed` (the model's lane change speed: n16 ~10 m/s) a change not yet started
+  is withdrawn and left to the turn desire.
 - Request and approve (PLAN D): stage 1 the driver's blinker on the request's side approves (NavDesire
   "laneChange:<side>"), 3 auto-approved (GTA, NavDesire "laneChange"). `requests` holds what the driver (or GTA's
   simulated one) does with the stalk: laneChangeLeft / signalTurnRight / cancelSignal.
@@ -34,10 +36,11 @@ from openpilot.selfdrive.navigation.route import cumulative_distance, local_mete
 LANE_TURN_SPEED = 19 * 0.44704  # m/s: below it a blinker is a turn, unless NavDesire makes it a lane change (desire_helper)
 PARAM_LEAD = 0.4  # s: openpilot reads NavDesire every 0.2 s, so the blinker comes on after it's set
 PARAM_HOLD = 0.5  # s NavDesire stays a lane change after the change
+BLINKER_GAP = 0.3  # s the blinker stays off between one request's and the next's
 FREEWAY_SPEED = 26.0  # m/s (~60 mph) maxspeed: a freeway's, wherever Mapbox doesn't say motorway
 APPROACH = 60.0  # m: lanes on intersections this near before a maneuver are its approach's
 TURN_KINDS = ("turn", "end of road", "continue", "new name")
-FORK_KINDS = ("fork", "off ramp", "on ramp", "merge")
+FORK_KINDS = ("fork", "off ramp")  # on ramps and merges join a road: only their lanes, where given, say anything
 ROUNDABOUTS = ("roundabout", "rotary", "roundabout turn", "exit roundabout", "exit rotary")
 REASONS = {"turn": "turn", "fork": "fork", "exit": "exit", "through": "straightOn", "roundabout": "turn"}
 # Mapbox lane indications -> navInstruction.Lane.Direction
@@ -56,6 +59,8 @@ class Tune:
   done_before_turn: float = 35.0  # m before a turn's (or roundabout's) maneuver point the changes must be done
   done_before_fork: float = 60.0  # m before a fork's or exit's
   done_before_through: float = 30.0  # m before a junction the route goes straight on through
+  signal_room: float = 30.0  # m before the last traffic signal on the way to a move: a queue there, where the model can't change
+  signal_window: float = 150.0  # m before a move, the signals that count
   lc_min_speed: float = 10.0  # m/s: slower, a change not yet started is withdrawn (the model's lane change speed)
   pair_gap: float = 100.0  # m: a maneuver this soon after one is planned with it
   max_ahead: float = 3500.0  # m: no change asked for further out
@@ -198,11 +203,14 @@ class MapboxRoute:
       return float(starts[k] + cumulative_distance(pts)[int(d.argmin())])
 
     self.moves: list[Move] = []
+    self.signals: list[float] = []  # m along to the intersections with traffic signals (Mapbox's traffic_signal)
     runs: list[tuple[float, list[dict], int, bool]] = []  # each run of an intersection's lanes: (last along, lanes, step)
     for k, s in enumerate(steps):
       for it in s["intersections"]:
         lanes = car_lanes(it["lanes"]) if it.get("lanes") else None
         a = at(it, k)
+        if it.get("traffic_signal"):
+          self.signals.append(a)
         fwy = motorway(it) or (self.maxspeed(a) or 0.0) >= FREEWAY_SPEED
         if lanes and runs and runs[-1][1] == lanes and runs[-1][2] == k:
           runs[-1] = (a, lanes, k, fwy)
@@ -219,8 +227,8 @@ class MapboxRoute:
       a = float(starts[k])
       int0 = s["intersections"][0] if s["intersections"] else {}
       lanes = car_lanes(int0["lanes"]) if int0.get("lanes") else None
-      if lanes is None:  # the approach's, where the maneuver's own intersection has none
-        near = [r for r in runs if r[2] == k - 1 and 0.0 <= a - r[0] <= 60.0]
+      if lanes is None:  # the approach's, where the maneuver's own intersection has none (not another maneuver's)
+        near = [r for r in runs if r[2] == k - 1 and 0.0 <= a - r[0] <= APPROACH and r[0] > float(starts[k - 1]) + 5.0]
         lanes = near[-1][1] if near else None
       fwy = motorway(int0) or (self.maxspeed(a - 50.0) or 0.0) >= FREEWAY_SPEED
       side = side_of(mod)
@@ -430,8 +438,12 @@ class LaneGuidance:
     return self.tune.turn_done if m.signal else 2.0
 
   def _done_before(self, m: Move) -> float:
+    """m before the move its changes must be done by: done_before for its kind, or signal_room before the last traffic
+    signal within signal_window on the way to it, whichever is further."""
     t = self.tune
-    return {"fork": t.done_before_fork, "exit": t.done_before_fork, "through": t.done_before_through}.get(m.kind, t.done_before_turn)
+    d = {"fork": t.done_before_fork, "exit": t.done_before_fork, "through": t.done_before_through}.get(m.kind, t.done_before_turn)
+    lights = [a for a in (self.route.signals if self.route is not None else []) if 0.0 < m.along - a <= t.signal_window]
+    return max(d, m.along - max(lights) + t.signal_room) if lights and t.signal_room > 0 else d
 
   def _targets(self, m: Move, ahead: list[Move], n_car: int) -> list[int] | None:
     """The move's target lanes from its side in the car's count; narrowed for a maneuver close after it."""
@@ -502,8 +514,13 @@ class LaneGuidance:
     elif not self.change_started and inp.v < self.tune.lc_min_speed:
       self._end_change(inp.blinker, "gave_up")  # too slow for the model: left to the turn desire
     elif self.change_send_at and inp.t >= self.change_send_at:
-      self.change_send_at = 0.0
-      self.requests.append("laneChange" + self.changing.capitalize())
+      if inp.blinker is not None and inp.blinker != self.changing:
+        # a blinker still on (another side): off first, as openpilot starts a change on the blinker's edge
+        self.requests.append("cancelSignal")
+        self.change_send_at = inp.t + BLINKER_GAP
+      else:
+        self.change_send_at = 0.0
+        self.requests.append("laneChange" + self.changing.capitalize())
     self.was_changing = inp.changing
 
   def _change(self, inp: GuidanceInputs, needs: list[tuple[Move, dict]]):
@@ -524,9 +541,12 @@ class LaneGuidance:
       if not (self._due(nd) or self.series == key) or self.tries.get(key, 0) >= t.change_tries:
         continue
       to = i + (-1 if nd["side"] == "left" else 1)
-      if any(min(abs(to - x) for x in y["lanes"]) > min(abs(i - x) for x in y["lanes"])
-             for x_m, y in needs if x_m.along < m.along and y["lanes"]):
+      before = [(x, y) for x, y in needs if x.along < m.along and y["lanes"]]
+      if any(min(abs(to - j) for j in y["lanes"]) > min(abs(i - j) for j in y["lanes"]) for _, y in before):
         return  # not away from the lanes for a move before it
+      # a move before it wanting the same way: the change is the earlier's (its reason, deadline and count)
+      m, nd = next(((x, y) for x, y in before if y["changes"] > 0 and y["side"] == nd["side"]), (m, nd))
+      key = round(m.along, 1)
       self.tries[key] = self.tries.get(key, 0) + 1
       self._open_request("laneChange", nd["side"], REASONS.get(m.kind, "other"), max(nd["deadline"], 0.0), nd["changes"],
                          m.along - self.along, f"{nd['changes']} lane(s) {nd['side']} for the {m.kind} in {m.along - self.along:.0f} m")
@@ -544,8 +564,8 @@ class LaneGuidance:
         self.tries.pop(self.request_meta.get("move"), None)
         self.series = self.request_meta.get("move")
       self._close_request(outcome)
-    if blinker == self.changing and outcome != "done":
-      self.requests.append("cancelSignal")
+    if blinker == self.changing:
+      self.requests.append("cancelSignal")  # the driver's stalk off once it's over, done or not
     self.changing, self.change_t, self.change_send_at, self.change_started = None, self.now, 0.0, False
     self.change_hold_until = self.now + PARAM_HOLD
 

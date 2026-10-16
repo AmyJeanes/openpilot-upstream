@@ -22,9 +22,10 @@ def lane(ind, valid=False):
   return out
 
 
-def made_route(maneuvers, length=3000.0, kmh=48, motorway=False):
+def made_route(maneuvers, length=3000.0, kmh=48, motorway=False, signals=(), extra=()):
   """A straight route east along the equator, `length` m, with maneuvers [(m along, type, modifier, lanes or None)],
-  maxspeed `kmh` throughout."""
+  maxspeed `kmh` throughout; intersections with traffic signals at `signals` (m along), and others with lanes at
+  `extra` [(m along, lanes)]."""
   n = int(length // 10) + 1
   coords = [[i * 10.0 * DEG, 0.0] for i in range(n)]
   cuts = [0.0] + [m[0] for m in maneuvers] + [length]
@@ -37,10 +38,13 @@ def made_route(maneuvers, length=3000.0, kmh=48, motorway=False):
           "mapbox_streets_v8": {"class": "motorway" if motorway else "street"}}
     if lanes is not None:
       it["lanes"] = lanes
+    more = [{"location": coords[int(x // 10)], "geometry_index": int(x // 10), "bearings": [90, 270], "entry": [True, False],
+             "in": 1, "out": 0, **({"traffic_signal": True} if x in signals else {}), **({"lanes": ls} if ls else {})}
+            for x, ls in sorted([(x, None) for x in signals] + list(extra)) if a < x < b]
     steps.append({"distance": b - a, "duration": (b - a) / 10.0, "name": f"road {k}",
                   "geometry": {"type": "LineString", "coordinates": coords[i0:i1 + 1]},
                   "maneuver": {"type": mtype, "modifier": mod, "location": coords[i0]} if mod else {"type": mtype, "location": coords[i0]},
-                  "intersections": [it], "bannerInstructions": []})
+                  "intersections": [it, *more], "bannerInstructions": []})
   steps.append({"distance": 0.0, "duration": 0.0, "name": "", "geometry": {"type": "LineString", "coordinates": [coords[-1]] * 2},
                 "maneuver": {"type": "arrive", "location": coords[-1]}, "intersections": [{"location": coords[-1],
                 "geometry_index": n - 1, "bearings": [270], "entry": [False], "in": 0}], "bannerInstructions": []})
@@ -144,7 +148,8 @@ def test_two_close_maneuvers_planned_together():
                       (1560.0, "turn", "right", None)])
   _, out = first_request(Drive(route), 12.0, (0, 3))
   assert out.request["side"] == "right" and out.request["laneChanges"] == 1
-  assert first_request(Drive(route), 12.0, (1, 3)) is None  # already there: nothing for the first; the second follows
+  got = first_request(Drive(route), 12.0, (1, 3))
+  assert got is None or got[0] > 1500.0  # already in its lane: nothing asked before the first turn
 
 
 def test_no_lanes_falls_back_to_the_outermost():
@@ -262,3 +267,37 @@ def test_navd_runs_it(monkeypatch):
   assert str(ins.request.kind) == "laneChange" and str(ins.request.side) == "right" and ins.request.laneChanges == 1
   assert [bool(x.active) for x in ins.lanes] == [False, True] and ins.laneDistance > 0
   assert values.get("NavDesire") == "laneChange:right"
+
+
+def test_lights_before_the_turn_bring_the_deadline_forward():
+  """A traffic signal 80 m before the turn: the changes are to be done signal_room before it (a queue there)."""
+  t = lg.Tune()
+  lanes_ = [lane("straight"), lane("right", True)]
+  plain = first_request(Drive(made_route([(2000.0, "turn", "right", lanes_)])), 12.0, (0, 2))[0]
+  lit = first_request(Drive(made_route([(2000.0, "turn", "right", lanes_)], signals=(1920.0,))), 12.0, (0, 2))
+  assert lit[1].request["distance"] == pytest.approx(1920.0 - t.signal_room - lit[0], abs=3.0)
+  assert plain - lit[0] == pytest.approx(80.0 + t.signal_room - t.done_before_turn, abs=3.0)
+
+
+def test_blinker_off_before_the_other_side():
+  """The blinker still on the other side (the driver's, a turn's): off first, then the change's own after a gap, as
+  openpilot starts a change on the blinker's edge."""
+  d = Drive(turn_right_two_lanes())
+  d.blinker = "left"
+  out = d.run_until(12.0, (0, 2), lambda o: o.requests, 300.0)
+  assert out.requests == ["cancelSignal"]
+  out = d.run_until(12.0, (0, 2), lambda o: o.requests, 2.0)
+  assert out.requests == ["laneChangeRight"]
+
+
+def test_approach_lanes_not_another_maneuvers():
+  """A maneuver whose own intersection has no lanes takes the approach's, not those of the maneuver just before it."""
+  exit_lanes = [lane("straight")] * 3 + [lane("slight right", True)]
+  route = made_route([(1500.0, "off ramp", "slight right", exit_lanes), (1550.0, "fork", "slight left", None)],
+                     extra=[(1530.0, [lane("slight left", True), lane("straight")])])
+  mr = lg.MapboxRoute(route)
+  fork = next(m for m in mr.moves if m.kind == "fork")
+  assert [x["indications"] for x in fork.lanes] == [["slight left"], ["straight"]]
+  route = made_route([(1500.0, "off ramp", "slight right", exit_lanes), (1550.0, "fork", "slight left", None)])
+  fork = next(m for m in lg.MapboxRoute(route).moves if m.along == 1550.0)
+  assert fork.lanes is None and lg.targets(fork, 2) == [0]  # the fallback, not the exit's lanes
