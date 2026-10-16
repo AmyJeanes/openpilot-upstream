@@ -112,8 +112,9 @@ class Parser:
   def parse_policy_outputs(self, outs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     self.parse_mdn('plan', outs, in_N=0, out_N=0, out_shape=(ModelConstants.IDX_N, ModelConstants.PLAN_WIDTH))
     self.parse_categorical_crossentropy('desire_state', outs, out_shape=(ModelConstants.DESIRE_PRED_WIDTH,))
-    if 'lane_head' in outs:  # only models with a current-lane head have it (their output_slices name it)
-      self.parse_categorical_crossentropy('lane_head', outs)
+    for name in ('lane_head', 'lane_head_kerb'):  # only models with a current-lane head have one (output_slices name it)
+      if name in outs:
+        self.parse_categorical_crossentropy(name, outs)
     return outs
 
   def parse_outputs(self, outs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

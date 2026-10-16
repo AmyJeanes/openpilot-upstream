@@ -39,7 +39,7 @@ from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper, TURNS
 from openpilot.selfdrive.navigation.helpers import navigation_input
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, should_stop, smooth_value, get_curvature_from_plan
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
-from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
+from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState, lane_head_from_kerb
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.route_input import RouteInputReader, model_layout, write_model_layout
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, LOCAL_BIG_PKL, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob, wait_for_chestnut
@@ -518,6 +518,8 @@ def main(demo=False):
         prev_action.desiredCurvature = sm['controlsState'].curvature
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       prev_action = action
+      if 'lane_head_kerb' in model_output:
+        model_output['lane_head'] = lane_head_from_kerb(model_output['lane_head_kerb'][0], is_rhd)[None]
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, extrinsics_calibration_seen)

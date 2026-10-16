@@ -83,6 +83,19 @@ def lane_head_marginals(probs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
   return idx, count
 
 
+def lane_head_from_kerb(probs: np.ndarray, is_rhd: bool) -> np.ndarray:
+  """A kerb-counted lane head's (count, index from the kerb) class probabilities as (count, index from the left): the
+  kerb is on the right in right-hand traffic and on the left where cars are right-hand drive."""
+  if is_rhd:
+    return probs
+  out = np.empty_like(probs)
+  k = 0
+  for c in range(1, ModelConstants.LANE_HEAD_MAX + 1):
+    out[k:k + c] = probs[k:k + c][::-1]
+    k += c
+  return out
+
+
 def fill_lane_head(builder, probs: np.ndarray) -> None:
   k = int(np.argmax(probs))
   count = int((1 + np.sqrt(1 + 8 * k)) // 2)
