@@ -54,6 +54,7 @@ from functools import cached_property
 from typing import NamedTuple
 
 import numpy as np
+from openpilot.selfdrive.navd.lane_targets import LEFTS, RIGHTS, turn_targets  # noqa: F401  (navd's, re-exported)
 
 FORWARD, BACKWARD, BOTH_WAYS = 1, -1, 0
 TURNS = frozenset({'left', 'slight_left', 'sharp_left', 'through', 'right', 'slight_right', 'sharp_right', 'reverse',
@@ -495,8 +496,6 @@ def mitred(points, right, before=None, after=None) -> np.ndarray:
 
 # *** along a route ***
 
-LEFTS = frozenset({'left', 'slight_left', 'sharp_left'})
-RIGHTS = frozenset({'right', 'slight_right', 'sharp_right'})
 ROADS = frozenset({'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service',
                    'living_street', 'track', 'road', 'motorway_link', 'trunk_link', 'primary_link', 'secondary_link',
                    'tertiary_link'})
@@ -626,18 +625,6 @@ def continuing(into: Section, out: Section) -> list[int]:
   same = abs((hi_in - lo_in) - (hi_out - lo_out)) < SAME_WIDTH
   shift = (lo_in - lo_out + hi_in - hi_out) / 2 if same else 0.0
   return [i for i, s in enumerate(into.ours) if any(o.left + shift <= s.centre <= o.right + shift for o in out.ours)]
-
-
-def turn_targets(turns: list[frozenset[str]], move: str, fork: bool = False) -> list[int]:
-  """The lanes (of ours, from the left) whose turn:lanes arrows allow a move: 'left' or 'right' (a turn that way, or
-  with `fork`, keeping to that side at a fork or exit, which mappers mark slight_left / slight_right), or 'through'. []
-  where no lane's arrows say."""
-  if not any(turns):
-    return []
-  if move == 'through':
-    return [i for i, t in enumerate(turns) if 'through' in t or not t]
-  want = {f'slight_{move}'} if fork else LEFTS if move == 'left' else RIGHTS
-  return [i for i, t in enumerate(turns) if t & want]
 
 
 class OsmLanes:

@@ -119,3 +119,17 @@ def test_summary():
   assert s["relevant"] == 2 and s["in_lane"] == 1 and s["missed"] == 1
   assert s["lc_done"] == 2 and s["lc_requested"] >= 3 and s["lc_late"] >= 1
   assert "in lane" in ns.table([("x", s)])
+
+
+def test_mapbox_nav_makes_the_city_turn():
+  """--nav mapbox: comma navd's lane guidance on the route's emulated Mapbox response (no lanes on this made road, so
+  the outermost lane on the turn's side) and the lane head alone: two changes over well before the slowing, the turn
+  made, its maneuvers marked by what Mapbox gave."""
+  for side, lane in (("right", 0), ("left", 2)):
+    r = ms.junction_turn(side, lead=400.0, tail=200.0, ours=3, back=2, stop="lights")
+    sim, res = drive(r, lane, "n16", head="model:0.95", nav="mapbox")
+    assert res.error is None and res.arrived
+    turn = [m for m in res.maneuvers if m["kind"] == "turn"]
+    assert len(turn) == 1 and turn[0]["made"] and turn[0]["mapbox"] in ("lanes", "none"), turn
+    assert [c["outcome"] for c in res.changes] == ["done", "done"]
+    assert all(q["lane_src"] == "model" for q in res.requests)

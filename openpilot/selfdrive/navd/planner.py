@@ -13,7 +13,7 @@ import numpy as np
 
 from openpilot.common.constants import CV
 from openpilot.selfdrive.navd.inputs import NavInputs, NavOutputs
-from openpilot.tools.sim.bridge.gta5.map.osm_lanes import turn_targets  # the map stack moves into navd with the OSM-only Route
+from openpilot.selfdrive.navd.lane_targets import turn_targets
 
 # the GTA5_ names are the bridge's, while navd runs inside it
 DEBUG = bool(os.getenv("NAVD_DEBUG") or os.getenv("GTA5_DEBUG"))
