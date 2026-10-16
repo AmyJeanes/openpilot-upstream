@@ -481,7 +481,7 @@ class Route:
       moves = [float(self.along[m['begin_shape_index']]) for m in self.maneuvers
                if m.get('type') in TURN_MANEUVERS and 0 <= m.get('begin_shape_index', -1) < len(self.along)]
       while turn is not None:
-        # a turn where roads meet or Valhalla calls one; a bend of the road alone is only slowed for (bend_cap)
+        # a turn where roads meet or Valhalla calls one; a bend of the road alone isn't one
         if any(abs(j - turn.dist) <= TURN_AT for j in junctions + moves):
           self._turns.append(turn)
         turn = find_turn(pts, turn.dist + TURN_HOLDS)

@@ -141,11 +141,6 @@ class NavCard:
     self.camera_rect = rl.Rectangle(0, 0, 0, 0)
 
   @property
-  def stock_button_shown(self) -> bool:
-    """The HUD's own experimental button: only with no route at all, the card has it otherwise."""
-    return self.present.value(self._now) <= 0.001
-
-  @property
   def route_on(self) -> bool:
     """A route to show: nav has one, and the driver hasn't ended it here."""
     return self.session.route_on

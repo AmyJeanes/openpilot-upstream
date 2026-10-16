@@ -105,15 +105,12 @@ class AugmentedRoadView(CameraView):
     # Draw colored border based on driving state
     self._draw_border(rect)
 
-  def set_exp_button_visible(self, visible: bool):
-    self._hud_renderer.show_exp_button = visible
-
   def _handle_mouse_press(self, _):
-    if not self._hud_renderer.user_interacting() and self._click_callback is not None:
+    if self._click_callback is not None:
       self._click_callback()
 
   def _handle_mouse_release(self, _):
-    # We only call click callback on press if not interacting with HUD
+    # We only call click callback on press
     pass
 
   def _draw_border(self, rect: rl.Rectangle):

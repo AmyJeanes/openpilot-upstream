@@ -59,15 +59,13 @@ The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` 
 
 ## Navigation
 Set a waypoint on the game's map while engaged and the car follows GTA's GPS route to it: the plugin sends the route (a
-point every 5 m for 500 m) and navd's planner finds the turns in it, caps the speed to 12 mph for each (16 mph for
-a gentler one), and signals
-it, which below 19 mph asks the driving model for the turn. The model takes that request as a pulse when the blinker
+point every 5 m for 500 m) and navd's planner finds the turns in it and signals each, which below 19 mph asks the
+driving model for the turn. The model takes that request as a pulse when the blinker
 comes on, and forgets it after several seconds and at a stop, so the bridge drops the blinker briefly for openpilot
 (not the car's lights) every 2.5 s until the turn starts, when the car pulls away again, or when the model stops
-expecting the turn. It slows gently (0.6 m/s^2, done 25 m before the turn), and for bends and ramps on the route to
-2 m/s^2 sideways (the Tesla's steering is limited to about 3). A turn is signalled 5 s before it (28-50 m): further out
-the model stops short of it. A turn straight after another is signalled as soon as the first is done.
-Near the waypoint it slows to a stop there and disengages.
+expecting the turn. The driving model drives the speed, slowing for turns and bends itself. A turn is signalled 5 s
+before it (28-50 m): further out the model stops short of it. A turn straight after another is signalled as soon as
+the first is done. Stopped at the waypoint, the car disengages.
 
 Before a turn the car changes into the lanes the map's turn arrows (`turn:lanes`) allow it from, else the leftmost lane
 for a left turn or the rightmost for a right; going straight on through a junction it moves out of lanes whose arrows
@@ -75,7 +73,7 @@ only turn, or that end there (the road out has fewer lanes its way: the lanes th
 lanes, kerb to kerb where it is as wide, else by its line); and it moves back over if it drifts into the oncoming lanes,
 by its lane reading or by the map's lanes alone (`map/lane_match.py`, outside junctions' areas: an oncoming lane, a
 one-way the wrong way, the other direction's turn bay), with keepRight. Lane changes are planned back from the last place one may start (30 m before
-a turn), about 8 s each, and when there isn't room left the set speed comes down for it; a turn the car still isn't in
+a turn), about 8 s each; a turn the car still isn't in
 the lane for is left for the route to come round again, as the model won't take it from the wrong lane anyway. The car's
 lane comes from the road's lanes along our route (map/README.md: the map's lane tags, or GTA's links on a map without
 them), else from the plugin's guess at the road it's on, and the
@@ -89,13 +87,11 @@ from 4 s before it to 40 m past, unless a turn the other way follows, or the rou
 is no keepLeft on a two-way road, as it takes the car into the oncoming lanes. A turn ends at its way out (the blinker
 off, no more pulses once begun), with keepRight for a moment if the car is still swinging round a left turn
 (`GTA5_EXIT_CUE=0` turns that off); a turn is left to the route only when the car is surely out of its lane. Where a centre turn bay or slip lane opens for
-a turn (GTA's bays are short slip-lane links into the median), the car slows for the turn from there, changes into it
-from the lane beside it, and then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
+a turn (GTA's bays are short slip-lane links into the median), the car changes into it from the lane beside it, and
+then signals the turn (`GTA5_BAY=0` signals from the lane beside it instead). The car's
 lane from the route counts only while the car heads along the route's link and agrees with the plugin's, if it has
 one. With the map's speed limits, engaging sets the limit where the car is; after that the set speed is the driver's
-alone (the arrow keys), and nav caps the speed at the limit where the car is and slows for a lower one ahead
-(`GTA5_FOLLOW_LIMIT=1` has the set speed follow the limit instead, as before, for A/B runs). Routes avoid service
-roads (car parks, alleys, drives), which the model doesn't see as roads.
+alone (the arrow keys). Routes avoid service roads (car parks, alleys, drives), which the model doesn't see as roads.
 GTA's route sometimes turns back on itself, after a missed turn or around roads its GPS avoids; the model can't make a
 U-turn, so nav drives on until GTA routes round instead. Nor has it a desire for straight on, and it sometimes turns
 where the route doesn't, as from a lane that becomes a turn lane; when its expectation of a turn the route doesn't take
@@ -108,13 +104,10 @@ would give. The game's AI drivers know the lights: those waiting with the car at
 clear at once when it turns green, about 2 s before they move. With no AI traffic around, as with `traffic on=0`, the car
 can't tell, and waits for the gas, as on the real car; nor does it go while traffic crosses ahead or someone is in front.
 
-Nav's turn parameters (speeds by turn angle, where slowing starts and ends, when to signal, re-pulsing, lane change
-lead) can come from a JSON file, `GTA5_NAVTUNE`, read again whenever it changes, for sweeps with `e2e.py sweep`; keys
+Nav's turn parameters (when to signal, re-pulsing, lane change lead) can come from a JSON file, `GTA5_NAVTUNE`, read again whenever it changes, for sweeps with `e2e.py sweep`; keys
 left out keep the defaults (`selfdrive/navd/planner.py` Tune). With `"signal_mode": "entry"` a turn is signalled at
 `signal_entry_offset` m past its junction's entry (the map's stop line, else GTA's junction nodes), as a driver signals on
-entering the junction, rather than 5 s before it. How far the model turns depends on its speed in the turn, so the
-turn's speed holds through the arc until the car heads its way out and is straight (`turn_release`, `turn_release_m`)
-and lifts at `release_accel`; nav logs the speeds into, through and out of each turn.
+entering the junction, rather than 5 s before it.
 
 On motorways and trunks (the map's road classes, so only on a map route), nav moves over for an exit or fork far
 ahead: `fwy_lane_time` s of travel per lane to cross (30 s; 0 times them as on any road) at the road's limit or the
@@ -149,16 +142,10 @@ next maneuver, its lanes, the time and distance left, the route and the map's ro
 beside the camera view while a route is active. With the Windows host it's set on the host, which makes the messages'
 content and hands it to the link to build and publish (`gta5_nav_pub.py`). `nav_ui_demo.py` shows that view offline,
 with screenshots of each scene, from a route it finds over the map itself (its docstring says how).
-nav's speed cap reaches openpilot as `navSpeed` (cereal's custom.capnp: the cap and why, a turn either way, a bend, a
-lower limit ahead, a lane change, a turn bay or the arrival), and openpilot's longitudinal planner drives the lower of it
-and the set speed, as sunnypilot's map curve speed control does: the set speed stays the car's (the arrow keys), and the
-onroad UI shows the cap under the MAX box while it is lower. `GTA5_NAV_SPEED=can` instead lowers the simulated car's set
-speed to the cap (the car reports it on CAN, as before), for A/B runs.
 `GTA5_NOO` is Navigate on openpilot: `param` (the default) follows the UI's nav button (the `NavigateOnOpenpilot`
 param); `on` drives regardless, which test runs (e2e, A/Bs) must set; `off` only guides. Guiding only, nav takes no
-actions (no turn signals or desires, lane changes, slowing for turns, arrival or route input for the model) but still
-caps the speed for the road's bends up to the next turn and for its speed limits, and holds keepRight out of the
-oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
+actions (no turn signals or desires, lane changes, arrival or route input for the model) but still holds keepRight out
+of the oncoming lanes. With `param` or `off`, the UI's slide to end (it removes `NavDestination`) ends the route, and the game's waypoint is ignored until it
 changes.
 
 ### The comma four (mici) nav UI
@@ -192,8 +179,8 @@ still shows it. Still held at the last place it may start (for a fork, its last 
 nav gives it up and the blinker goes off, leaving the exit or turn to a reroute rather than changing into a car; and
 likewise once the lanes ahead no longer need it (a reroute, or the car's lane has moved). Out of a lane that ends
 (a lane drop rather than a split the route leaves by), where a reroute won't help, it isn't given up: the blinker stays
-on to the lane's end, and nav caps the speed down to a crawl 10 m before it, so the vehicle alongside goes by and the car
-falls in behind it; such a merge waits while nav's lane and the map's lane match disagree on where the car is. Whatever
+on to the lane's end, and the change starts once the vehicle alongside has gone by, falling in behind it; such a merge
+waits while nav's lane and the map's lane match disagree on where the car is. Whatever
 nav's own lane says, no lane change starts into a lane the map's lanes read as oncoming beside the car, and one asked
 for is given up if the map reads it so before the car moves over (out of the oncoming lanes, and into a turn bay, which
 can be a way of its own in the median, aren't blocked). `bsm_trial.py` drives trips in traffic and measures each lane change nav asks for against the blind
@@ -204,8 +191,8 @@ what each is and why), read again whenever it changes. Needs the plugin's `nearb
 ### navd and the GTA layer
 Navigation is being moved out of the bridge into a game-agnostic navd (`selfdrive/navd/`), which is to plan from only
 what a real car and device give it (GNSS, the car's state, the model's outputs, an OSM map and router), so it ports to
-the road. So far it holds the planner (`planner.py`, which takes `NavInputs` and returns a cap, NavDesire changes and
-requests to the driver, `inputs.py`), the route input encoder and lane slots; it still runs inside the bridge, and its
+the road. So far it holds the planner (`planner.py`, which takes `NavInputs` and returns NavDesire changes, requests to
+the driver and arrival, `inputs.py`), the route input encoder and lane slots; it still runs inside the bridge, and its
 inputs still carry the game's true pose and lane (`truth_*`). The bridge's side of it:
 - `gta5_navd.py`: the planner's inputs from the game's state and our route, and the destination: the game's waypoint or
   a map view pick, written to the `NavDestination` param as lat/lon.

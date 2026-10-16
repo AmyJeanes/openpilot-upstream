@@ -37,7 +37,7 @@ Each change, from nav's "lane change <side>, <why>" line:
   not_taken (laneChangeStarting came and went without the car moving over: this fork's desire helper has no
   laneChangeFinishing, so it leaves laneChangeStarting the same way whether the model changed lanes or not, and the driver
   then cancels the blinker), given_up (nav's reason), ended (the blinker off unstarted), superseded, or open at the
-  trip's end; nav's lowest speed cap while it waited (merge slowing).
+  trip's end.
 
 The summary splits not_taken and partial by cause: refused (laneChangeStarting over within REFUSED_S, the model's lane
 change probability having stayed low: the desire helper drops back to preLaneChange and the driver cancels the blinker)
@@ -309,13 +309,13 @@ class Change:
                 "started_beside": None, "rear_at_start": None, "start_v": None, "min_side_gap": None, "min_rear_gap": None,
                 "min_ttc": None, "max_brake": 0.0, "contacts": 0, "contact_frames": 0, "squeezed": False,
                 "lane_before": None, "lane_after": None, "lanes_over": None, "shift_m": None, "landed": None, "outcome": None, "detail": None,
-                "min_cap": None, "cap_reason": None, "v_min_waiting": None}
+                "v_min_waiting": None}
     self.prev_state = OFF
     self.prev_flag = False
     self.last = mono
     self.closed_at: float | None = None  # mono when it closed; assessed once LAND s on
 
-  def step(self, mono: float, cs, lc: int, state: dict, cap: tuple[float, str] | None):
+  def step(self, mono: float, cs, lc: int, state: dict):
     r, side = self.rec, self.side
     dt, self.last = mono - self.last, mono
     blinker = cs.leftBlinker if side == "left" else cs.rightBlinker
@@ -325,8 +325,6 @@ class Change:
       r["blinker_after"] = round(mono - r["mono_ask"], 2)
       r["flag_at_blinker"] = flag
     if r["mono_start"] is None:
-      if cap is not None and cap[0] > 0 and (r["min_cap"] is None or cap[0] < r["min_cap"]):
-        r["min_cap"], r["cap_reason"] = round(cap[0], 2), cap[1]
       if r["mono_blinker"] is not None:
         v = state.get("vEgo", 0.0)
         r["v_min_waiting"] = round(v if r["v_min_waiting"] is None else min(v, r["v_min_waiting"]), 2)
@@ -358,7 +356,7 @@ class Change:
 class Run:
   def __init__(self, out_path: str):
     from openpilot.cereal import messaging
-    self.sm = messaging.SubMaster(["carState", "modelV2", "selfdriveState", "navSpeed"], poll="modelV2")
+    self.sm = messaging.SubMaster(["carState", "modelV2", "selfdriveState"], poll="modelV2")
     self.states_tail, self.log = Tail(STATE_LOG), Tail(BRIDGE_LOG)
     self.states: deque[tuple[float, dict]] = deque()
     self.state: dict = {}
@@ -489,8 +487,6 @@ class Run:
         break
       s, cs = self.state, self.sm["carState"]
       lc = self.sm["modelV2"].meta.laneChangeState.raw
-      ns = self.sm["navSpeed"] if self.sm.seen["navSpeed"] else None
-      cap = (ns.speedCap, str(ns.reason)) if ns is not None and now - self.sm.recv_time["navSpeed"] < 1.0 else None
       max_v = max(max_v, s.get("vEgo", 0.0))
       for line in self.take():
         if m := GIVEN_UP.match(line):
@@ -506,7 +502,7 @@ class Run:
           changes.append(open_)
           print(f"bsm: {name} t={t:.0f} lane change {m.group(1)}, {m.group(2)}", flush=True)
       if open_ is not None and open_.closed_at is None:
-        open_.step(now, cs, lc, s, cap)
+        open_.step(now, cs, lc, s)
       self._emit_due(changes, now)
       v = s.get("vEgo", 0.0)
       left = math.hypot(s["pos"][0] - dx, s["pos"][1] - dy)

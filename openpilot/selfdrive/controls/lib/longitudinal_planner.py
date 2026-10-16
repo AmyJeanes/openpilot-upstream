@@ -20,11 +20,9 @@ A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MIN = -0.5
-NAV_A_CRUISE_MIN = -1.2  # fork: navd plans its speed caps (turns, arrival, merges, limits) at up to 1.0 m/s^2
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
-NAV_SPEED_TIMEOUT = 1.0  # s: navigation's speed cap lapses when its messages stop
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -36,17 +34,7 @@ def get_max_accel(v_ego):
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
-def get_nav_speed_cap(sm) -> float:
-  """Navigation's speed cap (navSpeed, a fork's) while it comes: m/s, inf for none. The cruise speed is the lower of it
-  and the driver's set speed, which stays the car's own."""
-  if 'navSpeed' not in sm.data or not sm.seen['navSpeed']:
-    return math.inf
-  if sm.logMonoTime['modelV2'] - sm.logMonoTime['navSpeed'] > NAV_SPEED_TIMEOUT * 1e9:
-    return math.inf
-  cap = sm['navSpeed'].speedCap
-  return cap if cap > 0 else math.inf
-
-def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle, a_cruise_min=A_CRUISE_MIN):
+def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle):
   max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
 
   if not e2e:
@@ -59,7 +47,7 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
       coast_limit = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [max_accel, clipped_accel_coast])
       max_accel = min(max_accel, coast_limit)
 
-  target_accel = np.clip(v_cruise - v_ego, a_cruise_min, max_accel)
+  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
@@ -92,9 +80,7 @@ class LongitudinalPlanner:
 
     v_ego = sm['carState'].vEgo
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
-    nav_speed_cap = get_nav_speed_cap(sm)
-    v_cruise = min(v_cruise_kph * CV.KPH_TO_MS, nav_speed_cap)
-    a_cruise_min = NAV_A_CRUISE_MIN if nav_speed_cap < v_cruise_kph * CV.KPH_TO_MS else A_CRUISE_MIN
+    v_cruise = v_cruise_kph * CV.KPH_TO_MS
     if sm['controlsState'].forceDecel:
       v_cruise = 0.0
 
@@ -148,7 +134,7 @@ class LongitudinalPlanner:
 
     self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
-                                     accel_coast, self.allow_throttle, a_cruise_min)
+                                     accel_coast, self.allow_throttle)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)

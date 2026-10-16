@@ -74,7 +74,7 @@ FRAME_INFO_METADATA = {
 # per road frame, in gta5.npz's "frame" array
 FRAME_COLUMNS = ("frame_id", "t", "x", "y", "z", "heading", "pitch", "roll", "grade", "bank", "v_ego", "a_meas", "yaw_rate",
                  "rot_vel_x", "rot_vel_y", "rot_vel_z", "steer_curvature", "cam_height", "wheel_base", "resets", "collisions",
-                 "indicator", "user_steer", "user_gas", "user_brake", "engaged", "blinker_gap", "cruise_cap", "lane", "lanes",
+                 "indicator", "user_steer", "user_gas", "user_brake", "engaged", "blinker_gap", "lane", "lanes",
                  "route", "route_at", "route_off", "route_right", "expert", "expert_label")
 # per road frame, NaN where modeld's output for it never came
 MODEL_COLUMNS = ("time", "frame_id_extra", "execution_time", "lane_change_state", "lane_change_direction", "action_curvature",
@@ -379,7 +379,7 @@ class Recorder:
             state.get("camHeight", 0), state.get("wheelBase", 0), state.get("resets", 0), state.get("collisions", 0),
             INDICATORS.get(state.get("indicator"), 0), user.get("steer", 0), user.get("gas", False), user.get("brake", False),
             w.openpilot.engaged if w is not None else 0, w.nav.blinker_gap(time.monotonic()) if w is not None else 0,
-            getattr(w, "cap", 0), lane[0], lane[1], route_idx,
+            lane[0], lane[1], route_idx,
             *((route.at, route.off, route.right) if route is not None else (np.nan,) * 3),
             expert_on, self.segment.expert_labels.index(label)]
 

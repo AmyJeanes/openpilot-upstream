@@ -837,7 +837,6 @@ class Trip:
     traffic = self.opts.get('traffic')
     # density multipliers hold until reset: a trip without its own goes back to the game's
     cmd("traffic", on=1, **traffic) if isinstance(traffic, dict) else cmd("traffic", on=int(self.args.traffic), reset=1)
-    self.rig.params.put_bool("ExperimentalMode", bool(self.opts.get('xm')), block=True)
     cmd("lead", remove=1)
     kw = {"x": x, "y": y, "z": z, "heading": h, "lane": self.lane, "fix": 1}
     # at the middle of the start lane by the map: the game's own lanes from a road node can put the car on a centre line
@@ -999,8 +998,6 @@ class Trip:
     if rig.engaged:
       rig.set_engaged(False)
     post_json(f"{MAP_VIEW}/destination", {})
-    if self.opts.get('xm'):
-      rig.params.put_bool("ExperimentalMode", False, block=True)
     if isinstance(self.opts.get('lead'), dict):
       cmd("lead", remove=1)
     s = rig.state

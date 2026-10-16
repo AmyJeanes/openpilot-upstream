@@ -34,17 +34,16 @@ class Drive:
     self.lane, self.v = lane, v
     self.drives = True  # Navigate on openpilot
 
-  def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict) -> tuple[float, bool]:
+  def update(self, state: dict, engaged: bool, indicator: str | None, desire: dict) -> bool:
     """A step from the bridge's state, as the world takes it: the driver's game commands to `sent`, NavDesire to
     `desires`, and the game's waypoint off on arriving."""
     out = self.nav.update(nav_inputs(state, engaged, indicator, desire, self.clock.t, self.drives))
     self.human.act(out)
     self.desires += out.desires
     self.events += out.events
-    self.reason = out.cap_reason
     if out.arrived:
       self._send({"type": "waypoint", "off": True})
-    return out.cap, out.arrived
+    return out.arrived
 
   def _send(self, m):
     self.sent.append(m)
@@ -250,34 +249,6 @@ def test_left_turn_into_its_bay():
   assert order == ["bay", "turn"]
 
 
-def test_uncapped_tune_into_a_bay():
-  # the bay test's drive: by default nav slows the car for the bay and the turn; with the turn, lane change and bay
-  # speeds lifted (an end-to-end longitudinal model sets its own speed) it still changes into the bay and signals
-  route = route_to_turn(200.0, "left")
-  for uncapped in (False, True):
-    d = Drive((0, 2), v=6.0)
-    d.nav.tune = nav_mod.Tune("")
-    if uncapped:
-      d.nav.tune.values.update(turn_speed_soft=40.0, turn_speed_square=40.0, turn_speed_sharp=40.0,
-                               lane_change_min_speed=40.0, bay_speed=0.0)
-    y, caps, order = 0.0, [], []
-    while y < 195.0:
-      bay_at = 170.0 - y
-      forks = [[bay_at, "right", 2, 2, False, 0, True]] if bay_at > 0 else []
-      cap, _ = d.step(route, y, {"forks": forks, "routeEnd": 300.0 - y})
-      caps.append(cap)
-      if d.nav.changing == "left" and "bay" not in order:
-        order.append("bay")
-      if d.nav.changing and d.indicator == "left" and "bay" in order and 200.0 - y < 26:
-        d.indicator, d.lane = None, (-1, 2)
-      if d.nav.signaled == "left" and "turn" not in order:
-        order.append("turn")
-      y += d.v * 0.05
-    assert order == ["bay", "turn"]
-    slowed = [c for c in caps if 0 < c < d.v]
-    assert (not slowed) if uncapped else min(slowed) <= nav_mod.BAY_SPEED
-
-
 def test_no_keep_left_on_a_two_way_road():
   # a left fork on a two-way road (L2): keepLeft would take the car over into the oncoming lanes
   route = route_to_turn(300.0)
@@ -449,28 +420,6 @@ def test_signal_at_the_junction_entry():
       at = 120.0 - y
     y += d.v * 0.05
   assert at is not None and 12.0 < at < 14.5, at
-
-
-def test_turn_speed_held_through_the_arc():
-  # the turn's speed holds until the car heads its way out and is straight, not when the turn counts as done
-  route = route_to_turn(40.0, "left")
-  d = Drive((0, 1), v=5.0)
-  d.nav.tune = nav_mod.Tune("")
-  d.nav.tune.values.update(left_signal_max_entry=0.0)  # signalled at 25 m, without a stop line
-  for k in range(60):
-    d.step(route, k * 0.25)
-  assert d.nav.signaled == "left"
-  ahead = [[-x, 40.0] for x in np.arange(0.0, 300.0, 5.0)]
-  caps = []
-  for h, yaw in [(hh, 0.5) for hh in np.linspace(0, 80, 30)] + [(80.0, 0.3)] * 5 + [(88.0, 0.02)] * 30:
-    d.clock.t += 0.1
-    cap, _ = d.update({"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": yaw, "lane": [0, 1],
-                           "routeEnd": 500.0, "route": ahead}, True, d.indicator, {})
-    caps.append(cap)
-  held = d.nav.tune.turn_speed_square
-  assert d.nav.signaled is None  # done at 25 deg from the way out
-  assert all(abs(c - held) < 1e-6 for c in caps[:35])  # but held through the arc
-  assert caps[-1] > held + 1.0  # and lifted gently once straight
 
 
 def lane_route(points, links: list) -> Route:
@@ -650,35 +599,17 @@ def test_lane_change_for_a_lane_that_ends():
   assert d.nav.changing is None  # already in it
 
 
-def test_guidance_only_still_slows_for_bends():
-  # Navigate on openpilot off: no nav actions, but the road's bends ahead still cap the speed, as this tight bend without
-  # a junction (which the turn finder calls a turn); a turn at a junction (test_guidance_only_drives_nothing) isn't
-  arc = [(20.0 - 20.0 * np.cos(a), 150.0 + 20.0 * np.sin(a)) for a in np.radians(np.arange(5.0, 91.0, 5.0))]
-  route = np.array([(0.0, y) for y in np.arange(0.0, 150.0, 5.0)] + arc + [(20.0 + x, 170.0) for x in (20.0, 40.0, 80.0)])
-  assert find_turn(route) is not None
-  d = Drive((0, 1), v=15.0)
-  d.drives = False
-  caps = [d.step(route, 50.0 + k * 2.0)[0] for k in range(40)]
-  assert d.sent == [] and d.desires == [] and 0.0 < min(caps) < 12.0
-  d = Drive((0, 1), v=15.0)
-  d.drives = False
-  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": [], "limits": [[0.0, 10.0], [50.0, 5.0]]},
-                  True, None, {})[0] > 0  # and the speed limits ahead
-  d.drives = True  # Navigate on openpilot on: the same bend capped as ever
-  assert 0.0 < d.step(route, 100.0)[0] < 15.0
-
-
 def test_guidance_only_drives_nothing():
-  # Navigate on openpilot off: no signals, lane changes, NavDesire or speed caps on the way to a turn at a junction;
-  # turned on, nav drives as before, and turned off again mid-way it cancels what it asked for
+  # Navigate on openpilot off: no signals, lane changes or NavDesire on the way to a turn at a junction; turned on, nav
+  # drives as before, and turned off again mid-way it cancels what it asked for
   route = route_to_turn(200.0)
   d = Drive((0, 2), v=7.0)
   d.drives = False
-  y, caps = 0.0, []
+  y = 0.0
   while y < 100.0:
-    caps.append(d.step(route, y, {"junctions": [200.0 - y]})[0])
+    d.step(route, y, {"junctions": [200.0 - y]})
     y += d.v * 0.05
-  assert d.sent == [] and d.desires == [] and not any(0.0 < c < 2 * d.v for c in caps)  # nothing that slows the car
+  assert d.sent == [] and d.desires == []
   d.drives = True
   while y < 190.0 and not d.sent:
     d.step(route, y)
@@ -688,40 +619,6 @@ def test_guidance_only_drives_nothing():
   for _ in range(20):  # NavDesire is held a moment past a lane change, as openpilot reads it every 0.2 s
     d.step(route, y)
   assert d.nav.desire == "" and d.nav.changing is None and d.nav.signaled is None
-
-
-def test_cap_reasons():
-  # what sets the cap, for navSpeed and the UI: the turn ahead (by side), the arrival, a bend, a lower limit ahead
-  route = route_to_turn(150.0, "left")
-  d = Drive((0, 2), v=12.0)
-  y, reasons = 0.0, set()
-  while y < 140.0:
-    cap = d.step(route, y)[0]
-    if 0.0 < cap < d.v:
-      reasons.add(d.reason)
-    y += d.v * 0.05
-  assert "turnLeft" in reasons and reasons <= {"turnLeft", "bendLeft"}  # the turn itself is a bend too, at the end
-  d = Drive((0, 1), v=10.0)
-  straight = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
-  assert d.step(straight, 0.0, {"routeEnd": 40.0})[0] < 10.0 and d.reason == "arrival"
-  d = Drive((0, 1), v=15.0)
-  d.drives = False
-  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": [], "limits": [[0.0, 20.0], [40.0, 5.0]]},
-                  True, None, {})[0] < 15.0 and d.reason == "speedLimit"
-  arc = [(20.0 - 20.0 * np.cos(a), 150.0 + 20.0 * np.sin(a)) for a in np.radians(np.arange(5.0, 91.0, 5.0))]
-  bend = np.array([(0.0, y) for y in np.arange(0.0, 150.0, 5.0)] + arc + [(20.0 + x, 170.0) for x in (20.0, 40.0, 80.0)])
-  assert d.step(bend, 100.0)[0] < 15.0 and d.reason == "bendRight"  # guiding only: no turn there at a junction
-  assert d.update({"vEgo": 15.0, "pos": [0.0, 0.0, 0.0], "heading": 0.0, "yawRate": 0.0, "route": []}, False, None, {}) == (0.0, False)
-  assert d.reason == ""
-
-
-def test_limit_cap_where_the_car_is():
-  # the set speed is the driver's: nav caps the speed at the limit where the car is, and slows for a lower one ahead
-  assert nav_mod.limit_cap([[0.0, 15.6]], 20.0) == 15.6
-  assert nav_mod.limit_cap([[0.0, 15.6], [400.0, 29.0]], 15.0) == 15.6  # a higher limit ahead is the driver's to take
-  ahead = nav_mod.limit_cap([[0.0, 29.0], [200.0, 15.6]], 29.0)
-  assert 15.6 < ahead < 29.0
-  assert nav_mod.limit_cap([[0.0, 0.0]], 10.0) == 0.0  # unknown
 
 
 def jogging_route() -> Route:

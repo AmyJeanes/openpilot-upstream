@@ -27,7 +27,7 @@ from openpilot.selfdrive.navd.route_input import ROUTE_LEN
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5 import gta5_gnss, gta5_stacks
-from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, NAV_SPEED, Brain, speed_limit
+from openpilot.tools.sim.bridge.gta5.gta5_brain import MAP, NAV_MATCH, Brain, speed_limit
 from openpilot.tools.sim.bridge.gta5.gta5_cmd import display_from_env
 from openpilot.tools.sim.bridge.gta5.gta5_opio import INPUTS, PARAMS, OpenpilotIO
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import INACTIVE
@@ -56,7 +56,7 @@ FULL_GC_IDLE = 2.0  # s
 FULL_GC_EVERY = 60.0  # s
 # the simulated car's inputs from the brain before it sets any, and after the link loses the host
 DEFAULT_INPUTS = {"user_torque": 0, "left_blinker": False, "right_blinker": False, "left_blindspot": False,
-                  "right_blindspot": False, "speed_limit_follow": False, "cruise_cap": 0.0, "cap_set_speed": False}
+                  "right_blindspot": False}
 
 
 def hold_full_collections():
@@ -104,7 +104,6 @@ class LocalIO(OpenpilotIO):
     self.params = Params()
     self.VM: VehicleModel | None = None
     self.inputs = dict(DEFAULT_INPUTS)
-    self.nav_speed_pm = messaging.PubMaster(["navSpeed"]) if NAV_SPEED != "can" else None
     self.bookmark_pm = None  # made on the first bookmark
     self.route_writer: RouteInputWriter | None = None  # made on the first vector
     self.lanes_writer: RouteInputWriter | None = None
@@ -169,14 +168,6 @@ class LocalIO(OpenpilotIO):
       self.params.put("NavDesire", desire)
     else:
       self.params.remove("NavDesire")
-
-  def nav_speed(self, cap: float, reason: str):
-    if self.nav_speed_pm is None:
-      return
-    msg = messaging.new_message("navSpeed", valid=True)
-    msg.navSpeed.speedCap = cap
-    msg.navSpeed.reason = reason
-    self.nav_speed_pm.send("navSpeed", msg)
 
   def route_input(self, vec):
     if self.route_writer is None:
