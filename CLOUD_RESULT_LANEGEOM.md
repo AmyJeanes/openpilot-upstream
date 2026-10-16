@@ -312,7 +312,7 @@ Left alone and listed: stacked 2838; lane over 6.5 m 1401; game files measured i
 | 561:46>561:49 | unclassified | (643.5, 599.7) | 1.9 | -2.20|2.20 | -4.10|0.31 | PP |
 | 399:481>399:504 | primary | (-398.5, -1756.0) | 1.67 | -5.50|0.00|5.50 | -3.83|0.95|6.45 | PP. |
 
-By class (same samples before and after; before = step 3):
+By class (same samples before and after; student paint before = step 3, game files before = the live19b baseline):
 
 | class | student paint > 1 m | nearer / further 0.5 m (m) | game files > 0.5 m | game files > 1 m | game files nearer / further (m) |
 |---|---|---|---|---|---|
@@ -340,3 +340,71 @@ left alone; a one-lane link on a lane line of a wide carriageway ambiguous; the 
 
 Amy's own labels (150 reviewed tiles) are not used: they're in tile pixels and the projection to the world isn't in the
 cloud data's tools; see open questions.
+
+## Step 5: turn fillets (cause 3)
+
+**Change**: `FILLET_RADIUS['left']` 20 -> 15 m (`map/osm_lanes.py`). Nothing else in the fillets or `_clamp` changed;
+the map build (lanes.json, roads.json) doesn't use fillets, so this is driver code only. New tool `plan_term.py`
+drives `mapdrive_sim.py` trips routed by Valhalla (pyvalhalla 3.9.1 on port 8002, tiles from the live pbf), records the
+plan term per frame (MapDrive's intent before its bias and wander, less the map's target centre) plus the map term
+and the car's distance from its paint lane centre, and sums them 30 m before (entry) and after (exit) each turn of
+45 deg or more. Trips: `cloud_lanegeom/step5/plan_specs.json` (11 trips from the drift sessions: the 3 cause-3
+places, the Strawberry ramp, (-378,-2062) and the (68.7,-1146) step). Results in `cloud_lanegeom/step5/`.
+
+**Why the left radius.** In the drift frames (97 legs, all turns of 45 deg or more), the planned line was further
+from the paint than the lane centre from about 15 m before a corner to 15 m after. On right turns this is mostly
+inside +/-10 m, where the line has to cut the corner. On left turns, the 20 m arc is still curving 10-15 m out of
+the corner: an arc of radius 20 ending 20 m on is about 1.4 m off its straight line 7.5 m before it ends. At 15 m:
+
+| drift, planned line vs paint | step 4 | left radius 15 |
+|---|---|---|
+| all frames > 0.5 m | 11.06% | 10.86% |
+| all frames > 1 m | 4.25% | 4.18% |
+| > 1 m away from junctions (j20) | 2.49% | 2.46% |
+| left turns, -15..-10 m, median | 0.61 m | 0.43 m |
+| left turns, -10..-5 m, median | 0.82 m | 0.66 m |
+| left turns, +10..+15 m, median | 0.49 m | 0.45 m |
+| right turns | unchanged | unchanged |
+
+The 90 deg left with a 4 m median (test_clamp_corners' road): the unclamped line reaches 2.32 m into the corner
+kerb, was 3.79 m. At 60 deg it no longer reaches the kerb (was 0.30 m).
+
+**Plan term on the mapdrive_sim trips (before -> after)**, frames over 2 m/s:
+
+| | plan > 0.5 m | plan p90 | plan max | car > 0.5 m off its paint lane centre |
+|---|---|---|---|---|
+| all turn entries | 59.2% -> 56.4% | 2.80 -> 2.52 m | 8.63 -> 8.63 | 68.4% -> 65.7% |
+| all turn exits | 64.1% -> 61.9% | 2.62 -> 2.47 m | 8.82 -> 8.82 | 47.8% -> 47.5% |
+| elsewhere | 12.9% -> 12.9% | 0.67 -> 0.67 m | 5.39 -> 5.39 | 33.8% -> 33.8% |
+| (867.3,-1745.8) trip 018 (left then right), entries | 66.9% -> 54.4% | 3.24 -> 2.09 m | 5.87 -> 4.44 | 55.2% -> 41.8% |
+| (867.3,-1745.8) trip 018, exits | 68.5% -> 60.5% | 3.38 -> 2.55 m | 5.99 -> 4.58 | 41.0% -> 39.0% |
+
+The other trips have only right turns, or no turns, and are the same frame for frame (per trip:
+`plan_term_compare.md`). All 11 arrive before and after. A large plan term at a turn is mostly the target's fault,
+not the plan's: the map's target centre follows the ways to the junction node and turns there, which no car drives
+(at (-1521.4,-243.0) the target's corner, at the junction node, sits about 3 m outside the curve the car drives and
+the paint lane's: plotted from `plan_term.py`'s per-frame output, which it saves as one .npy per trip). So the plan term at entries and exits is
+an upper bound; the car-vs-paint column is the better guide.
+
+**Tried and not kept** (measured, but each needs MapDrive retuned with it and an in-game check):
+- **Shorter fillets, `FILLET_LEG` 12 m** (with `FILLET_REACH` kept at 20 m as the corner-to-junction distance).
+  Drift planned line > 1 m: 4.25% -> 3.88% (15 m: 4.00%, 10 m: 3.92%). Left -15..-10 m: 0.61 -> 0.28; +10..+15:
+  0.49 -> 0.20; right -10..-5: 1.10 -> 0.54. On the trips, plan > 0.5 m on exits went from 64.1% to 43.2%. But
+  turn entries got worse: car > 0.5 m off its lane went from 68.4% to 80.9%. At (-1521.4,-243.0) the line swings
+  about 1 m out before the right turn. The cause: a fillet 12 m long starts where the lane line is already smoothed
+  round the corner (offset, unfold, `_smooth_line`), so it starts with a kink. Four mapdrive tests fail with it:
+  `test_clamp_corners` and `test_far_corner_beside_the_flank` (their unclamped line no longer reaches the kerb they
+  test against), `test_live_starts` (SL2b no longer has a `sharp_corner`), and `test_no_oscillation` (turn, tau
+  0.15, gain 1.6: peak 0.0227 rad/s, limit 0.02). 16 m and 15 m fail 3 and 5 tests; 20/12, 12/20 and 20/15
+  (entry/exit) fail 3 to 5.
+- **Clamp settling earlier, `CORNER_ZONE` 15 -> 12 / 10**: fails 2 / 4 tests (`test_no_oscillation`,
+  `test_far_corner_beside_the_flank`; at 10 also `test_clamp_corners` and `test_give_way_and_lights`).
+- **Left radius 12**: drift no better than 15 (4.23%), and 3 tests fail.
+
+**Tests**: lane_numbering 29 + the cloud-router case (as baseline), lane_slots 20, freeway_lanes 7, **mapdrive 38/38**
+(the known `test_collision_routes` failure now passes: 029's plan is within 0.6 m of its lane's centre where map1010b
+touched the pavement), validate_lanes 0 issues, lane_parity unchanged, map tests 160 passed. One test changed:
+`test_clamp_corners`' median case is now a 75 deg left instead of 60 deg. At 60 deg the 15 m fillet no longer reaches a 4 m
+median's kerb, so the clamp had nothing to push there; at 75 deg it reaches 0.79 m in, and the case still tests the
+push. Amy, please check this change: it alters a test's scenario, not what the test checks.
+

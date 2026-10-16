@@ -1,0 +1,122 @@
+{
+ "step4_before": {
+  "map_term_line_all": {
+   "frames": 159577,
+   "paint_known": 0.9662,
+   "over_0.5": 0.1106,
+   "over_0.75": 0.0667,
+   "over_1.0": 0.0425,
+   "p50": 0.125,
+   "p90": 0.552
+  },
+  "map_term_line_j20": {
+   "frames": 82652,
+   "paint_known": 0.9803,
+   "over_0.5": 0.0719,
+   "over_0.75": 0.0416,
+   "over_1.0": 0.0249,
+   "p50": 0.092,
+   "p90": 0.433
+  }
+ },
+ "left_radius_15_kept": {
+  "map_term_line_all": {
+   "frames": 159577,
+   "paint_known": 0.9679,
+   "over_0.5": 0.1086,
+   "over_0.75": 0.0654,
+   "over_1.0": 0.0418,
+   "p50": 0.124,
+   "p90": 0.542
+  },
+  "map_term_line_j20": {
+   "frames": 82652,
+   "paint_known": 0.9815,
+   "over_0.5": 0.0707,
+   "over_0.75": 0.0407,
+   "over_1.0": 0.0246,
+   "p50": 0.092,
+   "p90": 0.431
+  }
+ },
+ "left_radius_12": {
+  "map_term_line_all": {
+   "frames": 159577,
+   "paint_known": 0.9697,
+   "over_0.5": 0.1088,
+   "over_0.75": 0.0657,
+   "over_1.0": 0.0423,
+   "p50": 0.124,
+   "p90": 0.542
+  },
+  "map_term_line_j20": {
+   "frames": 82652,
+   "paint_known": 0.9835,
+   "over_0.5": 0.0715,
+   "over_0.75": 0.0413,
+   "over_1.0": 0.0252,
+   "p50": 0.092,
+   "p90": 0.432
+  }
+ },
+ "fillet_leg_15": {
+  "map_term_line_all": {
+   "frames": 159577,
+   "paint_known": 0.9738,
+   "over_0.5": 0.1063,
+   "over_0.75": 0.0636,
+   "over_1.0": 0.04,
+   "p50": 0.123,
+   "p90": 0.53
+  },
+  "map_term_line_j20": {
+   "frames": 82652,
+   "paint_known": 0.99,
+   "over_0.5": 0.071,
+   "over_0.75": 0.0409,
+   "over_1.0": 0.0246,
+   "p50": 0.091,
+   "p90": 0.429
+  }
+ },
+ "fillet_leg_12": {
+  "map_term_line_all": {
+   "frames": 159577,
+   "paint_known": 0.9748,
+   "over_0.5": 0.1053,
+   "over_0.75": 0.0626,
+   "over_1.0": 0.0388,
+   "p50": 0.122,
+   "p90": 0.526
+  },
+  "map_term_line_j20": {
+   "frames": 82652,
+   "paint_known": 0.9902,
+   "over_0.5": 0.0706,
+   "over_0.75": 0.0405,
+   "over_1.0": 0.0241,
+   "p50": 0.091,
+   "p90": 0.429
+  }
+ },
+ "fillet_leg_10": {
+  "map_term_line_all": {
+   "frames": 159577,
+   "paint_known": 0.9748,
+   "over_0.5": 0.1054,
+   "over_0.75": 0.0631,
+   "over_1.0": 0.0392,
+   "p50": 0.121,
+   "p90": 0.527
+  },
+  "map_term_line_j20": {
+   "frames": 82652,
+   "paint_known": 0.9897,
+   "over_0.5": 0.0704,
+   "over_0.75": 0.0403,
+   "over_1.0": 0.0241,
+   "p50": 0.091,
+   "p90": 0.428
+  }
+ }
+}

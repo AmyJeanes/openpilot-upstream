@@ -531,7 +531,8 @@ FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a 
 FILLET_MIN = 1.0  # m: a corner nearer the route's start or end than this has no room for a fillet
 START_STUB = 0.5  # m: a route's points nearer its start than this are left out of its lane line (RouteLanes._lead)
 CORNER_SHARP, SHARP_SHARE = 10.0, 0.6  # a turn through a junction turns this share of its angle within this many m
-FILLET_RADIUS = {'left': 20.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns
+FILLET_RADIUS = {'left': 15.0, 'right': 12.0}  # m at most, about as wide as GTA's AI drives its turns (left at 20
+# left the painted lane 10-15 m either side of the corner: paint_score drift, lanegeom step 5)
 MATCH_TOL = 0.5  # m between a route's shape point and a map node it is at
 DROP_SPAN = 25.0  # m: junction nodes this near each other along a route are one junction, for the lanes through it
 DROP_TURN = 30.0  # deg at most a route turns going straight on through a junction (over DROP_REACH m either side)

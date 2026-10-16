@@ -368,7 +368,8 @@ def test_clamp_corners():
   two-way road, its front corner past the edge into a bridge parapet's end); a near-side turn's into a narrow street."""
   one_way = ms.section(2, 0, 4.4)
   cases = [("left 60, one-way legs", ms.junction_turn("left", stop=None, angle=60.0, sec=one_way), 0, 0.5),
-           ("left 60, a 4 m median", ms.junction_turn("left", stop=None, angle=60.0, sec=ms.section(2, 2, median=4.0)), 0, 0.05),
+           # (at 60 deg the fillet no longer reaches a 4 m median's kerb: FILLET_RADIUS left 15 m)
+           ("left 75, a 4 m median", ms.junction_turn("left", stop=None, angle=75.0, sec=ms.section(2, 2, median=4.0)), 0, 0.05),
            ("left 90, two-way 3 m lanes", ms.junction_turn("left", stop=None, sec=ms.section(1, 1, 3.0)), 0, 0.2),
            # 015's side road bends away past its first metres: the corner from shorter legs, not taken for a bend
            ("left 90 onto a road bending away", ms.made_route(ms.line((200.0, 0.0), (10.0, 90.0), *[(10.0, 4.0)] * 6, (100.0, 0.0)),
