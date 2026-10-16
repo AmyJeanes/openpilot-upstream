@@ -573,6 +573,8 @@ class Junctions:
   ways count (default: all the map's roads)."""
   def __init__(self, osm: OsmLanes, roads=None):
     self.osm = osm
+    # built from the lines as drawn with no road carried across a junction, whatever junctions were built on osm before
+    self._carried_before = osm.uncarry()
     keep = roads or (lambda tags: True)
     self.ways = {w: v for w, v in osm.ways.items() if keep(v[0]) and len(v[1]) >= 2}
     self.crossovers = crossovers(osm, self.ways)
@@ -833,7 +835,7 @@ class Junctions:
         j.carried = self._carried_on(j)
         for w, offsets in self._carried_edges(j).items():
           j.carried[w] = j.carried.get(w, set()) | offsets
-    self.osm.carry_across([tuple(j.through) for j in self.junctions if j.carried and len(j.through) == 2])
+    self.osm.carry_across(self._carried_before + [tuple(j.through) for j in self.junctions if j.carried and len(j.through) == 2])
 
   def junction(self, nodes: list[int], caps: dict[tuple[int, int], float] | None = None) -> Junction | None:
     """A junction of these nodes, or None where its roads make fewer than three arms (as where a road's lanes split).

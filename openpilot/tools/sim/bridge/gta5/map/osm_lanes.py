@@ -689,6 +689,13 @@ class OsmLanes:
         self._carried[(a, node)], self._carried[(b, node)] = b, a
     self._blends.clear()
 
+  def uncarry(self) -> list[tuple[int, int]]:
+    """Undo carry_across: the pairs it was given, for giving back."""
+    pairs = sorted({(min(a, b), max(a, b)) for (a, _), b in self._carried.items()})
+    self._carried.clear()
+    self._blends.clear()
+    return pairs
+
   def _onto(self, way: int, node: int) -> tuple[int, int] | None:
     """_other's way, or at a junction the way the road carried across it runs on to (carry_across), or among one-way
     ways the one straight on (_straight_on)."""

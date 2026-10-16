@@ -518,6 +518,15 @@ def test_edge_lines_carried_past_a_side_road():
   assert j.carried == {1: {0.0}, 2: {0.0}}, j.carried
 
 
+def test_a_second_build_finds_the_same_junctions():
+  # Junctions leaves the roads it carries across junctions on the map (carry_across), for drawing their lines; built
+  # again on the same map, it must not read its own carried lines (on this piece of GTA's map they moved two trims)
+  from openpilot.tools.sim.bridge.gta5.map.osm_to_roads import drawn
+  osm = fixture('junction_rebuild.osm')
+  a, b = Junctions(osm, drawn), Junctions(osm, drawn)
+  assert a.trims == b.trims and [j.carried for j in a.junctions] == [j.carried for j in b.junctions]
+
+
 def test_through_only_by_a_road_with_the_way():
   arms = {1: (PRIORITY, (-100.0, 0.0)), 2: (PRIORITY, (100.0, 0.0)), 3: (SIDE, (0.0, 100.0))}
   signals = cross(arms)
