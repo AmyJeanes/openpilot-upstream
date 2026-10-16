@@ -77,6 +77,39 @@ def instruction(s: dict) -> str:
   return f"Turn {mod} onto {name}."
 
 
+def lonlat(origin: tuple[float, float], px: float, py: float) -> tuple[float, float]:
+  return (round(origin[0] + px / METERS_PER_DEGREE, 6), round(origin[1] + py / METERS_PER_DEGREE, 6))
+
+
+def intersection(s: dict, at: tuple[float, float], gi: int, h: float, h_before: float, lane_text, flags: dict,
+                 first: bool) -> dict:
+  """An intersection of step s at (lon, lat) `at`, route geometry index gi; the road runs on at bearing h."""
+  back, out_b = round((h_before if first else h) + 180) % 360, round(h) % 360
+  if s["type"] == "depart":
+    bearings, entry, io = [out_b], [True], {"out": 0}
+  elif s["type"] == "arrive":
+    bearings, entry, io = [back], [True], {"in": 0}
+  else:
+    bearings = sorted({back, out_b, round(h + 90) % 360})
+    entry = [b != back for b in bearings]
+    io = {"in": bearings.index(back), "out": bearings.index(out_b)}
+  it = {"location": list(at), "geometry_index": gi, "admin_index": 0,
+        "is_urban": s["cls"] not in ("motorway", "trunk") and not s.get("rural")}
+  if s["type"] not in ("depart", "arrive"):
+    o = gi % 7
+    it.update(turn_weight=0.5 if first else 0.0, duration=round(2.0 + o, 3), weight=round(2.5 + o, 3))
+  it.update(io, entry=entry, bearings=bearings)
+  if s["type"] != "arrive":
+    it["mapbox_streets_v8"] = {"class": s["cls"]}
+  if s["cls"] in ("motorway", "motorway_link"):
+    it["classes"] = ["motorway"]
+  it.update(flags)
+  ln = lanes(lane_text)
+  if ln:
+    it["lanes"] = ln
+  return it
+
+
 def build(name: str, features: list[str], origin: tuple[float, float], heading: float, steps: list[dict]) -> dict:
   steps = steps + [step("arrive")]
   x, y, h = 0.0, 0.0, heading
@@ -84,60 +117,25 @@ def build(name: str, features: list[str], origin: tuple[float, float], heading: 
   seg_d, seg_t, seg_v, seg_c = [], [], [], []
   out_steps = []
 
-  def lonlat(px, py):
-    return (round(origin[0] + px / METERS_PER_DEGREE, 6), round(origin[1] + py / METERS_PER_DEGREE, 6))
-
-  for k, s in enumerate(steps):
+  for s in steps:
     h_before = h
     if s["type"] != "depart":
       h = (h + TURN.get(s["mod"] or "straight", 0)) % 360
     offsets = sorted({0.0, s["length"], *[o for o, *_ in s["ints"]], *[float(d) for d in range(20, int(s["length"]), 20)]})
-    pts = []
-    for o in offsets:
-      pts.append((x + o * math.sin(math.radians(h)), y + o * math.cos(math.radians(h))))
+    pts = [lonlat(origin, x + o * math.sin(math.radians(h)), y + o * math.cos(math.radians(h))) for o in offsets]
     first_gi = len(route_pts) - 1 if route_pts else 0
     gi_of = {o: first_gi + i for i, o in enumerate(offsets)}
-    if route_pts:
-      route_pts += [lonlat(*p) for p in pts[1:]]
-    else:
-      route_pts += [lonlat(*p) for p in pts]
+    route_pts += pts[1:] if route_pts else pts
     v = s["mph"] * 0.44704 * 0.85 if s["mph"] else 13.0
-    for a, b in zip(offsets, offsets[1:]):
+    for a, b in zip(offsets, offsets[1:], strict=False):
       d = b - a
       seg_d.append(round(d, 1))
       seg_t.append(round(d / v, 3))
       seg_v.append({"unit": "km/h", "speed": KMH[s["mph"]]} if s["mph"] and not s.get("unknown_speed") else {"unknown": True})
       seg_c.append("unknown" if s["cls"] in ("street", "service") else "low")
-    motorway = s["cls"] in ("motorway", "motorway_link")
 
-    def intersection(o, lane_text, flags, first=False, last=False):
-      back, out_b = round((h_before if first else h) + 180) % 360, round(h) % 360
-      if s["type"] == "depart":
-        bearings, entry, io = [out_b], [True], {"out": 0}
-      elif s["type"] == "arrive":
-        bearings, entry, io = [back], [True], {"in": 0}
-      else:
-        side = round(h + 90) % 360
-        bearings = sorted({back, out_b, side})
-        entry = [b != back for b in bearings]
-        io = {"in": bearings.index(back), "out": bearings.index(out_b)}
-      it = {"location": list(lonlat(x + o * math.sin(math.radians(h)), y + o * math.cos(math.radians(h)))),
-            "geometry_index": gi_of[o], "admin_index": 0, "is_urban": s["cls"] not in ("motorway", "trunk") and not s.get("rural")}
-      if s["type"] not in ("depart", "arrive"):
-        it.update(turn_weight=0.5 if first else 0.0, duration=round(2.0 + o % 7, 3), weight=round(2.5 + o % 7, 3))
-      it.update(io, entry=entry, bearings=bearings)
-      if s["type"] != "arrive":
-        it["mapbox_streets_v8"] = {"class": s["cls"]}
-      if motorway:
-        it["classes"] = ["motorway"]
-      it.update(flags)
-      ln = lanes(lane_text)
-      if ln:
-        it["lanes"] = ln
-      return it
-
-    ints = [intersection(0.0, s["at"], s.get("at_flags", {}), first=True)]
-    ints += [intersection(o, lt, fl) for o, lt, fl in s["ints"]]
+    ints = [intersection(s, pts[0], gi_of[0.0], h, h_before, s["at"], s.get("at_flags", {}), first=True)]
+    ints += [intersection(s, pts[offsets.index(o)], gi_of[o], h, h_before, lt, fl, first=False) for o, lt, fl in s["ints"]]
     dur = round(sum(seg_t[len(seg_t) - len(offsets) + 1:]) if len(offsets) > 1 else 0.0, 3)
     man = {"location": ints[0]["location"], "bearing_before": 0 if s["type"] == "depart" else round(h_before) % 360,
            "bearing_after": 0 if s["type"] == "arrive" else round(h) % 360, "instruction": instruction(s), "type": s["type"]}
@@ -145,7 +143,7 @@ def build(name: str, features: list[str], origin: tuple[float, float], heading: 
       man["modifier"] = s["mod"]
     if "exit" in s:
       man["exit"] = s["exit"]
-    st = {"geometry": encode([lonlat(*p) for p in pts]) if len(pts) > 1 else encode([lonlat(*pts[0])] * 2),
+    st = {"geometry": encode(pts if len(pts) > 1 else pts * 2),
           "mode": "driving", "driving_side": "left", "distance": round(s["length"], 3), "duration": dur,
           "weight": round(dur * 1.1, 3), "duration_typical": round(dur * 1.05, 3), "weight_typical": round(dur * 1.15, 3),
           "name": s["name"], "speedLimitSign": "vienna", "speedLimitUnit": "mph", "maneuver": man, "intersections": ints,
@@ -156,7 +154,7 @@ def build(name: str, features: list[str], origin: tuple[float, float], heading: 
     if "exit" in s:
       st["exits"] = str(s["exit"])
     out_steps.append(st)
-    x, y = pts[-1]
+    x, y = x + s["length"] * math.sin(math.radians(h)), y + s["length"] * math.cos(math.radians(h))
 
   for k, st in enumerate(out_steps[:-1]):
     nxt, spec = out_steps[k + 1], steps[k + 1]
@@ -170,8 +168,8 @@ def build(name: str, features: list[str], origin: tuple[float, float], heading: 
     if not ln:
       st["bannerInstructions"] = [{"distanceAlongGeometry": d, "primary": primary}]
       continue
-    sub = {"text": "", "components": [{"text": "", "type": "lane", "active": x["active"], "directions": x["indications"],
-                                       "active_direction": x.get("valid_indication", x["indications"][0])} for x in ln]}
+    sub = {"text": "", "components": [{"text": "", "type": "lane", "active": lane["active"], "directions": lane["indications"],
+                                       "active_direction": lane.get("valid_indication", lane["indications"][0])} for lane in ln]}
     reach = (3218.688 if d > 3218.688 else 1609.344) if steps[k]["cls"] == "motorway" else 402.336
     if d > reach:
       st["bannerInstructions"] = [{"distanceAlongGeometry": d, "primary": primary},
@@ -191,7 +189,8 @@ def build(name: str, features: list[str], origin: tuple[float, float], heading: 
            "weight_typical": leg["weight_typical"], "distance": dist, "legs": [leg], "geometry": encode(route_pts)}
   tz = {"offset": "+01:00", "identifier": "Europe/London", "abbreviation": "BST"}
   ends = [route_pts[0], route_pts[-1]]
-  waypoints = [{"location": list(p), "name": n, "distance": 3.5, "time_zone": tz} for p, n in zip(ends, (steps[0]["name"], steps[-2]["name"]))]
+  names = (steps[0]["name"], steps[-2]["name"])
+  waypoints = [{"location": list(p), "name": n, "distance": 3.5, "time_zone": tz} for p, n in zip(ends, names, strict=True)]
   coords = ";".join(f"{lon:.6f},{lat:.6f}" for lon, lat in ends)
   return {"name": name, "features": features, "made": "invented: make_fixtures.py",
           "request": {"path": f"/directions/v5/mapbox/driving-traffic/{coords}", "params": PARAMS},
@@ -200,15 +199,15 @@ def build(name: str, features: list[str], origin: tuple[float, float], heading: 
 
 SIG = {"traffic_signal": True}
 FIXTURES = [
-  ("turn_bay_right", ["right-turn bay: 2 lanes (`S* R`) 250 m before Marsh Lane, 3 (`S R R*`) in the last 33 m, the "
-                      "turn's own intersection listing 2 (`S R*`)", "lanes valid for each way's own junction"], 0, [
+  ("turn_bay_right", ["right-turn bay: 2 lanes (`S* R`) 250 m before Marsh Lane, 3 (`S R R*`) in the last 33 m",
+                      "the turn's own intersection listing 2 (`S R*`)", "lanes valid for each way's own junction"], 0, [
     step("depart", "Orchard Way", 300, ints=[(120, None, {})]),
     step("turn", "Hollin Road", 600, "right", cls="primary", ints=[
       (150, None, SIG), (350, "S* R", {}), (420, "S* R", SIG), (567, "S R R*", {}), (585, "S R R*", {})]),
     step("turn", "Marsh Lane", 400, "right", cls="secondary", at="S R*", at_flags=SIG, ints=[(200, None, {})]),
   ]),
-  ("motorway_exit_lane_drop", ["exit with a lane drop: 3 lanes (`S* S S`) 43-270 m before the diverge, 4 at the gore "
-                               "(`l* S S S`)", "lane gain 2 -> 4 after a junction", "banner lanes from 2 miles out"], 90, [
+  ("motorway_exit_lane_drop", ["exit with a lane drop: 3 lanes (`S* S S`) 43-270 m before the diverge, 4 at the gore (`l* S S S`)",
+                               "lane gain 2 -> 4 after a junction", "banner lanes from 2 miles out"], 90, [
     step("depart", "Kestrel Road", 200, cls="primary", mph=40),
     step("on ramp", "", 300, "slight left", mph=50, cls="motorway_link", ref="M90"),
     step("merge", "", 4000, "slight right", mph=70, cls="motorway", ref="M90", ints=[
