@@ -16,6 +16,7 @@ import requests
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.prefix import OpenpilotPrefix
+from openpilot.selfdrive.navigation import lane_guidance
 from openpilot.selfdrive.navigation.mapsd import MapsD
 from openpilot.selfdrive.navigation.navd import REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
 from openpilot.selfdrive.navigation.pmtiles import PMTiles, decode_directory, tile_id
@@ -92,6 +93,7 @@ def mapbox_response(steps):
 def route_engine(sm, pm, values):
   params = MagicMock()
   params.get.side_effect = values.get
+  params.get_bool.side_effect = lambda key: bool(values.get(key))
   params.remove.side_effect = lambda key: values.pop(key, None)
   with patch('openpilot.selfdrive.navigation.navd.Api') as api:
     api.return_value.get_token.return_value = 'test-token'
@@ -344,6 +346,23 @@ class TestRouteEngine(unittest.TestCase):
     self.assertEqual(len(self.last_message('navRoute').navRoute.coordinates), 0)
     self.engine.send_instruction()
     self.assertFalse(self.last_message('navInstruction').valid)
+
+  def test_lane_guidance_failure_keeps_the_route(self):
+    self.values['NavLaneGuidance'] = True
+    self.engine = route_engine(self.sm, self.pm, self.values)
+    self.engine.last_position, self.engine.last_bearing = (0, 0), 90
+    steps = self.response.json.return_value['routes'][0]['legs'][0]['steps']
+    for step, kind in zip(steps, ('depart', 'arrive'), strict=True):
+      step.update(maneuver={'type': kind}, intersections=[{'location': step['geometry']['coordinates'][0]}])
+    self.load_route()
+    self.assertIsNotNone(self.engine.guidance.route)
+    with patch.object(self.engine.guidance, 'update', side_effect=ValueError('bad step')):
+      self.engine.update()
+    self.assertTrue(self.last_message('navInstruction').valid)
+    with patch.object(lane_guidance.MapboxRoute, '__init__', side_effect=ValueError('bad route')):
+      self.load_route()
+    self.assertIsNotNone(self.engine.route)
+    self.assertIsNone(self.engine.guidance.route)  # not the last route's
 
   def test_gps_source(self):
     fixes = {'gpsLocation': SimpleNamespace(hasFix=True, latitude=1, longitude=1, bearingDeg=180),

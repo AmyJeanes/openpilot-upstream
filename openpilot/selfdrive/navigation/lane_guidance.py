@@ -206,7 +206,7 @@ class MapboxRoute:
     self.signals: list[float] = []  # m along to the intersections with traffic signals (Mapbox's traffic_signal)
     runs: list[tuple[float, list[dict], int, bool]] = []  # each run of an intersection's lanes: (last along, lanes, step)
     for k, s in enumerate(steps):
-      for it in s["intersections"]:
+      for it in s.get("intersections") or []:
         lanes = car_lanes(it["lanes"]) if it.get("lanes") else None
         a = at(it, k)
         if it.get("traffic_signal"):
@@ -225,7 +225,7 @@ class MapboxRoute:
       if typ == "arrive":
         continue
       a = float(starts[k])
-      int0 = s["intersections"][0] if s["intersections"] else {}
+      int0 = s["intersections"][0] if s.get("intersections") else {}
       lanes = car_lanes(int0["lanes"]) if int0.get("lanes") else None
       if lanes is None:  # the approach's, where the maneuver's own intersection has none (not another maneuver's)
         near = [r for r in runs if r[2] == k - 1 and 0.0 <= a - r[0] <= APPROACH and r[0] > float(starts[k - 1]) + 5.0]
@@ -403,6 +403,7 @@ class LaneGuidance:
     """A new route (routes[0] of navd's Mapbox response, or a MapboxRoute), or None to clear it."""
     if self.request is not None:
       self._close_request("replaced")
+    self.route = None  # a route that fails to read leaves none, never the last one
     self.route = route if isinstance(route, MapboxRoute) or route is None else MapboxRoute(route, self.tune)
     self.tries.clear()
     self.changing, self.signaled, self.change_send_at, self.series = None, None, 0.0, None

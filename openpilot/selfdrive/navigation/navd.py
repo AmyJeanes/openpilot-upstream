@@ -80,7 +80,12 @@ class RouteEngine:
     try:
       if full:
         self.recompute_route(gps_ok=source is not None)
-      self.guide()
+      try:
+        self.guide()
+      except Exception:  # the lane guidance never takes the route's instruction down with it
+        cloudlog.exception("navd.guidance_failed")
+        self.guided = None
+        self.put_desire("")
       self.send_instruction()
     except Exception:
       cloudlog.exception("navd.failed_to_compute")
@@ -154,7 +159,10 @@ class RouteEngine:
         self.step_idx = 0
         self.route_steps_along = np.r_[0.0, np.cumsum([step['distance'] for step in self.route])].tolist()
         if self.guidance is not None:
-          self.guidance.set_route(r['routes'][0])
+          try:
+            self.guidance.set_route(r['routes'][0])
+          except Exception:  # navigation carries on without lane guidance for this route
+            cloudlog.exception("navd.guidance_failed")
       else:
         cloudlog.warning("Got empty route response")
         self.clear_route()
