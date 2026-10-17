@@ -444,3 +444,31 @@ def test_lanes_vary_bus_fixture_never_into_the_bus_lane():
       out = d.step(12.0, (lane0, 4))
       for r in out.requests:
         assert r != "laneChangeLeft" or lane0 != 1  # from beside the bus lane, never into it
+
+
+# *** forks and exits without arrows ***
+
+def test_fork_without_lanes_falls_back_to_the_outermost_on_its_side():
+  """A fork (slight left) and a motorway exit (slight right) with no lanes from Mapbox, at its node or on its approach:
+  the outermost lane on the branch's side is the target (never the other branch's; sometimes a change more than a lane
+  split needs), counted from that side whatever the model counts."""
+  fork = made_route([(1500.0, "fork", "slight left", None)])
+  m = next(x for x in lg.MapboxRoute(fork).moves if x.along == 1500.0)
+  assert m.kind == "fork" and m.side == "left" and m.lanes is None
+  assert lg.targets(m, 3) == [0] and lg.targets(m, 1) == [0]
+  _, out = first_request(Drive(fork), 12.0, (2, 3))
+  assert out.request["reason"] == "fork" and out.request["side"] == "left" and out.request["laneChanges"] == 2
+  assert first_request(Drive(fork), 12.0, (0, 3)) is None  # in place: nothing asked
+
+  exit_ = made_route([(5000.0, "off ramp", "slight right", None)], length=6000.0, kmh=113, motorway=True)
+  m = next(x for x in lg.MapboxRoute(exit_).moves if x.along == 5000.0)
+  assert m.kind == "exit" and m.side == "right" and m.freeway and m.lanes is None
+  _, out = first_request(Drive(exit_), 30.0, (0, 3))
+  assert out.request["reason"] == "exit" and out.request["side"] == "right" and out.request["laneChanges"] == 2
+  assert first_request(Drive(exit_), 30.0, (2, 3)) is None
+  # a fork on a motorway is an exit, the same way
+  fwy_fork = made_route([(5000.0, "fork", "slight left", None)], length=6000.0, kmh=113, motorway=True)
+  m = next(x for x in lg.MapboxRoute(fwy_fork).moves if x.along == 5000.0)
+  assert m.kind == "exit" and m.side == "left" and lg.targets(m, 4) == [0]
+  # off: any lane
+  assert first_request(Drive(fork, {"fallback": False}), 12.0, (2, 3)) is None
