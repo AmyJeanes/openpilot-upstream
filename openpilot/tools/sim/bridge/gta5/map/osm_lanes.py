@@ -531,6 +531,9 @@ RUN_ON_TAG, RUN_ON_NO = 'lanes:run_on', 'no'
 DIVERGES = True  # RouteLanes._diverges on; off (and where it leaves a branch be): a lane hop off (onto) one road alone as before (_hops)
 DIVERGE_M, DIVERGE_EASE = 100.0, 20.0  # m
 DIVERGE_PART = 0.3  # m: the branch's lanes this near where the road's lanes run on, or out past them, have parted
+# m: never as near as DIVERGE_PART, they part where they first come this near (the road's and the branch's lane widths
+# fitted apart), not run on straight for DIVERGE_M, which leaves a bending branch's lanes metres off it
+DIVERGE_NEAR = 1.5
 CORNER_TURN = 30.0  # deg: a route turning this much within CORNER_CHORD m either side of a point has a corner there
 CORNER_CHORD = 10.0  # m
 FILLET_REACH = 20.0  # m either side of a corner the lane line is replaced by a fillet
@@ -1649,8 +1652,9 @@ class RouteLanes:
     lanes on the side it leaves (joins) on, counted from that side and measured from the road's line run on straight,
     until the branch's own lanes come out past them (within DIVERGE_PART), where the paint parts at the gore, and follow
     the branch's from there; the branch may go on onto ways of any class with its lanes (a ramp GTA classes by the
-    roads it reaches). Where they haven't parted within DIVERGE_M (a lane chain running alongside), they move across to
-    the branch's own over the last DIVERGE_EASE. No lane is moved further into a hatched area (lanes.json's painted
+    roads it reaches). Where they never come within DIVERGE_PART but do within DIVERGE_NEAR, they part where they first
+    come nearest, moving across to the branch's own over the DIVERGE_EASE before it; where they don't even come that
+    near within DIVERGE_M (a lane chain running alongside), over the last DIVERGE_EASE. No lane is moved further into a hatched area (lanes.json's painted
     gores and islands beside the map, router.LaneLines) than it ran before: a branch whose lanes would be is left as
     it was; so is one the map tags to keep its lanes on its own line (RUN_ON_TAG, OsmLanes.kept_diverge).
     Also m along from and to each."""
@@ -1717,9 +1721,14 @@ class RouteLanes:
             break
         if not shifts:
           continue
+        if not parted:
+          gap = [abs(shifts[j][1] if leaving else shifts[j][0]) for j in run[:len(shifts)]]
+          near = next((i for i, g in enumerate(gap) if g < DIVERGE_NEAR and (i + 1 == len(gap) or g <= gap[i + 1])), None)
+          if near is not None:  # nearest there: parts there, eased across before it
+            shifts = {j: shifts[j] for j in run[:near + 1]}
         lo = min(float(along[j]) for j in shifts)
         hi = max(float(along[j + 1]) for j in shifts)
-        if not parted:  # a lane chain alongside: across to its own over the far end of the stretch
+        if not parted:  # across to its own over the far end of the stretch (a lane chain alongside: all of it)
           far = hi if leaving else lo
           for j, (a, b) in shifts.items():
             fa, fb = (min(abs(far - float(along[q])) / DIVERGE_EASE, 1.0) for q in (j, j + 1))
