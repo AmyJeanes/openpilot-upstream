@@ -31,7 +31,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.selfdrive.navd import maneuvers, planner
+from openpilot.tools.sim.bridge.gta5.navd import maneuvers, planner
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import LEFTS, RIGHTS, Section
 
 SLOTS = 8

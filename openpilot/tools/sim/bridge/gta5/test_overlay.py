@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from openpilot.tools.sim.bridge.gta5 import gta5_overlay as ov
-from openpilot.selfdrive.navd.planner import Planner
+from openpilot.tools.sim.bridge.gta5.navd.planner import Planner
 from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import OsmLanes

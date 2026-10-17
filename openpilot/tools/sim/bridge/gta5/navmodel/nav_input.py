@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from openpilot.selfdrive.navd.maneuvers import junction_maneuvers
+from openpilot.tools.sim.bridge.gta5.navd.maneuvers import junction_maneuvers
 from openpilot.selfdrive.navigation.helpers import navigation_input
 from openpilot.selfdrive.navigation.route import RouteTracker
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon

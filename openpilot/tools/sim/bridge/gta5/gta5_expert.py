@@ -53,7 +53,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openpilot.selfdrive.navd.maneuvers import Maneuver, maneuvers, route_point
+from openpilot.tools.sim.bridge.gta5.navd.maneuvers import Maneuver, maneuvers, route_point
 from openpilot.tools.sim.bridge.gta5.gta5_drivers import TOOK_OVER, MapDriver
 from openpilot.tools.sim.bridge.gta5.gta5_mapdrive import MapDrive
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import WrongWay

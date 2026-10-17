@@ -17,10 +17,10 @@ from pathlib import Path
 
 import numpy as np
 
-from openpilot.selfdrive.navd.lane_slots import preview
-from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
-from openpilot.selfdrive.navd.planner import Planner, lane_plan
-from openpilot.selfdrive.navd.route_input import ROUTE_LEN, RouteInput
+from openpilot.tools.sim.bridge.gta5.navd.lane_slots import preview
+from openpilot.tools.sim.bridge.gta5.navd.map_match import MapMatcher, RoadGraph
+from openpilot.tools.sim.bridge.gta5.navd.planner import Planner, lane_plan
+from openpilot.tools.sim.bridge.gta5.navd.route_input import ROUTE_LEN, RouteInput
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpot
 from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_expert import Expert
@@ -66,7 +66,7 @@ NOO = os.getenv("GTA5_NOO", "param")
 # approving each at once (gta5_driver.HumanDriver)
 NAV_STAGE = int(os.getenv("GTA5_NAV_STAGE", "3"))
 NOO_CHECK = 0.5  # s between reads of the param
-# routing places the car by navd's map match of the simulated GNSS (selfdrive/navd/map_match.py) rather than the game's
+# routing places the car by navd's map match of the simulated GNSS (navd/map_match.py) rather than the game's
 # pose; needs GTA5_GPS on and the map's gta5.osm.pbf. Off: the match puts the car on its road's line, so the route's
 # lane for the car is wrong (replays ask for needless lane changes) until the lane comes from elsewhere.
 NAV_MATCH = os.getenv("GTA5_NAV_MATCH") == "1"

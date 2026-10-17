@@ -9,7 +9,7 @@ import os
 import time
 from enum import IntEnum
 
-from openpilot.selfdrive.navd.inputs import CANCEL_SIGNAL, LANE_CHANGE_LEFT, LANE_CHANGE_RIGHT, SIGNAL_TURN_LEFT, \
+from openpilot.tools.sim.bridge.gta5.navd.inputs import CANCEL_SIGNAL, LANE_CHANGE_LEFT, LANE_CHANGE_RIGHT, SIGNAL_TURN_LEFT, \
   SIGNAL_TURN_RIGHT, NavOutputs
 
 DEBUG = bool(os.getenv("GTA5_DEBUG"))

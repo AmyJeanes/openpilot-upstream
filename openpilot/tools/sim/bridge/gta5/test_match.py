@@ -1,6 +1,6 @@
 import numpy as np
 
-from openpilot.selfdrive.navd.map_match import Match
+from openpilot.tools.sim.bridge.gta5.navd.map_match import Match
 from openpilot.tools.sim.bridge.gta5.map.router import Navigator, Route
 
 

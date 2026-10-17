@@ -8,7 +8,7 @@ import tempfile
 
 import numpy as np
 
-import openpilot.selfdrive.navd.planner as nav_mod
+import openpilot.tools.sim.bridge.gta5.navd.planner as nav_mod
 import openpilot.tools.sim.bridge.gta5.gta5_driver as driver_mod
 import openpilot.tools.sim.bridge.gta5.gta5_overlay as ov
 import openpilot.tools.sim.lib.simulated_tesla as tesla_mod

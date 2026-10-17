@@ -102,7 +102,7 @@ def decode_polyline(encoded: str, precision: int = 6) -> list[tuple[float, float
 def sharp_turns(route: "Route") -> list[float]:
   """m along the route to its U-turns: Valhalla's U-turn maneuvers, and turns (a run of them through a junction's links
   as one) changing heading by more than SHARP_TURN from before the turn to past its links."""
-  from openpilot.selfdrive.navd.maneuvers import HEADING_SPAN, heading_between, junction_maneuvers, route_point
+  from openpilot.tools.sim.bridge.gta5.navd.maneuvers import HEADING_SPAN, heading_between, junction_maneuvers, route_point
   out, n = [], len(route.along)
   for m in junction_maneuvers(route):
     i = m.get("begin_shape_index", 0)
@@ -469,7 +469,7 @@ class Route:
     the car drives on), those within TURN_AT m of a junction or a turn Valhalla calls: [[m ahead, side, exit heading
     (game deg), deg turned]]. A bend of the road alone, however sharp (a hairpin), is no turn."""
     if self._turns is None:
-      from openpilot.selfdrive.navd.planner import MIN_AHEAD_MAP, TURN_HOLDS, find_turn
+      from openpilot.tools.sim.bridge.gta5.navd.planner import MIN_AHEAD_MAP, TURN_HOLDS, find_turn
       self._turns = []
       # its own points, a long segment split so that find_turn's window always holds the next
       seg = np.diff(self.along)

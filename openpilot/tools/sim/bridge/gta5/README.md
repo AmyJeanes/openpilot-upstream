@@ -105,7 +105,7 @@ clear at once when it turns green, about 2 s before they move. With no AI traffi
 can't tell, and waits for the gas, as on the real car; nor does it go while traffic crosses ahead or someone is in front.
 
 Nav's turn parameters (when to signal, re-pulsing, lane change lead) can come from a JSON file, `GTA5_NAVTUNE`, read again whenever it changes, for sweeps with `e2e.py sweep`; keys
-left out keep the defaults (`selfdrive/navd/planner.py` Tune). With `"signal_mode": "entry"` a turn is signalled at
+left out keep the defaults (`navd/planner.py` Tune). With `"signal_mode": "entry"` a turn is signalled at
 `signal_entry_offset` m past its junction's entry (the map's stop line, else GTA's junction nodes), as a driver signals on
 entering the junction, rather than 5 s before it.
 
@@ -125,11 +125,11 @@ and no turning to take it stops, so a turn is signalled only within 50 m of one.
 
 With a map of the game's roads built ([map/README.md](map/README.md)), nav can route over it with a standard router
 instead (`GTA5_ROUTER`), which never asks for a U-turn, and `GTA5_MAP` serves a map view of the car and its route.
-On that route the bridge also writes a route input for route-conditioned driving models (`selfdrive/navd/route_input.py`, trained
+On that route the bridge also writes a route input for route-conditioned driving models (`navd/route_input.py`, trained
 by gta5-train `--route`) to shared memory, which modeld feeds only to a model with a `route` input; it is zero off the
 route, and `GTA5_ROUTE_INPUT=0` turns it off to A/B one model with and without it.
 `OPENPILOT_PREFIX=gta5 GALLIUM_DRIVER=d3d12 python openpilot/tools/sim/bridge/gta5/watch_route.py` (in the venv) shows that input live.
-Below it, it shows route input v2's lane slots (`selfdrive/navd/lane_slots.py`: the road here and the road out of the next
+Below it, it shows route input v2's lane slots (`navd/lane_slots.py`: the road here and the road out of the next
 maneuver, counted from the kerb, with the lanes the route needs), which the bridge also writes to a shared-memory file of
 their own with the car's lane (`GTA5_LANE_SLOTS=0` turns that off). The same slots are the route input's last 50 floats
 (route input v2, which the bridge writes whole). modeld reads the layout its model was trained on (`route_version` in the
@@ -189,9 +189,10 @@ spot: occupied as the blinker came on, the wait, whether it started into an occu
 what each is and why), read again whenever it changes. Needs the plugin's `nearby` (no flags with an older plugin).
 
 ### navd and the GTA layer
-Navigation is being moved out of the bridge into a game-agnostic navd (`selfdrive/navd/`), which is to plan from only
-what a real car and device give it (GNSS, the car's state, the model's outputs, an OSM map and router), so it ports to
-the road. So far it holds the planner (`planner.py`, which takes `NavInputs` and returns NavDesire changes, requests to
+Navigation is being moved out of the bridge into a navd (`navd/`), which is to plan from only what a real car and
+device give it (GNSS, the car's state, the model's outputs, an OSM map and router). It plans on our map's lanes
+(`Route.info`, OSM lane tags), which only GTA has, so it lives here beside the bridge, not in `selfdrive/`; comma's navd
+(`selfdrive/navigation/`, with its Mapbox-only lane guidance) is the real-car path. So far it holds the planner (`planner.py`, which takes `NavInputs` and returns NavDesire changes, requests to
 the driver and arrival, `inputs.py`), the route input encoder and lane slots; it still runs inside the bridge, and its
 inputs still carry the game's true pose and lane (`truth_*`). The bridge's side of it:
 - `gta5_navd.py`: the planner's inputs from the game's state and our route, and the destination: the game's waypoint or
@@ -203,7 +204,7 @@ inputs still carry the game's true pose and lane (`truth_*`). The bridge's side 
   `GTA5_GPS=qcom3x|ublox|perfect|off`, `GTA5_GPS_SEED`).
 - `nav_replay.py`: replays e2e trips (bridge log and traces) through the bridge's nav into decision logs, to check that
   a refactor leaves every decision as it was.
-- `match_replay.py`: replays the bridge log's drives through navd's map matching (`selfdrive/navd/map_match.py`) on
+- `match_replay.py`: replays the bridge log's drives through navd's map matching (`navd/map_match.py`) on
   simulated 3X GNSS, scored against the game's own pose snapped to the map: wrong road and wrong way shares, episodes,
   latency after turns, false and missed reroutes. `Navigator.update(..., match=...)` takes its matches, and
   `GTA5_NAV_MATCH=1` has the bridge route from them (off by default: the match puts the car on its road's line, so the

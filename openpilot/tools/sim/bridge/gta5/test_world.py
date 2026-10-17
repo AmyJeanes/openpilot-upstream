@@ -31,8 +31,8 @@ def brain() -> Brain:
 
 
 def test_lane_slots_preview():
-  from openpilot.selfdrive.navd import lane_slots as ls
-  from openpilot.selfdrive.navd import route_input as ri
+  from openpilot.tools.sim.bridge.gta5.navd import lane_slots as ls
+  from openpilot.tools.sim.bridge.gta5.navd import route_input as ri
   from openpilot.tools.sim.bridge.gta5.test_lane_slots import RIGHT, fixture, route
   osm, nodes = fixture('lht.osm', drive_on_right=False)
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})
@@ -117,7 +117,7 @@ def test_e2e_lane_map():
 
 
 def test_lane_slots_failure_keeps_v1():
-  from openpilot.selfdrive.navd import route_input as ri
+  from openpilot.tools.sim.bridge.gta5.navd import route_input as ri
   from openpilot.tools.sim.bridge.gta5.test_lane_slots import RIGHT, fixture, route
   osm, nodes = fixture('lht.osm', drive_on_right=False)
   r = route(osm, nodes, [1, 2, 4], {1: RIGHT})

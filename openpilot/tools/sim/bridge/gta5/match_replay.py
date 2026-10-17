@@ -9,7 +9,7 @@ Each drive (the log cut where the car stood still for a minute, jumped, paused o
 gta5_gnss.Gnss (seeded per drive) and carState-like speed and yaw rate, and these go to three matchers:
 - nearest: the road nearest the fix, either way on a two-way road by the GNSS course (no heading otherwise);
 - n1: the nearest road heading within Route.locate's WRONG_WAY of the GNSS course: N1's heading gate, at every road;
-- n2: navd's MapMatcher (selfdrive/navd/map_match.py).
+- n2: navd's MapMatcher (navd/map_match.py).
 `stress` adds a city's worse GNSS to qcom3x: more bias and noise, a course that means nothing when stopped, and now
 and then a multipath jump of 10-25 m.
 
@@ -34,7 +34,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph, wrap
+from openpilot.tools.sim.bridge.gta5.navd.map_match import MapMatcher, RoadGraph, wrap
 from openpilot.tools.sim.bridge.gta5.gta5_gnss import PROFILES, Gnss
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.paths import CAR_HEIGHT

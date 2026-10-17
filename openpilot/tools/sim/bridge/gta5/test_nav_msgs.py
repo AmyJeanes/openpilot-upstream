@@ -7,7 +7,7 @@ import numpy as np
 
 from openpilot.cereal import messaging
 from openpilot.selfdrive.ui.nav.nav_state import NavState, card_lanes, format_distance, instruction_guidance
-from openpilot.selfdrive.navd import lane_slots as ls
+from openpilot.tools.sim.bridge.gta5.navd import lane_slots as ls
 from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm, gta5_nav_pub as npub
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M

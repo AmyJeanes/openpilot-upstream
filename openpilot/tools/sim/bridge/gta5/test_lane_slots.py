@@ -6,9 +6,9 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from openpilot.selfdrive.navd import lane_slots as ls
-from openpilot.selfdrive.navd import planner
-from openpilot.selfdrive.navd import route_input as ri
+from openpilot.tools.sim.bridge.gta5.navd import lane_slots as ls
+from openpilot.tools.sim.bridge.gta5.navd import planner
+from openpilot.tools.sim.bridge.gta5.navd import route_input as ri
 from openpilot.tools.sim.bridge.gta5.map.osm_lanes import TAPER_M, OsmLanes
 from openpilot.tools.sim.bridge.gta5.map.osm_pbf import OsmData
 from openpilot.tools.sim.bridge.gta5.map.router import Route
@@ -437,7 +437,7 @@ def jog_route(first: int, second: int, link: tuple[float, float], out: tuple[flo
 def test_turns_through_a_junction_are_one():
   """A turn onto a junction's unnamed link and the turn off it are one maneuver: a jog straight across is none, a bear
   left then a right is one right turn, at the junction's entry, onto the second's road."""
-  from openpilot.selfdrive.navd import maneuvers as mv
+  from openpilot.tools.sim.bridge.gta5.navd import maneuvers as mv
   from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
   jog = jog_route(RIGHT, LEFT, (12.0, 0.0), (12.0, 100.0))
   merged = mv.junction_maneuvers(jog)

@@ -7,7 +7,7 @@ import numpy as np
 
 from openpilot.selfdrive.modeld.route_input import (HEADER, RouteInputReader, RouteInputWriter, model_layout, read_model_layout,
                                                     write_model_layout)
-from openpilot.selfdrive.navd import route_input as ri
+from openpilot.tools.sim.bridge.gta5.navd import route_input as ri
 
 N = 173
 

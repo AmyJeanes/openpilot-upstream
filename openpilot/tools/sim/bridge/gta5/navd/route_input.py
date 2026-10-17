@@ -38,9 +38,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.selfdrive.navd import maneuvers, planner
-from openpilot.selfdrive.navd.lane_slots import LANE_SLOTS_LEN, LaneSlots
-from openpilot.selfdrive.navd.lane_slots import describe as describe_lanes
+from openpilot.tools.sim.bridge.gta5.navd import maneuvers, planner
+from openpilot.tools.sim.bridge.gta5.navd.lane_slots import LANE_SLOTS_LEN, LaneSlots
+from openpilot.tools.sim.bridge.gta5.navd.lane_slots import describe as describe_lanes
 
 NAV_BINS, BIN_M, BIN_ZERO = 50, 20.0, 25
 NAV_LEN = NAV_BINS * 3

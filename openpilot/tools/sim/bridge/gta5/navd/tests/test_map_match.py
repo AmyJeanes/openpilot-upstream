@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 
-from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph, oneway_of, wrap
+from openpilot.tools.sim.bridge.gta5.navd.map_match import MapMatcher, RoadGraph, oneway_of, wrap
 
 
 def dual_carriageway(gap: float = 12.0, length: float = 600.0, service: bool = False) -> RoadGraph:
