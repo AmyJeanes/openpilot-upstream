@@ -243,7 +243,9 @@ class Tune:
     # slows below it, for a turn (at slow_decel down to the turn's speed by its junction's entry) or a red light's queue
     # (queue_room m before the last lights before the move), and are timed at the road's speed (its limit, or the car's
     # speed if higher) rather than the car's, so slowing traffic doesn't put them off; past that point and slower than
-    # this, nav stops asking and leaves the move to the route (a reroute) rather than forcing a change at the junction
+    # this, nav stops asking and leaves the move to the route (a reroute) rather than forcing a change at the junction.
+    # Slower than this no lane change is asked for at all, and one not started yet is withdrawn: n16 takes a lane change
+    # desire this slow like a turn's (n16 at ~8 m/s into a wall, in game)
     "model_lc_speed": MODEL_LC_SPEED,  # m/s
     "slow_decel": 1.5,  # m/s^2
     "queue_room": 30.0,  # m
@@ -1173,6 +1175,8 @@ class Planner:
       self.taken.clear()
       return False
     self._watch_change(indicator, now, inp.left_blindspot if self.changing == "left" else inp.right_blindspot)
+    if self.changing is not None and not self.change_went and self._lc_too_slow(v):
+      self._give_up(indicator, f"too slow for the model's lane change ({v:.1f} m/s)")
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
       self.requests.append("laneChange" + self.changing.capitalize())
@@ -1656,7 +1660,7 @@ class Planner:
     """Into the turn bay or slip lane for the turn ahead as it opens, from the lane beside it."""
     if not self._bay_beside(turn, bay) or self.driven < self.bay_to or self.changing is not None or self._turn_into(turn, v):
       return
-    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED:
+    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED or self._lc_too_slow(v):
       return
     where = self._point(self.route_ahead, turn.dist)
     if self._into_oncoming(turn.side):
@@ -1767,6 +1771,7 @@ class Planner:
         print(f"nav: the merge for the lane ending in {m.dist:.0f} m " +
               ("waits, nav's lane and the map's disagreeing" if self.merge_waits else "goes on, the lane readings agreeing"))
     ready = (self.changing is None and (room > 0 or must and m.dist > MERGE_STOP_BEFORE) and due and (v > LANE_CHANGE_SPEED or must)
+             and not self._lc_too_slow(v)
              and now - self.change_t > LANE_CHANGE_GAP and now >= self.cooldown_until and abs(self.yaw) < TURNING
              and self._lane_settled(side, now) and agreed)
     bay = self._point(route, max(m.dist, 0.0)) if isinstance(m, Turn) and self._turn_bay(m, side) else None
@@ -1978,7 +1983,7 @@ class Planner:
       return
     self.wrong_side_t = self.wrong_side_t or now
     if (self.changing is None and self.turn is None and now - self.wrong_side_t > WRONG_SIDE_FOR and v > LANE_CHANGE_SPEED
-        and now - self.change_t > LANE_CHANGE_GAP and not self._into_oncoming("right")):
+        and now - self.change_t > LANE_CHANGE_GAP and not self._into_oncoming("right") and not self._lc_too_slow(v)):
       self._start_change("right", f"out of oncoming lane {-lane[0]}", reason="oncoming", changes=-lane[0])
 
   def _oncoming_keep(self, plugin_lane: list[int] | None, near_junction: bool, now: float, map_lane: dict | None = None):
@@ -2004,6 +2009,10 @@ class Planner:
     elif now - self.recover_t > self.tune.repulse_every:
       self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
     self.recover = "keepRight"
+
+  def _lc_too_slow(self, v: float) -> bool:
+    """Slower than the model's lane change speed (model_lc_speed): no lane change asked for, one not started withdrawn."""
+    return self.tune.model_lc_speed > 0 and v < self.tune.model_lc_speed
 
   def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False,
                     end: float | None = None, bay: np.ndarray | None = None, reason: str = "other", changes: int = 1,

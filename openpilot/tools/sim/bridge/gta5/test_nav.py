@@ -237,9 +237,11 @@ def test_turn_straight_after_a_turn():
 
 
 def test_left_turn_into_its_bay():
-  # a bay opening 30 m before a left turn, from the inside lane: into the bay, then signal the turn
+  # a bay opening 30 m before a left turn, from the inside lane: into the bay, then signal the turn (at 6 m/s, below
+  # n16's lane change speed, only with model_lc_speed off: test_slow_bay_left_to_the_turn_signal)
   route = route_to_turn(200.0, "left")
   d = Drive((0, 2), v=6.0)
+  d.nav.tune.values["model_lc_speed"] = 0.0
   y, order = 0.0, []
   while y < 195.0:
     bay_at = 170.0 - y
@@ -254,6 +256,21 @@ def test_left_turn_into_its_bay():
       order.append("turn")
     y += d.v * 0.05
   assert order == ["bay", "turn"]
+
+
+def test_slow_bay_left_to_the_turn_signal():
+  """The same bay at 6 m/s with n16's lane change speed (10 m/s): no lane change into it (n16 would take the desire
+  like a turn's, at the wrong place); the turn's signal comes, its desire takes the car over."""
+  route = route_to_turn(200.0, "left")
+  d = Drive((0, 2), v=6.0)
+  y, changed, signalled = 0.0, False, False
+  while y < 195.0:
+    bay_at = 170.0 - y
+    d.step(route, y, {"forks": [[bay_at, "right", 2, 2, False, 0, True]] if bay_at > 0 else [], "routeEnd": 300.0 - y})
+    changed |= d.nav.changing is not None
+    signalled |= d.nav.signaled == "left"
+    y += d.v * 0.05
+  assert not changed and signalled
 
 
 def test_no_keep_left_on_a_two_way_road():
@@ -759,23 +776,41 @@ def test_city_change_before_the_slowing():
   route = route_to_turn(400.0)
   turn = find_turn(route, nav_mod.MIN_AHEAD_MAP).dist
   extra = {"stops": lambda y: [turn - 20.0 - y], "stopKinds": ["lights"], "limits": [[0.0, 13.3]], "routeEnd": lambda y: 600.0 - y}
-  old, _ = first_change(route, (0, 2), 9.0, extra, tune={"model_lc_speed": 0.0})
-  new, _ = first_change(route, (0, 2), 9.0, extra)
+  old, _ = first_change(route, (0, 2), 10.5, extra, tune={"model_lc_speed": 0.0})
+  new, _ = first_change(route, (0, 2), 10.5, extra)
   assert old is not None and new is not None
   lead = nav_mod.city_lead(1, 13.3, nav_mod.TUNE)
-  assert abs(old - (nav_mod.LANE_CHANGE_DIST + nav_mod.city_lead(1, 9.0, nav_mod.TUNE))) < 5.0
+  assert abs(old - (nav_mod.LANE_CHANGE_DIST + nav_mod.city_lead(1, 10.5, nav_mod.TUNE))) < 5.0
   assert abs(new - (20.0 + 30.0 + lead)) < 5.0 and new > old + 50.0
 
 
 def test_slow_city_change_waits_for_the_traffic():
-  """Slower than lc_wait of model_lc_speed well before the turn, the change isn't asked for; at speed it is."""
+  """Slower than model_lc_speed (n16's 10 m/s) the change isn't asked for, also between lc_wait of it and it (9 m/s:
+  n16 takes a lane change desire that slow like a turn's); at speed it is."""
   route = route_to_turn(300.0)
   slow, _ = first_change(route, (0, 2), 5.0, {"routeEnd": 500.0}, upto=290.0)
-  fast, _ = first_change(route, (0, 2), 9.0, {"routeEnd": 500.0}, upto=290.0)
-  assert slow is None and fast is not None
+  under, _ = first_change(route, (0, 2), 9.0, {"routeEnd": 500.0}, upto=290.0)
+  fast, _ = first_change(route, (0, 2), 11.0, {"routeEnd": 500.0}, upto=290.0)
+  assert slow is None and under is None and fast is not None
   # today's planner asks at 5 m/s
   old, _ = first_change(route, (0, 2), 5.0, {"routeEnd": 500.0}, upto=290.0, tune={"model_lc_speed": 0.0})
   assert old is not None
+
+
+def test_change_not_started_withdrawn_when_slowing():
+  """Asked for at 11 m/s, the car slowing to 8 before openpilot starts it (below n16's 10 m/s): withdrawn, its blinker
+  never on (gave_up), and not asked again until the car is faster."""
+  route = route_to_turn(300.0)
+  at, d = first_change(route, (0, 2), 11.0, {"routeEnd": 500.0}, upto=290.0)
+  assert at is not None
+  y = 300.0 - at
+  d.v = 8.0
+  for _ in range(40):
+    y += d.v * 0.05
+    d.step(route, y, {"routeEnd": 500.0 - y})
+    assert d.nav.changing is None or d.nav.change_went
+  assert not signals(d)
+  assert [e["outcome"] for e in d.events if e.get("event") == "navRequest"] == ["gave_up"]
 
 
 def test_too_slow_near_the_turn_isnt_forced():

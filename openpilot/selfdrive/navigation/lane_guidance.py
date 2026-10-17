@@ -7,11 +7,18 @@ signals turns, and shows the lanes under active guidance (navInstruction.lanes),
 - Targets: each maneuver's intersection's valid lanes (Mapbox's `lanes`, left to right); where the next maneuver follows
   within `pair_gap` m, the first's targets narrowed to those nearest the second's side, so both can be made. At a
   junction the route goes straight on through, the valid lanes if not all are. No lanes from Mapbox at a turn or exit:
-  the outermost lane on its side.
+  the outermost lane on its side. Never a bus lane (Mapbox's `access: {designated: [bus]}`), which still counts as a
+  lane; nor does a change go into one (the bus lanes on the road the car is on, by its lane lists).
 - The car's lane: the lane head's, held through flicker and dropouts (LaneReader), counted from the maneuver's side.
   Where the model counts fewer lanes than Mapbox lists at the junction (a turn bay not open yet), the missing lanes are
   taken to be on the turn's side: counted from there, the target is the outermost lane, and the car is in place in it;
   the turn's signal takes it into the bay as it opens (the turn desire, `turn_into`).
+- Lanes that end (Mapbox has no lane ends; option B): where an intersection on the same road lists fewer lanes than the
+  one before it, the side whose lanes line up with the list before (by their arrows, bus lanes as such) keeps its
+  lanes; the car in one of the others is moved over (request reason laneEnds) as for a maneuver, by the first
+  intersection listing fewer. Not where it's ambiguous, where the fewer are a maneuver's own node or approach (its
+  targets count from its side), where only lanes not for the route at the junction before drop out (its move has
+  them), unless the model counts as many lanes as the list before, nor out of a lane a maneuver just past wants.
 - Timing: a change is asked for once time left <= lanes away x lc_time + margin, time left being the distance to the
   last place it must be done (`done_before` m before the maneuver) over the planning speed max(v, maxspeed_share x
   maxspeed), so slowing traffic doesn't put the ask off; at the latest `min_dist` m per lane away; with lc_time_fwy at
@@ -42,7 +49,8 @@ APPROACH = 60.0  # m: lanes on intersections this near before a maneuver are its
 TURN_KINDS = ("turn", "end of road", "continue", "new name")
 FORK_KINDS = ("fork", "off ramp")  # on ramps and merges join a road: only their lanes, where given, say anything
 ROUNDABOUTS = ("roundabout", "rotary", "roundabout turn", "exit roundabout", "exit rotary")
-REASONS = {"turn": "turn", "fork": "fork", "exit": "exit", "through": "straightOn", "roundabout": "turn"}
+STRAIGHT_KINDS = ("new name", "continue", "notification")  # with no modifier or "straight": the same road goes on
+REASONS = {"turn": "turn", "fork": "fork", "exit": "exit", "through": "straightOn", "roundabout": "turn", "ends": "laneEnds"}
 # Mapbox lane indications -> navInstruction.Lane.Direction
 DIRECTIONS = {"left": "left", "sharp left": "left", "slight left": "slightLeft", "straight": "straight",
               "slight right": "slightRight", "right": "right", "sharp right": "right", "uturn": "left", "none": "none"}
@@ -64,6 +72,14 @@ class Tune:
   lc_min_speed: float = 10.0  # m/s: slower, a change not yet started is withdrawn (the model's lane change speed)
   pair_gap: float = 100.0  # m: a maneuver this soon after one is planned with it
   max_ahead: float = 3500.0  # m: no change asked for further out
+  # lanes that end (option B): where an intersection lists fewer lanes than the one before it on the road
+  lane_ends: bool = True
+  ends_at: float = 1.0  # the end taken to be this share of the way from the last intersection listing more to the first listing fewer
+  done_before_ends: float = 30.0  # m before it the changes must be done
+  ends_count_match: bool = True  # only while the model counts as many lanes as the list before
+  ends_at_maneuver: bool = False  # also where the fewer are listed at a maneuver's own node or on its approach (the bay case)
+  ends_valid_only: bool = True  # only where a lane that ends was valid at the junction before (else that junction's move has it)
+  ends_guard: float = 150.0  # m past the end: a maneuver this near whose lanes the car is in keeps it there
   fallback: bool = True  # no lanes from Mapbox at a turn or exit: the outermost lane on its side
   ui_town: float = 402.0  # m before a maneuver its lanes show, without a banner saying
   ui_fwy: float = 1609.0
@@ -139,6 +155,7 @@ class Move:
   name: str = ""
   step: int = -1  # its step, for a maneuver
   signal: bool = False  # nav signals it (a turn left or right)
+  before: int = 0  # lanes that end: how many the road had before (its lanes are those after; side: the side that keeps)
 
   @property
   def valid(self) -> list[int]:
@@ -157,6 +174,21 @@ def motorway(it: dict) -> bool:
 
 def side_of(modifier: str) -> str | None:
   return "left" if "left" in modifier else "right" if "right" in modifier else None
+
+
+def bus(lane: dict) -> bool:
+  return "bus" in lane.get("access", {}).get("designated", [])
+
+
+def ends_side(before: list[dict], after: list[dict]) -> str | None:
+  """Where a road's lane list shortens (`after` fewer than `before`): the side that keeps its lanes, the one whose
+  lanes line up with the list before, lane by lane from that side, by their arrows (and bus lanes as bus lanes); None
+  where both or neither do (ambiguous)."""
+  n0, n1 = len(before), len(after)
+  key = [(frozenset(x.get("indications", [])), bus(x)) for x in before + after]
+  left = all(key[j] == key[n0 + j] for j in range(n1))
+  right = all(key[n0 - n1 + j] == key[n0 + j] for j in range(n1))
+  return None if left == right else "left" if left else "right"
 
 
 def edge_side(valid: list[int], n: int) -> str | None:
@@ -204,18 +236,19 @@ class MapboxRoute:
 
     self.moves: list[Move] = []
     self.signals: list[float] = []  # m along to the intersections with traffic signals (Mapbox's traffic_signal)
-    runs: list[tuple[float, list[dict], int, bool]] = []  # each run of an intersection's lanes: (last along, lanes, step)
+    # each run of an intersection's lanes: (last along, lanes, step, freeway, first along, at a maneuver's own node)
+    runs: list[tuple[float, list[dict], int, bool, float, bool]] = []
     for k, s in enumerate(steps):
-      for it in s.get("intersections") or []:
+      for j, it in enumerate(s.get("intersections") or []):
         lanes = car_lanes(it["lanes"]) if it.get("lanes") else None
         a = at(it, k)
         if it.get("traffic_signal"):
           self.signals.append(a)
         fwy = motorway(it) or (self.maxspeed(a) or 0.0) >= FREEWAY_SPEED
         if lanes and runs and runs[-1][1] == lanes and runs[-1][2] == k:
-          runs[-1] = (a, lanes, k, fwy)
+          runs[-1] = (a, lanes, k, fwy, runs[-1][4], runs[-1][5])
         elif lanes:
-          runs.append((a, lanes, k, fwy))
+          runs.append((a, lanes, k, fwy, a, j == 0 and k > 0))
     maneuver_at = []
     for k, s in enumerate(steps):
       if k == 0:
@@ -251,7 +284,7 @@ class MapboxRoute:
                              signal=kind == "turn" and mod in ("left", "right", "sharp left", "sharp right")))
       maneuver_at.append(a)
     # junctions straight on through, where not every lane goes on
-    for a, lanes, _, fwy in runs:
+    for a, lanes, _, fwy, _, _ in runs:
       if any(-5.0 <= m - a <= APPROACH for m in maneuver_at):
         continue  # a maneuver's own approach (Mapbox repeats its lanes on the way into it)
       valid = [i for i, x in enumerate(lanes) if x.get("valid")]
@@ -259,7 +292,27 @@ class MapboxRoute:
       if side is None or not valid:
         continue
       self.moves.append(Move(a, "through", side, lanes, fwy, t.ui_fwy if fwy else t.ui_town))
+    # lanes that end (Mapbox has no lane ends): an intersection listing fewer lanes than the one before it on the same
+    # road; the side whose lanes line up with the list before (by their arrows) keeps its lanes, the other's end
+    turning = [k > 0 and not (s["maneuver"].get("type") in STRAIGHT_KINDS and s["maneuver"].get("modifier", "") in ("", "straight"))
+               for k, s in enumerate(steps)]
+    for r0, r1 in zip(runs, runs[1:], strict=False) if t.lane_ends else ():
+      # a maneuver's own node lists the lanes into it: the road before it
+      road0, road1 = r0[2] - r0[5], r1[2] - r1[5]
+      into = r1[5] or any(-5.0 <= m - r1[0] <= APPROACH for m in maneuver_at)
+      if len(r1[1]) >= len(r0[1]) or (into and not t.ends_at_maneuver) or any(turning[road0 + 1:road1 + 1]):
+        continue  # not fewer; a maneuver's own node or approach (a bay listed only further back: its targets have it); another road
+      keep = ends_side(r0[1], r1[1])
+      gone = r0[1][len(r1[1]):] if keep == "left" else r0[1][:len(r0[1]) - len(r1[1])]
+      if t.ends_valid_only and not any(x.get("valid") for x in gone):
+        continue  # only lanes not for the route at the junction before (a turn lane, a bus lane): that junction's move
+      if keep is not None:
+        a = r0[0] + t.ends_at * (r1[4] - r0[0])
+        self.moves.append(Move(a, "ends", keep, r1[1], r1[3], 0.0, before=len(r0[1])))
     self.moves.sort(key=lambda m: m.along)
+    # each road's lane lists (a maneuver's own node lists the road into it), for the bus lanes on the road the car is on
+    self.starts = starts
+    self.lists = [(r[4], r[0], r[1], r[2] - r[5]) for r in runs]
 
   @staticmethod
   def _banner_lanes_from(step: dict) -> float | None:
@@ -267,6 +320,20 @@ class MapboxRoute:
       if any(c.get("type") == "lane" for c in (b.get("sub") or {}).get("components", [])):
         return float(b["distanceAlongGeometry"])
     return None
+
+  def bus_lanes(self, along: float, n_car: int) -> set[int]:
+    """The bus lanes (from the left, in the car's count n_car) on the road the car is on, by the next lane list ahead on
+    it (Mapbox repeats a way's lanes on each of its intersections), else the last behind on it; each counted from the
+    edge it's nearer in its list."""
+    road = int(np.searchsorted(self.starts, along, side="right")) - 1
+    on = [(last, ls) for _, last, ls, r in self.lists if r == road]
+    lanes = next((ls for last, ls in on if last >= along - 1.0), on[-1][1] if on else None)
+    out = set()
+    for j, x in enumerate(lanes or []):
+      if bus(x):
+        n = len(lanes)
+        out.add(j if j < n / 2 else n_car - n + j)
+    return {j for j in out if 0 <= j < n_car}
 
   def maxspeed(self, along: float) -> float | None:
     if not self.maxspeeds:
@@ -324,7 +391,10 @@ def targets(move: Move, n_car: int, fallback: bool = True) -> list[int] | None:
     return [0] if fallback and move.kind in ("turn", "fork", "exit") else None
   n = len(move.lanes)
   valid = move.valid
-  if not valid or len(valid) == n:
+  if not valid or len(valid) == n and not any(bus(x) for x in move.lanes):
+    return None
+  valid = [j for j in valid if not bus(move.lanes[j])]  # never a bus lane (still counted)
+  if not valid:
     return None
   t = sorted({j if side == "left" else n - 1 - j for j in valid})
   if n_car < n and move.kind != "through":
@@ -425,7 +495,7 @@ class LaneGuidance:
       self._turn(inp, ahead)
       needs = self._needs(ahead)
       self._change(inp, needs)
-      shown = next((m for m in ahead if m.lanes and m.along - inp.along > 0.0), None)
+      shown = next((m for m in ahead if m.lanes and m.kind != "ends" and m.along - inp.along > 0.0), None)
       if shown is not None:
         lanes_ui, lane_distance = self._lanes_ui(shown, next((nd for m, nd in needs if m is shown), None))
     self._set_desire()
@@ -442,14 +512,19 @@ class LaneGuidance:
     """m before the move its changes must be done by: done_before for its kind, or signal_room before the last traffic
     signal within signal_window on the way to it, whichever is further."""
     t = self.tune
-    d = {"fork": t.done_before_fork, "exit": t.done_before_fork, "through": t.done_before_through}.get(m.kind, t.done_before_turn)
+    d = {"fork": t.done_before_fork, "exit": t.done_before_fork, "through": t.done_before_through,
+         "ends": t.done_before_ends}.get(m.kind, t.done_before_turn)
     lights = [a for a in (self.route.signals if self.route is not None else []) if 0.0 < m.along - a <= t.signal_window]
     return max(d, m.along - max(lights) + t.signal_room) if lights and t.signal_room > 0 else d
 
   def _targets(self, m: Move, ahead: list[Move], n_car: int) -> list[int] | None:
     """The move's target lanes from its side in the car's count; narrowed for a maneuver close after it."""
+    if m.kind == "ends":  # the lanes that carry on (not bus lanes), counted from the side that keeps them, while the car has more
+      n = len(m.lanes or [])
+      keep = [j for j in range(n) if not bus(m.lanes[j if m.side == "left" else n - 1 - j])]
+      return keep or None if n_car > n and (n_car == m.before or not self.tune.ends_count_match) else None
     tg = targets(m, n_car, self.tune.fallback)
-    nxt = next((x for x in ahead if x.along > m.along + 1.0), None)
+    nxt = next((x for x in ahead if x.along > m.along + 1.0 and x.kind != "ends"), None)
     if tg is not None and nxt is not None and nxt.along - m.along <= self.tune.pair_gap and nxt.kind != "through":
       tg = narrowed(tg, nxt.side, m.side)
     return tg
@@ -542,11 +617,16 @@ class LaneGuidance:
       if not (self._due(nd) or self.series == key) or self.tries.get(key, 0) >= t.change_tries:
         continue
       to = i + (-1 if nd["side"] == "left" else 1)
+      if to in self.route.bus_lanes(min(self.along, m.along - 1.0), n):
+        continue  # never into a bus lane
       before = [(x, y) for x, y in needs if x.along < m.along and y["lanes"]]
       if any(min(abs(to - j) for j in y["lanes"]) > min(abs(i - j) for j in y["lanes"]) for _, y in before):
         return  # not away from the lanes for a move before it
+      if m.kind == "ends" and any(i in y["lanes"] and to not in y["lanes"] for x, y in needs
+                                  if x.kind != "ends" and m.along < x.along <= m.along + t.ends_guard and y["lanes"]):
+        continue  # the car is in the lanes for a maneuver just past: its lane goes on, whatever the lists say
       # a move before it wanting the same way: the change is the earlier's (its reason, deadline and count)
-      m, nd = next(((x, y) for x, y in before if y["changes"] > 0 and y["side"] == nd["side"]), (m, nd))
+      m, nd = next(((x, y) for x, y in before if y["changes"] > 0 and y["side"] == nd["side"] and x.kind != "ends"), (m, nd))
       key = round(m.along, 1)
       self.tries[key] = self.tries.get(key, 0) + 1
       self._open_request("laneChange", nd["side"], REASONS.get(m.kind, "other"), max(nd["deadline"], 0.0), nd["changes"],
