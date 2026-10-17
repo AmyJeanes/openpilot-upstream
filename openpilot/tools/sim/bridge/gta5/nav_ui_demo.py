@@ -23,7 +23,7 @@ if not PREFIX or PREFIX == "gta5":
 os.makedirs(f"/dev/shm/msgq_{PREFIX}", exist_ok=True)
 
 from openpilot.cereal import log, messaging
-from openpilot.selfdrive.navd import lane_slots
+from openpilot.tools.sim.bridge.gta5.navd import lane_slots
 from openpilot.tools.sim.bridge.gta5.gta5_nav_msgs import NavMessages, heading_at, point_at
 from openpilot.tools.sim.bridge.gta5.gta5_nav_pub import NavPublisher
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game

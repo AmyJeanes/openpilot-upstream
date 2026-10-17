@@ -502,7 +502,7 @@ def diverge_approach(m, d: dict, start: dict | None = None) -> dict | None:
 def nav_lane_changes(router, spec: str, v: float = 20.0) -> tuple[list[tuple[float, float, float]], int]:
   """The lane changes navd's planner (lane_plan, as the bridge draws nav's lane line) asks for on the trip's route
   from its start lane: [(m from, m to, lanes moved, + right)], and the lanes at the start."""
-  from openpilot.selfdrive.navd.planner import lane_plan
+  from openpilot.tools.sim.bridge.gta5.navd.planner import lane_plan
   from openpilot.tools.sim.bridge.gta5 import e2e
   (sx, sy, sz, sh, dx, dy), lane = e2e.parse_spec(spec)
   osm = router.osm

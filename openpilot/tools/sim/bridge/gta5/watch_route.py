@@ -13,8 +13,8 @@ import openpilot.cereal.messaging as messaging
 from openpilot.selfdrive.modeld.route_input import HEADER, RouteInputReader, read_model_layout
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
-from openpilot.selfdrive.navd import lane_slots as slots_mod
-from openpilot.selfdrive.navd.route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, V1_LEN, decode
+from openpilot.tools.sim.bridge.gta5.navd import lane_slots as slots_mod
+from openpilot.tools.sim.bridge.gta5.navd.route_input import BIN_M, BIN_ZERO, HEADING_AHEAD, V1_LEN, decode
 
 FPS = 10
 NAV_FROM, NAV_TO = BIN_ZERO - 5, 50  # bins shown: 100 m behind to 500 m ahead

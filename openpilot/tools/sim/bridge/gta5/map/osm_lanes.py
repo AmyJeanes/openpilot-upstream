@@ -54,7 +54,7 @@ from functools import cached_property
 from typing import NamedTuple
 
 import numpy as np
-from openpilot.selfdrive.navd.lane_targets import LEFTS, RIGHTS, turn_targets  # noqa: F401  (navd's, re-exported)
+from openpilot.tools.sim.bridge.gta5.navd.lane_targets import LEFTS, RIGHTS, turn_targets  # noqa: F401  (navd's, re-exported)
 
 FORWARD, BACKWARD, BOTH_WAYS = 1, -1, 0
 TURNS = frozenset({'left', 'slight_left', 'sharp_left', 'through', 'right', 'slight_right', 'sharp_right', 'reverse',

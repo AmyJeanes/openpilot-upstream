@@ -1,8 +1,8 @@
 """The route input of a route-conditioned driving model, from whoever knows the route (the GTA V bridge) to modeld, in
 a shared-memory file: uint32 seq (odd while being written), uint32 n, float64 CLOCK_MONOTONIC time, float32[n].
 Plain mmap, as multiprocessing.shared_memory registers a reader's attach with the resource tracker, which unlinks it.
-The writer writes the encoder's whole vector (selfdrive/navd/route_input.py, route input v2); a reader takes the floats
-of its model's layout from it (`take`), so v1 reads the start, v3 leaves NEXT's lane fields out.
+The writer writes the encoder's whole vector (the GTA V bridge's gta5/navd/route_input.py, route input v2); a reader takes the floats
+of its model's layout from it (`take`, route_layout.py), so v1 reads the start, v3 leaves NEXT's lane fields out.
 modeld records the layout its model reads beside the file (`write_model_layout`) for the route viewer and e2e."""
 import json
 import mmap
@@ -13,7 +13,7 @@ import time
 import numpy as np
 
 from openpilot.common.hardware.hw import Paths
-from openpilot.selfdrive.navd.route_input import Layout, layout
+from openpilot.selfdrive.modeld.route_layout import Layout, layout
 
 HEADER = struct.Struct('<IId')
 MAX_AGE = 1.0  # s: an older input means no route

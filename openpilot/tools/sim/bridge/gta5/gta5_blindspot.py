@@ -40,7 +40,7 @@ import os
 
 import numpy as np
 
-from openpilot.selfdrive.navd.planner import Tune
+from openpilot.tools.sim.bridge.gta5.navd.planner import Tune
 
 ENABLED = os.getenv("GTA5_BLINDSPOT", "1") != "0"
 OWN_DIMS = (-1.0, 1.0, -2.4, 2.4)  # m: min x, max x, min y, max y of our car, until the plugin reports its model's

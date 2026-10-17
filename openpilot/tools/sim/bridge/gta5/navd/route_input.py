@@ -38,20 +38,15 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.selfdrive.navd import maneuvers, planner
-from openpilot.selfdrive.navd.lane_slots import LANE_SLOTS_LEN, LaneSlots
-from openpilot.selfdrive.navd.lane_slots import describe as describe_lanes
+from openpilot.selfdrive.modeld.route_layout import HEADING, LANES, LATEST, LAYOUTS, NEXT, NEXT_LANES, ROUTE_LEN, STOP, V1_LEN, \
+  Layout, convert, layout  # noqa: F401  (the vector's layouts are modeld's, re-exported for gta5-train)
+from openpilot.tools.sim.bridge.gta5.navd import maneuvers, planner
+from openpilot.tools.sim.bridge.gta5.navd.lane_slots import LANE_SLOTS_LEN, LaneSlots
+from openpilot.tools.sim.bridge.gta5.navd.lane_slots import describe as describe_lanes
 
 NAV_BINS, BIN_M, BIN_ZERO = 50, 20.0, 25
 NAV_LEN = NAV_BINS * 3
 PRESENT = NAV_LEN
-HEADING = slice(151, 161)
-NEXT = slice(161, 171)
-STOP = slice(171, 173)
-V1_LEN = 173
-LANES = slice(V1_LEN, V1_LEN + LANE_SLOTS_LEN)
-ROUTE_LEN = LANES.stop
-NEXT_LANES = slice(NEXT.start + 5, NEXT.stop)  # NEXT's lane fields (v1, v2), which v3 leaves out
 HEADING_AHEAD = np.arange(10.0, 101.0, 10.0)
 # headings sampled from 30 m behind to 130 m ahead, so gta5-train's +-1 bin (20 m) distance jitter can shift them consistently
 HEADING_EXT_AHEAD = np.arange(-30.0, 131.0, 10.0)
@@ -174,63 +169,6 @@ class RouteInput:
     return out if version is None else out[LAYOUTS[version].take]
 
 
-class Layout(NamedTuple):
-  """One version of the route input: which of the encoder's floats it holds, in order, and where its parts are."""
-  version: int
-  take: np.ndarray  # [width] indices into the encoder's vector
-  heading: slice
-  next: slice
-  stop: slice
-  lanes: slice  # empty without lane slots (v1)
-
-  @property
-  def width(self) -> int:
-    return len(self.take)
-
-
-def _layout(version: int, keep: np.ndarray) -> Layout:
-  pos = {int(k): i for i, k in enumerate(keep)}
-
-  def part(sl: slice) -> slice:
-    idx = [pos[k] for k in range(sl.start, sl.stop) if k in pos]
-    return slice(idx[0], idx[-1] + 1) if idx else slice(len(keep), len(keep))
-  return Layout(version, keep, part(HEADING), part(NEXT), part(STOP), part(LANES))
-
-
-LAYOUTS = {1: _layout(1, np.arange(V1_LEN)), 2: _layout(2, np.arange(ROUTE_LEN)),
-           3: _layout(3, np.delete(np.arange(ROUTE_LEN), np.arange(NEXT_LANES.start, NEXT_LANES.stop)))}
-LATEST = 3
-
-
-def layout(version: int | str | None = None, width: int | None = None) -> Layout:
-  """A layout by its version, else by its width; a version that disagrees with the width is an error."""
-  if version not in (None, "", 0):
-    lay = LAYOUTS.get(int(version))
-    if lay is None:
-      raise ValueError(f"no route input layout v{version}")
-    if width is not None and width != lay.width:
-      raise ValueError(f"route input v{version} is {lay.width} floats, not {width}")
-    return lay
-  lay = next((v for v in LAYOUTS.values() if v.width == width), None)
-  if lay is None:
-    raise ValueError(f"no route input layout is {width} floats wide")
-  return lay
-
-
-def convert(vec: np.ndarray, version: int) -> np.ndarray:
-  """A route input (any layout, by its width; batched on the last axis) in layout `version`. v1 has no lane slots, so
-  they are zero (no lanes) from it; v3 has no NEXT lane fields, so it can't become v1 or v2."""
-  vec = np.asarray(vec, np.float32)
-  src, dst = layout(width=vec.shape[-1]), LAYOUTS[version]
-  if src.version == dst.version:
-    return vec.copy()
-  if src.version == 3 and dst.version in (1, 2):
-    raise ValueError(f"route input v3 has no NEXT lane fields for a v{dst.version} model")
-  full = np.zeros(vec.shape[:-1] + (ROUTE_LEN,), np.float32)
-  full[..., src.take] = vec
-  return full[..., dst.take]
-
-
 class Next(NamedTuple):
   side: str  # L or R
   change: float  # deg, right positive
@@ -281,4 +219,4 @@ def describe(vec: np.ndarray, lo_bin: int = 20, hi_bin: int = 50) -> str:
 
 assert NEXT.stop == STOP.start and STOP.stop == V1_LEN == LANES.start and HEADING.start == PRESENT + 1 and NEXT.start == HEADING.stop
 assert math.isclose(HEADING_EXT_AHEAD[HEADING_EXT_NOMINAL][0], HEADING_AHEAD[0])
-assert [v.width for v in LAYOUTS.values()] == [V1_LEN, ROUTE_LEN, ROUTE_LEN - 5] and LAYOUTS[3].lanes.stop == LAYOUTS[3].width
+assert LANES.stop - LANES.start == LANE_SLOTS_LEN  # modeld's layouts hold the lane slots as lane_slots.py lays them out

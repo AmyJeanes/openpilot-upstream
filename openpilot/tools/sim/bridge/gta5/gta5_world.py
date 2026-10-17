@@ -22,8 +22,8 @@ from opendbc.car.vehicle_model import VehicleModel
 from openpilot.cereal import log, messaging
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.route_input import RouteInputWriter
-from openpilot.selfdrive.navd.lane_slots import PREVIEW_LEN, lane_slots_path
-from openpilot.selfdrive.navd.route_input import ROUTE_LEN
+from openpilot.tools.sim.bridge.gta5.navd.lane_slots import PREVIEW_LEN, lane_slots_path
+from openpilot.tools.sim.bridge.gta5.navd.route_input import ROUTE_LEN
 from openpilot.tools.sim.lib.simulated_tesla import is_tesla
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 from openpilot.tools.sim.bridge.gta5 import gta5_gnss, gta5_stacks

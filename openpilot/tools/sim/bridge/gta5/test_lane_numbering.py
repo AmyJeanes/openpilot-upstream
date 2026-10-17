@@ -85,7 +85,7 @@ def road(*parts: tuple[float, dict]) -> Route:
 
 def ribbon(r: Route, lane: int, n: int):
   """The lane line nav's plan draws from lane `lane` of n at the car: its offset (m right of the route) s m along."""
-  from openpilot.selfdrive.navd.planner import lane_plan
+  from openpilot.tools.sim.bridge.gta5.navd.planner import lane_plan
   forks = [[f.along - r.at, f.side, f.lanes, f.lanes_in, f.keep, f.other, f.slip] for f in r.forks if f.along > r.at]
   line = r.lane_line(lane_plan(r.rest(), forks, [lane, n], r.lanes_at, 15.0, None, r.lane_arrows(r.length, 0.0),
                                r.lane_drops(r.length, 0.0), maps=r.lane_maps(r.length)))
@@ -227,7 +227,7 @@ def test_jog_along_an_angled_link():
 def test_arrows_show_from_where_the_lanes_go_on_into_the_junction():
   # the junction's arrows are tagged on the last way into it alone; the UI's lanes show them from 250 m back while the
   # lanes carry on into it, also across a left-turn bay opening (before it opens, the two lanes it opens beside)
-  from openpilot.selfdrive.navd import lane_slots as ls
+  from openpilot.tools.sim.bridge.gta5.navd import lane_slots as ls
   from openpilot.tools.sim.bridge.gta5 import gta5_nav_msgs as nm
   r = road((150.0, one_way(2, 'right_of:2')), (100.0, one_way(3, 'right_of:3')),
            (60.0, one_way(3, 'right_of:3', 'left|through|right')), (100.0, one_way(3, 'right_of:3')))
@@ -413,7 +413,7 @@ def test_turn_markers_on_the_lane_line():
 
 def test_live_lanes_follow_the_maps():
   # nav's live targets at a junction, followed back to the car's lanes across where they change on the way
-  from openpilot.selfdrive.navd.planner import LaneMaps, Planner, Through, Turn
+  from openpilot.tools.sim.bridge.gta5.navd.planner import LaneMaps, Planner, Through, Turn
   p = Planner(bridge_tune())
   p.lane = (1, 2)
   through = Through(100.0, (1, 1, 3))  # left | through | right at the junction, a right-turn bay opening on the way
@@ -434,7 +434,7 @@ def test_lane_slots_follow_the_maps():
   # straight on at a junction with left | through | right, its right-turn bay opening 100 m before beside a left-turn
   # lane already there: before the bay opens, the target is the right of our two lanes, which carries on as the
   # through lane (counted from the right, it would be the left-turn lane)
-  from openpilot.selfdrive.navd import lane_slots as ls
+  from openpilot.tools.sim.bridge.gta5.navd import lane_slots as ls
   r = road((150.0, one_way(2, 'left_of:1', 'left|through')), (100.0, one_way(3, 'left_of:1', 'left|through|right')),
            (100.0, one_way(2, 'left_of:1')))
   assert maps(r) == [(150, [0, 1], 3), (250, [0, 1, None], 2)]  # the lanes lie on the left both sides: the right one ends
@@ -503,7 +503,7 @@ def test_live_vinewood_stop_reads_its_lane():
 def live_plan(router, x, y, z, heading, dest, lane=None):
   """A route on the live map from the car and nav's plan along it from its lane (else the route's reading): (route,
   keys, the plan's lane changes [(m from, m to, lane from, lane to)])."""
-  from openpilot.selfdrive.navd.planner import lane_plan
+  from openpilot.tools.sim.bridge.gta5.navd.planner import lane_plan
   r = live_route(router, x, y, z, heading, dest)
   info = r.info(r.length)
   keys = lane_plan(r.rest(), info['forks'], lane or r.lane(), r.lanes_at, 20.0, None, info['laneArrows'], info['laneDrops'],
@@ -544,7 +544,7 @@ def test_live_freeway_merge_exit_and_splits():
 
 def bridge_line(r: Route, lane) -> np.ndarray:
   """The lane line as the bridge draws it (Brain._lane_line), from the car's lane."""
-  from openpilot.selfdrive.navd.planner import Planner
+  from openpilot.tools.sim.bridge.gta5.navd.planner import Planner
   from openpilot.tools.sim.bridge.gta5.gta5_brain import Brain
   w = Brain.__new__(Brain)
   w.nav, w.route, w.lane_line = Planner(bridge_tune()), r, (None, 0.0, [])
@@ -670,7 +670,7 @@ def test_live_sr4b_through_lane_past_a_left_bay_into_the_right_bay():
   # The through lane carries on as the through lane (taking both arrows for new lanes on the left put it in the right
   # bay at its first node, across its kerb's nose); the move into the right bay starts once it's open and ends by the
   # stop line at 222 m
-  from openpilot.selfdrive.navd.planner import BAY_ENTER
+  from openpilot.tools.sim.bridge.gta5.navd.planner import BAY_ENTER
   router = live_router()
   if router is None:
     print("skipped: no live map")

@@ -848,7 +848,7 @@ def test_lane_fixes_by_the_moves():
     got = ms.recorded_route(seg, i)
     if got is None:
       continue
-    from openpilot.selfdrive.navd.lane_slots import LaneSlots
+    from openpilot.tools.sim.bridge.gta5.navd.lane_slots import LaneSlots
     route, pose, v = got
     md = MapDrive({"seed": seed})
     assert md._make_plan(route, {"pos": [pose[0], pose[1], 0.0], "heading": pose[2], "vEgo": v}, 0.0), (seg, md.aborts)

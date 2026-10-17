@@ -16,8 +16,8 @@ import time
 
 import numpy as np
 
-from openpilot.selfdrive.navd.inputs import CANCEL_SIGNAL, NavInputs, NavOutputs
-from openpilot.selfdrive.navd.planner import Tune
+from openpilot.tools.sim.bridge.gta5.navd.inputs import CANCEL_SIGNAL, NavInputs, NavOutputs
+from openpilot.tools.sim.bridge.gta5.navd.planner import Tune
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_lat_lon
 
 # nav's lane source: the game gives nav a lane reading from the map that is the truth, so GTA runs "fused" where a real

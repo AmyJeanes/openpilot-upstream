@@ -50,8 +50,8 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from openpilot.common.constants import CV
-from openpilot.selfdrive.navd import planner as nav
-from openpilot.selfdrive.navd.planner import Fork, LaneMaps, Planner, Through, Tune, Turn, Ends, aim, aim_fork, \
+from openpilot.tools.sim.bridge.gta5.navd import planner as nav
+from openpilot.tools.sim.bridge.gta5.navd.planner import Fork, LaneMaps, Planner, Through, Tune, Turn, Ends, aim, aim_fork, \
   junction_entry, lane_ends, lanes_for, parse_arrows, throughs
 from openpilot.selfdrive.navigation import lane_guidance as lg
 from openpilot.tools.sim.bridge.gta5.gta5_navd import nav_inputs

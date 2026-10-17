@@ -90,8 +90,8 @@ import subprocess
 
 import numpy as np
 
-from openpilot.selfdrive.navd.maneuvers import maneuvers
-from openpilot.selfdrive.navd.planner import FREEWAY, TUNE, FwyState, Turn, lane_plan
+from openpilot.tools.sim.bridge.gta5.navd.maneuvers import maneuvers
+from openpilot.tools.sim.bridge.gta5.navd.planner import FREEWAY, TUNE, FwyState, Turn, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_blindspot import BlindSpotTune, lane_occupied
 from openpilot.tools.sim.bridge.gta5.gta5_traffic import ALONG_ANGLE, ALONG_OFF, TURN_OFF, Traffic, body_heading, ctra, rect, size, wrap as wrap_rad
 from openpilot.tools.sim.bridge.gta5.gta5_wrongway import project, pursuit
@@ -1195,7 +1195,7 @@ class MapDrive:
         return False
       lane = [min(max(sec.lane(route.right), 0), sec.lanes - 1), sec.lanes]
     try:
-      from openpilot.selfdrive.navd.lane_slots import LaneSlots
+      from openpilot.tools.sim.bridge.gta5.navd.lane_slots import LaneSlots
       slots = LaneSlots(route, bool(self.c["drive_on_right"]))
     except Exception as e:  # the slots on a map they can't read: plan without them
       self._event("mapdrive_warning", t, why=f"lane slots: {e!r}")

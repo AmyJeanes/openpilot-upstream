@@ -255,7 +255,7 @@ CLOCK = Clock()
 def _patch_clocks():
   """Every bridge and navd module's `time` becomes the fake clock."""
   for name, mod in list(sys.modules.items()):
-    if name.startswith(("openpilot.tools.sim.bridge.gta5", "openpilot.selfdrive.navd")) and getattr(mod, "time", None) is real_time:
+    if name.startswith("openpilot.tools.sim.bridge.gta5") and getattr(mod, "time", None) is real_time:
       mod.time = CLOCK
 
 
@@ -425,7 +425,7 @@ def _split_world(head: dict, mp: Map, rec: dict):
   _sync(br.navigator)
   br.lane_matcher, br.junction_areas = mp.lane_matcher, mp.junction_areas
   if gta5_brain.NAV_MATCH:  # routing from navd's map match, on simulated 3X GNSS seeded alike each run
-    from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
+    from openpilot.tools.sim.bridge.gta5.navd.map_match import MapMatcher, RoadGraph
     from openpilot.tools.sim.bridge.gta5.gta5_gnss import Gnss
     if mp.graph is None:
       mp.graph = RoadGraph.from_osm(mp.osm)
@@ -478,7 +478,7 @@ def _old_world(head: dict, mp: Map, rec: dict):
   _sync(w.navigator)
   w.lane_matcher, w.junction_areas = mp.lane_matcher, mp.junction_areas
   if getattr(gta5_world, "NAV_MATCH", False):  # routing from navd's map match, on simulated 3X GNSS seeded alike each run
-    from openpilot.selfdrive.navd.map_match import MapMatcher, RoadGraph
+    from openpilot.tools.sim.bridge.gta5.navd.map_match import MapMatcher, RoadGraph
     from openpilot.tools.sim.bridge.gta5.gta5_gnss import Gnss
     if mp.graph is None:
       mp.graph = RoadGraph.from_osm(mp.osm)

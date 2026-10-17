@@ -2,8 +2,8 @@
 plans from (lane_source). No pytest needed: `python test_freeway_lanes.py` runs them all."""
 import numpy as np
 
-import openpilot.selfdrive.navd.planner as nav_mod
-from openpilot.selfdrive.navd.planner import lane_plan
+import openpilot.tools.sim.bridge.gta5.navd.planner as nav_mod
+from openpilot.tools.sim.bridge.gta5.navd.planner import lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune
 from openpilot.tools.sim.bridge.gta5.test_nav import Drive
 

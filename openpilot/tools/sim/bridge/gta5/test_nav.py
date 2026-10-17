@@ -1,7 +1,7 @@
 import numpy as np
 
-import openpilot.selfdrive.navd.planner as nav_mod
-from openpilot.selfdrive.navd.planner import Fork, Planner, find_turn, lane_plan
+import openpilot.tools.sim.bridge.gta5.navd.planner as nav_mod
+from openpilot.tools.sim.bridge.gta5.navd.planner import Fork, Planner, find_turn, lane_plan
 from openpilot.tools.sim.bridge.gta5.gta5_driver import HumanDriver
 from openpilot.tools.sim.bridge.gta5.gta5_navd import bridge_tune, nav_inputs
 from openpilot.tools.sim.bridge.gta5.map.paths import Link
@@ -401,7 +401,7 @@ def test_unturned_cancel_can_keep_pulses():
 
 
 def test_junction_entry():
-  from openpilot.selfdrive.navd.planner import junction_entry
+  from openpilot.tools.sim.bridge.gta5.navd.planner import junction_entry
   assert junction_entry(100.0, [30.0, 85.0], [100.0]) == (85.0, "stop line")
   assert junction_entry(100.0, [], [65.0, 82.0, 92.0, 100.0]) == (82.0, "junction")  # back while the nodes are close
   assert junction_entry(100.0, [], [100.0]) == (85.0, "default")
@@ -411,7 +411,7 @@ def test_tune_reloads(tmp_path=None):
   import json as _json
   import os as _os
   import tempfile
-  from openpilot.selfdrive.navd.planner import Tune
+  from openpilot.tools.sim.bridge.gta5.navd.planner import Tune
   path = _os.path.join(tmp_path or tempfile.mkdtemp(), "tune.json")
   t = Tune(path)
   assert t.signal_mode == "time" and t.changed() == {}

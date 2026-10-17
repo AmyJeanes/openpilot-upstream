@@ -1,7 +1,7 @@
 """The model's lane (modelV2.laneHead) as nav's lane source (lane_source "model" / "fused", model_lane_robust): hysteresis
 and confidence, dropouts, the map's and the model's counts disagreeing, and the lane nav's own change was into."""
-from openpilot.selfdrive.navd.inputs import NavInputs
-from openpilot.selfdrive.navd.planner import Fork, Planner, Through, Tune, Turn
+from openpilot.tools.sim.bridge.gta5.navd.inputs import NavInputs
+from openpilot.tools.sim.bridge.gta5.navd.planner import Fork, Planner, Through, Tune, Turn
 
 
 def planner(source: str = "model", **tune) -> Planner:

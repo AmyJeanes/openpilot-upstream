@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 import openpilot.tools.sim.bridge.gta5.gta5_driver as driver_mod
-from openpilot.selfdrive.navd.inputs import NavOutputs
+from openpilot.tools.sim.bridge.gta5.navd.inputs import NavOutputs
 from openpilot.tools.sim.bridge.gta5.gta5_driver import GO_GAS, NUDGE_TIMEOUT, NUDGE_TORQUE, HumanDriver, LaneChangeState, PullAway
 from openpilot.tools.sim.bridge.gta5.gta5_navd import CANCELLED_FROM, Destination
 from openpilot.tools.sim.bridge.gta5.map.gta5_map import to_game
