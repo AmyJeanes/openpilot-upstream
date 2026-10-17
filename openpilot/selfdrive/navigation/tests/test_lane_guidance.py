@@ -385,3 +385,62 @@ def test_no_lane_end_for_a_turn_lane_at_the_junction_before():
   """Quay Street: a right-turn lane at some junctions only (`S* S* R` -> `S* S*`): the lane 'ending' is one the route
   doesn't take at its junction, whose straight-on move has it; not a lane end."""
   assert not [m for m in lg.MapboxRoute(fixture_route("lanes_added_midblock")).moves if m.kind == "ends"]
+
+
+# *** bus lanes ***
+
+def bus_lane(ind="straight", valid=False):
+  return lane(ind, valid) | {"access": {"designated": ["bus"]}}
+
+
+def test_bus_lane_never_a_target():
+  """A left turn (right-hand traffic) whose leftmost listed lane is a bus lane, valid for the turn: the target is the
+  lane beside it, counted with the bus lane in (4 lanes); the car in the bus lane is asked out."""
+  lanes_ = [bus_lane(("left", "straight"), True), lane(("left", "straight"), True), lane("straight"), lane("straight")]
+  route = made_route([(1500.0, "turn", "left", lanes_)])
+  m = next(x for x in lg.MapboxRoute(route).moves if x.kind == "turn")
+  assert lg.targets(m, 4) == [1]
+  _, out = first_request(Drive(route), 12.0, (3, 4))
+  assert out.request["side"] == "left" and out.request["laneChanges"] == 2
+  _, out = first_request(Drive(route), 12.0, (0, 4))
+  assert out.request["side"] == "right" and out.request["laneChanges"] == 1
+  assert first_request(Drive(route), 12.0, (1, 4)) is None
+  all_bus = made_route([(1500.0, "turn", "left", [bus_lane("left", True), lane("straight"), lane("straight")])])
+  assert lg.targets(next(x for x in lg.MapboxRoute(all_bus).moves if x.kind == "turn"), 3) is None
+
+
+def test_never_a_change_into_a_bus_lane():
+  """A fork left with no lanes of its own (the fallback: the outermost lane on its side) along a road whose lists give
+  a bus lane on the left: the car goes as far as the lane beside it, never into it."""
+  road = [bus_lane(), lane("straight", True), lane("straight", True)]
+  route = made_route([(1500.0, "fork", "slight left", None)], extra=[(600.0, road), (1000.0, road), (1300.0, road)])
+  mr = lg.MapboxRoute(route)
+  assert mr.bus_lanes(700.0, 3) == {0} and mr.bus_lanes(700.0, 4) == {0}
+  d = Drive(route)
+  _, out = first_request(d, 12.0, (2, 3))
+  assert out.request["side"] == "left"
+  d.run_until(12.0, (2, 3), lambda o: "laneChangeLeft" in o.requests, 2.0)
+  d.step(12.0, (2, 3), changing=True)
+  d.step(12.0, (2, 3), changing=False)
+  assert d.g.lane == (1, 3)
+  assert d.run_until(12.0, (1, 3), lambda o: o.request is not None and o.request["kind"] == "laneChange", 60.0) is None
+
+
+def test_lanes_vary_bus_fixture_never_into_the_bus_lane():
+  """Canal Road (left-hand traffic): the bus lane at the left kerb is counted (4 lanes, 5 at the turn) but never
+  a target or a lane a change goes into, along the road or for the right turn at its end."""
+  mr = lg.MapboxRoute(fixture_route("lanes_vary_bus"))
+  turn = next(m for m in mr.moves if m.kind == "turn")
+  assert turn.side == "right" and lg.targets(turn, 5) == [0, 1]
+  for m in mr.moves:
+    tg = lg.targets(m, len(m.lanes or [1])) if m.kind != "ends" else None
+    for x in tg or []:
+      j = x if m.side == "left" else len(m.lanes) - 1 - x
+      assert not lg.bus(m.lanes[j])
+  assert mr.bus_lanes(100.0, 4) == {0}
+  for lane0 in range(4):
+    d = Drive(fixture_route("lanes_vary_bus"))
+    for _ in range(int(950 / 1.2)):
+      out = d.step(12.0, (lane0, 4))
+      for r in out.requests:
+        assert r != "laneChangeLeft" or lane0 != 1  # from beside the bus lane, never into it

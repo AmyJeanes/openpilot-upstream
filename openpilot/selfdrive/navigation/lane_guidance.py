@@ -7,7 +7,8 @@ signals turns, and shows the lanes under active guidance (navInstruction.lanes),
 - Targets: each maneuver's intersection's valid lanes (Mapbox's `lanes`, left to right); where the next maneuver follows
   within `pair_gap` m, the first's targets narrowed to those nearest the second's side, so both can be made. At a
   junction the route goes straight on through, the valid lanes if not all are. No lanes from Mapbox at a turn or exit:
-  the outermost lane on its side.
+  the outermost lane on its side. Never a bus lane (Mapbox's `access: {designated: [bus]}`), which still counts as a
+  lane; nor does a change go into one (the bus lanes on the road the car is on, by its lane lists).
 - The car's lane: the lane head's, held through flicker and dropouts (LaneReader), counted from the maneuver's side.
   Where the model counts fewer lanes than Mapbox lists at the junction (a turn bay not open yet), the missing lanes are
   taken to be on the turn's side: counted from there, the target is the outermost lane, and the car is in place in it;
@@ -309,6 +310,9 @@ class MapboxRoute:
         a = r0[0] + t.ends_at * (r1[4] - r0[0])
         self.moves.append(Move(a, "ends", keep, r1[1], r1[3], 0.0, before=len(r0[1])))
     self.moves.sort(key=lambda m: m.along)
+    # each road's lane lists (a maneuver's own node lists the road into it), for the bus lanes on the road the car is on
+    self.starts = starts
+    self.lists = [(r[4], r[0], r[1], r[2] - r[5]) for r in runs]
 
   @staticmethod
   def _banner_lanes_from(step: dict) -> float | None:
@@ -316,6 +320,20 @@ class MapboxRoute:
       if any(c.get("type") == "lane" for c in (b.get("sub") or {}).get("components", [])):
         return float(b["distanceAlongGeometry"])
     return None
+
+  def bus_lanes(self, along: float, n_car: int) -> set[int]:
+    """The bus lanes (from the left, in the car's count n_car) on the road the car is on, by the next lane list ahead on
+    it (Mapbox repeats a way's lanes on each of its intersections), else the last behind on it; each counted from the
+    edge it's nearer in its list."""
+    road = int(np.searchsorted(self.starts, along, side="right")) - 1
+    on = [(last, ls) for _, last, ls, r in self.lists if r == road]
+    lanes = next((ls for last, ls in on if last >= along - 1.0), on[-1][1] if on else None)
+    out = set()
+    for j, x in enumerate(lanes or []):
+      if bus(x):
+        n = len(lanes)
+        out.add(j if j < n / 2 else n_car - n + j)
+    return {j for j in out if 0 <= j < n_car}
 
   def maxspeed(self, along: float) -> float | None:
     if not self.maxspeeds:
@@ -373,7 +391,10 @@ def targets(move: Move, n_car: int, fallback: bool = True) -> list[int] | None:
     return [0] if fallback and move.kind in ("turn", "fork", "exit") else None
   n = len(move.lanes)
   valid = move.valid
-  if not valid or len(valid) == n:
+  if not valid or len(valid) == n and not any(bus(x) for x in move.lanes):
+    return None
+  valid = [j for j in valid if not bus(move.lanes[j])]  # never a bus lane (still counted)
+  if not valid:
     return None
   t = sorted({j if side == "left" else n - 1 - j for j in valid})
   if n_car < n and move.kind != "through":
@@ -498,9 +519,10 @@ class LaneGuidance:
 
   def _targets(self, m: Move, ahead: list[Move], n_car: int) -> list[int] | None:
     """The move's target lanes from its side in the car's count; narrowed for a maneuver close after it."""
-    if m.kind == "ends":  # the lanes that carry on, counted from the side that keeps them, while the car has more
+    if m.kind == "ends":  # the lanes that carry on (not bus lanes), counted from the side that keeps them, while the car has more
       n = len(m.lanes or [])
-      return list(range(n)) if n_car > n and (n_car == m.before or not self.tune.ends_count_match) else None
+      keep = [j for j in range(n) if not bus(m.lanes[j if m.side == "left" else n - 1 - j])]
+      return keep or None if n_car > n and (n_car == m.before or not self.tune.ends_count_match) else None
     tg = targets(m, n_car, self.tune.fallback)
     nxt = next((x for x in ahead if x.along > m.along + 1.0 and x.kind != "ends"), None)
     if tg is not None and nxt is not None and nxt.along - m.along <= self.tune.pair_gap and nxt.kind != "through":
@@ -595,6 +617,8 @@ class LaneGuidance:
       if not (self._due(nd) or self.series == key) or self.tries.get(key, 0) >= t.change_tries:
         continue
       to = i + (-1 if nd["side"] == "left" else 1)
+      if to in self.route.bus_lanes(min(self.along, m.along - 1.0), n):
+        continue  # never into a bus lane
       before = [(x, y) for x, y in needs if x.along < m.along and y["lanes"]]
       if any(min(abs(to - j) for j in y["lanes"]) > min(abs(i - j) for j in y["lanes"]) for _, y in before):
         return  # not away from the lanes for a move before it
