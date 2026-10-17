@@ -325,11 +325,17 @@ def test_nav_waits_to_the_lanes_end_while_the_blind_spot_holds():
 
 
 def test_nav_merge_starts_late_at_any_speed():
-  # a lane ending the car only finds itself in past the last place to start (the lane reading late): it still changes
-  d = Drive((1, 2), v=1.0)
+  # a lane ending the car only finds itself in past the last place to start (the lane reading late): it still changes,
+  # but never slower than the model's lane change speed (n16 takes it like a turn's): the model merges there itself
   route = np.array([(0.0, y) for y in np.arange(0.0, 300.0, 5.0)])
-  for _ in range(60):
-    d.step(route, 200.0, {"blindspot": [False, False], "routeEnd": 900.0, "laneMaps": [[12.0, [0, None], 1]]})
+  for lc_speed in (None, 0.0):
+    d = Drive((1, 2), v=1.0)
+    if lc_speed is not None:
+      d.nav.tune.values["model_lc_speed"] = lc_speed
+    for _ in range(60):
+      d.step(route, 200.0, {"blindspot": [False, False], "routeEnd": 900.0, "laneMaps": [[12.0, [0, None], 1]]})
+    if lc_speed is None:
+      assert d.nav.changing is None and d.indicator is None
   assert d.nav.changing == "left" and d.indicator == "left"
 
 
@@ -440,6 +446,7 @@ def test_nav_merge_held_past_where_it_first_put_the_lanes_end():
   # the map's end of the lane further on than first read (the route's distances shift as the car nears it): a merge
   # held by the blind spot waits on to the end the map now gives, not given up where the first reading put it
   d = Drive((1, 2), v=8.0)
+  d.nav.tune.values["model_lc_speed"] = 0.0  # today's timing: these mechanics run below n16's lane change speed
   route = np.array([(0.0, y) for y in np.arange(0.0, 900.0, 5.0)])
   y = 0.0
   while y < 420.0:
@@ -453,6 +460,7 @@ def test_nav_merge_held_past_where_it_first_put_the_lanes_end():
 def test_nav_merge_held_through_the_lane_reading_dropping_out():
   # the lane reading lost while a merge waits on the blind spot (lanes merging read badly): it waits on
   d = Drive((1, 2), v=6.0)
+  d.nav.tune.values["model_lc_speed"] = 0.0  # today's timing: these mechanics run below n16's lane change speed
   route = np.array([(0.0, y) for y in np.arange(0.0, 700.0, 5.0)])
   y, lost = 0.0, False
   while y < 395.0:

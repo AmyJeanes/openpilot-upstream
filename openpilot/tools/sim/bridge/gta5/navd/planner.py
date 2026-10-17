@@ -1660,11 +1660,13 @@ class Planner:
     """Into the turn bay or slip lane for the turn ahead as it opens, from the lane beside it."""
     if not self._bay_beside(turn, bay) or self.driven < self.bay_to or self.changing is not None or self._turn_into(turn, v):
       return
-    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED or self._lc_too_slow(v):
+    if turn.dist - bay > BAY_OPEN or turn.dist < BAY_LAST or v < LANE_CHANGE_SPEED:
       return
     where = self._point(self.route_ahead, turn.dist)
     if self._into_oncoming(turn.side):
       self._bay_oncoming(where, turn.side, turn.dist)
+      return
+    if self._lc_too_slow(v):
       return
     self.bay_to = self.driven + turn.dist + TURN_HOLDS
     self._start_change(turn.side, f"into the bay for the {turn.side} turn in {turn.dist:.0f} m", by=turn.dist - BAY_LAST, bay=where,
