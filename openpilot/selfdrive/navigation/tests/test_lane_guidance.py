@@ -301,3 +301,87 @@ def test_approach_lanes_not_another_maneuvers():
   route = made_route([(1500.0, "off ramp", "slight right", exit_lanes), (1550.0, "fork", "slight left", None)])
   fork = next(m for m in lg.MapboxRoute(route).moves if m.along == 1550.0)
   assert fork.lanes is None and lg.targets(fork, 2) == [0]  # the fallback, not the exit's lanes
+
+
+# *** lanes that end (option B) ***
+
+S3 = [lane(("left", "straight"), True), lane("straight", True), lane("straight", True)]  # 3 lanes, all straight on
+S2 = S3[:2]  # 2: the right lane has ended (from the left the arrows still line up, from the right they don't)
+
+
+def lane_end_route(before=S3, after=S2, at=1500.0, maneuvers=()):
+  """Straight on along one road: `before`'s lanes listed at three intersections up to 1200 m, `after`'s from `at` on."""
+  return made_route(list(maneuvers), extra=[(600.0, before), (900.0, before), (1200.0, before), (at, after), (at + 300.0, after)])
+
+
+def test_ends_side_by_arrows():
+  assert lg.ends_side(S3, S2) == "left"  # left, left-turn, straight line up from the left: the right lane ends
+  assert lg.ends_side(list(reversed(S3)), list(reversed(S2))) == "right"
+  assert lg.ends_side([lane("straight")] * 3, [lane("straight")] * 2) is None  # both line up: ambiguous
+  assert lg.ends_side([lane("left"), lane("straight"), lane("right")], [lane("straight"), lane("straight")]) is None  # neither
+  bus_s = [lane("straight") | {"access": {"designated": ["bus"]}}, lane("straight"), lane("straight")]
+  assert lg.ends_side(bus_s, [lane("straight")] * 2) == "right"  # the bus lane doesn't line up with a car lane: it ends
+
+
+def test_lane_end_move():
+  mr = lg.MapboxRoute(lane_end_route())
+  ends = [m for m in mr.moves if m.kind == "ends"]
+  assert len(ends) == 1 and ends[0].side == "left" and ends[0].before == 3 and len(ends[0].lanes) == 2
+  assert ends[0].along == pytest.approx(1500.0, abs=1.0)  # at the first intersection listing fewer (ends_at 1)
+  half = [m for m in lg.MapboxRoute(lane_end_route(), lg.Tune(ends_at=0.5)).moves if m.kind == "ends"]
+  assert half[0].along == pytest.approx(1350.0, abs=1.0)  # half way from the last listing more
+  assert not [m for m in lg.MapboxRoute(lane_end_route(), lg.Tune(lane_ends=False)).moves if m.kind == "ends"]
+  assert not [m for m in lg.MapboxRoute(lane_end_route([lane("straight")] * 3, [lane("straight")] * 2)).moves if m.kind == "ends"]
+
+
+def test_lane_end_asked_in_good_time():
+  """In the lane that ends (the right of 3): one change left, reason laneEnds, timed as a maneuver's to done_before_ends
+  before the end; in a lane that goes on, nothing."""
+  t = lg.Tune()
+  at, out = first_request(Drive(lane_end_route()), 12.0, (2, 3))
+  assert out.request["reason"] == "laneEnds" and out.request["side"] == "left" and out.request["laneChanges"] == 1
+  vp = max(12.0, t.maxspeed_share * 48 / 3.6)
+  assert 1500.0 - t.done_before_ends - at == pytest.approx(max(vp * (t.lc_time + t.margin), t.min_dist), abs=2.0)
+  assert first_request(Drive(lane_end_route()), 12.0, (1, 3)) is None
+
+
+def test_lane_end_needs_the_model_to_count_the_lanes_before():
+  """The model counting 2 (the list before says 3: it doesn't describe the road here) asks nothing; without the gate
+  the gate, the car in the right lane of 4 is asked over (the 2 from the left go on)."""
+  assert first_request(Drive(lane_end_route()), 12.0, (1, 2)) is None
+  assert first_request(Drive(lane_end_route(), {"ends_count_match": False}), 12.0, (3, 4)) is not None
+
+
+def test_lane_end_never_against_a_maneuvers_targets():
+  """A right turn 100 m past the end, from the right lane: the car in it stays, whatever the lists say."""
+  turn = (1600.0, "turn", "right", [lane(("left", "straight")), lane("straight"), lane("right", True)])
+  got = first_request(Drive(lane_end_route(maneuvers=[turn])), 12.0, (2, 3))
+  assert got is None or got[1].request["reason"] != "laneEnds"
+  far = (2500.0, "turn", "right", [lane(("left", "straight")), lane("straight"), lane("right", True)])
+  _, out = first_request(Drive(lane_end_route(maneuvers=[far])), 12.0, (2, 3))
+  assert out.request["reason"] == "laneEnds"
+
+
+def test_no_lane_end_at_a_maneuvers_node():
+  """The bay case: Marsh Lane's own node lists 2 lanes where its approach lists 3; no lane ends there."""
+  mr = lg.MapboxRoute(fixture_route("turn_bay_right"))
+  assert not [m for m in mr.moves if m.kind == "ends"]
+  assert [m for m in lg.MapboxRoute(fixture_route("turn_bay_right"), lg.Tune(ends_at_maneuver=True)).moves if m.kind == "ends"]
+
+
+def test_lanes_vary_bus_fixture_ends():
+  """Canal Road (left-hand traffic, a bus lane at the kerb): 4 -> 2 lanes, the bus lane's side losing the bus lane and
+  the lane beside it (the lists line up from the right); 4 -> 3 loses only the bus lane, never the car's (no move); the
+  gains (3 -> 4, 2 -> 5) aren't lane ends."""
+  mr = lg.MapboxRoute(fixture_route("lanes_vary_bus"))
+  ends = [(m.side, m.before, len(m.lanes)) for m in mr.moves if m.kind == "ends"]
+  assert ends == [("right", 4, 2)]
+  ends = [(m.side, m.before, len(m.lanes)) for m in lg.MapboxRoute(fixture_route("lanes_vary_bus"), lg.Tune(ends_valid_only=False)).moves
+          if m.kind == "ends"]
+  assert ends == [("right", 4, 3), ("right", 4, 2)]
+
+
+def test_no_lane_end_for_a_turn_lane_at_the_junction_before():
+  """Quay Street: a right-turn lane at some junctions only (`S* S* R` -> `S* S*`): the lane 'ending' is one the route
+  doesn't take at its junction, whose straight-on move has it; not a lane end."""
+  assert not [m for m in lg.MapboxRoute(fixture_route("lanes_added_midblock")).moves if m.kind == "ends"]

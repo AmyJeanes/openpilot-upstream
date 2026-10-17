@@ -81,6 +81,8 @@ BLIND_BEHIND, BLIND_AHEAD = 7.0, 2.0  # m of the lane beside, from the car's mid
 TURN_TAKE, TURN_TAKE_TIME = 80.0, 3.0  # m before the turn, s to move over a lane at 2 m/s or more
 APPROACH = 400.0  # m before a maneuver's commit point the changes it needs are counted from
 COMMIT_BEFORE = 2.0  # m before a fork's gore, or where lanes end, it's judged
+LANE_END_SLACK = 50.0  # m past where nav says the car's lane ends that the map's lane end may be
+LANE_END_BACK = 200.0  # m before the car a lane gained still explains a longer lane list
 
 
 @dataclass
@@ -531,6 +533,7 @@ class TripResult:
   collisions: int = 0
   skipped: int = 0  # turns and forks nav left to the route
   requests: list = field(default_factory=list)  # nav's requests to the driver, as logged once over (navRequest events)
+  lane_end_asks: list = field(default_factory=list)  # each lane change nav asked for as a lane ending, checked on the full map
   wall_s: float = 0.0
   error: str | None = None
 
@@ -602,6 +605,7 @@ class NavSim:
     self.touching: set[int] = set()  # the vehicles the car is in contact with
     self.take: list | None = None  # a turn desire moving the car over: [from lane, to lane, progress]
     self.took = -1.0  # the pulse that last did
+    self.last_request = 0  # the id of nav's last request seen
 
   # the car's lane on the road, as the bridge reads it
   def _truth(self) -> tuple[list | None, float | None, float]:
@@ -648,6 +652,14 @@ class NavSim:
     else:
       out = self.nav.update(nav_inputs(state, True, self.indicator, desire, self.t, True, self.stage))
     self.result.skipped += max(len(self.nav.skipped) - skipped, 0)
+    q = self.nav.request
+    if q is not None and q["id"] != self.last_request:
+      self.last_request = q["id"]
+      if q["kind"] == "laneChange" and q["reason"] == "laneEnds":
+        target = self.nav.request_meta.get("target")
+        if target is not None and self.mapbox is not None:
+          target /= self.mb_scale
+        self.result.lane_end_asks.append(self.lane_end_ask(q["side"], target, truth))
     for req in out.requests:
       if req == "cancelSignal":
         self._indicator(None)
@@ -657,6 +669,33 @@ class NavSim:
         if req.startswith("laneChange"):
           self._new_change(side)
     return out, info
+
+  def lane_end_ask(self, side: str, target: float | None, truth: list | None) -> dict:
+    """A lane change nav asks for as the car's lane ending `target` m on, checked on the full map: "ends" (the car's
+    lane ends by then, the lane maps say), or a false positive by cause: "bay" (where Mapbox lists fewer lanes at a
+    maneuver's own node), "other_side" (a lane ends there, not the car's), "gain" (lanes gained on the way: an on-ramp,
+    a lane added), "partial" (none of these: Mapbox's lists differ where the road's lanes don't, as where turn:lanes
+    cover only part of a road)."""
+    s0 = self.s
+    s1 = s0 + (target if target is not None else 0.0) + LANE_END_SLACK
+    lane = int(round(self.lane))
+    out = {"t": round(self.t, 1), "s": round(s0, 1), "xy": [round(float(c), 1) for c in self.road.xy[self.road.at(s0)]],
+           "side": side, "target": None if target is None else round(target, 1), "lane": truth, "v": round(self.v, 1)}
+    ended = other = False
+    for s, mp, _ in self.road.maps:
+      if s0 < s <= s1 and len(mp):
+        k = min(max(lane, 0), len(mp) - 1)
+        if mp[k] is None:
+          ended = True
+          break
+        other |= None in mp
+        lane = mp[k]
+    gain = any(s0 - LANE_END_BACK < s <= s1 and len({j for j in mp if j is not None}) < n for s, mp, n in self.road.maps)
+    bay = self.mapbox is not None and target is not None and any(
+      x.kind in ("turn", "fork", "exit", "roundabout") and abs(x.along - (s0 + target) * self.mb_scale) < lg.APPROACH
+      for x in self.mapbox.moves)
+    out["cause"] = "ends" if ended else "bay" if bay else "other_side" if other else "gain" if gain else "partial"
+    return out
 
   def _new_change(self, side: str):
     nxt = next((k for k in range(self.judge_k, len(self.moves)) if self.moves[k].commit > self.s), None)
@@ -1038,6 +1077,7 @@ def summarise(results: list[dict]) -> dict:
     "collisions": sum(r["collisions"] for r in results),
     "requests": request_outcomes([q for r in results for q in r.get("requests", [])]),
     "missed_by": missed_by(rel),
+    "lane_end_asks": lane_end_causes([a for r in results for a in r.get("lane_end_asks", [])]),
   }
 
 
@@ -1058,6 +1098,24 @@ def missed_by(rel: list[dict]) -> dict:
     else:
       out["other"] += 1
   return out
+
+
+LANE_END_CAUSES = ("ends", "partial", "bay", "other_side", "gain")
+
+
+def lane_end_causes(asks: list[dict]) -> dict:
+  """nav's lane-ending asks by what the full map says: "ends" (right), the rest false positives by cause."""
+  return {c: sum(a["cause"] == c for a in asks) for c in LANE_END_CAUSES}
+
+
+def lane_ends_table(rows: list[tuple[str, dict]]) -> str:
+  """Lane changes asked for as a lane ending: right (the car's lane ends, by the full map), and the false positives."""
+  out = ["| run | asked | the car's lane ends | false: partial lane lists | a maneuver's node (bay) | other side | lanes gained |",
+         "|---|---|---|---|---|---|---|"]
+  for name, s in rows:
+    c = s["lane_end_asks"]
+    out.append(f"| {name} | {sum(c.values())} | " + " | ".join(str(c[k]) for k in LANE_END_CAUSES) + " |")
+  return "\n".join(out)
 
 
 def request_outcomes(reqs: list[dict]) -> dict:
@@ -1188,6 +1246,8 @@ def main():
   print(table([(k, v["summary"]) for k, v in res.items()]))
   print()
   print(kinds([(k, v["summary"]) for k, v in res.items()]))
+  print()
+  print(lane_ends_table([(k, v["summary"]) for k, v in res.items()]))
   if args.out:
     with open(args.out, "w") as f:
       json.dump(res, f)
