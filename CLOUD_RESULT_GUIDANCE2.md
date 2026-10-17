@@ -153,7 +153,8 @@ nothing more; the `lanes_vary_bus` fixture (Canal Road: no target is a bus lane,
 beside it no change left is ever asked along the road and for the right turn).
 
 **GTA**: our map has no bus lanes (no `bus`/`psv` key or value on any way of live21b's pbf) and the emulator gives no
-`access`, so navd_sim can't change; the final runs (item 4) confirm the Mapbox path's numbers.
+`access`, so navd_sim can't change: the Mapbox path at the final commit (`c369422`, seed 0, both models and heads) is
+identical to the baseline and to item 1's (247 / 244 / 254 / 252, every column).
 
 ## Item 3: forks without arrows (`9bc9f06`)
 
