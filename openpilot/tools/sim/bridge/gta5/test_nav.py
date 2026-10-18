@@ -329,7 +329,7 @@ def test_exit_cue_stacked_within_the_turn():
   for k in range(60):
     d.step(route, k * 0.25)
   assert d.nav.signaled == "left" and "+keepRight" not in d.desires
-  for k, h in enumerate(np.linspace(0, 85, 40)):
+  for h in np.linspace(0, 85, 40):
     d.clock.t += 0.1
     state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": 0.5, "lane": [0, 1], "routeEnd": 200.0,
              "route": [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]}
@@ -722,7 +722,7 @@ def test_city_turn_changes_drawn_where_nav_starts_them():
 
   def change(**kw):
     keys = lane_plan(route, [], [0, 2], lambda d, after=False: 2, 10.0, kw.pop('tune', None), maps=[], **kw)
-    return next((a[0], b[0]) for a, b in zip(keys, keys[1:]) if b[0] > a[0] and b[1] != a[1])
+    return next((a[0], b[0]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] and b[1] != a[1])
   start, end = change()
   assert abs(start - (turn - 30.0 - 120.0)) < 1.0 and abs(end - start - nav_mod.LANE_LINE_CHANGE) < 1.0
   start2, _ = change(crossings=[start + 10.0])
@@ -813,6 +813,34 @@ def test_change_not_started_withdrawn_when_slowing():
   assert [e["outcome"] for e in d.events if e.get("event") == "navRequest"] == ["gave_up"]
 
 
+def test_hovering_at_the_lane_change_speed_asks_once():
+  """Asked at 10.4 m/s and held by the blind spot, the car hovering about n16's 10 m/s (9.3-10.4) before openpilot can
+  start it: the one request stays (no ask, withdraw, ask); a margin (model_lc_margin) below the speed it's withdrawn.
+  With no margin it's asked, withdrawn and asked again."""
+  route = route_to_turn(400.0)
+  extra = {"routeEnd": lambda y: 600.0 - y, "blindspot": [False, True]}
+
+  def hover(tune):
+    at, d = first_change(route, (0, 2), 10.4, extra, upto=300.0, tune=tune)
+    assert at is not None
+    y = 400.0 - at
+    for k in range(160):  # 8 s
+      d.v = 9.85 + 0.55 * (1 if k % 40 < 20 else -1)
+      d.step(route, y, {k_: v_(y) if callable(v_) else v_ for k_, v_ in extra.items()})
+      y += d.v * 0.05
+    return d, y
+  d, y = hover({})
+  asks = [e for e in d.events if e.get("event") == "navRequest"]
+  assert d.nav.changing == "right" and not d.nav.change_went and asks == []
+  d.v = 8.9
+  for _ in range(10):
+    d.step(route, y, {k_: v_(y) if callable(v_) else v_ for k_, v_ in extra.items()})
+    y += d.v * 0.05
+  assert d.nav.changing is None and [e["outcome"] for e in d.events if e.get("event") == "navRequest"] == ["gave_up"]
+  d, _ = hover({"model_lc_margin": 0.0})
+  assert [e["outcome"] for e in d.events if e.get("event") == "navRequest"].count("gave_up") >= 2
+
+
 def test_too_slow_near_the_turn_isnt_forced():
   """Two lanes off a turn's lanes near it, slower than the model changes at: nothing asked, the turn left to the route."""
   route = route_to_turn(120.0, "left")
@@ -838,6 +866,67 @@ def test_slow_beside_the_turn_signals_it():
       got = "signal" if d.nav.signaling else "change" if d.nav.changing else None
       y += d.v * 0.05
     assert got == want and 120.0 - y > 40.0, (tune, got, 120.0 - y)
+
+
+def test_turn_gap_keeps_the_turn_for_its_signal():
+  """One lane beside a right turn's lane, between the turn signal's speed (19 mph) and n16's lane change speed when
+  the last place for a change goes by: no change, no signal, and not left to the route; once the car slows below
+  19 mph its signal (turn_into_lane) takes the model over. turn_gap off: left to the route at that speed."""
+  route = route_to_turn(120.0)
+  for tune, want in (({}, "signal"), ({"turn_gap": False}, "skipped")):
+    d = Drive((0, 2), v=9.3)
+    d.nav.tune.values.update(tune)
+    y, got, blinkers = 40.0, None, set()
+    while y < 110.0 and got is None:
+      d.v = 9.3 if 120.0 - y > 22.0 else 7.0
+      d.step(route, y, {"laneFrac": 0.0, "routeEnd": 300.0})
+      got = "signal" if d.nav.signaling else "skipped" if d.nav.skipped else None
+      if d.indicator is not None:
+        blinkers.add(d.v)
+      y += d.v * 0.05
+    assert got == want, (tune, got, 120.0 - y)
+    assert d.nav.changing is None and all(v < 19 * 0.44704 for v in blinkers), blinkers
+    if want == "signal":
+      assert 120.0 - y < 22.0 and not d.nav.skipped
+
+
+def test_turn_into_after_a_change_that_came_back():
+  """A change towards a right turn that openpilot started but didn't finish (the car back in the lane beside): slower
+  near the turn, its signal from beside still takes over (the change no longer under way), not left to the route."""
+  route = route_to_turn(300.0)
+  at, d = first_change(route, (0, 2), 11.0, {"routeEnd": 500.0}, upto=280.0)
+  assert at is not None
+  y = 300.0 - at
+  for _ in range(30):  # the blinker on and the side clear: openpilot starts it
+    d.step(route, y, {"routeEnd": 500.0 - y, "laneFrac": 0.0})
+    y += d.v * 0.05
+  assert d.nav.change_went
+  d._send({"type": "indicatorOff"})  # it gave up and came back: the stalk off
+  d.v = 6.0
+  y = max(y, 300.0 - 75.0)
+  while y < 290.0 and not d.nav.signaling and not d.nav.skipped:
+    d.step(route, y, {"routeEnd": 500.0 - y, "laneFrac": 0.0})
+    y += d.v * 0.05
+  assert d.nav.signaling and not d.nav.skipped and 300.0 - y > 40.0, (300.0 - y, d.nav.skipped)
+
+
+def test_no_lane_end_ask_from_a_reading_before_the_lanes_changed():
+  """Just past a lane drop (3 lanes to 2), the lane reading still the one before it (lane 2 of 3, held LANE_STEADY): the
+  lane maps ahead start from 2 lanes, the right one ending 150 m on. Its count isn't theirs, so which lane ends is a guess
+  (lanes_for would count the lane that carries on from the left in the 3: lane 1 only, and ask the car over): nothing
+  asked. Read as lane 2 of 2 (the one that ends), asked left (laneEnds)."""
+  route = np.array([(0.0, y) for y in np.arange(0.0, 1000.0, 5.0)])
+
+  def asks(lane):
+    d = Drive(lane, v=12.0)
+    y = 0.0
+    while y < 100.0:
+      d.step(route, y, {"laneMaps": [[150.0 - y, [0, None], 1]], "laneCounts": [[0.0, 2]], "routeEnd": 900.0 - y})
+      y += d.v * 0.05
+    return [(r["reason"], r["side"]) for r in d.events if r.get("event") == "navRequest"] + (
+      [(d.request["reason"], d.request["side"])] if d.request else [])
+  assert asks((1, 3)) == []
+  assert asks((1, 2)) == [("laneEnds", "left")]
 
 
 def test_request_lifecycle():

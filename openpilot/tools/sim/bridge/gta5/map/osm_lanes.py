@@ -2288,7 +2288,7 @@ def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float], points: np.nd
       continue
     o_in, o_out = float(offs[before][-1]), float(offs[after][0])  # the lane's offsets either side of the step
 
-    def ends(a, b):  # the offsets at a and b, either side of the jog (or at it)
+    def ends(a, b, o_in=o_in, o_out=o_out, sj=sj):  # the offsets at a and b, either side of the jog (or at it)
       return (o_in if a >= sj - 1e-6 else float(np.interp(a, s, offs)), o_out if b <= sj + 1e-6 else float(np.interp(b, s, offs)))
     lo, hi = max(sj - JOG_REACH, lo_lim), min(sj + JOG_REACH, hi_lim)
     if points is not None and along is not None:
@@ -2305,7 +2305,8 @@ def _ease_jogs(s: np.ndarray, offs: np.ndarray, jogs: list[float], points: np.nd
       straight = min(np.hypot(*u_in), np.hypot(*u_out)) > 1e-6 and span.sum() >= 3 and abs(math.degrees(
         (heading_of(u_out) - heading_of(u_in) + math.pi) % (2 * math.pi) - math.pi)) <= JOG_STRAIGHT
 
-      def bend(a, b):  # how far the lane line strays from straight over the stretch, moving across from a to b
+      def bend(a, b, span=span, sj=sj, o_out=o_out, xy=xy, normals=normals):  # how far the lane line strays from straight
+        # over the stretch, moving across from a to b
         o = offs[span].copy()
         inside = (s[span] >= a) & (s[span] <= b)
         o[inside] = np.interp(s[span][inside], [a, b], ends(a, b))
@@ -2429,8 +2430,8 @@ def _turn_side(a: Section, b: Section) -> bool | None:
   """Where the road's lanes change from a to b in number, the side the lanes begin or end on by their turn arrows:
   True on the left (a lane that only turns left is new in b, or a's ends), False on the right (one that only turns
   right), the left where both are (a left bay opening as the kerb lane becomes a right-turn lane, unless where the
-  lanes lie says otherwise: _match); None where the arrows don't say. A bay opens where its road widens the other side as often as on its own (the lanes moving across
-  over its taper), so where the lanes lie can't tell."""
+  lanes lie says otherwise: _match); None where the arrows don't say. A bay opens where its road widens the other side
+  as often as on its own (the lanes moving across over its taper), so where the lanes lie can't tell."""
   few, many = (a, b) if a.lanes < b.lanes else (b, a)
   if few.lanes == many.lanes or not few.lanes:
     return None

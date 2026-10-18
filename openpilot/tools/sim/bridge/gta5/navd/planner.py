@@ -247,6 +247,9 @@ class Tune:
     # Slower than this no lane change is asked for at all, and one not started yet is withdrawn: n16 takes a lane change
     # desire this slow like a turn's (n16 at ~8 m/s into a wall, in game)
     "model_lc_speed": MODEL_LC_SPEED,  # m/s
+    # m/s below model_lc_speed a change asked for but not started yet is withdrawn: asked at or above the speed, a car
+    # hovering about it would otherwise see the change asked, withdrawn and asked again
+    "model_lc_margin": 1.0,
     "slow_decel": 1.5,  # m/s^2
     "queue_room": 30.0,  # m
     # m before a turn within which, slower than model_lc_speed (and the lane turn speed) and one lane beside its lanes
@@ -254,6 +257,11 @@ class Tune:
     # the model's turn desire takes it over (the probe: 2-12 m of plan movement the right way, even from a standstill),
     # where its lane change wouldn't (0: off)
     "turn_into_lane": 80.0,  # m
+    # the gap below model_lc_speed where the car is still too fast for that signal (19 mph, the turn desire's speed): one
+    # lane beside the turn's lanes there, the turn is kept until SIGNAL_LAST before it rather than left to the route, so
+    # turn_into_lane signals it once the car has slowed; nothing is signalled meanwhile (above 20 mph openpilot takes a
+    # blinker as a lane change)
+    "turn_gap": True,
     # share of model_lc_speed under which, before that point, a city change waits for the car to be faster (traffic, a
     # light) rather than being asked for (0: never waits); partly across at once, the model gets there as it speeds up
     "lc_wait": 0.8,
@@ -1175,7 +1183,7 @@ class Planner:
       self.taken.clear()
       return False
     self._watch_change(indicator, now, inp.left_blindspot if self.changing == "left" else inp.right_blindspot)
-    if self.changing is not None and not self.change_went and self._lc_too_slow(v):
+    if self.changing is not None and not self.change_went and self._lc_too_slow(v, self.tune.model_lc_margin):
       self._give_up(indicator, f"too slow for the model's lane change ({v:.1f} m/s)")
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
@@ -1633,6 +1641,8 @@ class Planner:
         beside = t.turn_from_beside and self.lane[0] in (lo - 1, hi + 1) and (
           self.lane_frac is None or lo - 1 - SKIP_SURE <= self.lane_frac <= hi + 1 + SKIP_SURE)
         if self._sure_wrong(lo, hi) and not beside:
+          if self._turn_gap(turn, lo, hi, v):
+            return False  # its signal once slower (turn_into_lane)
           self._end_change(indicator, "left")
           self._skip(route, turn.dist, f"{turn.side} turn")
           return False
@@ -1651,9 +1661,19 @@ class Planner:
     t = self.tune
     if t.model_lc_speed <= 0 or t.turn_into_lane <= 0 or turn.dist > t.turn_into_lane or self.lane is None or self.lane[0] < 0:
       return False
-    if v >= min(t.model_lc_speed, 19 * CV.MPH_TO_MS) or self.change_went:
-      return False
+    if v >= min(t.model_lc_speed, 19 * CV.MPH_TO_MS) or self.changing is not None and self.change_went:
+      return False  # (a change under way: openpilot is moving the car; one over, it no longer holds the turn back)
     lo, hi = self._lanes_for(turn)
+    return self.lane[0] == (hi + 1 if turn.side == "left" else lo - 1)
+
+  def _turn_gap(self, turn: Turn, lo: int, hi: int, v: float) -> bool:
+    """turn_gap: one lane beside the turn's lanes lo-hi on its side, too fast for its signal to take the car over
+    (turn_into_lane) and too slow for a lane change, short of SIGNAL_LAST: kept, not left to the route."""
+    t = self.tune
+    if not t.turn_gap or t.model_lc_speed <= 0 or t.turn_into_lane <= 0 or self.changing is not None or turn.dist <= SIGNAL_LAST:
+      return False
+    if not min(t.model_lc_speed, 19 * CV.MPH_TO_MS) <= v < t.model_lc_speed:
+      return False
     return self.lane[0] == (hi + 1 if turn.side == "left" else lo - 1)
 
   def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):
@@ -1733,10 +1753,16 @@ class Planner:
       return
     side = "left" if i > hi else "right"
     by = room
+    # a lane reading from before the road's lanes changed (just past a split, a drop or a lane added: the reading holds
+    # LANE_STEADY), its count not the one the lane maps ahead start from: lanes_for counts the targets in it as if the
+    # lanes hadn't changed, so which of them ends, or is the move's, is a guess
+    first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
+    stale = bool(first) and len(first[0][1]) != n
+    if stale and isinstance(m, Ends):
+      return
     if self.tune.fwy_lane_time > 0 and freeway_move(m, self.classes):
-      first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
-      if first and len(first[0][1]) != n:
-        return  # a lane reading from before the road's lanes changed (just past a split): its targets are a guess
+      if stale:
+        return
       total = self._lanes_to(m, changes)
       start = fwy_start(m.dist, total, 0.0, [b - self.driven for b in self.fwy_marks], v, last, self.tune)
       slot = self._fwy_slot(where)
@@ -2012,9 +2038,10 @@ class Planner:
       self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
     self.recover = "keepRight"
 
-  def _lc_too_slow(self, v: float) -> bool:
-    """Slower than the model's lane change speed (model_lc_speed): no lane change asked for, one not started withdrawn."""
-    return self.tune.model_lc_speed > 0 and v < self.tune.model_lc_speed
+  def _lc_too_slow(self, v: float, margin: float = 0.0) -> bool:
+    """Slower than the model's lane change speed (model_lc_speed): no lane change asked for; `margin` m/s slower than
+    it, one not started withdrawn (model_lc_margin)."""
+    return self.tune.model_lc_speed > 0 and v < self.tune.model_lc_speed - margin
 
   def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False,
                     end: float | None = None, bay: np.ndarray | None = None, reason: str = "other", changes: int = 1,
