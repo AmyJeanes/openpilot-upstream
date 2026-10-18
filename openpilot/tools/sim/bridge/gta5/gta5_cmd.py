@@ -27,6 +27,12 @@
              [dry=1]                            pick a drive's weather, time, traffic, car, colours and mount (gta5_scene.py),
                                                 print them as a JSON line and set them; waits for the car swap
   gta5_cmd.py camera yaw=5 pitch=0              rotate the camera on its mount (degrees)
+  gta5_cmd.py freecam on=1 [x= y= z= heading= pitch=] [day=1] [speed=10] [hud=0]
+                                                a free camera flown with the mouse and keys (WASD, Space/E up, Ctrl/Q down,
+                                                Shift x4, Alt x0.25, wheel or +/- speed; F6 toggles it, Backspace ends it),
+                                                the player held hidden and frozen above it and put back after; day=1 midday
+                                                and clear meanwhile; fly=f,r,u look=yaw,pitch secs=2 fakes the input;
+                                                freecam on=0 ends it
   gta5_cmd.py ai on speed=12 style=1076369579   the game's AI drives the car: to the map's waypoint, else wandering
   gta5_cmd.py ai x=100 y=-200 z=30              ... to a point; ai off gives the car back
   gta5_cmd.py expert on speed=12                expert mode (gta5_expert.py; the bridge runs with GTA5_EXPERT=1, or the

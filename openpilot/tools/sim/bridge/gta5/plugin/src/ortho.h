@@ -34,6 +34,8 @@ void Watch(uintptr_t addr, float secs, std::function<void(const std::string &)> 
 // (m in front of the camera, NaN none) clips nearer geometry on the GPU while culling keeps zNear (under-deck shots)
 bool SetBox(bool on, float fov, float w, float h, float zNear, float zFar, bool jitter, float clip, float clipDepth,
             std::function<void(const std::string &)> log);
+// turns the box off, keeping its settings and the viewport it found
+void BoxOff(std::function<void(const std::string &)> log);
 // the box's state, as JSON
 std::string Stats();
 // call each tick: ends a watch whose time is up and logs its writers

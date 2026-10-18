@@ -303,14 +303,31 @@ inline BOOL SET_CONTROL_VALUE_NEXT_FRAME(int control, int action, float v) { ret
 inline void DISABLE_CONTROL_ACTION(int control, int action, BOOL related) { Invoke(0xFE99B66D079CF6BC, control, action, related); }
 inline float GET_DISABLED_CONTROL_NORMAL(int control, int action) { return Invoke<float>(0x11E65974A982637C, control, action); }
 inline float GET_CONTROL_NORMAL(int control, int action) { return Invoke<float>(0xEC3C9B8D5327B563, control, action); }
+inline void DISABLE_ALL_CONTROL_ACTIONS(int control) { Invoke(0x5F4B6931816E599B, control); }
+inline void ENABLE_CONTROL_ACTION(int control, int action, BOOL enable) { Invoke(0x351220255D64C155, control, action, enable); }
+inline BOOL IS_DISABLED_CONTROL_JUST_PRESSED(int control, int action) { return Invoke<BOOL>(0x91AEF906BCA88877, control, action); }
+inline BOOL IS_USING_KEYBOARD_AND_MOUSE(int control) { return Invoke<BOOL>(0xA571D46727E2B718, control); }
+
+// free camera
+inline Vector3 GET_GAMEPLAY_CAM_COORD() { return Invoke<Vector3>(0x14D6F5678D8F1B37); }
+inline Vector3 GET_GAMEPLAY_CAM_ROT(int order) { return Invoke<Vector3>(0x837765A25378F0BB, order); }
+inline BOOL IS_CAM_RENDERING(Cam c) { return Invoke<BOOL>(0x02EC0AF5C5A49B7A, c); }
+inline void SET_PLAYER_INVINCIBLE(int player, BOOL on) { Invoke(0x239528EACDC3E7DE, player, on); }
+inline BOOL HAS_COLLISION_LOADED_AROUND_ENTITY(Entity e) { return Invoke<BOOL>(0xE9676F61BC0B3321, e); }
 
 enum Input {
+  INPUT_LOOK_LR = 1,
+  INPUT_LOOK_UD = 2,
   INPUT_PHONE = 27,
   INPUT_VEH_MOVE_LR = 59,
   INPUT_VEH_ACCELERATE = 71,
   INPUT_VEH_BRAKE = 72,
   INPUT_VEH_EXIT = 75,
   INPUT_VEH_HANDBRAKE = 76,
+  INPUT_FRONTEND_PAUSE = 199,
+  INPUT_FRONTEND_PAUSE_ALTERNATE = 200,
+  INPUT_CURSOR_SCROLL_UP = 241,
+  INPUT_CURSOR_SCROLL_DOWN = 242,
 };
 
 }  // namespace nat

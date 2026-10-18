@@ -685,6 +685,13 @@ bool SetBox(bool on, float fov, float w, float h, float zNear, float zFar, bool 
   return true;
 }
 
+void BoxOff(LogFn log) {
+  if (!g_boxOn) return;
+  g_boxOn = false;
+  if (g_redirected) Redirect(false);
+  log("ortho box off");
+}
+
 std::string Stats() {
   return "{\"on\":" + std::string(g_boxOn ? "true" : "false") + ",\"redirected\":" + (g_redirected ? "true" : "false") + ",\"viewport\":\"" +
          Hex(g_gameVp) + "\",\"phases\":" + std::to_string(g_phases.size()) + ",\"searching\":" + (g_attach == 1 ? "true" : "false") +

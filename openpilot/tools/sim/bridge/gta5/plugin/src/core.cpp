@@ -2366,6 +2366,180 @@ std::string MountState() {
          Num(m.dx) + "," + Num(m.dy) + "," + Num(m.dz) + "," + Num(m.pitch) + "," + Num(m.yaw) + "]}";
 }
 
+// *** free camera ***
+
+// A camera flown with the mouse and keys (freecam command, F6), for looking around the map. The player (its car, if in
+// one) is held frozen, hidden, without collision and invincible above the camera: the game streams the world and its
+// collision only around the player. Off puts it back where it was.
+struct FreeCam {
+  bool on = false, hud = true, day = false;
+  Cam cam = 0;
+  float x = 0, y = 0, z = 0, heading = 0, pitch = 0, fov = 50;
+  float speed = 10;  // m/s, before shift (x4) and alt (x0.25)
+  float sens = 8;    // degrees per unit of the game's mouse look value
+  Entity held = 0;
+  Vector3 from{};
+  float fromHeading = 0;
+  bool parked = false;       // the park command had it hidden and frozen: left that way
+  int hour = 0, minute = 0;  // the clock before day
+  // synthetic input (tests): forward, right, up (-1..1) and yaw, pitch (deg/s), until inputUntil
+  float inF = 0, inR = 0, inU = 0, inYaw = 0, inPitch = 0;
+  double inputUntil = 0;
+  Entity restoring = 0;  // put back, held frozen until the game has its collision there
+  double restoreUntil = 0;
+} g_free;
+std::atomic<int> g_freeToggles{0}, g_freeOffs{0}, g_freeSpeedSteps{0};
+bool g_parked = false;  // the park command's state
+
+void FreeCamDay(bool on) {
+  if (on == g_free.day) return;
+  if (on) {
+    g_free.hour = GET_CLOCK_HOURS(), g_free.minute = GET_CLOCK_MINUTES();
+    SET_CLOCK_TIME(12, 0, 0);
+    PAUSE_CLOCK(TRUE);
+    SET_WEATHER_TYPE_NOW_PERSIST("EXTRASUNNY");
+    SET_OVERRIDE_WEATHER("EXTRASUNNY");
+  } else {
+    SET_CLOCK_TIME(g_free.hour, g_free.minute, 0);
+    PAUSE_CLOCK(g_world.frozen);
+    CLEAR_OVERRIDE_WEATHER();
+    if (!g_world.weather.empty()) SET_WEATHER_TYPE_NOW_PERSIST(g_world.weather.c_str()), SET_OVERRIDE_WEATHER(g_world.weather.c_str());
+    else CLEAR_WEATHER_TYPE_PERSIST();
+  }
+  g_free.day = on;
+}
+
+void FreeCamOn() {
+  if (g_free.on) return;
+  Ped ped = PLAYER_PED_ID();
+  g_top.on = false;  // one script camera at a time
+  ortho::BoxOff(Log);
+  g_free.held = g_veh.handle ? static_cast<Entity>(g_veh.handle) : static_cast<Entity>(ped);
+  if (g_free.restoring == g_free.held) g_free.restoring = 0;
+  g_free.from = GET_ENTITY_COORDS(g_free.held, TRUE);
+  g_free.fromHeading = GET_ENTITY_HEADING(g_free.held);
+  g_free.parked = g_parked;
+  FREEZE_ENTITY_POSITION(g_free.held, TRUE);
+  SET_ENTITY_COLLISION(g_free.held, FALSE, FALSE);
+  SET_ENTITY_VISIBLE(g_free.held, FALSE, FALSE);
+  SET_ENTITY_VISIBLE(ped, FALSE, FALSE);
+  SET_ENTITY_INVINCIBLE(ped, TRUE);
+  SET_PLAYER_INVINCIBLE(PLAYER_ID(), TRUE);
+  Vector3 p = GET_GAMEPLAY_CAM_COORD(), r = GET_GAMEPLAY_CAM_ROT(2);
+  g_free.x = p.x, g_free.y = p.y, g_free.z = p.z, g_free.pitch = r.x, g_free.heading = r.z;
+  g_free.cam = CREATE_CAM("DEFAULT_SCRIPTED_CAMERA", FALSE);
+  SET_CAM_NEAR_CLIP(g_free.cam, 0.1f);
+  SET_CAM_MOTION_BLUR_STRENGTH(g_free.cam, 0.0f);
+  g_free.on = true;
+}
+
+void FreeCamOff(double now, bool shutdown) {
+  if (!g_free.on) return;
+  if (g_free.cam && DOES_CAM_EXIST(g_free.cam)) SET_CAM_ACTIVE(g_free.cam, FALSE), DESTROY_CAM(g_free.cam, FALSE);
+  if (!g_cam && !g_top.shown) RENDER_SCRIPT_CAMS(FALSE, FALSE, 0, TRUE, FALSE, 0), g_rendering = false;
+  CLEAR_FOCUS();
+  Ped ped = PLAYER_PED_ID();
+  Entity e = g_free.held;
+  if (DOES_ENTITY_EXIST(e)) {
+    SET_ENTITY_COORDS(e, g_free.from.x, g_free.from.y, g_free.from.z, FALSE, FALSE, FALSE, FALSE);
+    SET_ENTITY_HEADING(e, g_free.fromHeading);
+    if (!g_free.parked) {
+      SET_ENTITY_COLLISION(e, TRUE, TRUE);
+      SET_ENTITY_VISIBLE(e, TRUE, FALSE);
+      SET_ENTITY_VISIBLE(ped, TRUE, FALSE);
+      // unfrozen before its ground has streamed in, it would fall through
+      if (shutdown) FREEZE_ENTITY_POSITION(e, FALSE);
+      else g_free.restoring = e, g_free.restoreUntil = now + 10;
+    }
+  }
+  SET_ENTITY_INVINCIBLE(ped, FALSE);
+  SET_PLAYER_INVINCIBLE(PLAYER_ID(), FALSE);
+  FreeCamDay(false);
+  g_free.on = false, g_free.cam = 0, g_free.inputUntil = 0;
+  Log("freecam off");
+}
+
+void UpdateFreeCam(double now, float dt) {
+  if (g_free.restoring) {
+    Entity e = g_free.restoring;
+    REQUEST_COLLISION_AT_COORD(g_free.from.x, g_free.from.y, g_free.from.z);
+    if (!DOES_ENTITY_EXIST(e)) g_free.restoring = 0;
+    else if (HAS_COLLISION_LOADED_AROUND_ENTITY(e) || now >= g_free.restoreUntil) {
+      FREEZE_ENTITY_POSITION(e, FALSE);
+      g_free.restoring = 0;
+      Log("freecam: player released");
+    }
+  }
+  int toggles = g_freeToggles.exchange(0), offs = g_freeOffs.exchange(0), steps = g_freeSpeedSteps.exchange(0);
+  if (g_free.on && (offs || toggles % 2)) return FreeCamOff(now, false);
+  if (!g_free.on && toggles % 2) FreeCamOn(), Log("freecam on (key) at " + Num(g_free.x) + "," + Num(g_free.y) + "," + Num(g_free.z));
+  if (!g_free.on) return;
+  if (g_top.on) g_top.on = false, Log("topcam off: freecam on");
+
+  DISABLE_ALL_CONTROL_ACTIONS(0);
+  ENABLE_CONTROL_ACTION(0, INPUT_FRONTEND_PAUSE, TRUE);
+  ENABLE_CONTROL_ACTION(0, INPUT_FRONTEND_PAUSE_ALTERNATE, TRUE);
+  bool test = now < g_free.inputUntil;
+  if (!IS_PAUSE_MENU_ACTIVE()) {
+    // the mouse's value is its movement this frame; a stick's is a rate
+    float look = IS_USING_KEYBOARD_AND_MOUSE(0) ? g_free.sens : 120.0f * dt;
+    g_free.heading -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_LR) * look;
+    g_free.pitch -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_UD) * look;
+    if (test) g_free.heading += g_free.inYaw * dt, g_free.pitch += g_free.inPitch * dt;
+    g_free.heading = WrapDeg(g_free.heading);
+    g_free.pitch = std::clamp(g_free.pitch, -89.0f, 89.0f);
+
+    steps += IS_DISABLED_CONTROL_JUST_PRESSED(0, INPUT_CURSOR_SCROLL_UP) - IS_DISABLED_CONTROL_JUST_PRESSED(0, INPUT_CURSOR_SCROLL_DOWN);
+    if (steps) g_free.speed = std::clamp(g_free.speed * std::pow(1.25f, static_cast<float>(steps)), 0.5f, 500.0f);
+    float f = 0, r = 0, u = 0, mult = 1;
+    if (GameFocused()) {
+      auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+      f = static_cast<float>(down('W') - down('S'));
+      r = static_cast<float>(down('D') - down('A'));
+      u = static_cast<float>((down(VK_SPACE) || down('E')) - (down(VK_CONTROL) || down('Q')));
+      mult = down(VK_SHIFT) ? 4.0f : down(VK_MENU) ? 0.25f : 1.0f;
+    }
+    if (test) f += g_free.inF, r += g_free.inR, u += g_free.inU;
+    float h = g_free.heading * 3.14159265f / 180, p = g_free.pitch * 3.14159265f / 180, len = std::hypot(f, r);
+    if (len > 1) f /= len, r /= len;
+    // heading 0 looks north (+y), 90 west; forward follows the pitch
+    float step = g_free.speed * mult * dt;
+    float vx = (-std::sin(h) * std::cos(p) * f + std::cos(h) * r) * step, vy = (std::cos(h) * std::cos(p) * f + std::sin(h) * r) * step,
+          vz = (std::sin(p) * f + std::clamp(u, -1.0f, 1.0f)) * step;
+    g_free.x += vx, g_free.y += vy, g_free.z += vz;
+    SET_FOCUS_POS_AND_VEL(g_free.x, g_free.y, g_free.z, dt > 0 ? vx / dt : 0, dt > 0 ? vy / dt : 0, dt > 0 ? vz / dt : 0);
+  }
+  SET_CAM_FOV(g_free.cam, g_free.fov);
+  SET_CAM_COORD(g_free.cam, g_free.x, g_free.y, g_free.z);
+  SET_CAM_ROT(g_free.cam, g_free.pitch, 0.0f, g_free.heading, 2);
+  if (!IS_CAM_RENDERING(g_free.cam)) {
+    SET_CAM_ACTIVE(g_free.cam, TRUE);
+    RENDER_SCRIPT_CAMS(TRUE, FALSE, 0, TRUE, FALSE, 0);
+    g_rendering = true;
+  }
+  Entity e = g_free.held;
+  if (DOES_ENTITY_EXIST(e)) {
+    Vector3 at = GET_ENTITY_COORDS(e, TRUE);
+    if (std::hypot(at.x - g_free.x, at.y - g_free.y, at.z - g_free.z - 20) > 30)
+      SET_ENTITY_COORDS(e, g_free.x, g_free.y, g_free.z + 20, FALSE, FALSE, FALSE, FALSE);
+  }
+  HIDE_HUD_AND_RADAR_THIS_FRAME();
+  if (g_free.hud) {
+    char line[160];
+    snprintf(line, sizeof(line), "freecam %.1f, %.1f, %.1f  heading %.0f  pitch %.0f  speed %.1f m/s", g_free.x, g_free.y, g_free.z, g_free.heading,
+             g_free.pitch, g_free.speed);
+    DrawText(line, 0.985f, 0.015f, 0.38f, 255, 255, 255);
+    // the game cuts a text component at 99 characters
+    DrawText("WASD, mouse, Space/E up, Ctrl/Q down, Shift x4, Alt x0.25, wheel or +/- speed, F6 off", 0.985f, 0.045f, 0.3f, 200, 200, 200);
+  }
+}
+
+std::string FreeCamState() {
+  return "\"freecam\":{\"on\":true,\"x\":" + Num(g_free.x) + ",\"y\":" + Num(g_free.y) + ",\"z\":" + Num(g_free.z) + ",\"heading\":" +
+         Num(g_free.heading) + ",\"pitch\":" + Num(g_free.pitch) + ",\"speed\":" + Num(g_free.speed) + ",\"fov\":" + Num(g_free.fov) +
+         ",\"day\":" + (g_free.day ? "true" : "false") + "}";
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -2391,6 +2565,7 @@ void Publish(double now, bool inVehicle) {
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
+  if (g_free.on) s << "," << FreeCamState();
   s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
@@ -3084,6 +3259,7 @@ void HandleMessage(const Message &m, double now) {
     Ped ped = PLAYER_PED_ID();
     Entity e = g_veh.handle ? static_cast<Entity>(g_veh.handle) : static_cast<Entity>(ped);
     bool on = MsgBool(m, "on", true);
+    g_parked = on;
     if (on) {
       FREEZE_ENTITY_POSITION(e, TRUE);
       SET_ENTITY_COLLISION(e, FALSE, FALSE);
@@ -3124,6 +3300,34 @@ void HandleMessage(const Message &m, double now) {
       out += (out.empty() ? "" : ";") + (r != 2 ? std::string("fail") : hit ? Num(end.x) + "," + Num(end.y) + "," + Num(end.z) : std::string("none"));
     }
     Log("ray " + MsgStr(m, "id") + " " + out);
+  } else if (type == "freecam") {
+    // on=1 [x y z (m) heading pitch (deg): the pose, else the gameplay camera's or where it is] [fov] [speed (m/s)]
+    // [sens (deg per mouse unit)] [hud=0|1] [day=1: midday, clear, the clock stopped; day=0 gives the old back]
+    // [fly=f,r,u look=yaw,pitch secs=s: synthetic input (-1..1, deg/s) as the keys and mouse give it, for tests]; on=0 off
+    if (!MsgBool(m, "on", true)) {
+      FreeCamOff(now, false);
+    } else {
+      FreeCamOn();
+      g_free.x = static_cast<float>(MsgNum(m, "x", g_free.x));
+      g_free.y = static_cast<float>(MsgNum(m, "y", g_free.y));
+      g_free.z = static_cast<float>(MsgNum(m, "z", g_free.z));
+      g_free.heading = WrapDeg(static_cast<float>(MsgNum(m, "heading", g_free.heading)));
+      g_free.pitch = std::clamp(static_cast<float>(MsgNum(m, "pitch", g_free.pitch)), -89.0f, 89.0f);
+      g_free.fov = std::clamp(static_cast<float>(MsgNum(m, "fov", g_free.fov)), 5.0f, 120.0f);
+      g_free.speed = std::clamp(static_cast<float>(MsgNum(m, "speed", g_free.speed)), 0.5f, 500.0f);
+      g_free.sens = std::clamp(static_cast<float>(MsgNum(m, "sens", g_free.sens)), 0.1f, 100.0f);
+      g_free.hud = MsgBool(m, "hud", g_free.hud);
+      if (m.count("day")) FreeCamDay(MsgBool(m, "day"));
+      if (m.count("fly") || m.count("look")) {
+        g_free.inF = g_free.inR = g_free.inU = g_free.inYaw = g_free.inPitch = 0;
+        sscanf_s(MsgStr(m, "fly").c_str(), "%f,%f,%f", &g_free.inF, &g_free.inR, &g_free.inU);
+        sscanf_s(MsgStr(m, "look").c_str(), "%f,%f", &g_free.inYaw, &g_free.inPitch);
+        g_free.inputUntil = now + std::clamp(MsgNum(m, "secs", 1.0), 0.0, 30.0);
+      }
+      Log("freecam on at " + Num(g_free.x) + "," + Num(g_free.y) + "," + Num(g_free.z) + " heading " + Num(g_free.heading) + " pitch " +
+          Num(g_free.pitch) + ", speed " + Num(g_free.speed) + (g_free.day ? ", day" : "") +
+          (now < g_free.inputUntil ? ", input " + MsgStr(m, "fly") + " look " + MsgStr(m, "look") : std::string()));
+    }
   } else if (type == "pins") {
     // p: "x,y;x,y;..." (empty clears), height: the vertical lines' length (m)
     g_pins.clear();
@@ -3510,13 +3714,13 @@ extern "C" __declspec(dllexport) void CoreTick() {
         : g_framesCmd > 0 ? "frames on: something takes them"
                           : "frames on: no frames command (a bridge without the relay)");
   }
-  bool want = connected && decided && g_frames && v != 0;
+  bool want = connected && decided && g_frames && v != 0 && !g_free.on;
   if (!g_frames && g_capture.Running() && !g_capture.HookMode()) g_capture.Stop();  // the window capture costs even idle
   if (want && !g_cam) ActivateCamera();
   else if (!want && g_cam) ReleaseCamera();
 
   // the top camera's grabs take the player's frames from the present hook too, with or without openpilot's
-  if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off && (want || g_top.on))
+  if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off && (want || g_top.on || g_free.on))
     g_hook = present_hook::Install(Log, [](const HookFrame &f) { g_capture.ProcessShared(f); }) ? Hook::On : Hook::Failed;
   bool hooked = g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::On;
   CaptureConfig cc;
@@ -3532,10 +3736,11 @@ extern "C" __declspec(dllexport) void CoreTick() {
   }
   g_capture.SetEnabled(want);
   g_capture.SetMarker(g_cfg.interleave && !hooked);
-  present_hook::SetEnabled((want || g_top.on) && hooked);
+  present_hook::SetEnabled((want || g_top.on || g_free.on) && hooked);
 
   script_hook::SetOverride(g_cam != 0);
   UpdateTopCam(v);
+  UpdateFreeCam(now, dt);
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view < 0 && g_top.on && !g_top.hud) HIDE_HUD_AND_RADAR_THIS_FRAME();
   // The wide lens reaches the radar in the corner, so the capture blacks it out. Hiding the radar on openpilot's frames
@@ -3567,7 +3772,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (view >= 0 || lastOp) FREEZE_MICROPHONE();
   lastOp = view >= 0;
   // on the player's frames only, which keeps it out of the openpilot camera's
-  if (connected && v && view < 0 && (g_top.hud || !g_top.on)) DrawSpeed(now);
+  if (connected && v && view < 0 && (g_top.hud || !g_top.on) && !g_free.on) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
   if (view < 0) DrawPins();
   if (int presses = g_debugPresses.exchange(0)) {
@@ -3616,6 +3821,8 @@ extern "C" __declspec(dllexport) void CoreTick() {
 extern "C" __declspec(dllexport) void CoreShutdown() {
   AiOff(PLAYER_PED_ID(), "shutdown");  // a task left running would keep driving under the reloaded core
   ReleaseControls();
+  FreeCamOff(QpcSeconds(), true);
+  if (g_free.restoring) FREEZE_ENTITY_POSITION(g_free.restoring, FALSE);
   g_top.on = false;
   ReleaseTopCam();
   ReleaseCamera();
@@ -3639,4 +3846,8 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
   else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
   else if (static_cast<int>(key) == g_cfg.keyMark) g_markPresses++;
+  else if (key == VK_F6) g_freeToggles++;
+  else if (key == VK_BACK) g_freeOffs++;  // these three count only while the free camera is on
+  else if (key == VK_OEM_PLUS || key == VK_ADD) g_freeSpeedSteps++;
+  else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) g_freeSpeedSteps--;
 }
