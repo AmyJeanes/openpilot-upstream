@@ -3106,6 +3106,24 @@ void HandleMessage(const Message &m, double now) {
       out += (out.empty() ? "" : ";") + Num(x) + "," + Num(y) + "," + (ok ? Num(z) : std::string("none"));
     }
     Log("probe " + out);
+  } else if (type == "ray") {
+    // shape tests against the map and objects along segments ("x,y,z0,z1;..." vertical, or "x0,y0,z0,x1,y1,z1;..."):
+    // the first surface hit from the start (under-deck shots: a deck's underside above a road); logged with id
+    std::stringstream ss(MsgStr(m, "p"));
+    std::string item, out;
+    while (std::getline(ss, item, ';')) {
+      float v[6] = {};
+      int n = sscanf_s(item.c_str(), "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+      if (n == 4) v[5] = v[3], v[3] = v[0], v[4] = v[1];
+      else if (n != 6) continue;
+      int test = START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(v[0], v[1], v[2], v[3], v[4], v[5], 1 | 16, g_veh.handle, 7);
+      BOOL hit = FALSE;
+      Vector3 end{}, normal{};
+      Entity e = 0;
+      int r = GET_SHAPE_TEST_RESULT(test, &hit, &end, &normal, &e);
+      out += (out.empty() ? "" : ";") + (r != 2 ? std::string("fail") : hit ? Num(end.x) + "," + Num(end.y) + "," + Num(end.z) : std::string("none"));
+    }
+    Log("ray " + MsgStr(m, "id") + " " + out);
   } else if (type == "pins") {
     // p: "x,y;x,y;..." (empty clears), height: the vertical lines' length (m)
     g_pins.clear();
