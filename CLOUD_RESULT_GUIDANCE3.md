@@ -165,7 +165,7 @@ Why the bridge planner's band cases fail, from the planner's own state at each s
 - **MDT's left turn at (93.0, -1357.1)**: left to the route at 6.4 m/s from lane 1 of 2 with lane 2 of 2 the turn's
   (the arrows): the car is on the far side of its lanes from the turn, where the turn's signal can't help.
 - The Mapbox path has no skip; in the band it signals the turn at `signal_min` (28 m) whatever the speed, so from beside
-  the blinker comes on at 8.4-9.97 m/s (R29, R33, R40, R01...): no turn desire below 20 mph and above 19, a lane change
+  the blinker comes on at 8.4-9.8 m/s (R29, R33, R40, R01...): no turn desire below 20 mph and above 19, a lane change
   desire above 20 mph (desire_helper), the hazard guidance2's item 4 removed.
 
 **What changed**:
@@ -221,6 +221,25 @@ stalk off with the car still beside: slower, the turn's signal from beside, not 
   gone (seed 0: 3 -> 1 and 6 -> 1, the one left R29's at (288.5, -856.1), two lanes off; seed 1: 1 -> 0 and 1 -> 0);
   those turns are now signalled from beside once below 19 mph (seed 0: 4 -> 7 and 6 -> 13), but mostly too late for the
   judge's commit point. No turn is signalled from outside its lanes at 20 mph or more (0 / 0 on seed 0, n16).
+- **The split** ("turn_gap off": item 2's tree with `--tune '{"turn_gap": false}'`, the bridge planner; in lane / turns
+  made / left to the route / contacts):
+
+  | run | seed | item 1 | item 2, turn_gap off (the change_went fix alone) | item 2 |
+  |---|---|---|---|---|
+  | n16 / truth | 0 | 242 / 67 / 53 / 92 | 257 / 83 / 33 / 86 | 257 / 83 / 29 / 86 |
+  | n16 / model:0.85 | 0 | 245 / 71 / 30 / 99 | 255 / 80 / 17 / 86 | 255 / 80 / 13 / 86 |
+  | finetuned / truth | 0 | 264 / 81 / 32 / 93 | 269 / 86 / 27 / 103 | 269 / 86 / 27 / 103 |
+  | finetuned / model:0.85 | 0 | 255 / 74 / 29 / 69 | 258 / 77 / 21 / 74 | 258 / 77 / 21 / 74 |
+  | n16 / truth | 1 | 248 / 75 / 42 / 106 | 256 / 83 / 26 / 81 | 256 / 83 / 24 / 81 |
+  | n16 / model:0.85 | 1 | 242 / 66 / 34 / 59 | 248 / 74 / 15 / 61 | 248 / 74 / 13 / 61 |
+  | finetuned / truth | 1 | 255 / 76 / 39 / 96 | 258 / 79 / 35 / 92 | 258 / 79 / 35 / 92 |
+  | finetuned / model:0.85 | 1 | 254 / 76 / 27 / 68 | 255 / 77 / 23 / 59 | 255 / 77 / 23 / 59 |
+
+  All of the in-lane gain is the `change_went` fix. `turn_gap` itself makes no turn in the sim: it keeps 2-4 turns a run
+  (n16) that were left to the route, and signals them from beside once below 19 mph (R21's at 8.35 m/s 24.5 m out), but
+  from there the stand-in's turn desire isn't a lane over by the commit point. What it buys is no reroute at those
+  turns and, on the Mapbox path, no blinker above 19 mph from beside; whether n16 makes such a late turn from beside in
+  game is check 2.
 - Band cases still left to the route on the bridge planner: MDT's left turn at (93.0, -1357.1) (the car on the wrong
   side of its lanes for the turn signal to help: lane 1 of 2 needed from lane 0 for a left turn) and R10's (a change
   under way not done 25 m out).
@@ -289,3 +308,126 @@ The Mapbox path makes no lane-end asks on GTA's data, guidance2's item 1, and it
 whose `__init__` reads it; the code is untouched. With the token set in this environment: before, 1 failed, 19 passed
 (`'https://api.mapbox.com/directions/v5/…' != 'https://api.commadotai.com/v1/nav/directions/v5/…'`); after, 20 passed,
 with it set and unset, and the token is still set in the process afterwards.
+
+### A lint-only commit (`53923b0`)
+
+ruff 0.16.7 (`uv.lock`'s) on the files `CLOUD_RESULT_NAVDMOVE.md` lists (`map/osm_lanes.py`, `gta5_mapdrive.py`,
+`test_mapdrive.py`, `test_nav.py`, `test_overlay.py`, `nav_replay.py`): the same 36 findings as navdmove counted (B023
+22, E501 6, F841 3, B905 2, ISC002, PLR1704, B007 1 each), now `All checks passed!`, and on every Python file this
+branch changes.
+- B023: `chains`' `same_way` binds `way`, `_ease_jogs`' `ends` and `bend` bind `o_in`, `o_out`, `sj`, `span`, `xy`,
+  `normals` as default arguments. Each closure is only called within the loop iteration that defines it, so the bound
+  values are the ones it read before.
+- B905: `strict=True` in `test_mapdrive.py`'s `inside_error` (three columns of one trip's rows: the lengths must match),
+  `strict=False` in `test_nav.py`'s `zip(keys, keys[1:])` (one shorter by design).
+- F841: `la` (unpacked, unused) becomes `_`; `test_mapdrive.py`'s unused `v` and `vv` columns aren't read (`trip.col`
+  only builds an array). PLR1704: `nav_keys`' loop variable `lane` (shadowing the argument) is `k`. B007: an unused
+  `enumerate` index dropped. ISC002: an explicit `+` between two f-strings. E501: six long lines wrapped.
+
+Same before and after (the lint commit made on the `gta5` tree, `079f1f1`, so the comparison is the lint alone; items
+1-3 don't touch these files but for test_nav.py's new tests):
+- The suite (314 tests): the same tests, the same outcome for each (junit compared per test id).
+  `test_mapdrive.py` + `test_overlay.py` (73): the same per test, 70 passed, 3 failed on both: `test_overlay_lines_from_lane_tags[L7]`,
+  `[X1]` and `test_lines_build_in_the_background_then_load_from_the_cache`, the three `CLOUD_RESULT_NAVDMOVE.md` found
+  failing on `gta5` too.
+- navd_sim (the full baseline set, seed 0): the request log byte-identical (sha256 `90de0cc5…` both, 1481397 B), the
+  result JSON equal once each trip's `wall_s` (its wall-clock time) is taken out.
+- On the branch with items 1-3: the suite plus the new tests, 320 passed.
+
+## Hand-over
+
+### In short
+
+- **Item 1, a margin before withdrawing a change**: asked only at or above the model's lane change speed, withdrawn only
+  1 m/s below it (`model_lc_margin`, `lc_speed_margin`). Asked again within 10 s for the same move: 13 -> 3 over both
+  seeds, the 3 real slowdowns; in-lane within one everywhere; a few more changes now start at 9-10 m/s (LC late 0 -> 1-5).
+- **Item 2, the turn gap**: measured, 4-6 turns a run reach their last chance in the band on the bridge planner (n16),
+  3-5 of them missed, and the Mapbox path puts the blinker on from outside the turn's lanes in the band at 8.4-9.8 m/s
+  1-6 times a run. Both now keep such a turn, no change and no blinker,
+  for turn_into's signal once the car is below 19 mph (`turn_gap`). Measuring it turned up a bug that mattered more: the
+  planner's turn_into refused after any earlier started change on the trip (`change_went` never cleared). With both,
+  n16 +8 to +15 in lane a run on the bridge planner and the finetuned model +1 to +5, all of it the `change_went` fix
+  (`turn_gap` alone moves no count in the sim, its turns signalled too late for the stand-in); the Mapbox path the
+  same within one, with no blinker from beside in the band.
+- **Item 3, wrong-side lane-end asks**: a lane reading from before the road's lanes changed (held past a drop) made
+  `lanes_for` count the lane-end targets in the old count; no `Ends` change is now asked from such a reading.
+  `other_side` with the truth head 18 -> 1 over both seeds (the one left on a lane-map spot that looks like a chain
+  join), with the noisy head 27 -> 17 (the head's misreads); in-lane and forced merges unchanged.
+- **Item 4**: `test_navigation.py` clears `MAPBOX_TOKEN` itself; a lint-only commit takes the 36 ruff findings to 0 with
+  the suite and navd_sim identical.
+- **test_blindspot.py, test_driver.py, test_world.py** import and pass here (35 + 15 + 8) once opendbc is installed from
+  the submodule's commit (`b3bd79a`) instead of PyPI's 0.3.1.
+
+### In-game checks for Amy
+
+Trip specs are `x,y,z,heading,lane>dx,dy` (navd_sim's). "Bridge" = the default path (`GTA5_NAV_PATH=bridge`, n16,
+`model_lc_speed` 10); "Mapbox path" = `GTA5_NAV_PATH=navd` with the Mapbox server and `NavLaneGuidance`.
+
+1. **Hovering at 10 m/s before a change: one ask, no on-off** (bridge): FX1 `799.0,-1752.5,28.9,264,1>814.2,41.7`, the
+   change left out of the lane leaving at the fork (from lane 2 of 2), asked at (870.0, -1764.6) about 60 m into the trip while the car
+   is still getting up to speed (in the sim at 10.0 m/s, withdrawn at 9.96 0.6 s later and asked again, on every n16
+   run before item 1). Watch navRequest: one request, outcome `done` (or `gave_up` only if the car drops below 9 m/s),
+   the blinker on once and not off-on. Also: does n16 make a lane change it's given at 9-10 m/s, or does it start to take
+   it as a turn? (The margin's one risk; 0.5 m/s if so.)
+2. **A turn whose last chance falls between 8.5 and 10 m/s** (bridge): R21 `-34.9,-957.2,28.4,338,1>132.4,885.6`, the
+   right turn at (76.8, -155.7): the car one lane left of the turn's lane, still at ~9.3 m/s 27 m out (in the sim the
+   turn was left to the route there). Now: no lane change, no blinker until the car is below 19 mph, then the right
+   turn's signal from the lane beside (in the sim at 8.35 m/s, 24.5 m out; NavDesire not a lane change, a turn desire).
+   The sim's stand-in isn't across by the commit point from there (still a miss); watch whether n16 moves over into
+   the turn's lane and turns, or turns across it from the wrong lane, or goes straight on. And R07 `724.8,-454.2,15.5,123,1>-959.8,86.1`,
+   the right turn at (793.7, -1146.7), reached at ~7 m/s one lane beside after earlier changes on the trip: before item 2
+   left to the route (the stale `change_went`), now signalled from beside 30 m or more out.
+3. **A fixed lane-end ask** (bridge): R38 `252.5,-229.0,53.0,69,1>592.0,-2167.2` at (-113.9, -692.9): the road's left lane
+   ends just behind the car (3 lanes to 2), then the right lane of the two ends 21 m on. In the left lane of the two,
+   before item 3 nav asked a lane change left (reason laneEnds, "from lane 2 of 3", the reading from before the drop)
+   out of a lane that carries on. Watch: no laneEnds request from the left lane there; from the right lane, one left,
+   once the lane reading has settled. Also R30 `-1386.0,-797.0,18.6,50,0>1080.8,778.1` at its start, (-1439.0, -753.5):
+   3 lanes to 1 behind the car, then 1 -> 2 -> 1: no laneEnds request from the one lane.
+4. **The Mapbox path in the band**: R33 `1273.5,577.4,79.6,135,0>-395.1,-1720.6` at the left turn by (-186.7, -892.3)
+   (in the sim one lane beside at 8.7 m/s 18 m out when the blinker came on before item 2; after it, at 8.3 m/s, 16 m
+   out, below 19 mph): no blinker above 19 mph from the lane beside, then the turn's request (kind turn), never a lane
+   change desire there.
+
+### Open questions
+
+1. **The size of item 2's gain** comes mostly from the `change_went` fix (turn_into after any started change), which is
+   wider than the 8.5-10 m/s band: it makes turn_into_lane apply wherever it was meant to. It rests on the sim's turn
+   desire taking the car a lane over (guidance2's probe); in game, check 2. If n16 does that badly, `turn_into_lane`
+   (80 m) is the switch for both.
+2. **Turn signals at speed from in a turn's lanes**: both planners signal a turn at `signal_min` (28 m) whatever the speed
+   when the car is in its lanes, so a car still above 20 mph there gets a blinker openpilot takes as a lane change
+   towards the turn. Not changed here (in the turn's lanes it's the turn's side; it's how both have always worked).
+3. **Lane-end asks from a misread lane head**: with model:0.85 3-5 a run of the planner's laneEnds asks are still
+   from the head reading lane 2 of 2 where the car is in lane 1 (or the reverse), the count right. A real car has only
+   the head; holding a laneEnds ask until the head has been sure for longer (`model_sure_wrong`'s 3 s) would cut them,
+   at the cost of later merges. Not changed (a retune).
+4. **(103.6, -1006.5) / (104, -998)** (LANE_END, R29, R33): the lane maps go 2 -> 3 -> 2 -> 1 -> 2 within 135 m, and
+   the one lane-end ask item 3 doesn't fix is there; probably a chain join for `laneslide`.
+5. `MAPBOX_HOST` set in the environment would also send `test_request_and_instruction`'s engine elsewhere; only
+   `MAPBOX_TOKEN` is cleared, as the brief asked.
+6. The opendbc mismatch: the cloud's PyPI opendbc 0.3.1 isn't the submodule's code (`structs.py` loads `car.capnp`
+   differently, and many car ports differ), so anything that imports `opendbc.car` beside `openpilot.cereal` needs the
+   submodule's. A future brief can say "pip install opendbc from commaai/opendbc at the submodule's commit".
+
+### Commits
+
+| commit | what |
+|---|---|
+| `3aafe8c` | this file's preflight |
+| `f0857d6` | item 1: the margin before withdrawing a change (both planners), its tests |
+| `59d2184` | item 2: turn_gap (both planners) and turn_into after an ended change (the planner), its tests |
+| `48a25c4` | item 3: no lane-end change from a reading before the lanes changed, its test (+ item 2's write-up corrected) |
+| `7847739` | item 3's write-up: the one lost right ask |
+| `af69162` | item 4: `test_navigation.py` clears `MAPBOX_TOKEN` |
+| `53923b0` | item 4: the lint-only commit |
+| (this one) | the hand-over |
+
+### Environment notes
+
+- Everything ran with `MAPBOX_TOKEN` unset (it's set in this cloud environment); after `af69162` the suite passes with it
+  set too.
+- Measurements ran from git worktrees of each item's code (`079f1f1` + item 1, + item 2, + item 3, and the lint commit
+  on `079f1f1`), through the session's `probe_sim.py` wrapper around navd_sim (measurement fields only, verified to change
+  nothing: the baseline reproduces guidance2's numbers, the lint tree's request log is byte-identical to the baseline's).
+- The suite's 320 on the final tree: the brief's set, `test_route_input.py`, and the three bridge files that now import
+  (opendbc from the submodule's commit).
