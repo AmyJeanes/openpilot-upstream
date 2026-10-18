@@ -329,7 +329,7 @@ def test_exit_cue_stacked_within_the_turn():
   for k in range(60):
     d.step(route, k * 0.25)
   assert d.nav.signaled == "left" and "+keepRight" not in d.desires
-  for k, h in enumerate(np.linspace(0, 85, 40)):
+  for h in np.linspace(0, 85, 40):
     d.clock.t += 0.1
     state = {"vEgo": 5.0, "pos": [0.0, 40.0, 0.0], "heading": float(h), "yawRate": 0.5, "lane": [0, 1], "routeEnd": 200.0,
              "route": [[-x, 40.0] for x in np.arange(0.0, 100.0, 5.0)]}
@@ -722,7 +722,7 @@ def test_city_turn_changes_drawn_where_nav_starts_them():
 
   def change(**kw):
     keys = lane_plan(route, [], [0, 2], lambda d, after=False: 2, 10.0, kw.pop('tune', None), maps=[], **kw)
-    return next((a[0], b[0]) for a, b in zip(keys, keys[1:]) if b[0] > a[0] and b[1] != a[1])
+    return next((a[0], b[0]) for a, b in zip(keys, keys[1:], strict=False) if b[0] > a[0] and b[1] != a[1])
   start, end = change()
   assert abs(start - (turn - 30.0 - 120.0)) < 1.0 and abs(end - start - nav_mod.LANE_LINE_CHANGE) < 1.0
   start2, _ = change(crossings=[start + 10.0])

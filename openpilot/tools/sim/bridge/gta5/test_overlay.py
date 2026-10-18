@@ -536,7 +536,7 @@ def test_lane_tags_marks_have_the_new_kinds(fresh_marks):
   # arrows of every turn, tapers, crossings, stop lines at lights, junctions
   assert set("LTRtxlj") <= kinds, kinds
   arrows = np.isin(fresh_marks["kinds"], list("LTR"))
-  print(f"{arrows.sum()} arrow segments, {(fresh_marks['kinds'] == 't').sum()} taper segments, "
+  print(f"{arrows.sum()} arrow segments, {(fresh_marks['kinds'] == 't').sum()} taper segments, " +
         f"{(fresh_marks['shape_kind'] == 'q').sum()} lane count flags, {(fresh_marks['shape_kind'] == 'k').sum()} give way lines")
 
 
