@@ -46,6 +46,7 @@ SCENE_TRAFFIC = {"type": "traffic", "on": 0, "vehicles": 0, "peds": 0, "parked":
 SCENE_SHADOWS = {"type": "shadows", "bounds": 0.0}
 SCENE_OFF = [{"type": "debug", "on": 0}, {"type": "gpsroute", "on": 0}, {"type": "pins", "p": ""}]
 GRAB_WAIT = 6.0
+STABLE = 1.5  # mean abs diff (0-255) of two grabs a moment apart, under which the scene has finished streaming
 RECONNECT_WAIT = 300.0
 
 
@@ -253,6 +254,24 @@ class Shooter:
     """Whether the topcam found the ground: else it stands at about the car's height."""
     return abs(st["topcam"]["ground"] - self.park_z) > 1.0
 
+  def settled(self, name: str, tries: int = 6, gap: float = 1.5) -> tuple[str, str] | None:
+    """A grab once the scene stops changing: after a long hop the game is still streaming (props pop in, the terrain's
+    low-detail mesh gives way), so grabs are taken gap s apart until two agree (mean abs diff of the albedo at a
+    sixteenth of its size under STABLE)."""
+    prev, got = None, None
+    for k in range(tries):
+      got = self.grab(name)
+      if got is None:
+        return None
+      small = np.asarray(Image.open(got[1]).convert("L").reduce(16), dtype=np.float64)  # 48 cm blocks: swaying trees average out
+      if prev is not None and float(np.abs(small - prev).mean()) < STABLE:
+        return got
+      prev = small
+      if k + 1 < tries:
+        time.sleep(gap)
+    self.log(f"ortho: {name}: still changing after {tries} grabs")
+    return got
+
   def shoot(self, t: dict, wait: float) -> bool:
     # the car (hidden) goes with the camera: the game streams collision around the player only, and the camera's
     # height comes from the ground under it
@@ -282,7 +301,7 @@ class Shooter:
       self.log(f"ortho: {t['name']}: {why}; setting up again")
       self.setup(t["x"], t["y"])
       return False
-    got = self.grab(t["name"])
+    got = self.settled(t["name"]) if wait > 1.0 else self.grab(t["name"])
     if got is None:
       self.log(f"ortho: {t['name']}: no grab")
       return False
@@ -357,7 +376,7 @@ class Reference:
     for _ in range(2):
       self.sh.park(t["x"], t["y"], self.sh.zguess + PARK_ABOVE)
       time.sleep(6.0)
-      got = self.sh.grab(name)
+      got = self.sh.settled(name, tries=10)
       if got:
         break
     if not got:
