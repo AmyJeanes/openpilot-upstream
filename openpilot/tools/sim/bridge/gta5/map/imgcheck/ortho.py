@@ -221,6 +221,9 @@ class Shooter:
       st = self.wait_state()
       if not (st.get("ortho") or {}).get("source"):
         self.send({"type": "ortho", "op": "gbuffer"})
+      # the albedo as the G-buffer passes leave it: a later pass (emissive surfaces, e.g. daytime neon) writes black
+      # over parts of it before the present
+      self.send({"type": "ortho", "op": "gtrace", "on": 1})
       time.sleep(4.0 + 4.0 * attempt)
       ok, why = self.scene_ok(self.wait_state())
       if ok:
@@ -241,8 +244,9 @@ class Shooter:
     self.send({"type": "grab", "path": self.raw_win + "\\" + name + ".bmp"})
     end = time.monotonic() + GRAB_WAIT
     while time.monotonic() < end:
-      if os.path.exists(bmp):  # renamed into place whole, after the source
-        return (bmp, src) if os.path.exists(src) else None
+      # each renamed into place whole; the albedo comes a frame or two after the lit frame (the plugin's grab trace)
+      if os.path.exists(bmp) and os.path.exists(src):
+        return bmp, src
       time.sleep(0.02)
     return None
 

@@ -137,6 +137,9 @@ struct Pending {
 
 // Everything on the game's device. Only the present thread changes it; the worker reads the frame textures under a
 // shared lock, which the present thread takes exclusively to recreate them.
+std::atomic<bool> g_grabTrace{false};
+bool ArmGrabTrace(ID3D12Resource *src);
+
 struct Renderer {
   IDXGISwapChain *swap = nullptr;  // identity only
   com_ptr<ID3D12Device> device;
@@ -379,11 +382,34 @@ struct Renderer {
     SaveBmp(grab.get(), grabFp, g_grabPath);
   }
 
-  void SaveBmp(ID3D12Resource *buf, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &grabFp, const std::string &path) {
+  // other formats than 8-bit RGBA/BGRA go to a .raw file instead: width, height, row pitch, DXGI format (u32 each),
+  // then the rows as the copy laid them out
+  void SaveBmp(ID3D12Resource *buf, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &grabFp, std::string path) {
     void *p = nullptr;
     D3D12_RANGE range{0, SIZE_T(grabFp.Footprint.RowPitch) * grabFp.Footprint.Height};
     if (!buf || FAILED(buf->Map(0, &range, &p))) return Log("grab: map failed");
     int w = int(grabFp.Footprint.Width), h = int(grabFp.Footprint.Height);
+    DXGI_FORMAT fmt = grabFp.Footprint.Format;
+    bool rgba8 = fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8X8_UNORM || fmt == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                 fmt == DXGI_FORMAT_R8G8B8A8_UNORM || fmt == DXGI_FORMAT_R8G8B8A8_TYPELESS || fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                 fmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    if (!rgba8) {
+      size_t dot = path.rfind('.');
+      path = (dot == std::string::npos ? path : path.substr(0, dot)) + ".raw";
+      FILE *r = nullptr;
+      if (fopen_s(&r, (path + ".part").c_str(), "wb") || !r) {
+        buf->Unmap(0, nullptr);
+        return Log("grab: can't write " + path);
+      }
+      uint32_t head[4] = {uint32_t(w), uint32_t(h), grabFp.Footprint.RowPitch, uint32_t(fmt)};
+      fwrite(head, 4, 4, r);
+      fwrite(p, 1, size_t(grabFp.Footprint.RowPitch) * h, r);
+      fclose(r);
+      D3D12_RANGE none{0, 0};
+      buf->Unmap(0, &none);
+      MoveFileExA((path + ".part").c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+      return Log("grab: saved " + path + " (" + std::to_string(w) + "x" + std::to_string(h) + ", format " + std::to_string(int(fmt)) + ", raw)");
+    }
     FILE *f = nullptr;
     if (fopen_s(&f, (path + ".part").c_str(), "wb") || !f) {
       buf->Unmap(0, nullptr);
@@ -471,6 +497,8 @@ struct Renderer {
     // `last` is the player's frame whichever this was: this one, or the one an openpilot frame's place shows
     bool grabbing = g_grabState == 1 && MakeGrab();
     ID3D12Resource *gsrc = g_grabSrc;
+    // with the grab trace on, the source comes from a trace through the next frame (PickCopy), saved after this grab
+    if (grabbing && gsrc && g_grabTrace && ArmGrabTrace(gsrc)) gsrc = nullptr;
     grabbedSrc = grabbing && gsrc && MakeSrcGrab(gsrc);
     if (grabbedSrc && g_srcGrabLeft == 0) g_srcGrabLeft = SRC_GRAB_PRESENTS;
     if (grabbedSrc) {
@@ -512,6 +540,28 @@ struct Renderer {
     return n;
   }
 } g_r;
+
+// A trace of the grab source through one frame (RequestTrace): a copy of it after each of the game's submissions on
+// the queue it presents on, to see what the frame's passes leave in it and when.
+struct Trace {
+  static constexpr int SLOTS = 32;
+  std::mutex m;
+  std::atomic<int> state{0};  // 0 idle, 1 asked (starts at the next present), 2 recording, 3 recorded
+  std::string path;
+  UINT assumed = 0;
+  ID3D12Resource *src = nullptr;
+  com_ptr<ID3D12CommandAllocator> alloc[SLOTS];
+  com_ptr<ID3D12GraphicsCommandList> list[SLOTS];
+  com_ptr<ID3D12Resource> buf[SLOTS];
+  com_ptr<ID3D12Fence> fence;
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+  D3D12_RESOURCE_DESC desc{};
+  int used = 0;
+  bool forGrab = false;  // a grab's albedo: only the copy picked (PickCopy) is saved, as <path>_src.bmp, and the
+                         // resources stay for the next
+  uint64_t fenceValue = 0;
+} g_trace;
+thread_local bool t_inTrace = false;
 
 std::mutex g_presentMutex;   // serializes presents, and Uninstall against them
 std::shared_mutex g_frameMutex;
@@ -583,8 +633,116 @@ void Worker() {
   CloseHandle(event);
 }
 
+// The copy holding the frame's albedo: GBUFFER_0 as the G-buffer passes leave it. A later pass (the emissive one,
+// e.g. the pier's daytime neon) writes black over it, which is what it holds at the present: the last copy. The pick
+// is the copy that agrees with the last wherever the last isn't black (so not the target mid-pass, nor one aliased
+// by something else) with the fewest black pixels; the latest of equals. Sampled every 8th pixel; 4-byte formats.
+int PickCopy() {
+  int n = g_trace.used;
+  if (n <= 0) return -1;
+  const auto &fp = g_trace.fp;
+  int w = int(fp.Footprint.Width), h = int(fp.Footprint.Height);
+  std::vector<const uint8_t *> px(n, nullptr);
+  D3D12_RANGE range{0, SIZE_T(fp.Footprint.RowPitch) * h};
+  for (int k = 0; k < n; k++) {
+    void *p = nullptr;
+    if (SUCCEEDED(g_trace.buf[k]->Map(0, &range, &p))) px[k] = static_cast<const uint8_t *>(p);
+  }
+  auto at = [&](int k, int x, int y) { return px[k] + size_t(y) * fp.Footprint.RowPitch + size_t(x) * 4; };
+  auto black = [](const uint8_t *q) { return q[0] < 3 && q[1] < 3 && q[2] < 3; };
+  int last = n - 1, best = last;
+  long bestBlack = -1;
+  std::string stats;
+  for (int k = 0; k < n; k++) {
+    if (!px[k] || !px[last]) continue;
+    long blacks = 0, compared = 0, diff = 0;
+    for (int y = 4; y < h; y += 8)
+      for (int x = 4; x < w; x += 8) {
+        const uint8_t *a = at(k, x, y), *b = at(last, x, y);
+        blacks += black(a);
+        if (!black(b)) compared++, diff += std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]);
+      }
+    bool agrees = compared == 0 || diff < compared;  // under 1/255 a pixel on average
+    stats += " " + std::to_string(k) + (agrees ? ":" : "x") + std::to_string(blacks);
+    if (agrees && (bestBlack < 0 || blacks <= bestBlack)) best = k, bestBlack = blacks;
+  }
+  D3D12_RANGE none{0, 0};
+  for (int k = 0; k < n; k++)
+    if (px[k]) g_trace.buf[k]->Unmap(0, &none);
+  Log("trace: albedo from copy " + std::to_string(best) + " of " + std::to_string(n) + " (copy:black samples, x = disagrees:" + stats + ")");
+  return best;
+}
+
+// the trace's buffers, lists and fence for a source like src; false if they can't be made
+bool TraceResources(ID3D12Resource *src) {
+  D3D12_RESOURCE_DESC d = src->GetDesc();
+  if (g_trace.fence && g_trace.buf[0] && d.Width == g_trace.desc.Width && d.Height == g_trace.desc.Height && d.Format == g_trace.desc.Format) return true;
+  UINT rows = 0;
+  UINT64 rowBytes = 0, total = 0;
+  g_r.device->GetCopyableFootprints(&d, 0, 1, 0, &g_trace.fp, &rows, &rowBytes, &total);
+  D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+  D3D12_RESOURCE_DESC b{};
+  b.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  b.Width = total;
+  b.Height = b.DepthOrArraySize = b.MipLevels = 1;
+  b.SampleDesc.Count = 1;
+  b.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  for (int k = 0; k < Trace::SLOTS; k++) {
+    g_trace.buf[k] = nullptr, g_trace.list[k] = nullptr, g_trace.alloc[k] = nullptr;
+    if (FAILED(g_r.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &b, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(g_trace.buf[k].put()))) ||
+        FAILED(g_r.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(g_trace.alloc[k].put()))) ||
+        FAILED(g_r.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_trace.alloc[k].get(), nullptr, IID_PPV_ARGS(g_trace.list[k].put()))))
+      return Log("trace: resources failed"), false;
+    g_trace.list[k]->Close();
+  }
+  g_trace.fence = nullptr;
+  g_trace.fenceValue = 0;
+  if (FAILED(g_r.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(g_trace.fence.put())))) return false;
+  g_trace.desc = d;
+  return true;
+}
+
+bool ArmGrabTrace(ID3D12Resource *src) {
+  std::lock_guard tl(g_trace.m);
+  if (g_trace.state != 0 || !TraceResources(src)) return false;
+  g_trace.src = src, g_trace.assumed = g_grabSrcState, g_trace.path = g_grabPath, g_trace.forGrab = true, g_trace.used = 0;
+  g_trace.state = 1;
+  return true;
+}
+
+void TracePresent() {
+  if (g_trace.state == 1) {
+    g_trace.used = 0;
+    g_trace.state = 2;  // the submissions until the next present are the next frame's
+  } else if (g_trace.state == 2) {
+    std::lock_guard tl(g_trace.m);
+    g_trace.state = 3;
+    uint64_t v = ++g_trace.fenceValue;
+    g_r.queue->Signal(g_trace.fence.get(), v);
+    std::thread([v] {
+      HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      g_trace.fence->SetEventOnCompletion(v, ev);
+      WaitForSingleObject(ev, 5000);
+      CloseHandle(ev);
+      std::lock_guard tl(g_trace.m);
+      std::string base = g_trace.path;
+      size_t dot = base.rfind('.');
+      if (dot != std::string::npos) base = base.substr(0, dot);
+      if (g_trace.forGrab) {
+        int k = PickCopy();
+        if (k >= 0) g_r.SaveBmp(g_trace.buf[k].get(), g_trace.fp, base + "_src.bmp");
+      } else {
+        for (int k = 0; k < g_trace.used; k++) g_r.SaveBmp(g_trace.buf[k].get(), g_trace.fp, base + "_" + std::to_string(k) + ".bmp");
+        Log("trace: " + std::to_string(g_trace.used) + " copies saved");
+      }
+      g_trace.state = 0;
+    }).detach();
+  }
+}
+
 void OnPresent(IDXGISwapChain *sc, UINT flags) {
   if (!g_enabled || (flags & DXGI_PRESENT_TEST)) return;
+  if (g_trace.state == 1 || g_trace.state == 2) TracePresent();
   double t = QpcSeconds();
   std::lock_guard lk(g_presentMutex);
   if (sc != g_r.swap) {
@@ -614,6 +772,29 @@ void STDMETHODCALLTYPE HookExecute(ID3D12CommandQueue *q, UINT n, ID3D12CommandL
     else it->second++;
   }
   reinterpret_cast<ExecuteFn>(g_execute.original)(q, n, lists);
+  if (g_trace.state == 2 && !t_inTrace && q == g_r.queue.get()) {
+    std::lock_guard tl(g_trace.m);
+    int k = g_trace.used;
+    if (g_trace.state == 2 && k < Trace::SLOTS && SUCCEEDED(g_trace.alloc[k]->Reset()) && SUCCEEDED(g_trace.list[k]->Reset(g_trace.alloc[k].get(), nullptr))) {
+      auto *list = g_trace.list[k].get();
+      auto st = D3D12_RESOURCE_STATES(g_trace.assumed);
+      D3D12_RESOURCE_BARRIER b = Transition(g_trace.src, st, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      if (st != D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &b);
+      D3D12_TEXTURE_COPY_LOCATION dst{g_trace.buf[k].get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
+      dst.PlacedFootprint = g_trace.fp;
+      D3D12_TEXTURE_COPY_LOCATION src{g_trace.src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
+      list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+      if (st != D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &b);
+      if (SUCCEEDED(list->Close())) {
+        t_inTrace = true;
+        ID3D12CommandList *ours[] = {list};
+        reinterpret_cast<ExecuteFn>(g_execute.original)(q, 1, ours);
+        t_inTrace = false;
+        g_trace.used = k + 1;
+      }
+    }
+  }
   g_inflight--;
 }
 
@@ -733,6 +914,23 @@ bool RequestGrab(const std::string &path) {
 }
 
 bool Reused(uint64_t n) { return g_recorded - n >= FRAMES - 1; }
+
+bool RequestTrace(const std::string &path, unsigned assumedState) {
+  ID3D12Resource *src = g_grabSrc;
+  if (g_trace.state != 0 || !src || !g_r.device) return false;
+  std::lock_guard tl(g_trace.m);
+  if (!TraceResources(src)) return false;
+  g_trace.src = src;
+  g_trace.assumed = assumedState;
+  g_trace.path = path;
+  g_trace.forGrab = false;
+  g_trace.used = 0;
+  g_trace.state = 1;
+  Log("trace: armed, " + std::to_string(Trace::SLOTS) + " slots, state assumed " + std::to_string(assumedState));
+  return true;
+}
+
+void SetGrabTrace(bool on) { g_grabTrace = on; }
 
 void SetGrabSource(void *resource, unsigned state) {
   g_grabSrc = static_cast<ID3D12Resource *>(resource);

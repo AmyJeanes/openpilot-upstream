@@ -15,8 +15,10 @@ void Dump(uintptr_t addr, int count, std::function<void(const std::string &)> lo
 // grabs take the ID3D12Resource a render target object (at target) holds at +resOffset, taken to be in `state` at
 // present; target 0 goes back to the frame
 void GrabSource(uintptr_t target, int resOffset, unsigned state, std::function<void(const std::string &)> log);
-// finds the G-buffer's albedo target (GBUFFER_0) by a memory search on a thread of its own, and makes it the grab source
-void FindGBuffer(unsigned state, std::function<void(const std::string &)> log);
+// finds a render target by its name (default GBUFFER_0, the G-buffer's albedo) by a memory search on a thread of its own, and makes it the grab source
+void FindGBuffer(unsigned state, const std::string &name, std::function<void(const std::string &)> log);
+// logs the render target objects around one (at), their names and textures
+void ListTargets(uintptr_t at, int before, int after, std::function<void(const std::string &)> log);
 // logs where the game's heap holds the zero-terminated string text
 void StringScan(const std::string &text, std::function<void(const std::string &)> log);
 // logs where the game's heap holds the value target, with the 24 qwords from `before` bytes ahead of each

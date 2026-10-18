@@ -29,6 +29,12 @@ bool RequestGrab(const std::string &path);
 // grabs take this ID3D12Resource of the game's (one of its render targets, in `state` at present) instead of the player's
 // frame; nullptr goes back to the frame
 void SetGrabSource(void *resource, unsigned state);
+// copies the grab source after each of the game's submissions through the next whole frame, to <path minus
+// extension>_<k>.bmp; the source taken to be in assumedState between submissions
+bool RequestTrace(const std::string &path, unsigned assumedState);
+// while on, a grab with a source takes the source from a trace of the next frame (the copy as the G-buffer passes
+// leave it, before later passes write over it) instead of at the present
+void SetGrabTrace(bool on);
 // whether frame n's texture may have been overwritten by a later frame: a consumer that read it since should drop it
 bool Reused(uint64_t n);
 }  // namespace present_hook

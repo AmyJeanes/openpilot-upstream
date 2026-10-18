@@ -3009,6 +3009,10 @@ void HandleMessage(const Message &m, double now) {
         (ok ? "a " + Num(a.x) + "," + Num(a.y) + "," + Num(a.z) + " b " + Num(b.x) + "," + Num(b.y) + "," + Num(b.z) + " lanes to a " +
                   std::to_string(toA) + " to b " + std::to_string(toB) + " median " + Num(median)
             : std::string("none")));
+  } else if (type == "trace") {
+    std::string path = MsgStr(m, "path");
+    bool ok = g_hook == Hook::On && !path.empty() && present_hook::RequestTrace(path, static_cast<unsigned>(MsgNum(m, "state", 0xC0)));
+    Log("trace " + path + (ok ? "" : ": not taken (no present hook, no grab source, or one pending)"));
   } else if (type == "grab") {
     std::string path = MsgStr(m, "path");
     bool ok = g_hook == Hook::On && !path.empty() && present_hook::RequestGrab(path);
@@ -3035,8 +3039,12 @@ void HandleMessage(const Message &m, double now) {
       ortho::PointerScan(addr, static_cast<int>(MsgNum(m, "before", 64)), Log);
     else if (op == "strscan")
       ortho::StringScan(MsgStr(m, "s"), Log);
+    else if (op == "targets" && addr)
+      ortho::ListTargets(addr, static_cast<int>(MsgNum(m, "before", 64)), static_cast<int>(MsgNum(m, "after", 64)), Log);
     else if (op == "gbuffer")
-      ortho::FindGBuffer(static_cast<unsigned>(MsgNum(m, "state", 0xC0)), Log);
+      ortho::FindGBuffer(static_cast<unsigned>(MsgNum(m, "state", 0xC0)), MsgStr(m, "name", "GBUFFER_0"), Log);
+    else if (op == "gtrace")
+      present_hook::SetGrabTrace(MsgBool(m, "on", true)), Log(std::string("ortho grab trace ") + (MsgBool(m, "on", true) ? "on" : "off"));
     else if (op == "gsrc")
       // a render target object's ID3D12Resource (at +res, 0x48) as the grab source, in state (D3D12_RESOURCE_STATES) at present
       ortho::GrabSource(addr, static_cast<int>(MsgNum(m, "res", 0x48)), static_cast<unsigned>(MsgNum(m, "state", 0xC0)), Log);

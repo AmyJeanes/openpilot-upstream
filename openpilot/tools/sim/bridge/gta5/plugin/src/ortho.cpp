@@ -471,26 +471,29 @@ void GrabSource(uintptr_t target, int resOffset, unsigned state, LogFn log) {
   g_sourceSet = true;
 }
 
-void FindGBuffer(unsigned state, LogFn log) {
+void FindGBuffer(unsigned state, const std::string &name, LogFn log) {
   Ranges();
   if (g_scan.joinable()) {
     g_scanStop = true;
     g_scan.join();
   }
   g_scanStop = false;
-  g_scan = std::thread([state, log] {
-    // the render target object names itself (a heap copy of "GBUFFER_0") at +0x28 and holds its ID3D12Resource at +0x48
+  g_scan = std::thread([state, name, log] {
+    // the render target object names itself (a heap copy of its name, e.g. "GBUFFER_0") at +0x28 and holds its
+    // ID3D12Resource at +0x48
     constexpr int NAME = 0x28, RES = 0x48;
-    static const char NEEDLE[] = "GBUFFER_0";
+    std::string needle = name;
+    const char *NEEDLE = needle.c_str();
+    const size_t NEEDLE_N = needle.size() + 1;
     ULONG_PTR stackLo = 0, stackHi = 0;
     GetCurrentThreadStackLimits(&stackLo, &stackHi);
     std::vector<uintptr_t> names;
     EachChunk([&](uintptr_t a, const uint8_t *b, size_t n) {
       for (const uint8_t *p = b; names.size() < 16;) {
-        p = static_cast<const uint8_t *>(std::memchr(p, 'G', n - (p - b)));
-        if (!p || static_cast<size_t>(p - b) + sizeof(NEEDLE) > n) break;
+        p = static_cast<const uint8_t *>(std::memchr(p, NEEDLE[0], n - (p - b)));
+        if (!p || static_cast<size_t>(p - b) + NEEDLE_N > n) break;
         uintptr_t at = a + (p - b);
-        if (std::memcmp(p, NEEDLE, sizeof(NEEDLE)) == 0 && (at < stackLo || at >= stackHi)) names.push_back(at);
+        if (std::memcmp(p, NEEDLE, NEEDLE_N) == 0 && (p == b || p[-1] == 0) && (at < stackLo || at >= stackHi)) names.push_back(at);
         p++;
       }
     });
@@ -504,10 +507,39 @@ void FindGBuffer(unsigned state, LogFn log) {
         if (Copy(&vt, reinterpret_cast<void *>(obj), 8) && Exe(vt)) found = obj;
       }
     });
-    if (!found) return log("ortho gbuffer: not found (" + std::to_string(names.size()) + " names)");
-    log("ortho gbuffer: GBUFFER_0 at " + Hex(found));
+    if (!found) return log("ortho gbuffer: " + name + " not found (" + std::to_string(names.size()) + " names)");
+    log("ortho gbuffer: " + name + " at " + Hex(found));
     GrabSource(found, RES, state, log);
   });
+}
+
+void ListTargets(uintptr_t at, int before, int after, LogFn log) {
+  Ranges();
+  // render target objects sit 0x80 apart, each with the same vtable, its name at +0x28 and ID3D12Resource at +0x48
+  uintptr_t vt0 = 0;
+  if (!Copy(&vt0, reinterpret_cast<void *>(at), 8) || !Exe(vt0)) return log("ortho targets: no object at " + Hex(at));
+  for (int k = -before; k <= after; k++) {
+    uintptr_t obj = at + k * 0x80, vt = 0, namep = 0, res = 0, rvt = 0;
+    if (!Copy(&vt, reinterpret_cast<void *>(obj), 8) || vt != vt0) continue;
+    char name[48] = {};
+    if (Copy(&namep, reinterpret_cast<void *>(obj + 0x28), 8) && namep) Copy(name, reinterpret_cast<void *>(namep), sizeof(name) - 1);
+    for (char &ch : name)
+      if (ch && (ch < 32 || ch > 126)) ch = '?';
+    std::string info;
+    HMODULE mod = nullptr;
+    if (Copy(&res, reinterpret_cast<void *>(obj + 0x48), 8) && res && Copy(&rvt, reinterpret_cast<void *>(res), 8) &&
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(rvt), &mod) &&
+        mod == GetModuleHandleW(L"D3D12Core.dll")) {
+      ID3D12Resource *r = nullptr;
+      if (SUCCEEDED(reinterpret_cast<IUnknown *>(res)->QueryInterface(IID_PPV_ARGS(&r))) && r) {
+        D3D12_RESOURCE_DESC d = r->GetDesc();
+        r->Release();
+        info = std::to_string(d.Width) + "x" + std::to_string(d.Height) + " fmt " + std::to_string(int(d.Format)) + " flags " + std::to_string(int(d.Flags)) +
+               " ms " + std::to_string(d.SampleDesc.Count) + " arr " + std::to_string(d.DepthOrArraySize);
+      }
+    }
+    log("ortho target " + Hex(obj) + " [" + std::to_string(k) + "] " + name + " " + info);
+  }
 }
 
 void StringScan(const std::string &text, LogFn log) {
