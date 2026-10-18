@@ -910,6 +910,25 @@ def test_turn_into_after_a_change_that_came_back():
   assert d.nav.signaling and not d.nav.skipped and 300.0 - y > 40.0, (300.0 - y, d.nav.skipped)
 
 
+def test_no_lane_end_ask_from_a_reading_before_the_lanes_changed():
+  """Just past a lane drop (3 lanes to 2), the lane reading still the one before it (lane 2 of 3, held LANE_STEADY): the
+  lane maps ahead start from 2 lanes, the right one ending 150 m on. Its count isn't theirs, so which lane ends is a guess
+  (lanes_for would count the lane that carries on from the left in the 3: lane 1 only, and ask the car over): nothing
+  asked. Read as lane 2 of 2 (the one that ends), asked left (laneEnds)."""
+  route = np.array([(0.0, y) for y in np.arange(0.0, 1000.0, 5.0)])
+
+  def asks(lane):
+    d = Drive(lane, v=12.0)
+    y = 0.0
+    while y < 100.0:
+      d.step(route, y, {"laneMaps": [[150.0 - y, [0, None], 1]], "laneCounts": [[0.0, 2]], "routeEnd": 900.0 - y})
+      y += d.v * 0.05
+    return [(r["reason"], r["side"]) for r in d.events if r.get("event") == "navRequest"] + (
+      [(d.request["reason"], d.request["side"])] if d.request else [])
+  assert asks((1, 3)) == []
+  assert asks((1, 2)) == [("laneEnds", "left")]
+
+
 def test_request_lifecycle():
   """A change for a turn: the request (navInstruction.request's content) says what, which side, why, by when and the
   stage; approved once the blinker is on its side; logged with its outcome once over (a navRequest event)."""

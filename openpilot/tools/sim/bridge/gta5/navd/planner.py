@@ -1753,10 +1753,16 @@ class Planner:
       return
     side = "left" if i > hi else "right"
     by = room
+    # a lane reading from before the road's lanes changed (just past a split, a drop or a lane added: the reading holds
+    # LANE_STEADY), its count not the one the lane maps ahead start from: lanes_for counts the targets in it as if the
+    # lanes hadn't changed, so which of them ends, or is the move's, is a guess
+    first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
+    stale = bool(first) and len(first[0][1]) != n
+    if stale and isinstance(m, Ends):
+      return
     if self.tune.fwy_lane_time > 0 and freeway_move(m, self.classes):
-      first = self.maps.between(-1.0, math.inf) if self.maps is not None else []
-      if first and len(first[0][1]) != n:
-        return  # a lane reading from before the road's lanes changed (just past a split): its targets are a guess
+      if stale:
+        return
       total = self._lanes_to(m, changes)
       start = fwy_start(m.dist, total, 0.0, [b - self.driven for b in self.fwy_marks], v, last, self.tune)
       slot = self._fwy_slot(where)

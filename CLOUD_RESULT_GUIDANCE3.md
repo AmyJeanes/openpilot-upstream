@@ -143,25 +143,27 @@ by the probe's later events and the judge:
 | n16 / truth | 0 | 6 | 1 | 4 | 0 | 0 | 1 | 1 |
 | n16 / model:0.85 | 0 | 6 | 2 | 0 | 4 | 0 | 0 | 1 |
 | mapbox / n16 / truth | 0 | 27 | 4 | - | 3 | 14 | 6 | 10 |
-| mapbox / n16 / model:0.85 | 0 | 31 | 6 | - | 6 | 15 | 4 | 13 |
+| mapbox / n16 / model:0.85 | 0 | 31 | 6 | - | 6 | 15 | 4 | 11 |
 | n16 / truth | 1 | 4 | 1 | 3 | 0 | 0 | 0 | 1 |
 | n16 / model:0.85 | 1 | 6 | 2 | 1 | 3 | 0 | 0 | 2 |
 | mapbox / n16 / truth | 1 | 23 | 3 | - | 1 | 13 | 6 | 13 |
 | mapbox / n16 / model:0.85 | 1 | 16 | 2 | - | 1 | 10 | 3 | 8 |
 
-(On the Mapbox path "nothing from nav" is mostly made anyway, 10-11 a run, by the car being in a lane for it at the
-commit point after all, or a Mapbox turn the judge has no turn for; "made" counts the judged ones.)
+(On the Mapbox path "nothing from nav" is a turn nav never signalled from there: 5-6 a run made anyway (in a lane for it
+at the commit point after all), 4-7 a Mapbox turn the judge has no turn of its own for; "made" counts the judged ones.)
 
 Why the bridge planner's band cases fail, from the planner's own state at each skip (MDT, R07, R10, R21 on seed 0):
-- **R21's left turn at (76.8, -155.7)** is the gap as the brief has it: one lane beside the turn's lane, still at 9.35
+- **R21's right turn at (76.8, -155.7)** is the gap as the brief has it: one lane beside the turn's lane, still at 9.35
   m/s when it reaches the turn's signal distance (27 m out), so neither a change (too slow) nor the turn's signal (too
   fast): left to the route. A moment later it was below 8.49 and `turn_into_lane` would have signalled it.
-- **MDT (93.0, -1357.1) and R07 (793.7, -1146.7)**: left to the route at 6.4 and 6.9 m/s, one lane beside, well inside
-  80 m: slow enough for `turn_into_lane`, which refused because `change_went` was still true. `change_went` ("openpilot
+- **R07's right turn at (793.7, -1146.7)**: left to the route at 6.9 m/s, one lane beside, 30 m out: slow enough for
+  `turn_into_lane`, which refused because `change_went` was still true. `change_went` ("openpilot
   could start it") is set for the change under way and never cleared when it ends; `_turn_into` reads it as "a change is
   under way", so after the first lane change of a trip that got going, every later turn from beside was left to the
   route. That's not only the band: it's every turn_into_lane case after any started change.
 - **R10 (603.8, -372.7)**: a change towards the turn started late (8.8 m/s), still under way 25 m out, given up there.
+- **MDT's left turn at (93.0, -1357.1)**: left to the route at 6.4 m/s from lane 1 of 2 with lane 2 of 2 the turn's
+  (the arrows): the car is on the far side of its lanes from the turn, where the turn's signal can't help.
 - The Mapbox path has no skip; in the band it signals the turn at `signal_min` (28 m) whatever the speed, so from beside
   the blinker comes on at 8.4-9.97 m/s (R29, R33, R40, R01...): no turn desire below 20 mph and above 19, a lane change
   desire above 20 mph (desire_helper), the hazard guidance2's item 4 removed.
@@ -222,3 +224,57 @@ stalk off with the car still beside: slower, the turn's signal from beside, not 
 - Band cases still left to the route on the bridge planner: MDT's left turn at (93.0, -1357.1) (the car on the wrong
   side of its lanes for the turn signal to help: lane 1 of 2 needed from lane 0 for a left turn) and R10's (a change
   under way not done 25 m out).
+
+## Item 3: the planner's own lane-ending asks on the wrong side
+
+**Why** (navd_sim's `lane_end_ask` check, the judge as it was; the planner's state at each `other_side` ask, replayed
+with each trip's own seed, beside the sim's lane maps): with the truth head every one checked was the same thing. Just
+past a place where the road's lanes change (a lane dropped 1-7 m behind, or 3 lanes to 1), the lane reading nav plans
+from is still the one from before it (the bridge's reading must hold LANE_STEADY, and does so for a while past a drop):
+R29 at (104.0, -998.2) reads lane 1 of 3 where the car is in lane 1 of 2; R30 at (-1439.0, -753.5) lane 2 of 3 on a
+road now of 1; R38 at (-113.9, -692.9) lane 2 of 3 where it's lane 1 of 2. The lane maps ahead start from the road's
+new count, so `lanes_for` can't follow the lane through them (`LaneMaps.lanes` returns None for "the maps don't start
+from n lanes") and falls back to the `Ends` move's targets counted from the side that keeps its lanes in the stale
+count: in R38's 3 lanes "lane 1 only", so the car in lane 2 (really the left of 2, which carries on) is asked left for
+the right lane ending 21 m on. The freeway branch of `_change_for` already refuses to plan from such a reading ("its
+targets are a guess"); city lane ends didn't.
+
+With the noisy head (model:0.85) the extra ones are the lane head misreading the index on a 2-lane road (lane 2 of 2
+read where the car is in lane 1, the count right): R03 at (-179.0, -871.6) and (-88.5, -194.3), R06 at (238.6,
+-2086.7), R08 at (-1727.9, 40.1), R39 at (-162.6, -825.3): the reading's error, which nav can't tell from the truth;
+those are left.
+
+**What changed** (`navd/planner.py` `_change_for`): the "lane reading from before the road's lanes changed" check (the
+car's lane count not the one the first lane map ahead starts from) is made once for every move, and an `Ends` move's
+change isn't asked from such a reading; it's asked once the reading catches up (the freeway case as before). The judge
+is unchanged.
+
+**Test**: `test_nav.py::test_no_lane_end_ask_from_a_reading_before_the_lanes_changed` (the lane maps from 2 lanes, the
+right ending 150 m on: read as lane 2 of 3, nothing asked; read as lane 2 of 2, asked left with reason `laneEnds`;
+the first fails without the fix).
+
+**Measured** (items 1-3 against items 1-2; lane-end asks by navd_sim's check):
+
+| run | seed | lane-end asks | right (the car's lane ends) | other_side | in lane | LC req / done / gave up / failed | forced merges |
+|---|---|---|---|---|---|---|---|
+| n16 / truth | 0 | 39 -> 34 | 35 -> 34 | **4 -> 0** | 257 -> 257 | 162/108/10/44 -> 159/108/8/43 | 8 -> 8 |
+| n16 / model:0.85 | 0 | 38 -> 35 | 30 -> 30 | **8 -> 5** | 255 -> 255 | 163/111/7/45 -> 160/111/7/42 | 7 -> 7 |
+| finetuned / truth | 0 | 43 -> 37 | 36 -> 36 | **7 -> 1** | 269 -> 269 | 215/148/8/59 -> 209/148/7/54 | 4 -> 4 |
+| finetuned / model:0.85 | 0 | 40 -> 38 | 32 -> 33 | **8 -> 5** | 258 -> 258 | 207/140/4/63 -> 205/140/4/61 | 8 -> 8 |
+| n16 / truth | 1 | 33 -> 31 | 32 -> 31 | **1 -> 0** | 256 -> 256 | 156/115/8/33 -> 155/115/7/33 | 8 -> 8 |
+| n16 / model:0.85 | 1 | 32 -> 29 | 27 -> 26 | **5 -> 3** | 248 -> 248 | 164/115/7/42 -> 162/115/7/40 | 8 -> 8 |
+| finetuned / truth | 1 | 43 -> 36 | 37 -> 36 | **6 -> 0** | 258 -> 260 | 218/144/17/57 -> 208/140/17/51 | 4 -> 4 |
+| finetuned / model:0.85 | 1 | 39 -> 37 | 33 -> 33 | **6 -> 4** | 255 -> 255 | 216/142/8/66 -> 215/142/8/65 | 6 -> 6 |
+
+(The baseline, before items 1 and 2, had 4 / 8 / 7 / 8 and 1 / 5 / 7 / 6 `other_side`: items 1 and 2 didn't change them.
+The Mapbox path makes no lane-end asks on GTA's data, guidance2's item 1, and its rows are identical.)
+
+- With the truth head 18 -> 1 over both seeds; with the noisy head 27 -> 17 (the rest are the head's misreads above).
+- Nothing lost: in-lane the same (finetuned / truth +2 on seed 1), forced merges the same in every run, and the
+  changes asked fall by the false ones (up to 10 a run). The right asks are 1 fewer in four runs: a lane-end ask that
+  the stale reading happened to get right is now made a moment later, once the reading has caught up, and counted by
+  the check as part of a following request (the merges themselves still happen: forced merges unchanged).
+- The one left with the truth head, LANE_END (finetuned, seed 0) at (103.6, -1006.5), is a reading one lane off with the
+  count right, so this check can't see it; there the lane maps go 2 -> 3 (a lane opening on the left) -> 2 -> 1 -> 2
+  within 135 m, the same stretch as R29's and R33's stale cases at (104, -998): it looks like one of live21b's chain
+  joins (the known map issue), worth a look with `laneslide`.
