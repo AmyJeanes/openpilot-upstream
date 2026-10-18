@@ -18,7 +18,7 @@ void GrabSource(uintptr_t target, int resOffset, unsigned state, std::function<v
 // finds a render target by its name (default GBUFFER_0, the G-buffer's albedo) by a memory search on a thread of its own, and makes it the grab source
 void FindGBuffer(unsigned state, const std::string &name, std::function<void(const std::string &)> log);
 // logs the render target objects around one (at), their names and textures
-void ListTargets(uintptr_t at, int before, int after, std::function<void(const std::string &)> log);
+void ListTargets(uintptr_t at, int before, int after, bool any, std::function<void(const std::string &)> log);
 // logs where the game's heap holds the zero-terminated string text
 void StringScan(const std::string &text, std::function<void(const std::string &)> log);
 // logs where the game's heap holds the value target, with the 24 qwords from `before` bytes ahead of each
@@ -30,8 +30,10 @@ void DumpImage(const std::string &path, std::function<void(const std::string &)>
 void Watch(uintptr_t addr, float secs, std::function<void(const std::string &)> log);
 // renders the game's viewport whose vertical fov is `fov` (the top camera's) orthographically: a w x h m box, zNear to
 // zFar m in front of the camera (negative: behind it); the render phases are pointed at an orthographic copy of it, found
-// by a memory search on a thread of its own the first time (a few tens of seconds), so no game code is changed
-bool SetBox(bool on, float fov, float w, float h, float zNear, float zFar, bool jitter, std::function<void(const std::string &)> log);
+// by a memory search on a thread of its own the first time (a few tens of seconds), so no game code is changed; clip
+// (m in front of the camera, NaN none) clips nearer geometry on the GPU while culling keeps zNear (under-deck shots)
+bool SetBox(bool on, float fov, float w, float h, float zNear, float zFar, bool jitter, float clip, float clipDepth,
+            std::function<void(const std::string &)> log);
 // the box's state, as JSON
 std::string Stats();
 // call each tick: ends a watch whose time is up and logs its writers

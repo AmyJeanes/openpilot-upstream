@@ -3032,7 +3032,8 @@ void HandleMessage(const Message &m, double now) {
     else if (op == "box")
       ortho::SetBox(MsgBool(m, "on", true), static_cast<float>(MsgNum(m, "fov", g_top.fov)), static_cast<float>(MsgNum(m, "w", 76.8)),
                     static_cast<float>(MsgNum(m, "h", 43.2)), static_cast<float>(MsgNum(m, "near", -500)), static_cast<float>(MsgNum(m, "far", 2000)),
-                    MsgBool(m, "jitter", true), Log);
+                    MsgBool(m, "jitter", true), static_cast<float>(MsgNum(m, "clip", NAN)),
+                    static_cast<float>(MsgNum(m, "clipdepth", 120)), Log);
     else if (op == "stats")
       Log("ortho stats " + ortho::Stats());
     else if (op == "ptrscan" && addr)
@@ -3040,7 +3041,7 @@ void HandleMessage(const Message &m, double now) {
     else if (op == "strscan")
       ortho::StringScan(MsgStr(m, "s"), Log);
     else if (op == "targets" && addr)
-      ortho::ListTargets(addr, static_cast<int>(MsgNum(m, "before", 64)), static_cast<int>(MsgNum(m, "after", 64)), Log);
+      ortho::ListTargets(addr, static_cast<int>(MsgNum(m, "before", 64)), static_cast<int>(MsgNum(m, "after", 64)), MsgBool(m, "any", false), Log);
     else if (op == "gbuffer")
       ortho::FindGBuffer(static_cast<unsigned>(MsgNum(m, "state", 0xC0)), MsgStr(m, "name", "GBUFFER_0"), Log);
     else if (op == "gtrace")
@@ -3094,6 +3095,17 @@ void HandleMessage(const Message &m, double now) {
     SET_ENTITY_VISIBLE(e, !on, FALSE);
     SET_ENTITY_VISIBLE(ped, !on, FALSE);
     Log("park " + std::string(on ? "at " + Num(MsgNum(m, "x")) + "," + Num(MsgNum(m, "y")) + "," + Num(MsgNum(m, "z", 1000)) : "off"));
+  } else if (type == "probe") {
+    // the game's highest surface under points ("x,y;x,y;..."), as GET_GROUND_Z_FOR_3D_COORD from 1500 m finds it
+    std::stringstream ss(MsgStr(m, "p"));
+    std::string item, out;
+    while (std::getline(ss, item, ';')) {
+      float x, y, z = 0;
+      if (sscanf_s(item.c_str(), "%f,%f", &x, &y) != 2) continue;
+      bool ok = GET_GROUND_Z_FOR_3D_COORD(x, y, 1500.0f, &z, FALSE, FALSE);
+      out += (out.empty() ? "" : ";") + Num(x) + "," + Num(y) + "," + (ok ? Num(z) : std::string("none"));
+    }
+    Log("probe " + out);
   } else if (type == "pins") {
     // p: "x,y;x,y;..." (empty clears), height: the vertical lines' length (m)
     g_pins.clear();
