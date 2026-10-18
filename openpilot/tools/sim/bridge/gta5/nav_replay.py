@@ -465,7 +465,8 @@ def _old_world(head: dict, mp: Map, rec: dict):
   tune_cls = type(w.nav.tune)
   w.nav.tune = tune_cls("")
   w.nav.tune.values.update(head["tune"])
-  w.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None, md_driving=False, on=False, take_arrived=lambda: False, engage_key=lambda route, engaged: False)
+  w.expert = SimpleNamespace(update=lambda state, route, engaged: False, md=None, md_driving=False, on=False,
+                             take_arrived=lambda: False, engage_key=lambda route, engaged: False)
   if hasattr(gta5_world, "MARKS"):  # the mark key's track and its marks
     from collections import deque
     w.track, w.lane_lines, w.marks_due, w.bookmark_pm = deque(maxlen=200), deque(maxlen=20), [], None

@@ -197,7 +197,7 @@ def test_lane_change_takes_its_time():
 def inside_error(trip, side: str) -> float:
   """The car's mean offset (m) towards the inside of the bend from its path, where the path bends."""
   md, out = trip.md, []
-  for x_, y_, sv in zip(trip.col(1), trip.col(2), trip.col(9)):
+  for x_, y_, sv in zip(trip.col(1), trip.col(2), trip.col(9), strict=True):
     j = int(min(np.searchsorted(md.s_path, sv), len(md.s_path) - 2))
     if abs(md.kappa_path[j]) < 0.04:
       continue
@@ -272,7 +272,7 @@ def test_lane_change_kept_off_a_jog():
     trip = ms.drive(r, {"seed": 2, "retime": False, "fit_durations": False}, lane=1, tau=0.18, faults={"surge": (190.0, 4.5)})
   finally:
     g.MapDrive.off_jogs, g.MapDrive.nav_keys = orig, real
-  s_, dev, v = trip.col(9), trip.col(8), trip.col(4)
+  s_, dev = trip.col(9), trip.col(8)
   m = (s_ > 170) & (s_ < 260)
   assert trip.finished == "arrived" and dev[m].max() < 0.6, (trip.finished, dev[m].max())
   assert not [a for a in trip.md.anomalies if a["kind"] == "tracking_saturated"], trip.md.anomalies
@@ -1129,7 +1129,7 @@ def test_real_routes():
       assert band_peak(trip, 0.4) < 0.03, (seg, i, band_peak(trip, 0.4))
       if kind == "freeway":
         assert md.changes, (seg, i)
-        t, s, vv = trip.col(0), trip.col(9), trip.col(4)
+        t, s = trip.col(0), trip.col(9)
         for s0, s1, _, across in md.changes:
           dt = np.interp(s1, s, t) - np.interp(s0, s, t)
           n = max(round(abs(across) / LANE_W), 1)

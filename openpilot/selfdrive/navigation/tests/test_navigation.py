@@ -1,4 +1,5 @@
 import gzip
+import os
 import re
 import struct
 import tempfile
@@ -257,6 +258,9 @@ class TestRouteEngine(unittest.TestCase):
     self.sm.logMonoTime = dict.fromkeys(self.sm.valid, time.monotonic_ns())
     self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic())
     self.sm.__getitem__.return_value = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90)
+    # comma's API, which the engine uses without MAPBOX_TOKEN: with the token set (as on a dev machine) it's api.mapbox.com
+    self.enterContext(patch.dict(os.environ))
+    os.environ.pop('MAPBOX_TOKEN', None)
     self.engine = route_engine(self.sm, self.pm, self.values)
     self.engine.last_position, self.engine.last_bearing = (0, 0), 90
     distance = 111.195  # Mapbox's length of 0.001 degrees at the equator

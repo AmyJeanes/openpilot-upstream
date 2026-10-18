@@ -437,7 +437,7 @@ def chains(keys: list[tuple[float, float]]) -> list[tuple[int, int]]:
     j = i
     way = keys[i + 1][1] - keys[i][1]
 
-    def same_way(m: int) -> bool:
+    def same_way(m: int, way=way) -> bool:
       return (keys[m + 1][1] - keys[m][1]) * way > 0
     def joined(m: int) -> bool:  # keys m and m + 1 at one place, inside a change: renumbered, or not at a lane's centre
       return keys[m + 1][0] - keys[m][0] <= EPS and (abs(keys[m + 1][1] - keys[m][1]) > EPS or
@@ -687,7 +687,8 @@ def game_heading(theta: float) -> float:
 
 
 class MapDrive:
-  """One trip's drive along the map, which the map driver (gta5_drivers.MapDriver) drives with. step() each bridge step returns the plugin control message (resent between frames);
+  """One trip's drive along the map, which the map driver (gta5_drivers.MapDriver) drives with. step() each bridge step
+  returns the plugin control message (resent between frames);
   `phase`, `events` (since last taken), `indicator`/`label` (the desire it signals) and `finished` (None, "arrived" or
   "abort: <why>") for expert mode."""
   def __init__(self, cfg: dict | None = None, tune=None):
@@ -894,7 +895,8 @@ class MapDrive:
     if self.phase == "abort":
       return
     self.why = why
-    self.aborts.append({"why": why, "t": round(t, 3), "s": round(self.s, 1), "pos": None if pos is None else [round(float(pos[0]), 1), round(float(pos[1]), 1)]})
+    self.aborts.append({"why": why, "t": round(t, 3), "s": round(self.s, 1),
+                        "pos": None if pos is None else [round(float(pos[0]), 1), round(float(pos[1]), 1)]})
     self._set("abort", t, why=why)
 
   # *** planning ***
@@ -912,9 +914,9 @@ class MapDrive:
                      classes=route.changes(route.classes, route.length), limits=route.changes(route.limit_list, route.length),
                      fwy=FwyState(), crossings=[a - route.at for a in route.stops + route.junctions if a > route.at])
     out, last = [], -math.inf
-    for d, lane in keys:  # in order along: nav's can step back a few cm
+    for d, k in keys:  # in order along: nav's can step back a few cm
       last = max(last, route.at + d)
-      out.append((last, float(lane)))
+      out.append((last, float(k)))
     return out
 
   def retime(self, route, keys: list[tuple[float, float]], slots) -> list[tuple[float, float]]:
@@ -1388,7 +1390,7 @@ class MapDrive:
       return along_of(float(np.interp(np.interp(path_s(s_from), sp, tcum) + dt, tcum, sp)))
 
     for a, b in reversed(chains(keys)):  # from the last, so earlier indices hold as keys come and go
-      (s0, la), (s1, _) = keys[a], keys[b]
+      (s0, _), (s1, _) = keys[a], keys[b]
       lanes = abs(self._chain_lanes(keys, a, b))
       want = lc_seconds(self.style, lanes)
       if abs(secs(s0, s1) - want) <= LC_FIT * want:
@@ -1658,8 +1660,8 @@ class MapDrive:
       for run in runs:
         i, detail = run[len(run) // 2]
         extra = {"why": why} if why else {}
-        self._anomaly(kind, t, self.path[i], float(self.s_path[i]), planned=True, length=round(float(self.s_path[run[-1][0]] - self.s_path[run[0][0]]) + every, 1),
-                      **extra, **detail)
+        self._anomaly(kind, t, self.path[i], float(self.s_path[i]), planned=True,
+                      length=round(float(self.s_path[run[-1][0]] - self.s_path[run[0][0]]) + every, 1), **extra, **detail)
     for s0, s1 in self.jog_changes:
       self._anomaly("jog_change", t, route_point(route, s0), float(np.interp(s0, self.route_s, self.s_path)),
                     span=[round(s0, 1), round(s1, 1)])
@@ -2036,7 +2038,8 @@ class MapDrive:
       off = ((joined[:n] - joined_i[:n]) * np.stack([np.sin(th), -np.cos(th)], axis=1)).sum(axis=1)
       self._derive(route, joined_i[:n], off, t)
       self.changes = self._changes(self.keys)
-      self.splices.append({"t": round(t, 3), "cut": round(cut, 1), "gap": round(float(d), 2), "pos": [round(float(keep[-1][0]), 1), round(float(keep[-1][1]), 1)]})
+      self.splices.append({"t": round(t, 3), "cut": round(cut, 1), "gap": round(float(d), 2),
+                           "pos": [round(float(keep[-1][0]), 1), round(float(keep[-1][1]), 1)]})
       self._event("mapdrive", t, phase=self.phase, splice=self.splices[-1])
 
   # *** lane changes the player asks for ***

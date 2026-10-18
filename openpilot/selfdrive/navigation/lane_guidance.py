@@ -24,8 +24,8 @@ signals turns, and shows the lanes under active guidance (navInstruction.lanes),
   maxspeed), so slowing traffic doesn't put the ask off; at the latest `min_dist` m per lane away; with lc_time_fwy at
   freeway speeds. The last place moves to `signal_room` m before the last traffic signal on the way (Mapbox's
   traffic_signal: a queue there, where the model can't change lanes). A maneuver's remaining changes follow
-  `change_gap` after each. Below `lc_min_speed` (the model's lane change speed: n16 ~10 m/s) a change not yet started
-  is withdrawn and left to the turn desire.
+  `change_gap` after each. Asked only at or above `lc_min_speed` (the model's lane change speed: n16 ~10 m/s); a
+  change not yet started is withdrawn once `lc_speed_margin` below it, and left to the turn desire.
 - Request and approve (PLAN D): stage 1 the driver's blinker on the request's side approves (NavDesire
   "laneChange:<side>"), 3 auto-approved (GTA, NavDesire "laneChange"). `requests` holds what the driver (or GTA's
   simulated one) does with the stalk: laneChangeLeft / signalTurnRight / cancelSignal.
@@ -69,7 +69,8 @@ class Tune:
   done_before_through: float = 30.0  # m before a junction the route goes straight on through
   signal_room: float = 30.0  # m before the last traffic signal on the way to a move: a queue there, where the model can't change
   signal_window: float = 150.0  # m before a move, the signals that count
-  lc_min_speed: float = 10.0  # m/s: slower, a change not yet started is withdrawn (the model's lane change speed)
+  lc_min_speed: float = 10.0  # m/s: asked for only at or above it (the model's lane change speed)
+  lc_speed_margin: float = 1.0  # m/s below lc_min_speed a change not yet started is withdrawn (no ask, withdraw, ask on a car hovering about it)
   pair_gap: float = 100.0  # m: a maneuver this soon after one is planned with it
   max_ahead: float = 3500.0  # m: no change asked for further out
   # lanes that end (option B): where an intersection lists fewer lanes than the one before it on the road
@@ -94,6 +95,9 @@ class Tune:
   signal_min: float = 28.0  # m: signalled by here whatever the speed
   signal_last: float = 26.0  # m: a change towards the turn still under way gives way to its signal by here
   turn_into: float = 80.0  # m: slower than lc_min_speed, one lane beside the turn's (or before its bay opens), its signal takes the car over
+  # there, but too fast for that (the lane turn speed) and too slow for a change: no signal until slow enough for
+  # turn_into (above 20 mph openpilot takes a blinker as a lane change)
+  turn_gap: bool = True
   turn_done: float = 20.0  # m past the turn: its signal off
   # requests
   change_timeout: float = 10.0  # s a lane change may hang before it's withdrawn (desire_helper's)
@@ -587,7 +591,7 @@ class LaneGuidance:
       self._end_change(inp.blinker, "declined")  # the blinker off before openpilot could start it
     elif not self.change_started and inp.t - self.change_t > self.tune.change_timeout:
       self._end_change(inp.blinker, "timeout")
-    elif not self.change_started and inp.v < self.tune.lc_min_speed:
+    elif not self.change_started and inp.v < self.tune.lc_min_speed - self.tune.lc_speed_margin:
       self._end_change(inp.blinker, "gave_up")  # too slow for the model: left to the turn desire
     elif self.change_send_at and inp.t >= self.change_send_at:
       if inp.blinker is not None and inp.blinker != self.changing:
@@ -660,6 +664,13 @@ class LaneGuidance:
       return False
     return need["bay"] or (need["changes"] == 1 and need["side"] == m.side)
 
+  def _turn_gap(self, m: Move, need: dict) -> bool:
+    """turn_gap: where turn_into's signal would take the car over, but too fast for it and too slow for a change."""
+    t = self.tune
+    if not t.turn_gap or t.turn_into <= 0 or m.along - self.along > t.turn_into:
+      return False
+    return min(t.lc_min_speed, LANE_TURN_SPEED) <= self.v < t.lc_min_speed and (need["bay"] or (need["changes"] == 1 and need["side"] == m.side))
+
   def _turn(self, inp: GuidanceInputs, ahead: list[Move]):
     """The turn ahead's signal: on near it once slow (the lane turn speed), or by signal_min whatever the speed, or
     earlier where its signal is to take the car over (turn_into); off once past it."""
@@ -680,6 +691,8 @@ class LaneGuidance:
     into = need is not None and self._turn_into(m, need)
     window = max(t.signal_min, min(t.signal_max, inp.v * t.signal_time))
     if not (dist < t.signal_min or (dist < window and inp.v < LANE_TURN_SPEED) or into):
+      return
+    if not into and self.changing is None and need is not None and self._turn_gap(m, need):
       return
     if self.changing is not None:
       if not into and dist > t.signal_last:

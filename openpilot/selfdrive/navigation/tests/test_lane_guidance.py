@@ -169,6 +169,41 @@ def test_withdrawn_when_too_slow():
   assert d.g.desire == "" or d.t > 0
 
 
+def test_hovering_at_the_lane_change_speed_asks_once():
+  """A car hovering about lc_min_speed (9.3-10.4 m/s) before the change starts: asked once, at or above it, and not
+  withdrawn until lc_speed_margin below it; with no margin, asked, withdrawn and asked again."""
+  def hover(tune):
+    d = Drive(turn_right_two_lanes(), tune)
+    assert d.run_until(9.9, (0, 2), lambda o: o.request is not None, 120.0) is None  # never asked below the speed
+    first_request(d, 10.4, (0, 2))
+    for k in range(80):  # 8 s, under change_timeout
+      d.step(9.85 + 0.55 * (1 if k % 20 < 10 else -1), (0, 2))
+    return d
+  d = hover(None)
+  assert d.g.request is not None and d.g.request_log == []
+  out = d.run_until(8.9, (0, 2), lambda o: o.request is None, 2.0)  # a margin below it: withdrawn
+  assert out is not None and [e["outcome"] for e in d.g.request_log] == ["gave_up"]
+  d = hover({"lc_speed_margin": 0.0})
+  assert [e["outcome"] for e in d.g.request_log].count("gave_up") >= 2  # change_gap apart
+
+
+def test_turn_gap_no_blinker_from_beside_until_slow():
+  """One lane beside a right turn's lane, between the lane turn speed (19 mph) and lc_min_speed inside signal_min: no
+  change (too slow) and no signal (too fast for the turn desire, a lane change above 20 mph) until the car slows
+  below 19 mph, when turn_into's signal takes it over; turn_gap off, signalled at that speed."""
+  for tune, signal_v in ((None, 7.0), ({"turn_gap": False}, 9.2)):
+    d = Drive(turn_right_two_lanes(), tune)
+    d.along = 2000.0 - 40.0
+    out = d.run_until(9.2, (0, 2), lambda o: o.request is not None, 2.0)  # to 22 m out: nothing asked
+    if signal_v == 9.2:
+      assert out is not None and out.request["kind"] == "turn"
+      continue
+    assert out is None
+    out = d.run_until(7.0, (0, 2), lambda o: o.request is not None, 2.0)
+    assert out is not None and out.request["kind"] == "turn" and out.request["side"] == "right"
+    assert [r for r in out.requests if r.startswith("signalTurn")] == ["signalTurnRight"]
+
+
 def test_request_and_sided_desire():
   """Stage 1: NavDesire laneChange:<side>, the blinker the driver's (approved once on); stage 3: bare laneChange, nav's
   blinker after openpilot has read it; done, the next waits change_gap."""
