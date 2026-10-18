@@ -247,6 +247,9 @@ class Tune:
     # Slower than this no lane change is asked for at all, and one not started yet is withdrawn: n16 takes a lane change
     # desire this slow like a turn's (n16 at ~8 m/s into a wall, in game)
     "model_lc_speed": MODEL_LC_SPEED,  # m/s
+    # m/s below model_lc_speed a change asked for but not started yet is withdrawn: asked at or above the speed, a car
+    # hovering about it would otherwise see the change asked, withdrawn and asked again
+    "model_lc_margin": 1.0,
     "slow_decel": 1.5,  # m/s^2
     "queue_room": 30.0,  # m
     # m before a turn within which, slower than model_lc_speed (and the lane turn speed) and one lane beside its lanes
@@ -1175,7 +1178,7 @@ class Planner:
       self.taken.clear()
       return False
     self._watch_change(indicator, now, inp.left_blindspot if self.changing == "left" else inp.right_blindspot)
-    if self.changing is not None and not self.change_went and self._lc_too_slow(v):
+    if self.changing is not None and not self.change_went and self._lc_too_slow(v, self.tune.model_lc_margin):
       self._give_up(indicator, f"too slow for the model's lane change ({v:.1f} m/s)")
     if self.changing is not None and self.change_send_at and now >= self.change_send_at:
       self.change_send_at = 0.0
@@ -2012,9 +2015,10 @@ class Planner:
       self.recover_t, self.keep_gap_until = now, now + KEEP_GAP
     self.recover = "keepRight"
 
-  def _lc_too_slow(self, v: float) -> bool:
-    """Slower than the model's lane change speed (model_lc_speed): no lane change asked for, one not started withdrawn."""
-    return self.tune.model_lc_speed > 0 and v < self.tune.model_lc_speed
+  def _lc_too_slow(self, v: float, margin: float = 0.0) -> bool:
+    """Slower than the model's lane change speed (model_lc_speed): no lane change asked for; `margin` m/s slower than
+    it, one not started withdrawn (model_lc_margin)."""
+    return self.tune.model_lc_speed > 0 and v < self.tune.model_lc_speed - margin
 
   def _start_change(self, side: str, why: str, turn: bool = False, by: float = math.inf, planned: bool = False,
                     end: float | None = None, bay: np.ndarray | None = None, reason: str = "other", changes: int = 1,

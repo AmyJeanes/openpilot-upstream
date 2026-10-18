@@ -813,6 +813,34 @@ def test_change_not_started_withdrawn_when_slowing():
   assert [e["outcome"] for e in d.events if e.get("event") == "navRequest"] == ["gave_up"]
 
 
+def test_hovering_at_the_lane_change_speed_asks_once():
+  """Asked at 10.4 m/s and held by the blind spot, the car hovering about n16's 10 m/s (9.3-10.4) before openpilot can
+  start it: the one request stays (no ask, withdraw, ask); a margin (model_lc_margin) below the speed it's withdrawn.
+  With no margin it's asked, withdrawn and asked again."""
+  route = route_to_turn(400.0)
+  extra = {"routeEnd": lambda y: 600.0 - y, "blindspot": [False, True]}
+
+  def hover(tune):
+    at, d = first_change(route, (0, 2), 10.4, extra, upto=300.0, tune=tune)
+    assert at is not None
+    y = 400.0 - at
+    for k in range(160):  # 8 s
+      d.v = 9.85 + 0.55 * (1 if k % 40 < 20 else -1)
+      d.step(route, y, {k_: v_(y) if callable(v_) else v_ for k_, v_ in extra.items()})
+      y += d.v * 0.05
+    return d, y
+  d, y = hover({})
+  asks = [e for e in d.events if e.get("event") == "navRequest"]
+  assert d.nav.changing == "right" and not d.nav.change_went and asks == []
+  d.v = 8.9
+  for _ in range(10):
+    d.step(route, y, {k_: v_(y) if callable(v_) else v_ for k_, v_ in extra.items()})
+    y += d.v * 0.05
+  assert d.nav.changing is None and [e["outcome"] for e in d.events if e.get("event") == "navRequest"] == ["gave_up"]
+  d, _ = hover({"model_lc_margin": 0.0})
+  assert [e["outcome"] for e in d.events if e.get("event") == "navRequest"].count("gave_up") >= 2
+
+
 def test_too_slow_near_the_turn_isnt_forced():
   """Two lanes off a turn's lanes near it, slower than the model changes at: nothing asked, the turn left to the route."""
   route = route_to_turn(120.0, "left")

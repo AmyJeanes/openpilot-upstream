@@ -24,8 +24,8 @@ signals turns, and shows the lanes under active guidance (navInstruction.lanes),
   maxspeed), so slowing traffic doesn't put the ask off; at the latest `min_dist` m per lane away; with lc_time_fwy at
   freeway speeds. The last place moves to `signal_room` m before the last traffic signal on the way (Mapbox's
   traffic_signal: a queue there, where the model can't change lanes). A maneuver's remaining changes follow
-  `change_gap` after each. Below `lc_min_speed` (the model's lane change speed: n16 ~10 m/s) a change not yet started
-  is withdrawn and left to the turn desire.
+  `change_gap` after each. Asked only at or above `lc_min_speed` (the model's lane change speed: n16 ~10 m/s); a
+  change not yet started is withdrawn once `lc_speed_margin` below it, and left to the turn desire.
 - Request and approve (PLAN D): stage 1 the driver's blinker on the request's side approves (NavDesire
   "laneChange:<side>"), 3 auto-approved (GTA, NavDesire "laneChange"). `requests` holds what the driver (or GTA's
   simulated one) does with the stalk: laneChangeLeft / signalTurnRight / cancelSignal.
@@ -69,7 +69,8 @@ class Tune:
   done_before_through: float = 30.0  # m before a junction the route goes straight on through
   signal_room: float = 30.0  # m before the last traffic signal on the way to a move: a queue there, where the model can't change
   signal_window: float = 150.0  # m before a move, the signals that count
-  lc_min_speed: float = 10.0  # m/s: slower, a change not yet started is withdrawn (the model's lane change speed)
+  lc_min_speed: float = 10.0  # m/s: asked for only at or above it (the model's lane change speed)
+  lc_speed_margin: float = 1.0  # m/s below lc_min_speed a change not yet started is withdrawn (no ask, withdraw, ask on a car hovering about it)
   pair_gap: float = 100.0  # m: a maneuver this soon after one is planned with it
   max_ahead: float = 3500.0  # m: no change asked for further out
   # lanes that end (option B): where an intersection lists fewer lanes than the one before it on the road
@@ -587,7 +588,7 @@ class LaneGuidance:
       self._end_change(inp.blinker, "declined")  # the blinker off before openpilot could start it
     elif not self.change_started and inp.t - self.change_t > self.tune.change_timeout:
       self._end_change(inp.blinker, "timeout")
-    elif not self.change_started and inp.v < self.tune.lc_min_speed:
+    elif not self.change_started and inp.v < self.tune.lc_min_speed - self.tune.lc_speed_margin:
       self._end_change(inp.blinker, "gave_up")  # too slow for the model: left to the turn desire
     elif self.change_send_at and inp.t >= self.change_send_at:
       if inp.blinker is not None and inp.blinker != self.changing:
