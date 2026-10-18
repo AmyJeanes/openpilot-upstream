@@ -279,3 +279,13 @@ The Mapbox path makes no lane-end asks on GTA's data, guidance2's item 1, and it
   count right, so this check can't see it; there the lane maps go 2 -> 3 (a lane opening on the left) -> 2 -> 1 -> 2
   within 135 m, the same stretch as R29's and R33's stale cases at (104, -998): it looks like one of live21b's chain
   joins (the known map issue), worth a look with `laneslide`.
+
+## Item 4: chores
+
+### `test_request_and_instruction` with `MAPBOX_TOKEN` set
+
+`selfdrive/navigation/tests/test_navigation.py`: `TestRouteEngine.setUp` patches `os.environ` for the test
+(`self.enterContext(patch.dict(os.environ))`, restored after it) and pops `MAPBOX_TOKEN` before it builds the engine,
+whose `__init__` reads it; the code is untouched. With the token set in this environment: before, 1 failed, 19 passed
+(`'https://api.mapbox.com/directions/v5/…' != 'https://api.commadotai.com/v1/nav/directions/v5/…'`); after, 20 passed,
+with it set and unset, and the token is still set in the process afterwards.
