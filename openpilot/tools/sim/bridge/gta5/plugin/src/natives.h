@@ -254,6 +254,15 @@ inline void OVERRIDE_LODSCALE_THIS_FRAME(float scale) { Invoke(0xA76359FC80B2438
 inline void SET_RANDOM_TRAINS(BOOL on) { Invoke(0x80D9F74197EA47D9, on); }
 inline void DELETE_ALL_TRAINS() { Invoke(0x736A718577F39C7D); }
 inline BOOL GET_WATER_HEIGHT_NO_WAVES(float x, float y, float z, float *h) { return Invoke<BOOL>(0x8EE6B53CE13A9794, x, y, z, h); }
+inline BOOL GET_WATER_HEIGHT(float x, float y, float z, float *h) { return Invoke<BOOL>(0xF6829842C06AE524, x, y, z, h); }
+inline BOOL TEST_PROBE_AGAINST_WATER(float x1, float y1, float z1, float x2, float y2, float z2, Vector3 *result) {
+  return Invoke<BOOL>(0xFFA5D878809819DB, x1, y1, z1, x2, y2, z2, result);
+}
+// 0 no water, 1 water (height set; the segment probe sets the point where it meets the water), 2 blocked
+inline int TEST_PROBE_AGAINST_ALL_WATER(float x1, float y1, float z1, float x2, float y2, float z2, int flags, Vector3 *p) {
+  return Invoke<int>(0x8974647ED222EA5F, x1, y1, z1, x2, y2, z2, flags, p);
+}
+inline int TEST_VERTICAL_PROBE_AGAINST_ALL_WATER(float x, float y, float z, int flags, float *h) { return Invoke<int>(0x2B3451FA1E3142E2, x, y, z, flags, h); }
 inline void HARD_ATTACH_CAM_TO_ENTITY(Cam c, Entity e, float xr, float yr, float zr, float x, float y, float z, BOOL relative) {
   Invoke(0x202A5ED9CE01D6E7, c, e, xr, yr, zr, x, y, z, relative);
 }

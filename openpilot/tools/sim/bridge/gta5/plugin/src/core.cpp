@@ -2540,6 +2540,75 @@ std::string FreeCamState() {
          ",\"day\":" + (g_free.day ? "true" : "false") + "}";
 }
 
+// The game's water at a grid of points (waterprobe command), a few ms of probes a frame: per point the water surface
+// height, "-" for none or "b" for blocked, as text rows from y0 north, columns from x0 east. The water tests answer
+// anywhere on the map; the bed (shape tests) only where the collision has streamed in, near the player.
+struct WaterProbe {
+  bool on = false;
+  std::string id, path;
+  char method = 'v';
+  float x0 = 0, y0 = 0, step = 1, z = 0, zd = 0, bed = 0;
+  int nx = 0, ny = 0, flags = 0, k = 0, wet = 0, frames = 0, retries = 0;
+  double budget = 0.004, busy = 0, started = 0;
+  std::string out;
+} g_wprobe;
+
+std::string WaterAt(const WaterProbe &w, float x, float y) {
+  float h = 0;
+  int r = 0;
+  Vector3 p{};
+  switch (w.method) {
+    case 'v': r = TEST_VERTICAL_PROBE_AGAINST_ALL_WATER(x, y, w.z, w.flags, &h); break;
+    case 's': r = TEST_PROBE_AGAINST_ALL_WATER(x, y, w.z, x, y, w.z - w.zd, w.flags, &p), h = p.z; break;
+    case 'p': r = TEST_PROBE_AGAINST_WATER(x, y, w.z, x, y, w.z - w.zd, &p) ? 1 : 0, h = p.z; break;
+    case 'h': r = GET_WATER_HEIGHT(x, y, w.z, &h) ? 1 : 0; break;
+    default: r = GET_WATER_HEIGHT_NO_WAVES(x, y, w.z, &h) ? 1 : 0; break;
+  }
+  if (r == 1) {
+    char buf[40];
+    int len = snprintf(buf, sizeof(buf), "%.3f", h);
+    if (w.bed > 0) {
+      // the bed: map and object collision straight down from just over the surface (water isn't collision; a deck
+      // over the water is above the start)
+      int test = START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE(x, y, h + 0.05f, x, y, h - w.bed, 1 | 16, g_veh.handle, 7);
+      BOOL hit = FALSE;
+      Vector3 end{}, normal{};
+      Entity e = 0;
+      int s = GET_SHAPE_TEST_RESULT(test, &hit, &end, &normal, &e);
+      if (s != 2) snprintf(buf + len, sizeof(buf) - len, "/f");
+      else if (hit) snprintf(buf + len, sizeof(buf) - len, "/%.3f", end.z);
+      else snprintf(buf + len, sizeof(buf) - len, "/-");
+    }
+    return buf;
+  }
+  return r == 0 ? "-" : r == 2 ? "b" : "?" + std::to_string(r);
+}
+
+void UpdateWaterProbe(double now) {
+  WaterProbe &w = g_wprobe;
+  if (!w.on) return;
+  double t0 = QpcSeconds();
+  int n = w.nx * w.ny;
+  for (; w.k < n && QpcSeconds() - t0 < w.budget; w.k++) {
+    int i = w.k % w.nx, j = w.k / w.nx;
+    std::string v = WaterAt(w, w.x0 + i * w.step, w.y0 + j * w.step);
+    // a failed bed test (the game refuses shape tests for a while, a frame's worth or more): the point again next frame
+    if (v.size() > 2 && v.compare(v.size() - 2, 2, "/f") == 0 && ++w.retries <= 30) break;
+    w.retries = 0;
+    w.wet += v[0] != '-' && v[0] != 'b' && v[0] != '?';
+    w.out += v;
+    w.out += i == w.nx - 1 ? '\n' : ' ';
+  }
+  w.busy += QpcSeconds() - t0, w.frames++;
+  if (w.k < n) return;
+  FILE *f = nullptr;
+  bool saved = !w.path.empty() && !fopen_s(&f, w.path.c_str(), "wb") && f;
+  if (saved) fwrite(w.out.data(), 1, w.out.size(), f), fclose(f);
+  Log("waterprobe " + w.id + " done: " + std::to_string(n) + " points, " + std::to_string(w.wet) + " water, " + Num(w.busy * 1000) + " ms probing over " +
+      std::to_string(w.frames) + " frames, " + Num(now - w.started) + " s" + (saved ? " to " + w.path : std::string(" (not saved)")));
+  w.on = false, w.out.clear(), w.out.shrink_to_fit();
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -3300,6 +3369,29 @@ void HandleMessage(const Message &m, double now) {
       out += (out.empty() ? "" : ";") + (r != 2 ? std::string("fail") : hit ? Num(end.x) + "," + Num(end.y) + "," + Num(end.z) : std::string("none"));
     }
     Log("ray " + MsgStr(m, "id") + " " + out);
+  } else if (type == "waterprobe") {
+    // x0= y0= x1= y1= step= (m) z= (m: the probes' top) [m=v|s|p|h|n: TEST_VERTICAL_PROBE_AGAINST_ALL_WATER (default),
+    // TEST_PROBE_AGAINST_ALL_WATER down zd= m, TEST_PROBE_AGAINST_WATER down zd=, GET_WATER_HEIGHT, its NO_WAVES]
+    // [f= the ALL_WATER probes' flags: 0 water only, 1 map collision blocks] [bed= m: also the bed under water points, as
+    // "height/bed" ("/-" nothing within bed m, "/f" failed); needs the collision streamed in] [ms= probing a frame]
+    // id= path= (written when done; a new one replaces a running one)
+    WaterProbe &w = g_wprobe;
+    if (w.on) Log("waterprobe " + w.id + " replaced");
+    w = WaterProbe{};
+    w.id = MsgStr(m, "id"), w.path = MsgStr(m, "path");
+    std::string method = MsgStr(m, "m", "v");
+    w.method = method.empty() ? 'v' : method[0];
+    w.step = std::clamp(static_cast<float>(MsgNum(m, "step", 1)), 0.05f, 1000.0f);
+    w.x0 = static_cast<float>(MsgNum(m, "x0")), w.y0 = static_cast<float>(MsgNum(m, "y0"));
+    w.nx = std::clamp(static_cast<int>(std::floor((MsgNum(m, "x1", w.x0) - w.x0) / w.step + 1e-6)) + 1, 1, 4000);
+    w.ny = std::clamp(static_cast<int>(std::floor((MsgNum(m, "y1", w.y0) - w.y0) / w.step + 1e-6)) + 1, 1, 4000);
+    w.z = static_cast<float>(MsgNum(m, "z", 1000)), w.zd = static_cast<float>(MsgNum(m, "zd", 2000));
+    w.flags = static_cast<int>(MsgNum(m, "f", 0));
+    w.bed = std::clamp(static_cast<float>(MsgNum(m, "bed", 0)), 0.0f, 500.0f);
+    w.budget = std::clamp(MsgNum(m, "ms", 4), 0.1, 100.0) / 1000;
+    w.started = now, w.on = true;
+    Log("waterprobe " + w.id + ": " + std::to_string(w.nx) + "x" + std::to_string(w.ny) + " from " + Num(w.x0) + "," + Num(w.y0) + " step " + Num(w.step) +
+        " m=" + w.method + " f=" + std::to_string(w.flags) + " z=" + Num(w.z));
   } else if (type == "freecam") {
     // on=1 [x y z (m) heading pitch (deg): the pose, else the gameplay camera's or where it is] [fov] [speed (m/s)]
     // [sens (deg per mouse unit)] [hud=0|1] [day=1: midday, clear, the clock stopped; day=0 gives the old back]
@@ -3741,6 +3833,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   script_hook::SetOverride(g_cam != 0);
   UpdateTopCam(v);
   UpdateFreeCam(now, dt);
+  UpdateWaterProbe(now);
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view < 0 && g_top.on && !g_top.hud) HIDE_HUD_AND_RADAR_THIS_FRAME();
   // The wide lens reaches the radar in the corner, so the capture blacks it out. Hiding the radar on openpilot's frames
