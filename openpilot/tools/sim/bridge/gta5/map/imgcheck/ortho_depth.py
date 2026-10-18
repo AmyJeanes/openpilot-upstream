@@ -3,7 +3,13 @@
 
 depth: per tile of an ortho plan, the camera and box of its albedo tile (the albedo sidecar's camera height and LOD), the
 grab source the depth target ("DepthBuffer Pre Alpha 1": reversed-Z float32, valid at the present), saved as 16-bit
-heights: h = base_m + v * scale_m (v = NODATA where nothing was drawn), with the albedo tile's world_to_px.
+heights: h = base_m + v * scale_m (v = NODATA where nothing was drawn), with the albedo tile's world_to_px. Right after
+the grab, while the tile is streamed (model lakes and the bed collision answer only then), the game's water over the tile
+on a 1 m world grid (plugin `waterprobe`), saved as <name>_w.npz before the sidecar: h (water surface, NaN none), c (0 none,
+1 water, 2 blocked, 3 other), bed + bcode (collision under each water point: 1 hit, 2 nothing within WATER_BED m, 3
+failed), hn + q (GET_WATER_HEIGHT_NO_WAVES and where it answered), x0, y0, step (row 0 = y0, south). A tile done without
+its _w file (the probe failed, or shot before it existed) gets only the probe on a resume. The water is calmed for the
+pass (plugin `waves calm=1`: no waves or wind), so the sea in the height tiles is flat at its NO_WAVES height.
 
 underplan: road links (the game's path nodes) crossing in 2D with more than DZ m between them; per grid cell, the lower
 roads binned to BAND m levels.
@@ -47,6 +53,8 @@ CHAIN = 40.0  # m along the lower road either way from a crossing link: the road
 U_NEAR, U_FAR = 0.5, 120.0  # the game draws nothing within ~1% of the near end: (far - near) / 100 under the near plane
 U_BLIND = U_NEAR + 0.01 * (U_FAR - U_NEAR) + 0.3  # m under the camera where nothing shows
 U_MIN_ABOVE = 2.0  # m: the camera at least this far over the lower road's highest point
+WATER_STEP, WATER_BED, WATER_ABOVE = 1.0, 60.0, 50.0  # m: probe grid, bed rays' reach, probes' top over the tile's highest surface
+WATER_GIVE_UP = 20  # consecutive failed tiles after which the pass stops probing (heights first)
 
 
 # ------------------------------------------------------------------------------------------------------------ heights
@@ -98,6 +106,28 @@ def changed(a: np.ndarray, b: np.ndarray) -> float:
   return float(np.minimum(np.abs(a - b), 2.0).mean())
 
 
+def parse_water(text: str) -> dict[str, np.ndarray]:
+  """waterprobe rows: per point "-" none, "b" blocked, "?r" other, else the height, with the bed as "h/bed", "h/-", "h/f"."""
+  rows = [r.split() for r in text.splitlines() if r.strip()]
+  shape = (len(rows), len(rows[0]))
+  h, bed = np.full(shape, np.nan, np.float32), np.full(shape, np.nan, np.float32)
+  c, bcode = np.zeros(shape, np.uint8), np.zeros(shape, np.uint8)
+  for j, r in enumerate(rows):
+    for i, v in enumerate(r):
+      if v == "-":
+        continue
+      if v == "b" or v[0] == "?":
+        c[j, i] = 2 if v == "b" else 3
+        continue
+      v, _, b = v.partition("/")
+      c[j, i], h[j, i] = 1, float(v)
+      if b:
+        bcode[j, i] = {"-": 2, "f": 3}.get(b, 1)
+        if bcode[j, i] == 1:
+          bed[j, i] = float(b)
+  return {"h": h, "c": c, "bed": bed, "bcode": bcode}
+
+
 # ---------------------------------------------------------------------------------------------------------- the plugin
 class PluginLog:
   def __init__(self, path: str = PLUGIN_LOG):
@@ -124,8 +154,8 @@ class PluginLog:
 class ZShooter(ortho.Shooter):
   """ortho.Shooter with the depth target as a second grab source and shape tests; saving is the pass's own."""
 
-  def __init__(self, run_dir: str, log, saver=None):
-    self.saver = saver
+  def __init__(self, run_dir: str, log, saver=None, calm=False):
+    self.saver, self.calm = saver, calm
     super().__init__(run_dir, log)
     self.plog = PluginLog()
     self.addr: dict[str, str] = {}
@@ -169,6 +199,8 @@ class ZShooter(ortho.Shooter):
     self.addr["albedo"] = self.find("GBUFFER_0")
     self.addr["depth"] = self.find(DEPTH_TARGET)
     self.source = ""
+    if self.calm:  # the plugin's calm water: no waves, so the sea's surface is its NO_WAVES height
+      self.send({"type": "waves", "calm": 1})
 
   def grab_depth(self, name: str) -> tuple[str, str] | None:
     bmp, raw = os.path.join(self.raw_dir, name + ".bmp"), os.path.join(self.raw_dir, name + "_src.raw")
@@ -215,6 +247,19 @@ class ZShooter(ortho.Shooter):
       p = item.split(",")
       out.append(tuple(float(v) for v in p) if len(p) == 3 else None)
     return (out + [None] * len(segs))[:len(segs)]
+
+  def waterprobe(self, tag: str, timeout: float, **grid) -> str | None:
+    """The plugin's waterprobe over a grid (x0 y0 x1 y1 step z m f bed ms): its rows, None when it doesn't finish in time."""
+    self.ray_id += 1
+    wid = f"{tag}.{os.getpid()}.{self.ray_id}"
+    path = os.path.join(self.raw_dir, wid + ".txt")
+    pos = self.plog.mark()
+    self.send({"type": "waterprobe", "id": wid, **grid, "path": self.raw_win + "\\" + wid + ".txt"})
+    if not self.plog.wait(pos, rf"waterprobe {re.escape(wid)} done: ", timeout) or not os.path.exists(path):
+      return None
+    text = open(path).read()
+    os.remove(path)
+    return text
 
   def ensure(self, st: dict | None, x: float, y: float) -> bool:
     if st is None or not isinstance(st.get("topcam"), dict):
@@ -263,8 +308,9 @@ def make_log(run_dir: str):
 class DepthPass:
   def __init__(self, args, log):
     self.args, self.log = args, log
-    self.sh = ZShooter(args.run_dir, log, self.save)
+    self.sh = ZShooter(args.run_dir, log, self.save, calm=True)
     self.results: dict[str, dict] = {}
+    self.water_s, self.water_n, self.water_failed, self.water_run = 0.0, 0, 0, 0
 
   def albedo_side(self, name: str) -> dict | None:
     p = os.path.join(self.args.albedo, name + ".json")
@@ -281,7 +327,7 @@ class DepthPass:
               "dof": 0, "lod": round(lod, 4)}, g
     return self.sh.topcam(t["x"], t["y"]), self.sh.zguess
 
-  def shot(self, t: dict, wait: float, settle: bool):
+  def shot(self, t: dict, wait: float, settle: bool, grab: bool = True):
     cam, g = self.camera(t)
     self.sh.send({"type": "park", "on": 1, "x": t["x"], "y": t["y"], "z": g + PARK_ABOVE}, cam)
     self.sh.park_z = g + PARK_ABOVE
@@ -302,6 +348,8 @@ class DepthPass:
       return None
     if not cam.get("abs") and self.sh.probed(st):
       self.sh.zguess = tc["ground"]
+    if not grab:  # there, for the water probe only
+      return None, {"topcam": tc}
     self.sh.use("depth")
     cam_z = tc["ground"] + tc["height"]
     diff = None
@@ -314,8 +362,45 @@ class DepthPass:
       return None
     return got, {"cam_z": cam_z, "near": NEAR, "far": FAR, "topcam": tc, "settle_m": diff, "wait": wait}
 
+  def water(self, t: dict, g: float) -> dict | None:
+    """The game's water over the tile's extent (around the albedo sidecar's centre) on the world's 1 m grid, the bed under
+    it and the NO_WAVES height; None (logged) when the probe fails. g: the tile's highest surface."""
+    if self.water_run >= WATER_GIVE_UP:
+      return None
+    t0 = time.monotonic()
+    side = self.albedo_side(t["name"]) or t
+    x, y = side["x"], side["y"]
+    grid = {"x0": math.floor(x - W_M / 2), "y0": math.floor(y - H_M / 2), "x1": math.ceil(x + W_M / 2), "y1": math.ceil(y + H_M / 2),
+            "step": WATER_STEP, "z": round(g + WATER_ABOVE, 1), "f": 0, "ms": 8}
+    try:
+      text = self.sh.waterprobe(t["name"], 5.0, m="v", bed=WATER_BED, **grid)
+      w = parse_water(text) if text else None
+      if w and not (w["c"] == 1).any():  # dry: no NO_WAVES water either
+        w["hn"], w["q"] = np.full_like(w["h"], np.nan), np.zeros(w["c"].shape, bool)
+      elif w and (nw := self.sh.waterprobe(t["name"] + "_n", 3.0, m="n", **grid)):
+        n = parse_water(nw)
+        w["hn"], w["q"] = n["h"], n["c"] == 1
+    except Exception as e:
+      self.log(f"ortho: {t['name']}: water probe: {type(e).__name__}: {e}")
+      w = None
+    if w is None:
+      self.water_failed, self.water_run = self.water_failed + 1, self.water_run + 1
+      self.log(f"ortho: {t['name']}: no water probe" + (f"; {WATER_GIVE_UP} in a row: no more probes this pass" if self.water_run >= WATER_GIVE_UP else ""))
+      return None
+    w.update(x0=grid["x0"], y0=grid["y0"], step=WATER_STEP, z=grid["z"])
+    self.water_s, self.water_n, self.water_run = self.water_s + time.monotonic() - t0, self.water_n + 1, 0
+    return w
+
+  def water_path(self, name: str) -> str:
+    return os.path.join(self.sh.tile_dir, name + "_w.npz")
+
+  def save_water(self, name: str, w: dict) -> dict:
+    np.savez_compressed(self.water_path(name)[:-4] + ".tmp.npz", **w)
+    os.replace(self.water_path(name)[:-4] + ".tmp.npz", self.water_path(name))
+    return {"npz": name + "_w.npz", "water_pts": int((w["c"] == 1).sum()), "no_waves": "q" in w}
+
   def save(self, item):
-    (bmp, raw), side = item
+    (bmp, raw), w, side = item
     c = side["camera"]
     h = to_height(load_raw(raw), c["cam_z"], c["near"], c["far"])
     v, meta = encode(h)
@@ -323,6 +408,7 @@ class DepthPass:
     meta["png"] = name + "_h.png"
     side["height"] = meta
     save_height(os.path.join(self.sh.tile_dir, meta["png"]), v)
+    side["water"] = self.save_water(name, w) if w else None  # before the sidecar: a tile is done with both
     write_json(os.path.join(self.sh.tile_dir, name + ".json"), side)
     os.remove(raw)
     os.remove(bmp)
@@ -354,8 +440,8 @@ class DepthPass:
     if a.names:
       want = set(open(a.names).read().split())
       tiles = [t for t in tiles if t["name"] in want]
-    todo = [t for t in tiles if not sh.done(t["name"])]
-    log(f"ortho depth: {len(todo)} of {len(tiles)} tiles to shoot")
+    todo = [t for t in tiles if not sh.done(t["name"]) or not os.path.exists(self.water_path(t["name"]))]
+    log(f"ortho depth: {len(todo)} of {len(tiles)} tiles to shoot ({sum(sh.done(t['name']) for t in todo)} for the water probe only)")
     if not todo:
       return
     deadline = until_deadline(a)
@@ -386,9 +472,19 @@ class DepthPass:
       if shot % 50 == 0 and ortho.free_gb(a.run_dir) < a.stop_free_gb:
         log(f"ortho: stopping: {ortho.free_gb(a.run_dir):.1f} GB free")
         break
+      water_only = sh.done(t["name"])
+      if water_only and self.water_run >= WATER_GIVE_UP:
+        continue
       hop = 1e4 if prev is None or since_ref else math.hypot(t["x"] - prev["x"], t["y"] - prev["y"])
       since_ref = False
       wait = ortho.wait_for(hop)
+      if water_only:
+        got = self.shot(t, max(2.0, wait), False, grab=False)
+        w = self.water(t, got[1]["topcam"]["ground"]) if got else None
+        if w:
+          self.save_water(t["name"], w)
+        prev = t
+        continue
       got = self.shot(t, wait, wait > 1.0) or self.shot(t, max(2.0, wait), True)
       prev = t
       if not got:
@@ -398,16 +494,21 @@ class DepthPass:
           break
         continue
       files, cam = got
+      w = self.water(t, cam["topcam"]["ground"])  # the tile still streamed
       side = {"name": t["name"], "cell": [t["i"], t["j"]], "x": t["x"], "y": t["y"], "cm_per_px": ortho.CM_PER_PX, "size": [W_PX, H_PX],
               "extent_m": [W_M, H_M], "world_to_px": ortho.world_to_px(t["x"], t["y"]), "north_up": True, "time": time.time(),  # noqa: TID251
-              "camera": cam, "kind": "height"}
-      sh.saved.put((files, side))
+              "camera": cam, "kind": "height", "waves": "calm"}
+      sh.saved.put((files, w, side))
       shot += 1
       if shot % 50 == 0:
-        log(f"ortho: {shot} shot, {(time.monotonic() - t0) / shot:.2f} s a tile, {len(failed)} failed, {ortho.free_gb(a.run_dir):.0f} GB free")
+        log(f"ortho: {shot} shot, {(time.monotonic() - t0) / shot:.2f} s a tile, {len(failed)} failed, {ortho.free_gb(a.run_dir):.0f} GB free, "
+            f"water probe {self.water_s / max(self.water_n, 1):.2f} s a tile ({self.water_failed} failed)")
     sh.saved.join()
+    sh.send({"type": "waves", "calm": 0})
     bad = [n for n, q in self.results.items() if q.get("valid", 1) < 0.5]
-    log("ortho depth: " + json.dumps({"shot": shot, "failed": failed, "mostly_empty": bad, "s_per_tile": round((time.monotonic() - t0) / max(shot, 1), 2)}))
+    log("ortho depth: " + json.dumps({"shot": shot, "failed": failed, "mostly_empty": bad, "s_per_tile": round((time.monotonic() - t0) / max(shot, 1), 2),
+                                      "water_probes": self.water_n, "water_failed": self.water_failed,
+                                      "water_s_per_tile": round(self.water_s / max(self.water_n, 1), 3)}))
 
 
 # ------------------------------------------------------------------------------------------------------ under: plan
