@@ -489,6 +489,9 @@ struct TopCam {
   float zref = NAN;    // a height near that ground (the road's, from the map), else the vehicle's
   bool abs = false;    // the height is above zref itself, unprobed: under a bridge, where the probe finds its deck
   bool focus = false;  // the game streams the world around the point, not the player
+  bool top = false;    // the height is above the highest surface over tw x th m around the point (roofs, decks, treetops),
+                       // probed from far above at 5x5 points; low is the lowest of them
+  float tw = 0, th = 0, low = 0;
   bool shown = false;  // the active camera
   Cam cam = 0;
 } g_top;
@@ -586,6 +589,21 @@ void ReleaseTopCam() {
 }
 
 // places the top camera over the vehicle (follow) or the given point; without the openpilot camera it's shown here
+// the highest and lowest surfaces over the top camera's area (TopCam::top), false while the game has no collision there
+bool TopSurface(float &high) {
+  high = -1e9f;
+  float low = 1e9f;
+  for (int a = -2; a <= 2; a++)
+    for (int b = -2; b <= 2; b++) {
+      float x = g_top.x + a * 0.25f * g_top.tw, y = g_top.y + b * 0.25f * g_top.th, z = 0;
+      if (!GET_GROUND_Z_FOR_3D_COORD(x, y, 1500.0f, &z, FALSE, FALSE)) continue;
+      high = std::max(high, z), low = std::min(low, z);
+    }
+  if (high < -1e8f) return false;
+  g_top.low = low;
+  return true;
+}
+
 void UpdateTopCam(Entity follow) {
   if (!g_top.on) return ReleaseTopCam();
   if (!g_top.cam) {
@@ -596,6 +614,8 @@ void UpdateTopCam(Entity follow) {
   if (g_top.follow) g_top.x = ref.x, g_top.y = ref.y;
   float z = 0, probe = std::isnan(g_top.zref) ? ref.z : g_top.zref;
   if (g_top.abs && !std::isnan(g_top.zref)) g_top.ground = g_top.zref;
+  else if (g_top.top && TopSurface(z))
+    g_top.ground = z;
   else
     g_top.ground = GET_GROUND_Z_FOR_3D_COORD(g_top.x, g_top.y, probe + 10.0f, &z, FALSE, FALSE) && std::fabs(z - probe) < 15.0f
                        ? z
@@ -603,7 +623,10 @@ void UpdateTopCam(Entity follow) {
   SET_CAM_FOV(g_top.cam, g_top.fov);
   if (g_top.dof >= 0) SET_CAM_USE_SHALLOW_DOF_MODE(g_top.cam, FALSE), SET_CAM_DOF_STRENGTH(g_top.cam, g_top.dof);
   SET_CAM_MOTION_BLUR_STRENGTH(g_top.cam, 0.0f);
-  if (g_top.lod > 0) OVERRIDE_LODSCALE_THIS_FRAME(g_top.lod);
+  // lod < 0: the game's LOD distances scaled by how far the lowest ground is below the camera, over the height, so the
+  // ground keeps the detail it has from `height` up (a camera over a tower is far above the street)
+  float lod = g_top.lod < 0 && g_top.top ? std::clamp((g_top.ground - g_top.low + g_top.height) / g_top.height, 1.0f, 10.0f) : g_top.lod;
+  if (lod > 0) OVERRIDE_LODSCALE_THIS_FRAME(lod);
   SET_CAM_COORD(g_top.cam, g_top.x, g_top.y, g_top.ground + g_top.height);
   SET_CAM_ROT(g_top.cam, g_top.pitch, 0.0f, g_top.heading, 2);
   bool away = std::hypot(g_top.x - ref.x, g_top.y - ref.y) > 60.0f;
@@ -616,10 +639,41 @@ void UpdateTopCam(Entity follow) {
   }
 }
 
+// Test pins for the top camera's projection (pins command): at each point on the game's ground, a vertical magenta
+// line `height` m tall and a green cross 1.2 m wide, drawn on the player's frames. Seen straight down, an orthographic
+// render shows each line as a dot at the cross's centre.
+struct Pin {
+  float x, y, z;
+};
+std::vector<Pin> g_pins;
+float g_pinHeight = 30.0f;
+
+void DrawPins() {
+  for (Pin &p : g_pins) {
+    if (std::isnan(p.z)) {
+      float z = 0;
+      if (!GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, 1000.0f, &z, FALSE, FALSE)) continue;
+      p.z = z;
+      Log("pin " + Num(p.x) + "," + Num(p.y) + " on the ground at " + Num(z));
+    }
+    float z = p.z + 0.05f;
+    DRAW_LINE(p.x, p.y, z, p.x, p.y, z + g_pinHeight, 255, 0, 255, 255);
+    DRAW_LINE(p.x - 0.6f, p.y, z, p.x + 0.6f, p.y, z, 0, 255, 0, 255);
+    DRAW_LINE(p.x, p.y - 0.6f, z, p.x, p.y + 0.6f, z, 0, 255, 0, 255);
+  }
+}
+
+std::string PinsState() {
+  std::string s = "\"pins\":[";
+  for (size_t i = 0; i < g_pins.size(); i++) s += std::string(i ? "," : "") + "[" + Num(g_pins[i].x) + "," + Num(g_pins[i].y) + "," + Num(g_pins[i].z) + "]";
+  return s + "]";
+}
+
 std::string TopCamState() {
   return "\"topcam\":{\"on\":" + std::string(g_top.on ? "true" : "false") + ",\"x\":" + Num(g_top.x) + ",\"y\":" + Num(g_top.y) +
          ",\"ground\":" + Num(g_top.ground) + ",\"height\":" + Num(g_top.height) + ",\"heading\":" + Num(g_top.heading) +
-         ",\"fov\":" + Num(g_top.fov) + ",\"abs\":" + (g_top.abs ? "true" : "false") + "}";
+         ",\"fov\":" + Num(g_top.fov) + ",\"abs\":" + (g_top.abs ? "true" : "false") +
+         ",\"low\":" + Num(g_top.low) + ",\"lod\":" + Num(g_top.lod) + "}";
 }
 
 void ReleaseCamera() {
@@ -2332,7 +2386,7 @@ void Publish(double now, bool inVehicle) {
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
-    for (const std::string &part : {Route(now), Lane(now), Traffic(now), Nearby(now),AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now), TopCamState(),
+    for (const std::string &part : {Route(now), Lane(now), Traffic(now), Nearby(now),AiState(g_veh.handle), VehicleState(now), MountState(), DebugState(now), TopCamState(), PinsState(), "\"ortho\":" + ortho::Stats(),
                                     GpsState(), DirectionsState(now)})
       if (!part.empty()) s << "," << part;
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
@@ -2548,6 +2602,8 @@ void TrafficSources(bool on) {
     for (const char *s : DRIVEN_SCENARIOS) SET_SCENARIO_TYPE_ENABLED(s, FALSE);
   SET_GARBAGE_TRUCKS(on);
   SET_RANDOM_BOATS(on);
+  SET_RANDOM_TRAINS(on);
+  if (!on) DELETE_ALL_TRAINS();
   SET_CREATE_RANDOM_COPS(on);
   SET_CREATE_RANDOM_COPS_NOT_ON_SCENARIOS(on);
   SET_CREATE_RANDOM_COPS_ON_SCENARIOS(on);
@@ -2984,12 +3040,63 @@ void HandleMessage(const Message &m, double now) {
     else if (op == "gsrc")
       // a render target object's ID3D12Resource (at +res, 0x48) as the grab source, in state (D3D12_RESOURCE_STATES) at present
       ortho::GrabSource(addr, static_cast<int>(MsgNum(m, "res", 0x48)), static_cast<unsigned>(MsgNum(m, "state", 0xC0)), Log);
-    else if (op == "image")
+    else if (op == "water") {
+      // a water mask of a grid of cells for the capture planner: per cell (rows from y0 up, columns from x0 east), the
+      // number of its 3x3 sample points (centre, corners, edge middles) over the game's water, 0-9; written as text
+      double x0 = MsgNum(m, "x0"), y0 = MsgNum(m, "y0"), dx = MsgNum(m, "dx", 100), dy = MsgNum(m, "dy", 100);
+      int nx = std::clamp(static_cast<int>(MsgNum(m, "nx", 10)), 1, 4000), ny = std::clamp(static_cast<int>(MsgNum(m, "ny", 10)), 1, 4000);
+      std::string out;
+      out.reserve(size_t(nx + 1) * ny);
+      for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+          int wet = 0;
+          for (int a = -1; a <= 1; a++)
+            for (int b = -1; b <= 1; b++) {
+              float h = 0;
+              wet += GET_WATER_HEIGHT_NO_WAVES(static_cast<float>(x0 + (i + 0.5 + 0.5 * a) * dx), static_cast<float>(y0 + (j + 0.5 + 0.5 * b) * dy), 1000.0f, &h) != 0;
+            }
+          out += static_cast<char>('0' + wet);
+        }
+        out += '\n';
+      }
+      std::string path = MsgStr(m, "path");
+      FILE *f = nullptr;
+      if (!path.empty() && !fopen_s(&f, path.c_str(), "wb") && f) fwrite(out.data(), 1, out.size(), f), fclose(f);
+      Log("ortho water: " + std::to_string(nx) + "x" + std::to_string(ny) + " cells to " + path);
+    } else if (op == "image")
       ortho::DumpImage(MsgStr(m, "path"), Log);
     else if (op == "watch" && addr)
       ortho::Watch(addr, static_cast<float>(MsgNum(m, "secs", 2)), Log);
     else
       Log("ortho: unknown op " + op);
+  } else if (type == "park") {
+    // for captures far from where the player is: the car (and the player in it) held still, hidden and without
+    // collision at x, y, z, so the game streams the world, its collision too, around there; on=0 gives them back
+    Ped ped = PLAYER_PED_ID();
+    Entity e = g_veh.handle ? static_cast<Entity>(g_veh.handle) : static_cast<Entity>(ped);
+    bool on = MsgBool(m, "on", true);
+    if (on) {
+      FREEZE_ENTITY_POSITION(e, TRUE);
+      SET_ENTITY_COLLISION(e, FALSE, FALSE);
+      SET_ENTITY_COORDS(e, static_cast<float>(MsgNum(m, "x")), static_cast<float>(MsgNum(m, "y")), static_cast<float>(MsgNum(m, "z", 1000)), FALSE, FALSE, FALSE, FALSE);
+    } else {
+      SET_ENTITY_COLLISION(e, TRUE, TRUE);
+      FREEZE_ENTITY_POSITION(e, FALSE);
+    }
+    SET_ENTITY_VISIBLE(e, !on, FALSE);
+    SET_ENTITY_VISIBLE(ped, !on, FALSE);
+    Log("park " + std::string(on ? "at " + Num(MsgNum(m, "x")) + "," + Num(MsgNum(m, "y")) + "," + Num(MsgNum(m, "z", 1000)) : "off"));
+  } else if (type == "pins") {
+    // p: "x,y;x,y;..." (empty clears), height: the vertical lines' length (m)
+    g_pins.clear();
+    g_pinHeight = std::clamp(static_cast<float>(MsgNum(m, "height", g_pinHeight)), 0.5f, 500.0f);
+    std::stringstream ss(MsgStr(m, "p"));
+    std::string item;
+    while (std::getline(ss, item, ';')) {
+      float x, y;
+      if (sscanf_s(item.c_str(), "%f,%f", &x, &y) == 2) g_pins.push_back({x, y, NAN});
+    }
+    Log("pins: " + std::to_string(g_pins.size()) + ", " + Num(g_pinHeight) + " m tall");
   } else if (type == "topcam") {
     g_top.on = MsgBool(m, "on", true);
     g_top.abs = MsgBool(m, "abs", false);
@@ -2999,7 +3106,10 @@ void HandleMessage(const Message &m, double now) {
     g_top.pitch = std::clamp(static_cast<float>(MsgNum(m, "pitch", -90.0)), -90.0f, 30.0f);
     g_top.hud = MsgBool(m, "hud", g_top.hud);
     g_top.dof = static_cast<float>(MsgNum(m, "dof", g_top.dof));
-    g_top.lod = std::clamp(static_cast<float>(MsgNum(m, "lod", g_top.lod)), 0.0f, 10.0f);
+    g_top.top = MsgBool(m, "top", false);
+    g_top.tw = static_cast<float>(MsgNum(m, "tw", 0));
+    g_top.th = static_cast<float>(MsgNum(m, "th", 0));
+    g_top.lod = std::clamp(static_cast<float>(MsgNum(m, "lod", g_top.lod)), -1.0f, 10.0f);
     double x = MsgNum(m, "x", NAN), y = MsgNum(m, "y", NAN);
     g_top.follow = std::isnan(x) || std::isnan(y);
     g_top.zref = static_cast<float>(MsgNum(m, "z", NAN));
@@ -3421,6 +3531,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0 && (g_top.hud || !g_top.on)) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
+  if (view < 0) DrawPins();
   if (int presses = g_debugPresses.exchange(0)) {
     static const char *const LEVELS[] = {"off", "route ahead", "full"};
     g_debug.level = (g_debug.level + presses) % 3;

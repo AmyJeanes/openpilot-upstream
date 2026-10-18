@@ -204,6 +204,7 @@ std::vector<Phase> g_phases;
 uint8_t *g_fake = nullptr;  // never freed: a phase may still read it after this module unloads, if a restore missed one
 bool g_redirected = false;
 std::thread g_attachThread;
+std::atomic<bool> g_sourceSet{false};  // a grab source (the albedo target) is set
 
 bool Exe(uintptr_t p) { return p >= g_exeLo && p < g_exeHi; }
 
@@ -444,6 +445,7 @@ void GrabSource(uintptr_t target, int resOffset, unsigned state, LogFn log) {
   Ranges();
   if (!target) {
     present_hook::SetGrabSource(nullptr, 0);
+    g_sourceSet = false;
     return log("ortho grab source: the frame");
   }
   uintptr_t res = 0;
@@ -466,6 +468,7 @@ void GrabSource(uintptr_t target, int resOffset, unsigned state, LogFn log) {
       ", format " + std::to_string(int(d.Format)) + ", dimension " + std::to_string(int(d.Dimension)) + ", flags " + std::to_string(int(d.Flags)) +
       ", state at present taken as " + Hex(state));
   present_hook::SetGrabSource(reinterpret_cast<void *>(res), state);
+  g_sourceSet = true;
 }
 
 void FindGBuffer(unsigned state, LogFn log) {
@@ -633,7 +636,8 @@ bool SetBox(bool on, float fov, float w, float h, float zNear, float zFar, bool 
 
 std::string Stats() {
   return "{\"on\":" + std::string(g_boxOn ? "true" : "false") + ",\"redirected\":" + (g_redirected ? "true" : "false") + ",\"viewport\":\"" +
-         Hex(g_gameVp) + "\",\"phases\":" + std::to_string(g_phases.size()) + ",\"searching\":" + (g_attach == 1 ? "true" : "false") + "}";
+         Hex(g_gameVp) + "\",\"phases\":" + std::to_string(g_phases.size()) + ",\"searching\":" + (g_attach == 1 ? "true" : "false") +
+         ",\"source\":" + (g_sourceSet ? "true" : "false") + "}";
 }
 
 void Update() {

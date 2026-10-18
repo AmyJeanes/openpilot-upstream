@@ -77,6 +77,8 @@ inline void SET_ENTITY_COORDS(Entity e, float x, float y, float z, BOOL xa, BOOL
 inline void SET_ENTITY_HEADING(Entity e, float h) { Invoke(0x8E2530AA8ADA980E, e, h); }
 inline void SET_ENTITY_AS_MISSION_ENTITY(Entity e, BOOL a, BOOL b) { Invoke(0xAD738C3085FE7E11, e, a, b); }
 inline void FREEZE_ENTITY_POSITION(Entity e, BOOL t) { Invoke(0x428CA6DBD1094446, e, t); }
+inline void SET_ENTITY_VISIBLE(Entity e, BOOL on, BOOL unk) { Invoke(0xEA1C610A04DB6BBB, e, on, unk); }
+inline void SET_ENTITY_COLLISION(Entity e, BOOL on, BOOL keepPhysics) { Invoke(0x1A9205C1B9EE827F, e, on, keepPhysics); }
 
 // vehicles
 inline Hash GET_HASH_KEY(const char *s) { return Invoke<Hash>(0xD24D37CC275948CC, s); }
@@ -249,6 +251,9 @@ inline void SET_CAM_DOF_STRENGTH(Cam c, float strength) { Invoke(0x5EE29B4D7D5DF
 inline void SET_CAM_MOTION_BLUR_STRENGTH(Cam c, float strength) { Invoke(0x6F0F77FBA9A8F2E6, c, strength); }
 inline void SET_CAM_USE_SHALLOW_DOF_MODE(Cam c, BOOL on) { Invoke(0x16A96863A17552BB, c, on); }
 inline void OVERRIDE_LODSCALE_THIS_FRAME(float scale) { Invoke(0xA76359FC80B2438E, scale); }
+inline void SET_RANDOM_TRAINS(BOOL on) { Invoke(0x80D9F74197EA47D9, on); }
+inline void DELETE_ALL_TRAINS() { Invoke(0x736A718577F39C7D); }
+inline BOOL GET_WATER_HEIGHT_NO_WAVES(float x, float y, float z, float *h) { return Invoke<BOOL>(0x8EE6B53CE13A9794, x, y, z, h); }
 inline void HARD_ATTACH_CAM_TO_ENTITY(Cam c, Entity e, float xr, float yr, float zr, float x, float y, float z, BOOL relative) {
   Invoke(0x202A5ED9CE01D6E7, c, e, xr, yr, zr, x, y, z, relative);
 }
