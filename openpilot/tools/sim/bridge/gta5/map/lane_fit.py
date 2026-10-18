@@ -15,7 +15,11 @@ a shift a lane away fits as well is ambiguous and dropped). Over the way: the me
 under AGREE_MAD, AGREE_SHARE of them within AGREE_TOL); each edge on its paint line where most stations found one (both
 sides of a lane: its centre and width from the paint); an edge without, beside a lane with paint on its other side,
 keeps that lane's width (one side: the lane shifted to its paint); else moved by the shift. Left alone, and listed: a
-stacked way, stations disagreeing, a lane fitted under LANE_MIN m (a turn bay or a false line) or over LANE_MAX m, paint
+stacked way, a way whose paint is all a junction's (fewer than JUNCTION_CLEAR matched stations outside junctions'
+areas: other roads' lines, stop lines, turn guides), stations disagreeing, a lane fitted under LANE_MIN m (a turn bay or a
+false line) or over LANE_MAX m, lanes moved across the centre line (a two-way way's centre line by more than half the
+lane beside it, or a one-way way's lanes all onto the oncoming side of its line: a two-way car-park aisle the map has
+one way, whose other lane is the oncoming one), paint
 lines inside a lane (the paint and the game files' lane counts disagree: the game files' counts are kept), a way whose
 lanes the build measured from the game files' own paint (source:width=survey: where the paint seen from above has
 them elsewhere, the game files are kept and the way is listed), a way whose
@@ -56,6 +60,8 @@ LANE_MIN, LANE_MAX = 4.0, 6.5  # m: a lane fitted narrower is a bay or a false l
 ONE_SIDE_MIN, ONE_SIDE_MAX = 2.7, 6.5  # m: a lane with paint on one side keeps its width unless it falls outside these
 INSIDE_SHARE = 0.5  # of the matched stations with a paint line inside a lane (a metre or more from its edges): counts disagree
 MOVE_MIN = 0.25  # m an edge moves at least for the fit to be applied
+ONCOMING_KEEP = 0.5  # m a one-way way's kerb-side lane edge stays at least past its line, towards the kerb
+JUNCTION_CLEAR = 2  # matched stations outside junctions' areas a fit needs at least
 VERIFY_TOL = 0.05  # m between the fitted edges and those the written tags give
 ROADS = {'motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link', 'secondary', 'secondary_link',
          'tertiary', 'tertiary_link', 'unclassified', 'residential', 'living_street', 'road'}  # not service or track
@@ -219,7 +225,41 @@ class Stacked:
     return bool(idx) and bool((np.abs(self.z[idx] - z) > STACK_DZ).any())
 
 
-def fit_way(osm: OsmLanes, way: int, paint, stacked: Stacked) -> tuple[dict | None, str | None, dict]:
+class Junctions:
+  """Whether a point is in a junction's area: roads.json's areas that hold a node where 3 or more ways meet (its others
+  are the joints where road pieces meet), at that height."""
+  def __init__(self, roads_path: str, osm: OsmLanes):
+    from openpilot.tools.sim.bridge.gta5.map.junctions import in_fan
+    self.in_fan = in_fan
+    r = json.load(open(roads_path))
+    hubs = np.array([osm.node_xy(n) for n, d in osm.degree.items() if d >= 3]).reshape(-1, 2)
+    tree = cKDTree(hubs) if len(hubs) else None
+    heights = r.get('junction_heights') or [math.nan] * len(r['junctions'])
+    self.areas: list[tuple[np.ndarray, np.ndarray, float]] = []
+    self.cells: dict[tuple[int, int], list[int]] = {}
+    for area, h in zip(r['junctions'], heights, strict=True):
+      centre, ring = np.array(area[2:4], float), np.array(area[4:], float).reshape(-1, 2)
+      near = tree.query_ball_point(centre, float(np.hypot(*(ring - centre).T).max()) + 0.5) if tree is not None else []
+      if not near or not in_fan(hubs[near], centre, ring).any():
+        continue
+      i = len(self.areas)
+      self.areas.append((centre, ring, float(np.mean(h)) if isinstance(h, list) else float(h)))
+      lo, hi = np.floor(np.vstack([centre, ring]).min(0) / 10.0).astype(int), np.floor(np.vstack([centre, ring]).max(0) / 10.0).astype(int)
+      for cx in range(lo[0], hi[0] + 1):
+        for cy in range(lo[1], hi[1] + 1):
+          self.cells.setdefault((cx, cy), []).append(i)
+
+  def at(self, p, z: float) -> bool:
+    for i in self.cells.get((int(math.floor(p[0] / 10.0)), int(math.floor(p[1] / 10.0))), ()):
+      centre, ring, hz = self.areas[i]
+      if math.isfinite(z) and math.isfinite(hz) and abs(hz - z) > STACK_DZ:
+        continue
+      if self.in_fan(np.asarray(p, float)[None], centre, ring)[0]:
+        return True
+    return False
+
+
+def fit_way(osm: OsmLanes, way: int, paint, stacked: Stacked, junctions: Junctions | None = None) -> tuple[dict | None, str | None, dict]:
   """(the fit: edges before and after, how they were found; None where none), why it's left alone (None where it
   isn't), and counts."""
   tags = osm.ways[way][0]
@@ -235,7 +275,7 @@ def fit_way(osm: OsmLanes, way: int, paint, stacked: Stacked) -> tuple[dict | No
   st = stations(osm, way)
   if not st:
     return None, None, info
-  clear, shifts, found, inside = 0, [], [], 0
+  clear, shifts, found, inside, matched_clear = 0, [], [], 0, 0
   own = sum(1 for *_, mine in st if mine)
   own_clear = 0
   for p, u, z, mine in st:
@@ -248,6 +288,7 @@ def fit_way(osm: OsmLanes, way: int, paint, stacked: Stacked) -> tuple[dict | No
     if m is None:
       continue
     d, got = m
+    matched_clear += junctions is None or not junctions.at(p, z)
     shifts.append(d)
     found.append(got)
     # paint lines inside a lane, a metre or more from its edges as fitted here
@@ -257,13 +298,15 @@ def fit_way(osm: OsmLanes, way: int, paint, stacked: Stacked) -> tuple[dict | No
       if b - a > 2.0 and ((lat > a + 1.0) & (lat < b - 1.0)).any():
         inside += 1
         break
-  info = {'stations': len(st), 'own': own, 'clear': clear, 'matched': len(shifts)}
+  info = {'stations': len(st), 'own': own, 'clear': clear, 'matched': len(shifts), 'matched_clear_of_junctions': matched_clear}
   if (own and own_clear < 0.5 * own) or clear < 0.5 * len(st):  # the paint misreads stacked roads: not fitted there
     return None, 'stacked: another road over or under it', info
   if clear < MIN_STATIONS:
     return None, None, info
   if len(shifts) < MIN_STATIONS or len(shifts) < MIN_SHARE * clear:
     return None, None, info  # too little paint: nothing to say
+  if matched_clear < JUNCTION_CLEAR:
+    return None, f'its paint is a junction\'s ({len(shifts) - matched_clear} of its {len(shifts)} matched stations in a junction)', info
   shifts = np.array(shifts)
   med = float(np.median(shifts))
   mad = float(np.median(np.abs(shifts - med)))
@@ -300,7 +343,29 @@ def fit_way(osm: OsmLanes, way: int, paint, stacked: Stacked) -> tuple[dict | No
     return None, f'a lane fitted {min(lane_w):.1f} m wide (under {LANE_MIN} m: a bay or a false line)', info
   if max(lane_w) > LANE_MAX:
     return None, f'a lane fitted {max(lane_w):.1f} m wide (over {LANE_MAX} m: a line missed)', info
+  if (why := across_centre(osm, way, edges, kinds, after)) is not None:
+    return None, why, info
   return {'before': edges, 'after': after, 'kinds': kinds, 'paint_side': paint_side}, None, info
+
+
+def across_centre(osm: OsmLanes, way: int, edges: np.ndarray, kinds: list[str], after: np.ndarray) -> str | None:
+  """Why the fitted edges move lanes across the centre line, None where they don't: a two-way way's centre line moved
+  more than half the narrower lane beside it, or a one-way way's lanes all moved onto the oncoming side of its line
+  (left of it driving on the right)."""
+  if oneway_of(osm.ways[way][0]):
+    if osm.drive_on_right:
+      moved = edges[-1] >= ONCOMING_KEEP > after[-1]
+    else:
+      moved = edges[0] <= -ONCOMING_KEEP < after[0]
+    return 'its lanes would move onto the oncoming side of its line' if moved else None
+  for j, kind in enumerate(kinds):
+    if kind != 'centre':
+      continue
+    beside = [edges[b] - edges[a] for a, b in ((j - 1, j), (j, j + 1))
+              if 0 <= a and b < len(edges) and not kinds[a] == kinds[b] == 'centre']  # lanes, not a median
+    if beside and abs(after[j] - edges[j]) > min(beside) / 2:
+      return f'its centre line would move {abs(after[j] - edges[j]):.1f} m, across half the lane beside it'
+  return None
 
 
 def tags_for(osm: OsmLanes, way: int, after: np.ndarray) -> dict | None:
@@ -349,7 +414,9 @@ def tags_for(osm: OsmLanes, way: int, after: np.ndarray) -> dict | None:
 
 def why_kind(why: str) -> str:
   """A listed way's reason, without its numbers."""
-  for key, kind in (('stacked', 'stacked'), ('disagrees along', 'paint disagrees along it'), ('lane counts', 'lane counts disagree'),
+  for key, kind in (('stacked', 'stacked'), ("a junction's", "its paint is a junction's"),
+                    ('oncoming side', 'lanes onto the oncoming side'), ('centre line would move', 'centre line moved across a lane'),
+                    ('disagrees along', 'paint disagrees along it'), ('lane counts', 'lane counts disagree'),
                     (f'under {LANE_MIN}', f'lane under {LANE_MIN} m'), (f'over {LANE_MAX}', f'lane over {LANE_MAX} m'),
                     (':start', 'lanes widen or move along it'), ('unique key', 'no unique key'), ('tags cannot', 'tags cannot place it'),
                     ('game files measured', 'game files measured it (paint disagrees)')):
@@ -375,12 +442,13 @@ def main():
   osm = OsmLanes.load(os.path.join(args.map_dir, 'gta5.osm.pbf'), to_game)
   paint = PaintIndex(args.paint)
   stacked = Stacked(os.path.join(args.map_dir, 'roads.json'))
+  junctions = Junctions(os.path.join(args.map_dir, 'roads.json'), osm)
   keys = Counter(osm.way_key(w) for w in osm.ways)
   fits, listed, written = [], [], {}
   for n, way in enumerate(osm.ways):
     if n % 5000 == 0:
       print(n, len(osm.ways), len(fits), len(listed), flush=True)
-    fit, why, info = fit_way(osm, way, paint, stacked)
+    fit, why, info = fit_way(osm, way, paint, stacked, junctions)
     key = osm.way_key(way)
     tags = osm.ways[way][0]
     pts = osm.way_points(way)

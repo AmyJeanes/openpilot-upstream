@@ -96,6 +96,62 @@ def test_one_lane_among_many_is_ambiguous():
   assert f is None and info.get('matched', 0) == 0, info
 
 
+def test_junction_paint_alone_left_out():
+  # a side road off node 2 and a junction area over the way up to y 142: one of its matched stations is outside it, the
+  # rest read the junction's paint; a junction area to y 130 leaves 7 outside, and it fits
+  nodes = {**NODES, 5: (40.0, 60.0)}
+  side = {'highway': 'residential', 'lanes': '2', 'width': '11'}
+  osm = made({10: (TWO, [1, 2]), 11: (TWO, [2, 3]), 12: (TWO, [3, 4]), 13: (side, [2, 5])}, nodes)
+  lines = [(-4.9, 'solid'), (0.6, 'dashed'), (6.3, 'solid')]
+  with tempfile.TemporaryDirectory() as d:
+    paint, st = files(d, lines)
+    roads = json.load(open(os.path.join(d, 'roads.json')))
+    roads.update(junctions=[[2, 0, 0.0, 60.0, -8.0, 40.0, 8.0, 40.0, 8.0, 142.0, -8.0, 142.0]], junction_heights=[10])
+    json.dump(roads, open(os.path.join(d, 'roads.json'), 'w'))
+    junctions = fit.Junctions(os.path.join(d, 'roads.json'), osm)
+    assert junctions.at(np.array([0.0, 100.0]), 10.0) and not junctions.at(np.array([0.0, 150.0]), 10.0)
+    assert not junctions.at(np.array([0.0, 100.0]), 30.0)  # another level
+    f, why, info = fit.fit_way(osm, 11, paint, st, junctions)
+    assert f is None and why and "a junction's" in why, (why, info)
+    roads['junctions'][0][8:12] = [8.0, 130.0, -8.0, 130.0]
+    json.dump(roads, open(os.path.join(d, 'roads.json'), 'w'))
+    f, why, info = fit.fit_way(osm, 11, paint, st, fit.Junctions(os.path.join(d, 'roads.json'), osm))
+    assert f is not None and why is None and info['matched_clear_of_junctions'] == 7, (why, info)
+
+
+def test_joint_areas_are_not_junctions():
+  # roads.json's areas where road pieces meet outside junctions (no node where 3 ways meet in them) aren't junctions
+  osm = made({10: (TWO, [1, 2]), 11: (TWO, [2, 3]), 12: (TWO, [3, 4])})
+  with tempfile.TemporaryDirectory() as d:
+    files(d, [(-5.5, 'solid')])
+    roads = json.load(open(os.path.join(d, 'roads.json')))
+    roads.update(junctions=[[2, 0, 0.0, 60.0, -8.0, 40.0, 8.0, 40.0, 8.0, 80.0, -8.0, 80.0]], junction_heights=[10])
+    json.dump(roads, open(os.path.join(d, 'roads.json'), 'w'))
+    assert not fit.Junctions(os.path.join(d, 'roads.json'), osm).at(np.array([0.0, 60.0]), 10.0)
+
+
+def test_two_way_centre_line_not_moved_across_a_lane():
+  # a 1+1 road whose paint is 3.1 m right of its lanes: its centre line would move more than half a lane (a wrong
+  # match, the right lane onto the pavement): left alone. 2 m is half a lane or less of a move: fitted
+  two_way = {'highway': 'residential', 'lanes': '2', 'width': '11'}  # lanes at -5.5..0 (oncoming) and 0..5.5
+  osm = made({10: (two_way, [1, 2]), 11: (two_way, [2, 3]), 12: (two_way, [3, 4])})
+  f, why, info = run(osm, 11, [(-2.4, 'solid'), (3.1, 'centre'), (8.6, 'solid')])
+  assert f is None and why and 'centre line' in why, (why, info)
+  f, why, _ = run(osm, 11, [(-3.5, 'solid'), (2.0, 'centre'), (7.5, 'solid')])
+  assert why is None and f is not None and abs(f['after'][1] - 2.0) < 0.01
+
+
+def test_one_way_lane_not_moved_onto_the_oncoming_side():
+  # a one-lane one-way aisle whose paint puts its lane wholly left of its line (driving on the right: the oncoming
+  # side, the other lane of a two-way car-park aisle the map has one way) is left alone; moved right, it's fitted
+  aisle = {'highway': 'unclassified', 'lanes': '1', 'oneway': 'yes', 'width': '4.4'}  # its lane at -2.2..2.2
+  osm = made({10: (aisle, [1, 2]), 11: (aisle, [2, 3]), 12: (aisle, [3, 4])})
+  f, why, info = run(osm, 11, [(-4.3, 'solid'), (0.1, 'solid')])
+  assert f is None and why and 'oncoming side' in why, (why, info)
+  f, why, _ = run(osm, 11, [(-0.4, 'solid'), (4.6, 'solid')])
+  assert why is None and f is not None and np.allclose(f['after'], [-0.4, 4.6], atol=0.01)
+
+
 def test_way_key():
   # GEOMETRY_FILE's key for a way: its end nodes' GTA ids
   osm = made({10: (TWO, [1, 2])})

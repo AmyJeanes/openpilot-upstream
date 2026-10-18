@@ -1234,27 +1234,38 @@ def merge_side(osm: OsmLanes, nodes: list[int | None], k: int, split: bool = Fal
   """Whether another road joins the route's at its shape point k from behind (driven into the node, heading within
   MERGE_SPREAD of the route's way on) on the left of the route's road in (True) or the right (False); with `split`,
   leaves it ahead (driven away from the node, within MERGE_SPREAD of the route's way in) on the left of the route's
-  road out. None where none does, or on both sides (nodes: route_nodes)."""
+  road out. At any heading where it's the node's only other road and the lanes add up (a fork: GTA's chains part at
+  wide angles). None where none does, or on both sides (nodes: route_nodes)."""
   if not 0 < k < len(nodes) - 1 or None in (nodes[k - 1], nodes[k], nodes[k + 1]):
     return None
   prev, j, nxt = nodes[k - 1], nodes[k], nodes[k + 1]
   here = osm.node_xy(j)
   ours = osm.node_xy(nxt if split else prev) - here  # the route's road on the side the other road is
   along = heading_of(here - osm.node_xy(prev)) if split else heading_of(osm.node_xy(nxt) - here)
+  others = [m for m in osm.links.get(j, ()) if m not in (prev, nxt)]
   sides = set()
-  for m in osm.links.get(j, ()):
-    if m in (prev, nxt):
-      continue
+  for m in others:
     w, fwd = osm.pairs[(j, m) if split else (m, j)]
     one = oneway_of(osm.ways[w][0])
     if one != 0 and (one == 1) != fwd:
       continue
     v = osm.node_xy(m) - here
-    if abs(math.degrees((heading_of(v if split else -v) - along + math.pi) % (2 * math.pi) - math.pi)) > MERGE_SPREAD:
+    if abs(math.degrees((heading_of(v if split else -v) - along + math.pi) % (2 * math.pi) - math.pi)) > MERGE_SPREAD and \
+       not (len(others) == 1 and _forks(osm, prev, j, nxt, m, split)):
       continue
     cross = ours[0] * v[1] - ours[1] * v[0]
     sides.add(bool(cross > 0) if split else bool(cross < 0))
   return sides.pop() if len(sides) == 1 else None
+
+
+def _forks(osm: OsmLanes, prev: int, j: int, nxt: int, m: int, split: bool) -> bool:
+  """Whether the route's road splits at node j into its road on and the road to m (with `split`; else the road from m
+  and the route's road in become its road on) with the lanes adding up, one way each."""
+  def driven(a, b):
+    w, fwd = osm.pairs[(a, b)]
+    return len(osm.lanes(w).ours(FORWARD if fwd else BACKWARD)) if oneway_of(osm.ways[w][0]) else None
+  whole, ours, other = (driven(prev, j), driven(j, nxt), driven(j, m)) if split else (driven(j, nxt), driven(prev, j), driven(m, j))
+  return None not in (whole, ours, other) and ours > 0 and other > 0 and whole == ours + other
 
 
 def ways_from_nodes(points, osm: OsmLanes, tol: float = MATCH_TOL) -> list[tuple[int, bool, int, int]]:

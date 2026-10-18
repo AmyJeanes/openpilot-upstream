@@ -303,6 +303,26 @@ def test_hop_keeps_to_the_outer_lane():
   assert lanes.corners == []
 
 
+def test_fork_lanes_go_by_side():
+  # GTA's chains parting: a two-lane one-way road splits into a one-lane road on ahead, a little right, and a one-lane
+  # road off 55 deg to the left. The lanes add up, so it's a fork whatever the angle: the right lane carries on, though
+  # the road on's lane lies more over the left lane at the node and keeps to its own line (a kept diverge)
+  nodes = {1: (0.0, -100.0), 2: (0.0, 0.0), 3: (5.0, 60.0), 4: (-35.0, 25.0), 5: (10.0, 120.0)}
+  two = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '2', 'width': '8'}
+  one = {'highway': 'motorway', 'oneway': 'yes', 'lanes': '1', 'width': '7', 'placement:offset': '-0.5'}
+
+  def lane_maps(other_lanes: str):
+    ways = {10: (two, [1, 2]), 11: ({**one, 'lanes:run_on': 'no'}, [2, 3]), 12: ({**one, 'lanes': other_lanes}, [2, 4]),
+            13: (one, [3, 5])}
+    ids = np.array(sorted(nodes), np.int64)
+    osm = OsmLanes(OsmData(ids, np.array([nodes[i][1] for i in ids]), np.array([nodes[i][0] for i in ids]), {}, ways, {}),
+                   lambda lat, lon: (lon, lat))
+    pts = np.array([nodes[i] for i in (1, 2, 3, 5)])
+    return [(round(s), m, n) for s, m, n in RouteLanes.from_osm(pts, ways_from_nodes(pts, osm), osm).lane_maps]
+  assert lane_maps('1') == [(100, (None, 0), 1)]
+  assert lane_maps('2') == [(100, (0, None), 1)]  # the lanes don't add up: matched by where they lie
+
+
 def test_nav_targets_from_arrows():
   arrows = parse_arrows([[100.0, ['left', 'through', 'right;through']]])
   turn = Turn(110.0, 'left', 90.0)
