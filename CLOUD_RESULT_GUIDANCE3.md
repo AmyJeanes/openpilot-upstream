@@ -271,9 +271,10 @@ The Mapbox path makes no lane-end asks on GTA's data, guidance2's item 1, and it
 
 - With the truth head 18 -> 1 over both seeds; with the noisy head 27 -> 17 (the rest are the head's misreads above).
 - Nothing lost: in-lane the same (finetuned / truth +2 on seed 1), forced merges the same in every run, and the
-  changes asked fall by the false ones (up to 10 a run). The right asks are 1 fewer in four runs: a lane-end ask that
-  the stale reading happened to get right is now made a moment later, once the reading has caught up, and counted by
-  the check as part of a following request (the merges themselves still happen: forced merges unchanged).
+  changes asked fall by the false ones (up to 10 a run). The right asks are 1 fewer in four runs, all the same one:
+  R34's at (272.8, -369.7), asked 278 m before the end from a reading of lane 1 of 1 where the lane maps start from
+  another count (stale too, and right by luck); without it the car is still in a lane that carries on at the end (the
+  drop judged made in all four).
 - The one left with the truth head, LANE_END (finetuned, seed 0) at (103.6, -1006.5), is a reading one lane off with the
   count right, so this check can't see it; there the lane maps go 2 -> 3 (a lane opening on the left) -> 2 -> 1 -> 2
   within 135 m, the same stretch as R29's and R33's stale cases at (104, -998): it looks like one of live21b's chain
