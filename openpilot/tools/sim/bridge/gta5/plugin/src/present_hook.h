@@ -26,6 +26,9 @@ void Uninstall();
 void SetEnabled(bool on);
 // saves the player's next frame (as the screen shows it) to a 32-bit BMP at path; false while one is pending
 bool RequestGrab(const std::string &path);
+// grabs take this ID3D12Resource of the game's (one of its render targets, in `state` at present) instead of the player's
+// frame; nullptr goes back to the frame
+void SetGrabSource(void *resource, unsigned state);
 // whether frame n's texture may have been overwritten by a later frame: a consumer that read it since should drop it
 bool Reused(uint64_t n);
 }  // namespace present_hook

@@ -26,6 +26,7 @@
 #include "core_api.h"
 #include "natives.h"
 #include "net.h"
+#include "ortho.h"
 #include "present_hook.h"
 #include "script_hook.h"
 
@@ -483,6 +484,8 @@ struct TopCam {
   bool on = false, follow = true, hud = true;
   float x = 0, y = 0, height = 40, heading = 0, fov = 50, pitch = -90;
   float ground = 0;    // the game's ground under the point, which the height is above
+  float dof = -1;      // depth of field strength (0 none), -1 the camera's own
+  float lod = 0;       // the game's LOD distance scale while it's on, 0 the game's own
   float zref = NAN;    // a height near that ground (the road's, from the map), else the vehicle's
   bool abs = false;    // the height is above zref itself, unprobed: under a bridge, where the probe finds its deck
   bool focus = false;  // the game streams the world around the point, not the player
@@ -598,6 +601,9 @@ void UpdateTopCam(Entity follow) {
                        ? z
                        : (std::isnan(g_top.zref) ? ref.z - 0.5f : g_top.zref);
   SET_CAM_FOV(g_top.cam, g_top.fov);
+  if (g_top.dof >= 0) SET_CAM_USE_SHALLOW_DOF_MODE(g_top.cam, FALSE), SET_CAM_DOF_STRENGTH(g_top.cam, g_top.dof);
+  SET_CAM_MOTION_BLUR_STRENGTH(g_top.cam, 0.0f);
+  if (g_top.lod > 0) OVERRIDE_LODSCALE_THIS_FRAME(g_top.lod);
   SET_CAM_COORD(g_top.cam, g_top.x, g_top.y, g_top.ground + g_top.height);
   SET_CAM_ROT(g_top.cam, g_top.pitch, 0.0f, g_top.heading, 2);
   bool away = std::hypot(g_top.x - ref.x, g_top.y - ref.y) > 60.0f;
@@ -2951,6 +2957,39 @@ void HandleMessage(const Message &m, double now) {
     std::string path = MsgStr(m, "path");
     bool ok = g_hook == Hook::On && !path.empty() && present_hook::RequestGrab(path);
     Log("grab " + path + (ok ? "" : ": not taken (no present hook, or one pending)"));
+  } else if (type == "ortho") {
+    // orthographic renders (ortho.cpp): op=scan fov= tol= x= y= z= | dump addr= n= | watch addr= secs=; addr is hex, or exe+hex
+    std::string op = MsgStr(m, "op"), a = MsgStr(m, "addr");
+    uintptr_t addr = 0;
+    bool exe = a.rfind("exe+", 0) == 0;
+    addr = std::strtoull(a.c_str() + (exe ? 4 : 0), nullptr, 16);
+    if (exe) addr += reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (op == "scan")
+      ortho::Scan(static_cast<float>(MsgNum(m, "fov", g_top.fov)), static_cast<float>(MsgNum(m, "tol", 1e-3)), static_cast<float>(MsgNum(m, "x", g_top.x)),
+                  static_cast<float>(MsgNum(m, "y", g_top.y)), static_cast<float>(MsgNum(m, "z", g_top.ground + g_top.height)), Log);
+    else if (op == "dump" && addr)
+      ortho::Dump(addr, static_cast<int>(MsgNum(m, "n", 16)), Log, MsgBool(m, "q", false));
+    else if (op == "box")
+      ortho::SetBox(MsgBool(m, "on", true), static_cast<float>(MsgNum(m, "fov", g_top.fov)), static_cast<float>(MsgNum(m, "w", 76.8)),
+                    static_cast<float>(MsgNum(m, "h", 43.2)), static_cast<float>(MsgNum(m, "near", -500)), static_cast<float>(MsgNum(m, "far", 2000)),
+                    MsgBool(m, "jitter", true), Log);
+    else if (op == "stats")
+      Log("ortho stats " + ortho::Stats());
+    else if (op == "ptrscan" && addr)
+      ortho::PointerScan(addr, static_cast<int>(MsgNum(m, "before", 64)), Log);
+    else if (op == "strscan")
+      ortho::StringScan(MsgStr(m, "s"), Log);
+    else if (op == "gbuffer")
+      ortho::FindGBuffer(static_cast<unsigned>(MsgNum(m, "state", 0xC0)), Log);
+    else if (op == "gsrc")
+      // a render target object's ID3D12Resource (at +res, 0x48) as the grab source, in state (D3D12_RESOURCE_STATES) at present
+      ortho::GrabSource(addr, static_cast<int>(MsgNum(m, "res", 0x48)), static_cast<unsigned>(MsgNum(m, "state", 0xC0)), Log);
+    else if (op == "image")
+      ortho::DumpImage(MsgStr(m, "path"), Log);
+    else if (op == "watch" && addr)
+      ortho::Watch(addr, static_cast<float>(MsgNum(m, "secs", 2)), Log);
+    else
+      Log("ortho: unknown op " + op);
   } else if (type == "topcam") {
     g_top.on = MsgBool(m, "on", true);
     g_top.abs = MsgBool(m, "abs", false);
@@ -2959,6 +2998,8 @@ void HandleMessage(const Message &m, double now) {
     g_top.heading = static_cast<float>(MsgNum(m, "heading", g_top.heading));
     g_top.pitch = std::clamp(static_cast<float>(MsgNum(m, "pitch", -90.0)), -90.0f, 30.0f);
     g_top.hud = MsgBool(m, "hud", g_top.hud);
+    g_top.dof = static_cast<float>(MsgNum(m, "dof", g_top.dof));
+    g_top.lod = std::clamp(static_cast<float>(MsgNum(m, "lod", g_top.lod)), 0.0f, 10.0f);
     double x = MsgNum(m, "x", NAN), y = MsgNum(m, "y", NAN);
     g_top.follow = std::isnan(x) || std::isnan(y);
     g_top.zref = static_cast<float>(MsgNum(m, "z", NAN));
@@ -3275,6 +3316,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   static bool scriptHook = false;
   if (!scriptHook) scriptHook = (script_hook::Install(Log), true);
   script_hook::Update();
+  ortho::Update();
 
   Ped ped = PLAYER_PED_ID();
   if (g_setup.step) StepSetup(ped, now);
@@ -3325,7 +3367,8 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (want && !g_cam) ActivateCamera();
   else if (!want && g_cam) ReleaseCamera();
 
-  if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off && want)
+  // the top camera's grabs take the player's frames from the present hook too, with or without openpilot's
+  if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off && (want || g_top.on))
     g_hook = present_hook::Install(Log, [](const HookFrame &f) { g_capture.ProcessShared(f); }) ? Hook::On : Hook::Failed;
   bool hooked = g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::On;
   CaptureConfig cc;
@@ -3341,7 +3384,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   }
   g_capture.SetEnabled(want);
   g_capture.SetMarker(g_cfg.interleave && !hooked);
-  present_hook::SetEnabled(want && hooked);
+  present_hook::SetEnabled((want || g_top.on) && hooked);
 
   script_hook::SetOverride(g_cam != 0);
   UpdateTopCam(v);
@@ -3431,6 +3474,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   PlaySoundW(nullptr, nullptr, 0);  // its memory goes with this core
   if (g_noTraffic) TrafficSources(true);  // a reloaded core starts with traffic on
   script_hook::Uninstall();
+  ortho::Shutdown();
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();
   ReleaseWaypoint(true);  // and gives the map its waypoint back

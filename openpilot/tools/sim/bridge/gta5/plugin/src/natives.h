@@ -245,6 +245,10 @@ inline BOOL DOES_CAM_EXIST(Cam c) { return Invoke<BOOL>(0xA7A932170592B50E, c); 
 inline void SET_CAM_ACTIVE(Cam c, BOOL a) { Invoke(0x026FB97D0A425F84, c, a); }
 inline void SET_CAM_FOV(Cam c, float fov) { Invoke(0xB13C14F66A00D047, c, fov); }
 inline void SET_CAM_NEAR_CLIP(Cam c, float d) { Invoke(0xC7848EFCCC545182, c, d); }
+inline void SET_CAM_DOF_STRENGTH(Cam c, float strength) { Invoke(0x5EE29B4D7D5DF897, c, strength); }
+inline void SET_CAM_MOTION_BLUR_STRENGTH(Cam c, float strength) { Invoke(0x6F0F77FBA9A8F2E6, c, strength); }
+inline void SET_CAM_USE_SHALLOW_DOF_MODE(Cam c, BOOL on) { Invoke(0x16A96863A17552BB, c, on); }
+inline void OVERRIDE_LODSCALE_THIS_FRAME(float scale) { Invoke(0xA76359FC80B2438E, scale); }
 inline void HARD_ATTACH_CAM_TO_ENTITY(Cam c, Entity e, float xr, float yr, float zr, float x, float y, float z, BOOL relative) {
   Invoke(0x202A5ED9CE01D6E7, c, e, xr, yr, zr, x, y, z, relative);
 }
