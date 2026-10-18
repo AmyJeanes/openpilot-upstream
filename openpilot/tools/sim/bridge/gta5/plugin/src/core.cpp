@@ -2609,6 +2609,22 @@ void UpdateWaterProbe(double now) {
   w.on = false, w.out.clear(), w.out.shrink_to_fit();
 }
 
+// Calm water (waves command): the water override at full strength with no waves or ripples, the deep ocean scaler 0 and
+// no wind, held every frame until it's turned off.
+bool g_calm = false;
+
+void UpdateCalmWater() {
+  if (!g_calm) return;
+  WATER_OVERRIDE_SET_STRENGTH(1.0f);
+  for (auto set : {WATER_OVERRIDE_SET_SHOREWAVEAMPLITUDE, WATER_OVERRIDE_SET_SHOREWAVEMINAMPLITUDE, WATER_OVERRIDE_SET_SHOREWAVEMAXAMPLITUDE,
+                   WATER_OVERRIDE_SET_OCEANNOISEMINAMPLITUDE, WATER_OVERRIDE_SET_OCEANWAVEAMPLITUDE, WATER_OVERRIDE_SET_OCEANWAVEMINAMPLITUDE,
+                   WATER_OVERRIDE_SET_OCEANWAVEMAXAMPLITUDE, WATER_OVERRIDE_SET_RIPPLEBUMPINESS, WATER_OVERRIDE_SET_RIPPLEMINBUMPINESS,
+                   WATER_OVERRIDE_SET_RIPPLEMAXBUMPINESS, WATER_OVERRIDE_SET_RIPPLEDISTURB})
+    set(0.0f);
+  SET_DEEP_OCEAN_SCALER(0.0f);
+  SET_WIND_SPEED(0.0f);
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -3392,6 +3408,11 @@ void HandleMessage(const Message &m, double now) {
     w.started = now, w.on = true;
     Log("waterprobe " + w.id + ": " + std::to_string(w.nx) + "x" + std::to_string(w.ny) + " from " + Num(w.x0) + "," + Num(w.y0) + " step " + Num(w.step) +
         " m=" + w.method + " f=" + std::to_string(w.flags) + " z=" + Num(w.z));
+  } else if (type == "waves") {
+    // calm=1: no waves or ripples on the sea and lakes (UpdateCalmWater); calm=0 gives the game's back
+    g_calm = MsgBool(m, "calm", true);
+    if (!g_calm) WATER_OVERRIDE_SET_STRENGTH(0.0f), RESET_DEEP_OCEAN_SCALER(), SET_WIND_SPEED(-1.0f);
+    Log(std::string("waves: ") + (g_calm ? "calm" : "the game's"));
   } else if (type == "freecam") {
     // on=1 [x y z (m) heading pitch (deg): the pose, else the gameplay camera's or where it is] [fov] [speed (m/s)]
     // [sens (deg per mouse unit)] [hud=0|1] [day=1: midday, clear, the clock stopped; day=0 gives the old back]
@@ -3834,6 +3855,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   UpdateTopCam(v);
   UpdateFreeCam(now, dt);
   UpdateWaterProbe(now);
+  UpdateCalmWater();
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view < 0 && g_top.on && !g_top.hud) HIDE_HUD_AND_RADAR_THIS_FRAME();
   // The wide lens reaches the radar in the corner, so the capture blacks it out. Hiding the radar on openpilot's frames

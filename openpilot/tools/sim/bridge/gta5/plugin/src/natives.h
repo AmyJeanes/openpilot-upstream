@@ -263,6 +263,22 @@ inline int TEST_PROBE_AGAINST_ALL_WATER(float x1, float y1, float z1, float x2, 
   return Invoke<int>(0x8974647ED222EA5F, x1, y1, z1, x2, y2, z2, flags, p);
 }
 inline int TEST_VERTICAL_PROBE_AGAINST_ALL_WATER(float x, float y, float z, int flags, float *h) { return Invoke<int>(0x2B3451FA1E3142E2, x, y, z, flags, h); }
+// the water override: 0 the game's waves, 1 fully the override's values
+inline void WATER_OVERRIDE_SET_STRENGTH(float s) { Invoke(0xC54A08C85AE4D410, s); }
+inline void WATER_OVERRIDE_SET_SHOREWAVEAMPLITUDE(float v) { Invoke(0xB8F87EAD7533B176, v); }
+inline void WATER_OVERRIDE_SET_SHOREWAVEMINAMPLITUDE(float v) { Invoke(0xC3EAD29AB273ECE8, v); }
+inline void WATER_OVERRIDE_SET_SHOREWAVEMAXAMPLITUDE(float v) { Invoke(0xA7A1127490312C36, v); }
+inline void WATER_OVERRIDE_SET_OCEANNOISEMINAMPLITUDE(float v) { Invoke(0x31727907B2C43C55, v); }
+inline void WATER_OVERRIDE_SET_OCEANWAVEAMPLITUDE(float v) { Invoke(0x405591EC8FD9096D, v); }
+inline void WATER_OVERRIDE_SET_OCEANWAVEMINAMPLITUDE(float v) { Invoke(0xF751B16FB32ABC1D, v); }
+inline void WATER_OVERRIDE_SET_OCEANWAVEMAXAMPLITUDE(float v) { Invoke(0xB3E6360DDE733E82, v); }
+inline void WATER_OVERRIDE_SET_RIPPLEBUMPINESS(float v) { Invoke(0x7C9C0B1EEB1F9072, v); }
+inline void WATER_OVERRIDE_SET_RIPPLEMINBUMPINESS(float v) { Invoke(0x6216B116083A7CB4, v); }
+inline void WATER_OVERRIDE_SET_RIPPLEMAXBUMPINESS(float v) { Invoke(0x9F5E6BB6B34540DA, v); }
+inline void WATER_OVERRIDE_SET_RIPPLEDISTURB(float v) { Invoke(0xB9854DFDE0D833D6, v); }
+inline void SET_DEEP_OCEAN_SCALER(float v) { Invoke(0xB96B00E976BE977F, v); }
+inline void RESET_DEEP_OCEAN_SCALER() { Invoke(0x5E5E99285AE812DB); }
+inline void SET_WIND_SPEED(float v) { Invoke(0xEE09ECEDBABE47FC, v); }  // negative: the game's wind again
 inline void HARD_ATTACH_CAM_TO_ENTITY(Cam c, Entity e, float xr, float yr, float zr, float x, float y, float z, BOOL relative) {
   Invoke(0x202A5ED9CE01D6E7, c, e, xr, yr, zr, x, y, z, relative);
 }
