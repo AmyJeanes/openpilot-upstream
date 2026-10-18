@@ -128,3 +128,97 @@ every `gave_up`) and of those, the ones asked again for the same move (same side
   don't get across (LC failed +0-3 a run). In-lane is the same within one in every run (n16 +1 on the Mapbox path seed 0,
   -1 with the noisy head seed 1). Whether n16 changes lanes properly at 9-10 m/s in game is check 1 below; if not, a
   smaller margin (0.5) halves the window.
+
+## Item 2: the turn gap between ~8.5 and 10 m/s
+
+**Measured first** (the baseline, n16; the finetuned model has no gap: its lane change speed, 4 m/s, is below the
+turn signal's). A move's "last chance" is the first step a lane change for it can't be asked any more: on the bridge
+planner past its fast point (`_fast_room`) and slower than `model_lc_speed`, or past its last place; on the Mapbox path
+past its deadline and slower than `lc_min_speed`, or its turn signal. "In the band": the car was then between the turn
+signal's speed (19 mph, 8.49 m/s) and 10 m/s, outside the turn's lanes, with no change under way. What came of each,
+by the probe's later events and the judge:
+
+| run | seed | turns in the band | signalled from beside (turn_into) | skipped to the route | signalled from the wrong lane | nothing from nav | signalled once in its lanes | made |
+|---|---|---|---|---|---|---|---|---|
+| n16 / truth | 0 | 6 | 1 | 4 | 0 | 0 | 1 | 1 |
+| n16 / model:0.85 | 0 | 6 | 2 | 0 | 4 | 0 | 0 | 1 |
+| mapbox / n16 / truth | 0 | 27 | 4 | - | 3 | 14 | 6 | 10 |
+| mapbox / n16 / model:0.85 | 0 | 31 | 6 | - | 6 | 15 | 4 | 13 |
+| n16 / truth | 1 | 4 | 1 | 3 | 0 | 0 | 0 | 1 |
+| n16 / model:0.85 | 1 | 6 | 2 | 1 | 3 | 0 | 0 | 2 |
+| mapbox / n16 / truth | 1 | 23 | 3 | - | 1 | 13 | 6 | 13 |
+| mapbox / n16 / model:0.85 | 1 | 16 | 2 | - | 1 | 10 | 3 | 8 |
+
+(On the Mapbox path "nothing from nav" is mostly made anyway, 10-11 a run, by the car being in a lane for it at the
+commit point after all, or a Mapbox turn the judge has no turn for; "made" counts the judged ones.)
+
+Why the bridge planner's band cases fail, from the planner's own state at each skip (MDT, R07, R10, R21 on seed 0):
+- **R21's left turn at (76.8, -155.7)** is the gap as the brief has it: one lane beside the turn's lane, still at 9.35
+  m/s when it reaches the turn's signal distance (27 m out), so neither a change (too slow) nor the turn's signal (too
+  fast): left to the route. A moment later it was below 8.49 and `turn_into_lane` would have signalled it.
+- **MDT (93.0, -1357.1) and R07 (793.7, -1146.7)**: left to the route at 6.4 and 6.9 m/s, one lane beside, well inside
+  80 m: slow enough for `turn_into_lane`, which refused because `change_went` was still true. `change_went` ("openpilot
+  could start it") is set for the change under way and never cleared when it ends; `_turn_into` reads it as "a change is
+  under way", so after the first lane change of a trip that got going, every later turn from beside was left to the
+  route. That's not only the band: it's every turn_into_lane case after any started change.
+- **R10 (603.8, -372.7)**: a change towards the turn started late (8.8 m/s), still under way 25 m out, given up there.
+- The Mapbox path has no skip; in the band it signals the turn at `signal_min` (28 m) whatever the speed, so from beside
+  the blinker comes on at 8.4-9.97 m/s (R29, R33, R40, R01...): no turn desire below 20 mph and above 19, a lane change
+  desire above 20 mph (desire_helper), the hazard guidance2's item 4 removed.
+
+**What changed**:
+- Bridge planner: `_turn_into` refuses only while a change is under way (`changing is not None and change_went`), not
+  after one has ended. New `_turn_gap` (Tune `turn_gap`, on): one lane beside the turn's lanes on its side, between
+  `min(model_lc_speed, 19 mph)` and `model_lc_speed`, no change open, more than SIGNAL_LAST (8 m) from the turn: where
+  `_signal_due` would leave the turn to the route, it keeps it (returns False, nothing signalled), so `turn_into_lane`
+  signals it once the car has slowed below 19 mph.
+- Lane guidance: `_turn_gap` (Tune `turn_gap`, on): where `turn_into` would take the car over (one lane beside on the
+  turn's side, or in place before its bay opens, within `turn_into` m) but the car is between the lane turn speed and
+  `lc_min_speed`, with no change open, the turn's signal waits until it's slow enough for `turn_into`; no blinker comes
+  on in the band from there (none at all if it never slows: the car goes on and the route recalculates).
+- Neither signals a turn above 19 mph that it didn't before; the in-lane signal at `signal_min` is unchanged.
+
+**Tests**: `test_nav.py::test_turn_gap_keeps_the_turn_for_its_signal` (one lane beside a right turn at 9.3 m/s past its
+last place for a change: no change, no blinker, not left to the route; at 7 m/s its signal; `turn_gap` off: left to
+the route), `test_nav.py::test_turn_into_after_a_change_that_came_back` (a change towards the turn started, then the
+stalk off with the car still beside: slower, the turn's signal from beside, not the route; fails without the
+`_turn_into` fix), `test_lane_guidance.py::test_turn_gap_no_blinker_from_beside_until_slow` (no request at 9.2 m/s from
+22 m out, the turn's signal at 7; `turn_gap` off: signalled at 9.2).
+
+**Measured** (item 1 + item 2 against item 1):
+
+| run | seed | in lane | turns | forks / exits | straight on | LC req / done / gave up / failed | forced merges | left to the route | contacts |
+|---|---|---|---|---|---|---|---|---|---|
+| n16 / truth | 0 | 242 -> 257 | 67 -> 83 | 92 -> 92 | 83 -> 82 | 163/107/7/49 -> 162/108/10/44 | 7 -> 8 | 53 -> 29 | 92 -> 86 |
+| n16 / model:0.85 | 0 | 245 -> 255 | 71 -> 80 | 94 -> 94 | 80 -> 81 | 160/110/4/46 -> 163/111/7/45 | 6 -> 7 | 30 -> 13 | 99 -> 86 |
+| finetuned / truth | 0 | 264 -> 269 | 81 -> 86 | 99 -> 99 | 84 -> 84 | 215/147/8/60 -> 215/148/8/59 | 4 -> 4 | 32 -> 27 | 93 -> 103 |
+| finetuned / model:0.85 | 0 | 255 -> 258 | 74 -> 77 | 99 -> 99 | 82 -> 82 | 208/139/4/65 -> 207/140/4/63 | 8 -> 8 | 29 -> 21 | 69 -> 74 |
+| mapbox / n16 / truth | 0 | 248 -> 247 | 78 -> 77 | 91 -> 91 | 79 -> 79 | 163/107/7/49 -> 164/107/7/50 | 20 -> 20 | - | |
+| mapbox / n16 / model:0.85 | 0 | 244 -> 245 | 74 -> 74 | 91 -> 92 | 79 -> 79 | 168/104/10/54 -> 169/106/10/53 | 22 -> 22 | - | |
+| mapbox / finetuned (both) | 0 | 254, 252: same | same | same | same | same | same | - | |
+| n16 / truth | 1 | 248 -> 256 | 75 -> 83 | 91 -> 91 | 82 -> 82 | 156/115/6/35 -> 156/115/8/33 | 7 -> 8 | 42 -> 24 | 106 -> 81 |
+| n16 / model:0.85 | 1 | 242 -> 248 | 66 -> 74 | 94 -> 92 | 82 -> 82 | 161/112/5/44 -> 164/115/7/42 | 7 -> 8 | 34 -> 13 | 59 -> 61 |
+| finetuned / truth | 1 | 255 -> 258 | 76 -> 79 | 96 -> 96 | 83 -> 83 | 224/145/21/58 -> 218/144/17/57 | 5 -> 4 | 39 -> 35 | 96 -> 92 |
+| finetuned / model:0.85 | 1 | 254 -> 255 | 76 -> 77 | 97 -> 97 | 81 -> 81 | 217/143/8/66 -> 216/142/8/66 | 6 -> 6 | 27 -> 23 | 68 -> 59 |
+| mapbox / n16 / truth | 1 | 247 -> 247 | 80 -> 80 | 88 -> 88 | 79 -> 79 | 161/102/1/58 -> 161/101/1/59 | 18 -> 18 | - | |
+| mapbox / n16 / model:0.85 | 1 | 244 -> 244 | 77 -> 77 | 88 -> 88 | 79 -> 79 | 170/108/1/61 -> 170/107/1/62 | 19 -> 19 | - | |
+| mapbox / finetuned (both) | 1 | 256, 254: same | same | same | same | same | same | - | |
+
+- **The bridge planner**: n16 +15 / +10 (seed 0) and +8 / +6 (seed 1) in lane, all of it turns; the finetuned model
+  +5 / +3 and +3 / +1. Turns left to the route fall by a third to a half. On seed 0, n16 / truth makes 17 turns it
+  missed and misses 1 it made (R40's right turn at (361.1, -271.4)); the 17 are turns signalled from one lane beside at
+  1-8 m/s (MD012's at (-268.0, -1430.1), MDT's at (67.1, -1265.7), R02/R06/R40's at (603.0, -372.0), R11's at (230.4,
+  -222.3), R17, R19 x2, R20, R23, R24, R25, R27 x2...), nearly all after an earlier change on the trip had set
+  `change_went`: that fix, not the band, carries most of it (the split is below, "turn_gap off"). The stand-in's
+  turn desire then moves the car a lane over (TURN_TAKE, 3 s): the sim credits what guidance2's probe saw n16 do (2-12 m
+  of plan movement the right way); whether n16 does it in game is check 2.
+- Contacts in the sim: n16 down (92 -> 86, 99 -> 86, 106 -> 81, 59 -> 61), the finetuned model mixed (93 -> 103, 69 ->
+  74, 96 -> 92, 68 -> 59): the turn desire's move across goes into the gap the stand-in waits for, as a lane change does.
+- Forced merges +1 in three n16 runs (7 -> 8, 6 -> 7): a turn taken changes which lane the car is in after it.
+- **The Mapbox path**: within one (248 -> 247, 244 -> 245, the rest the same). In the band the blinker from beside is
+  gone (seed 0: 3 -> 1 and 6 -> 1, the one left R29's at (288.5, -856.1), two lanes off; seed 1: 1 -> 0 and 1 -> 0);
+  those turns are now signalled from beside once below 19 mph (seed 0: 4 -> 7 and 6 -> 13), but mostly too late for the
+  judge's commit point. No turn is signalled from outside its lanes at 20 mph or more (0 / 0 on seed 0, n16).
+- Band cases still left to the route on the bridge planner: MDT's left turn at (93.0, -1357.1) (the car on the wrong
+  side of its lanes for the turn signal to help: lane 1 of 2 needed from lane 0 for a left turn) and R10's (a change
+  under way not done 25 m out).

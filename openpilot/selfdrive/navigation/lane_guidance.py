@@ -95,6 +95,9 @@ class Tune:
   signal_min: float = 28.0  # m: signalled by here whatever the speed
   signal_last: float = 26.0  # m: a change towards the turn still under way gives way to its signal by here
   turn_into: float = 80.0  # m: slower than lc_min_speed, one lane beside the turn's (or before its bay opens), its signal takes the car over
+  # there, but too fast for that (the lane turn speed) and too slow for a change: no signal until slow enough for
+  # turn_into (above 20 mph openpilot takes a blinker as a lane change)
+  turn_gap: bool = True
   turn_done: float = 20.0  # m past the turn: its signal off
   # requests
   change_timeout: float = 10.0  # s a lane change may hang before it's withdrawn (desire_helper's)
@@ -661,6 +664,13 @@ class LaneGuidance:
       return False
     return need["bay"] or (need["changes"] == 1 and need["side"] == m.side)
 
+  def _turn_gap(self, m: Move, need: dict) -> bool:
+    """turn_gap: where turn_into's signal would take the car over, but too fast for it and too slow for a change."""
+    t = self.tune
+    if not t.turn_gap or t.turn_into <= 0 or m.along - self.along > t.turn_into:
+      return False
+    return min(t.lc_min_speed, LANE_TURN_SPEED) <= self.v < t.lc_min_speed and (need["bay"] or (need["changes"] == 1 and need["side"] == m.side))
+
   def _turn(self, inp: GuidanceInputs, ahead: list[Move]):
     """The turn ahead's signal: on near it once slow (the lane turn speed), or by signal_min whatever the speed, or
     earlier where its signal is to take the car over (turn_into); off once past it."""
@@ -681,6 +691,8 @@ class LaneGuidance:
     into = need is not None and self._turn_into(m, need)
     window = max(t.signal_min, min(t.signal_max, inp.v * t.signal_time))
     if not (dist < t.signal_min or (dist < window and inp.v < LANE_TURN_SPEED) or into):
+      return
+    if not into and self.changing is None and need is not None and self._turn_gap(m, need):
       return
     if self.changing is not None:
       if not into and dist > t.signal_last:

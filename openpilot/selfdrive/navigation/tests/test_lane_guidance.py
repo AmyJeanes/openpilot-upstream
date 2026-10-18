@@ -187,6 +187,23 @@ def test_hovering_at_the_lane_change_speed_asks_once():
   assert [e["outcome"] for e in d.g.request_log].count("gave_up") >= 2  # change_gap apart
 
 
+def test_turn_gap_no_blinker_from_beside_until_slow():
+  """One lane beside a right turn's lane, between the lane turn speed (19 mph) and lc_min_speed inside signal_min: no
+  change (too slow) and no signal (too fast for the turn desire, a lane change above 20 mph) until the car slows
+  below 19 mph, when turn_into's signal takes it over; turn_gap off, signalled at that speed."""
+  for tune, signal_v in ((None, 7.0), ({"turn_gap": False}, 9.2)):
+    d = Drive(turn_right_two_lanes(), tune)
+    d.along = 2000.0 - 40.0
+    out = d.run_until(9.2, (0, 2), lambda o: o.request is not None, 2.0)  # to 22 m out: nothing asked
+    if signal_v == 9.2:
+      assert out is not None and out.request["kind"] == "turn"
+      continue
+    assert out is None
+    out = d.run_until(7.0, (0, 2), lambda o: o.request is not None, 2.0)
+    assert out is not None and out.request["kind"] == "turn" and out.request["side"] == "right"
+    assert [r for r in out.requests if r.startswith("signalTurn")] == ["signalTurnRight"]
+
+
 def test_request_and_sided_desire():
   """Stage 1: NavDesire laneChange:<side>, the blinker the driver's (approved once on); stage 3: bare laneChange, nav's
   blinker after openpilot has read it; done, the next waits change_gap."""

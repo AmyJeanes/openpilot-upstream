@@ -257,6 +257,11 @@ class Tune:
     # the model's turn desire takes it over (the probe: 2-12 m of plan movement the right way, even from a standstill),
     # where its lane change wouldn't (0: off)
     "turn_into_lane": 80.0,  # m
+    # the gap below model_lc_speed where the car is still too fast for that signal (19 mph, the turn desire's speed): one
+    # lane beside the turn's lanes there, the turn is kept until SIGNAL_LAST before it rather than left to the route, so
+    # turn_into_lane signals it once the car has slowed; nothing is signalled meanwhile (above 20 mph openpilot takes a
+    # blinker as a lane change)
+    "turn_gap": True,
     # share of model_lc_speed under which, before that point, a city change waits for the car to be faster (traffic, a
     # light) rather than being asked for (0: never waits); partly across at once, the model gets there as it speeds up
     "lc_wait": 0.8,
@@ -1636,6 +1641,8 @@ class Planner:
         beside = t.turn_from_beside and self.lane[0] in (lo - 1, hi + 1) and (
           self.lane_frac is None or lo - 1 - SKIP_SURE <= self.lane_frac <= hi + 1 + SKIP_SURE)
         if self._sure_wrong(lo, hi) and not beside:
+          if self._turn_gap(turn, lo, hi, v):
+            return False  # its signal once slower (turn_into_lane)
           self._end_change(indicator, "left")
           self._skip(route, turn.dist, f"{turn.side} turn")
           return False
@@ -1654,9 +1661,19 @@ class Planner:
     t = self.tune
     if t.model_lc_speed <= 0 or t.turn_into_lane <= 0 or turn.dist > t.turn_into_lane or self.lane is None or self.lane[0] < 0:
       return False
-    if v >= min(t.model_lc_speed, 19 * CV.MPH_TO_MS) or self.change_went:
-      return False
+    if v >= min(t.model_lc_speed, 19 * CV.MPH_TO_MS) or self.changing is not None and self.change_went:
+      return False  # (a change under way: openpilot is moving the car; one over, it no longer holds the turn back)
     lo, hi = self._lanes_for(turn)
+    return self.lane[0] == (hi + 1 if turn.side == "left" else lo - 1)
+
+  def _turn_gap(self, turn: Turn, lo: int, hi: int, v: float) -> bool:
+    """turn_gap: one lane beside the turn's lanes lo-hi on its side, too fast for its signal to take the car over
+    (turn_into_lane) and too slow for a lane change, short of SIGNAL_LAST: kept, not left to the route."""
+    t = self.tune
+    if not t.turn_gap or t.model_lc_speed <= 0 or t.turn_into_lane <= 0 or self.changing is not None or turn.dist <= SIGNAL_LAST:
+      return False
+    if not min(t.model_lc_speed, 19 * CV.MPH_TO_MS) <= v < t.model_lc_speed:
+      return False
     return self.lane[0] == (hi + 1 if turn.side == "left" else lo - 1)
 
   def _enter_bay(self, turn: Turn, bay: float, v: float, now: float):

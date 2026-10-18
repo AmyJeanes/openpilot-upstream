@@ -868,6 +868,48 @@ def test_slow_beside_the_turn_signals_it():
     assert got == want and 120.0 - y > 40.0, (tune, got, 120.0 - y)
 
 
+def test_turn_gap_keeps_the_turn_for_its_signal():
+  """One lane beside a right turn's lane, between the turn signal's speed (19 mph) and n16's lane change speed when
+  the last place for a change goes by: no change, no signal, and not left to the route; once the car slows below
+  19 mph its signal (turn_into_lane) takes the model over. turn_gap off: left to the route at that speed."""
+  route = route_to_turn(120.0)
+  for tune, want in (({}, "signal"), ({"turn_gap": False}, "skipped")):
+    d = Drive((0, 2), v=9.3)
+    d.nav.tune.values.update(tune)
+    y, got, blinkers = 40.0, None, set()
+    while y < 110.0 and got is None:
+      d.v = 9.3 if 120.0 - y > 22.0 else 7.0
+      d.step(route, y, {"laneFrac": 0.0, "routeEnd": 300.0})
+      got = "signal" if d.nav.signaling else "skipped" if d.nav.skipped else None
+      if d.indicator is not None:
+        blinkers.add(d.v)
+      y += d.v * 0.05
+    assert got == want, (tune, got, 120.0 - y)
+    assert d.nav.changing is None and all(v < 19 * 0.44704 for v in blinkers), blinkers
+    if want == "signal":
+      assert 120.0 - y < 22.0 and not d.nav.skipped
+
+
+def test_turn_into_after_a_change_that_came_back():
+  """A change towards a right turn that openpilot started but didn't finish (the car back in the lane beside): slower
+  near the turn, its signal from beside still takes over (the change no longer under way), not left to the route."""
+  route = route_to_turn(300.0)
+  at, d = first_change(route, (0, 2), 11.0, {"routeEnd": 500.0}, upto=280.0)
+  assert at is not None
+  y = 300.0 - at
+  for _ in range(30):  # the blinker on and the side clear: openpilot starts it
+    d.step(route, y, {"routeEnd": 500.0 - y, "laneFrac": 0.0})
+    y += d.v * 0.05
+  assert d.nav.change_went
+  d._send({"type": "indicatorOff"})  # it gave up and came back: the stalk off
+  d.v = 6.0
+  y = max(y, 300.0 - 75.0)
+  while y < 290.0 and not d.nav.signaling and not d.nav.skipped:
+    d.step(route, y, {"routeEnd": 500.0 - y, "laneFrac": 0.0})
+    y += d.v * 0.05
+  assert d.nav.signaling and not d.nav.skipped and 300.0 - y > 40.0, (300.0 - y, d.nav.skipped)
+
+
 def test_request_lifecycle():
   """A change for a turn: the request (navInstruction.request's content) says what, which side, why, by when and the
   stage; approved once the blinker is on its side; logged with its outcome once over (a navRequest event)."""
