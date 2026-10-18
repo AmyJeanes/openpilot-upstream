@@ -439,7 +439,9 @@ def run(args) -> None:
     return
   sh.setup(todo[0]["x"], todo[0]["y"])
   time.sleep(5.0)
-  ref = Reference(sh, tiles[0], log)
+  # the reference: --ref x y, else the plan's first tile (a coast's surf animates, so pick an inland one for a coast-first plan)
+  ref_tile = {"name": "ref", "i": 0, "j": 0, "x": args.ref[0], "y": args.ref[1]} if args.ref else tiles[0]
+  ref = Reference(sh, ref_tile, log)
   t0 = time.monotonic()
   shot, failed, prev = 0, [], None
   for t in todo:
@@ -486,6 +488,7 @@ def main():
   b.add_argument("plan")
   b.add_argument("--minutes", type=float)
   b.add_argument("--stop-free-gb", type=float, default=30.0)
+  b.add_argument("--ref", type=float, nargs=2, help="x y of the reference tile (default the plan's first)")
   args = ap.parse_args()
   plan(args) if args.cmd == "plan" else run(args)
 
