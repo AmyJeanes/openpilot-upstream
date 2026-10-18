@@ -9,10 +9,10 @@ Built under `/mnt/e/gta5map_candidates/live21d/` (not in the repo: lanes.json an
 
 | file | sha256 | what |
 |---|---|---|
-| `gta5.osm.pbf` | `33cce8aa93937d3f…` | live19b's pbf baked (`lane_geometry.py`) with `lanegeom.review.json` |
-| `lanegeom.review.json` | `fa5cf025702e59a3…` | **in this folder**: live21's lane geometry less 37 fits (below); the 14 kept diverges unchanged |
-| `roads.json` | `6a8e07b5a05db3f8…` | `osm_to_roads.py` on this branch, `--hatched` live19b's hatched19b.json |
-| `lanes.json` | `db669d9a36039adc…` | the same run |
+| `gta5.osm.pbf` | `85959dad08c66afa…` | live19b's pbf baked (`lane_geometry.py`) with `lanegeom.review.json` |
+| `lanegeom.review.json` | `64b808f24ccbb918…` | **in this folder**: live21's lane geometry less 33 fits (below); the 14 kept diverges unchanged |
+| `roads.json` | `6e1ba290b2a82477…` | `osm_to_roads.py` on this branch, `--hatched` live19b's hatched19b.json |
+| `lanes.json` | `47ff609f6803ae87…` | the same run |
 
 No nodes, ways, access or turn rules change: the 348 scan trips route identically on live21d's Valhalla tiles and the
 live ones, so the live tiles and nav map tiles stay.
@@ -41,19 +41,21 @@ A stricter junction rule (no stations in junction areas at all) was tried first 
 and on the crops about half of those it dropped by more than 0.75 m were right (lane paint runs on into the junction
 polygons on approaches). The junction stations' shifts agree with the clear stations' on most ways.
 
-**The 37 fits dropped** (live21 keeps 1,346 of 1,383; the rules were judged by running `lane_fit.py` with and without
+**The 33 fits dropped** (live21d keeps 1,350 of live21's 1,383; the rules were judged by running `lane_fit.py` with and without
 them on live19b's map with the local 2-tile paint, `paint_lanes_confident.json`; live21's own tags are kept for every
 fit that stays):
 - the 7 live21c rejected: by rule 496:839>496:861 (centre line 3.1 m), 561:92>561:98 and 561:46>561:49 (oncoming
   side), 562:112>562:118 (junction paint alone); by Amy's review answers 653:114>653:117 (junction), 491:43>492:162 and
   398:570>398:566 (unsure, not applied). 653:114's error is the size of the shift, not junction paint: its stations
   outside the junction say the same.
-- 30 fitted from junction paint alone, none moved more than 0.72 m. The 16 that moved 0.4 m or more are on the live21d
-  Map Review page for Amy.
+- 26 fitted from junction paint alone, none moved more than 0.72 m. The rule dropped 30; the 16 that moved 0.4 m or
+  more went on the live21d Map Review page, where Amy confirmed 12 and kept 4 (464:339>464:338, 493:275>493:218,
+  494:315>494:306, 494:832>494:830). Nothing in the stations, shift, paint or road class separates those 4 from
+  neighbouring ways she dropped with the same evidence, so they're kept by name (`AMY_KEEP` in the build's filter),
+  as live21c's rejects were. The first build without them (37 dropped) is kept beside as `*.v1`.
 
-Scan (348 trips, live21c vs live21d, same code): lane centres move at most 0.46 m, all at dropped fits; one lane map
-changes (trip X063 at (-752, -41), where a dropped fit shifts a run boundary next to a left turn: nav takes the lane
-from the arrows there, which already say the left lane).
+Scan (348 trips, live21c vs live21d, same code): lane centres move at most 0.46 m, all at dropped fits, and no lane
+map changes. With the code change too, only place 7's node changes lane maps (4 trips).
 
 ## Rebuild
 
@@ -68,5 +70,4 @@ osm_to_roads.py live21d/gta5.osm.pbf live21d/roads.json --lanes live21d/lanes.js
 1. **Place 7**: `-475.0,-1648.0,20.0,317,1` to `-372.8,-1430.5`. The car should stay in the right lane and take the exit
    without moving left first; watch the start of the solid line.
 2. **Alta St** (496:839>496:861, (96, -108)) and **place 9's start**: unchanged from live21c (Alta's fit stays dropped).
-3. One of the dropped junction fits that looked right on the crops, e.g. 495:282>495:284 at the junction mouth: the
-   lanes there are up to 0.4 m off the paint again.
+3. A junction mouth with a dropped fit Amy confirmed, e.g. 495:282>495:284, and one she kept, e.g. 494:315>494:306.
