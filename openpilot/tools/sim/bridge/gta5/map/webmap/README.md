@@ -15,7 +15,8 @@ Rebuilding everything from the captures (`/mnt/e/gta5_ortho_20261018`):
    rebuilds the blocks holding painted cells.
 3. Roads: `roads.py <gta5.osm.pbf> --pmtiles roads.pmtiles` builds the vector roads for the street and hybrid views
    (it needs `osmium`, `mapbox_vector_tile` and `pmtiles` in one environment).
-4. View: put `index.html` beside `sat.pmtiles` and `roads.pmtiles` and serve the folder with `rangeserver.py <dir> <port>`
+4. 3D: `demfull.py <out dir>` averages the height tiles to z18 (~0.5 m) as terrarium elevation tiles, `dem.pmtiles`.
+5. View: put `index.html` beside `sat.pmtiles`, `roads.pmtiles` and `dem.pmtiles` and serve the folder with `rangeserver.py <dir> <port>`
    (PMTiles needs HTTP range requests).
 
 Covered roads (tunnels, roads under buildings and sheds) for the labeller, not the public map: `imgcheck/covered/find.py`
