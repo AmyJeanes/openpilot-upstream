@@ -8,10 +8,13 @@ Rebuilding everything from the captures (`/mnt/e/gta5_ortho_20261018`):
 
 1. Water: `imgcheck/water/bodies.py <dir>` puts every height tile's water probe on one 1 m world grid and assigns each
    water point a body; `imgcheck/water/compose_full.py <out> --all` draws the water into the albedo tiles with each
-   body's colour and opacity (`imgcheck/water/params.json`).
+   body's colour and opacity (`imgcheck/water/params.json`); `imgcheck/water/fill_cells.py <out>` paints the cells the
+   capture skipped as open water (the middle of the Alamo Sea, the port basins) in their body's deep colour.
 2. Satellite: `satfull.py <out dir>` mosaics every cell (water tiles first, then the filled ones, then the raw albedo)
-   into WebP tiles z22..z10 as `sat.pmtiles`. It works in z16 blocks and resumes from its spool.
-3. Roads: `roads.py <gta5.osm.pbf> --pmtiles roads.pmtiles` builds the vector roads for the street and hybrid views.
+   into WebP tiles z22..z10 as `sat.pmtiles`. It works in z16 blocks and resumes from its spool; `--redo-fill`
+   rebuilds the blocks holding painted cells.
+3. Roads: `roads.py <gta5.osm.pbf> --pmtiles roads.pmtiles` builds the vector roads for the street and hybrid views
+   (it needs `osmium`, `mapbox_vector_tile` and `pmtiles` in one environment).
 4. View: put `index.html` beside `sat.pmtiles` and `roads.pmtiles` and serve the folder with `rangeserver.py <dir> <port>`
    (PMTiles needs HTTP range requests).
 

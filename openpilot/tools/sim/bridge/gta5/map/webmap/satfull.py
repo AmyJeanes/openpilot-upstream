@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gframe  # noqa: E402
 
 F = "/mnt/e/gta5_ortho_20261018"
-SRC = [f"{F}/full_water/tiles", f"{F}/full_filled", f"{F}/full/tiles"]
+FILL = f"{F}/full_water/fill"  # open-water cells the capture skipped, painted the body's colour
+SRC = [f"{F}/full_water/tiles", f"{F}/full_filled", f"{F}/full/tiles", FILL]
 CW, CH, CX0, CY0 = 2304, 1296, 128, 72
 PPM = 100.0 / 3.0
 Z, B = 22, 16                      # top zoom, block zoom
@@ -178,11 +179,15 @@ def main():
   ap.add_argument("--zmin", type=int, default=10)
   ap.add_argument("--workers", type=int, default=3)
   ap.add_argument("--blocks", type=int, default=0)
+  ap.add_argument("--redo-fill", action="store_true", help="rebuild the blocks that hold painted open-water cells")
+  ap.add_argument("--redo-cells", default="", help="rebuild the blocks that hold these cells: i,j;i,j")
   a = ap.parse_args()
   QUALITY = a.quality
   os.makedirs(f"{a.out}/spool", exist_ok=True)
   cv2.setNumThreads(2)
-  cells = sorted((int(f[1:4]), int(f[5:8])) for f in os.listdir(f"{F}/full/tiles") if f.endswith(".json"))
+  cells = {(int(f[1:4]), int(f[5:8])) for f in os.listdir(f"{F}/full/tiles") if f.endswith(".json")}
+  fill = {(int(f[1:4]), int(f[5:8])) for f in os.listdir(FILL) if f.endswith(".png")} if os.path.isdir(FILL) else set()
+  cells = sorted(cells | fill)
   blocks = {}
   for i, j in cells:
     xc, yc = centre(i, j)
@@ -195,6 +200,14 @@ def main():
   for k, cs in blocks.items():  # a cell of margin all round, for the resampling kernel
     blocks[k] = sorted({(i + di, j + dj) for i, j in cs for di in (-1, 0, 1) for dj in (-1, 0, 1)} & have)
   keys = sorted(blocks)
+  redo = fill if a.redo_fill else {tuple(int(v) for v in c.split(",")) for c in a.redo_cells.split(";") if c}
+  if redo:
+    for k in keys:
+      if redo & set(blocks[k]):
+        for ext in (".idx", ".dat", ".z16.npy"):
+          p = f"{a.out}/spool/{k[0]}_{k[1]}{ext}"
+          if os.path.exists(p):
+            os.remove(p)
   if a.blocks:
     mid = len(keys) // 2
     keys = keys[mid:mid + a.blocks]
