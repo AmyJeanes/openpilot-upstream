@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GTA V map prototype</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+  html, body { margin: 0; height: 100%; font: 13px/1.3 system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .panel { position: absolute; z-index: 2; background: rgba(255,255,255,.92); border-radius: 6px;
+           box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  #views { top: 10px; left: 10px; display: flex; overflow: hidden; }
+  #views button { border: 0; background: none; padding: 8px 14px; cursor: pointer; font: inherit; color: #333; }
+  #views button + button { border-left: 1px solid #ddd; }
+  #views button.on { background: #1a73e8; color: #fff; }
+  #zoom { top: 58px; left: 10px; padding: 4px 9px; font-variant-numeric: tabular-nums; }
+  .maplibregl-ctrl-scale { margin-bottom: 10px !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="views" class="panel">
+  <button data-view="street">Street</button><button data-view="hybrid">Hybrid</button><button data-view="satellite">Satellite</button>
+</div>
+<div id="zoom" class="panel"></div>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
+<script>
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+const base = location.origin + location.pathname.replace(/[^/]*$/, "");
+const SAT = base + "sat.pmtiles", ROADS = base + "roads.pmtiles";
+const FONT = ["Noto Sans Medium"];
+
+// width in px at z16, then doubling per zoom (real road width) above; thinner below
+const W16 = { minor: 4, major: 7, highway: 10, other: 3 };
+function lw(w16, extra = 0, low = 0.2) {
+  return ["interpolate", ["exponential", 2], ["zoom"], 12, w16 * low + extra, 16, w16 + extra, 24, w16 * 256 + extra];
+}
+function halfOffset(w16, sign) {
+  return ["interpolate", ["exponential", 2], ["zoom"], 12, sign * w16 * 0.1, 16, sign * w16 / 2, 24, sign * w16 * 128];
+}
+const KIND = {
+  highway: ["==", ["get", "kind"], "highway"],
+  major: ["==", ["get", "kind"], "major_road"],
+  minor: ["==", ["get", "kind"], "minor_road"],
+  other: ["==", ["get", "kind"], "other"],
+};
+const BRIDGE = ["==", ["get", "is_bridge"], true];
+const NOBRIDGE = ["!", BRIDGE];
+const roadLayers = [];
+const L = (view, l) => { l.metadata = { view }; roadLayers.push(l); };
+const order = ["other", "minor", "major", "highway"];
+const col = {
+  street: { casing: { other: "#cfcfcf", minor: "#c3c3c3", major: "#a8a8a8", highway: "#d98e1f" },
+            fill: { other: "#ffffff", minor: "#ffffff", major: "#ffffff", highway: "#fbc75c" } },
+};
+for (const bridge of [false, true]) {
+  for (const k of order) {
+    const flt = ["all", KIND[k], bridge ? BRIDGE : NOBRIDGE];
+    const tag = `${k}${bridge ? "-br" : ""}`;
+    const cap = { "line-cap": bridge ? "butt" : "round", "line-join": "round" };
+    L("street", { id: `st-casing-${tag}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
+      layout: cap, paint: { "line-color": bridge ? "#8a8a8a" : col.street.casing[k], "line-width": lw(W16[k], 3, 0.8) } });
+    L("street", { id: `st-fill-${tag}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
+      layout: cap, paint: { "line-color": col.street.fill[k], "line-width": lw(W16[k], 0, 0.8) } });
+  }
+}
+// hybrid: translucent fill that fades out as the painted road becomes visible, plus thin edge lines
+for (const k of order) {
+  const flt = KIND[k];
+  const tint = k === "highway" ? "#ffc857" : "#ffffff";
+  L("hybrid", { id: `hy-fill-${k}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
+    layout: { "line-cap": "butt", "line-join": "round" },
+    paint: { "line-color": tint, "line-width": lw(W16[k], 0, 0.8),
+             "line-opacity": ["interpolate", ["linear"], ["zoom"], 12, 0.75, 16, 0.5, 17, 0.2, 18, 0] } });
+  for (const s of [1, -1]) {
+    L("hybrid", { id: `hy-edge-${k}${s}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
+      layout: { "line-join": "round" },
+      paint: { "line-color": k === "highway" ? "#ffd27a" : "#ffffff", "line-width": 1.2, "line-offset": halfOffset(W16[k], s),
+               "line-opacity": ["interpolate", ["linear"], ["zoom"], 15, 0, 17, 0.85] } });
+  }
+}
+const labelSize = ["interpolate", ["linear"], ["zoom"], 13, 10, 16, 12, 18, 16, 20, 26, 22, 44];
+function label(view, id, flt, minzoom, paint) {
+  L(view, { id, type: "symbol", source: "roads", "source-layer": "roads", minzoom,
+    filter: ["all", ["has", "name"], flt],
+    layout: { "symbol-placement": "line", "text-field": ["get", "name"], "text-font": FONT, "text-size": labelSize,
+              "text-max-angle": 30, "symbol-spacing": ["interpolate", ["linear"], ["zoom"], 14, 250, 22, 900],
+              "text-padding": 4 }, paint });
+}
+const labelsStreet = { "text-color": "#3c4043", "text-halo-color": "#ffffff", "text-halo-width": 2 };
+const labelsHybrid = { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.85)", "text-halo-width": 2 };
+for (const v of ["street", "hybrid"]) {
+  const p = v === "street" ? labelsStreet : labelsHybrid;
+  label(v, `${v}-lbl-major`, ["any", KIND.highway, KIND.major], 12.5, p);
+  label(v, `${v}-lbl-minor`, ["any", KIND.minor, KIND.other], 15, p);
+}
+
+const style = {
+  version: 8,
+  glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
+  sources: {
+    sat: { type: "raster", url: "pmtiles://" + SAT, tileSize: 256 },
+    roads: { type: "vector", url: "pmtiles://" + ROADS },
+  },
+  layers: [
+    { id: "bg", type: "background", paint: { "background-color": "#f1eee8" } },
+    { id: "sat", type: "raster", source: "sat", paint: { "raster-resampling": "linear" },
+      layout: { visibility: "none" } },
+    ...roadLayers,
+  ],
+};
+
+const params = new URLSearchParams(location.search);
+let view = params.get("view") || "hybrid";
+const map = new maplibregl.Map({ container: "map", style, hash: new URLSearchParams(location.search).get("hash") !== "0", minZoom: 11, maxZoom: 21,
+  center: [-0.005, 33.989], zoom: 17, attributionControl: false, });
+window.map = map;
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
+map.addControl(new maplibregl.ScaleControl({ maxWidth: 140, unit: "metric" }), "bottom-left");
+
+function setView(v) {
+  view = v;
+  document.querySelectorAll("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  map.setLayoutProperty("sat", "visibility", v === "street" ? "none" : "visible");
+  map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#14181c");
+  for (const l of roadLayers) {
+    map.setLayoutProperty(l.id, "visibility", l.metadata.view === v ? "visible" : "none");
+  }
+  const u = new URL(location.href); u.searchParams.set("view", v); history.replaceState(null, "", u);
+}
+document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.view));
+const zl = document.getElementById("zoom");
+const upd = () => { zl.textContent = "z " + map.getZoom().toFixed(2); };
+map.on("move", upd); upd();
+// MapLibre takes quick wheel notches for a trackpad and jumps without easing; ease every wheel step towards one target instead
+map.scrollZoom.disable();
+let wheelTarget = null, wheelAt = 0;
+map.getCanvasContainer().addEventListener("wheel", e => {
+  e.preventDefault();
+  const px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 800 : e.deltaY;
+  const base = wheelTarget !== null && e.timeStamp - wheelAt < 250 ? wheelTarget : map.getZoom();  // easeTo's own stop() fires moveend
+  wheelAt = e.timeStamp;
+  wheelTarget = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), base - px / 300));
+  const r = map.getCanvasContainer().getBoundingClientRect();
+  map.easeTo({ zoom: wheelTarget, around: map.unproject([e.clientX - r.left, e.clientY - r.top]), duration: 220,
+    easing: t => 1 - Math.pow(1 - t, 3) });
+}, { passive: false });
+map.on("load", async () => {
+  setView(view);
+  if (!location.hash) {
+    const h = await new pmtiles.PMTiles(SAT).getHeader();
+    map.jumpTo({ center: [h.centerLon, h.centerLat], zoom: 17 });
+  }
+});
+</script>
+</body>
+</html>
