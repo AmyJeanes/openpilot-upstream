@@ -178,6 +178,7 @@ inline void SET_CREATE_RANDOM_COPS_ON_SCENARIOS(BOOL on) { Invoke(0x444CB7D7DBE6
 inline void SET_VEHICLE_POPULATION_BUDGET(int budget) { Invoke(0xCB9E1EB3BE2AF4E9, budget); }
 // ePopulationType: 1-5 the game's own (2 parked), 6 permanent (the player's), 7 mission (script-made, ours too)
 inline int GET_ENTITY_POPULATION_TYPE(Entity e) { return Invoke<int>(0xF6F5161F4534EDFF, e); }
+inline int GET_ENTITY_HEALTH(Entity e) { return Invoke<int>(0xEEF059FAD016D209, e); }
 inline BOOL IS_ENTITY_ON_SCREEN(Entity e) { return Invoke<BOOL>(0xE659E47AF827484B, e); }
 inline BOOL IS_PED_A_PLAYER(Ped p) { return Invoke<BOOL>(0x12534C348C6CB68B, p); }
 inline int GET_VEHICLE_MAX_NUMBER_OF_PASSENGERS(Vehicle v) { return Invoke<int>(0xA7C4F2C6E744A550, v); }
@@ -338,6 +339,8 @@ inline Vector3 GET_GAMEPLAY_CAM_COORD() { return Invoke<Vector3>(0x14D6F5678D8F1
 inline Vector3 GET_GAMEPLAY_CAM_ROT(int order) { return Invoke<Vector3>(0x837765A25378F0BB, order); }
 inline BOOL IS_CAM_RENDERING(Cam c) { return Invoke<BOOL>(0x02EC0AF5C5A49B7A, c); }
 inline void SET_PLAYER_INVINCIBLE(int player, BOOL on) { Invoke(0x239528EACDC3E7DE, player, on); }
+inline void SET_EVERYONE_IGNORE_PLAYER(int player, BOOL on) { Invoke(0x8EEDA153AD141BA4, player, on); }
+inline void SET_POLICE_IGNORE_PLAYER(int player, BOOL on) { Invoke(0x32C62AA929C2DA6A, player, on); }
 inline BOOL HAS_COLLISION_LOADED_AROUND_ENTITY(Entity e) { return Invoke<BOOL>(0xE9676F61BC0B3321, e); }
 
 enum Input {

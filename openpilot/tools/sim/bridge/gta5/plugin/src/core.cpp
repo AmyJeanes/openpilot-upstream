@@ -3353,6 +3353,12 @@ void HandleMessage(const Message &m, double now) {
       SET_ENTITY_COLLISION(e, TRUE, TRUE);
       FREEZE_ENTITY_POSITION(e, FALSE);
     }
+    // parked over Bolingbroke the player kept ending up out of the car; made invincible and ignored by peds and
+    // police, it stays in (safe=0 to compare)
+    bool safe = on && MsgBool(m, "safe", true);
+    if (!g_free.on) SET_ENTITY_INVINCIBLE(ped, safe), SET_PLAYER_INVINCIBLE(PLAYER_ID(), safe);
+    SET_EVERYONE_IGNORE_PLAYER(PLAYER_ID(), safe);
+    SET_POLICE_IGNORE_PLAYER(PLAYER_ID(), safe);
     SET_ENTITY_VISIBLE(e, !on, FALSE);
     SET_ENTITY_VISIBLE(ped, !on, FALSE);
     Log("park " + std::string(on ? "at " + Num(MsgNum(m, "x")) + "," + Num(MsgNum(m, "y")) + "," + Num(MsgNum(m, "z", 1000)) : "off"));
@@ -3907,6 +3913,13 @@ extern "C" __declspec(dllexport) void CoreTick() {
   }
   TakeWaypoint(now);
   UpdateMission(now);
+  // a parked capture stops getting state once the player is out of the car: say why, once
+  static bool parkLost = false;
+  bool lost = g_parked && (IS_PED_DEAD_OR_DYING(ped, TRUE) || !v);
+  if (lost && !parkLost)
+    Log(std::string("park: player ") + (IS_PED_DEAD_OR_DYING(ped, TRUE) ? "dead" : "out of the car") + ", health " +
+        std::to_string(GET_ENTITY_HEALTH(ped)) + ", car " + (g_veh.handle && DOES_ENTITY_EXIST(g_veh.handle) ? "exists" : "gone"));
+  parkLost = lost;
   if (connected) {
     // police chases after a scrape with traffic would end any drive
     SET_MAX_WANTED_LEVEL(0);
