@@ -1,7 +1,9 @@
 """Tiny static server with HTTP Range support (python -m http.server has none, which PMTiles needs)."""
 import os
 import re
+import socket
 import sys
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -53,7 +55,13 @@ class H(SimpleHTTPRequestHandler):
                 left -= len(d)
 
 
+class H6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 if __name__ == "__main__":
     root, port = sys.argv[1], int(sys.argv[2])
     os.chdir(root)
+    # loopback on both: browsers try ::1 for "localhost" first, and an IPv4-only server costs a fallback on every tile
+    threading.Thread(target=H6(("::1", port), H).serve_forever, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
