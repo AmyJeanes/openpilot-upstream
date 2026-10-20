@@ -218,9 +218,8 @@ class Shooter:
     for attempt in range(6):
       self.send(SCENE_WORLD, SCENE_TRAFFIC, SCENE_SHADOWS, *SCENE_OFF)
       self.send(self.topcam(x, y), {"type": "ortho", "op": "box", "on": 1, "fov": FOV, "w": W_M, "h": H_M, "near": NEAR, "far": FAR})
-      st = self.wait_state()
-      if not (st.get("ortho") or {}).get("source"):
-        self.send({"type": "ortho", "op": "gbuffer"})
+      # found every time: a height pass in the same game session leaves the depth target as the grab source
+      self.send({"type": "ortho", "op": "gbuffer"})
       # the albedo as the G-buffer passes leave it: a later pass (emissive surfaces, e.g. daytime neon) writes black
       # over parts of it before the present
       self.send({"type": "ortho", "op": "gtrace", "on": 1})
