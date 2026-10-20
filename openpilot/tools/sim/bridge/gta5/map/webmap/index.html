@@ -15,8 +15,6 @@
   #views button + button { border-left: 1px solid #ddd; }
   #views button.on { background: #1a73e8; color: #fff; }
   #zoom { top: 58px; left: 10px; padding: 4px 9px; font-variant-numeric: tabular-nums; }
-  #d3 { top: 10px; left: 232px; border: 0; padding: 8px 14px; cursor: pointer; font: inherit; color: #333; }
-  #d3.on { background: #1a73e8; color: #fff; }
   .maplibregl-ctrl-scale { margin-bottom: 10px !important; }
 </style>
 </head>
@@ -26,14 +24,13 @@
   <button data-view="street">Street</button><button data-view="hybrid">Hybrid</button><button data-view="satellite">Satellite</button>
 </div>
 <div id="zoom" class="panel"></div>
-<button id="d3" class="panel" title="Tilt with right-drag or Ctrl+drag">3D</button>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
 <script>
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 const base = location.origin + location.pathname.replace(/[^/]*$/, "");
-const SAT = base + "sat.pmtiles", ROADS = base + "roads.pmtiles", DEM = base + "dem.pmtiles";
+const SAT = base + "sat.pmtiles", ROADS = base + "roads.pmtiles";
 const FONT = ["Noto Sans Medium"];
 
 // width in px at z16, then doubling per zoom (real road width) above; thinner below
@@ -107,7 +104,6 @@ const style = {
   sources: {
     sat: { type: "raster", url: "pmtiles://" + SAT, tileSize: 256 },
     roads: { type: "vector", url: "pmtiles://" + ROADS },
-    dem: { type: "raster-dem", url: "pmtiles://" + DEM, tileSize: 256, encoding: "terrarium" },
   },
   layers: [
     { id: "bg", type: "background", paint: { "background-color": "#f1eee8" } },
@@ -119,10 +115,10 @@ const style = {
 
 const params = new URLSearchParams(location.search);
 let view = params.get("view") || "hybrid";
-const map = new maplibregl.Map({ container: "map", style, hash: new URLSearchParams(location.search).get("hash") !== "0", minZoom: 11, maxZoom: 21, maxPitch: 80,
+const map = new maplibregl.Map({ container: "map", style, hash: new URLSearchParams(location.search).get("hash") !== "0", minZoom: 11, maxZoom: 21,
   center: [-0.005, 33.989], zoom: 17, attributionControl: false, });
 window.map = map;
-map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ maxWidth: 140, unit: "metric" }), "bottom-left");
 
 function setView(v) {
@@ -136,15 +132,6 @@ function setView(v) {
   const u = new URL(location.href); u.searchParams.set("view", v); history.replaceState(null, "", u);
 }
 document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.view));
-// the heights are the top surface (roofs, trees, bridges), so buildings stand up with their roof images stretched down the sides
-const d3 = document.getElementById("d3");
-function set3d(on) {
-  d3.classList.toggle("on", on);
-  map.setTerrain(on ? { source: "dem", exaggeration: 1 } : null);
-  map.easeTo({ pitch: on ? 60 : 0, duration: 600 });
-  const u = new URL(location.href); on ? u.searchParams.set("3d", "1") : u.searchParams.delete("3d"); history.replaceState(null, "", u);
-}
-d3.onclick = () => set3d(!d3.classList.contains("on"));
 const zl = document.getElementById("zoom");
 const upd = () => { zl.textContent = "z " + map.getZoom().toFixed(2); };
 map.on("move", upd); upd();
@@ -163,7 +150,6 @@ map.getCanvasContainer().addEventListener("wheel", e => {
 }, { passive: false });
 map.on("load", async () => {
   setView(view);
-  if (params.get("3d") === "1") set3d(true);
   if (!location.hash) {
     const h = await new pmtiles.PMTiles(SAT).getHeader();
     map.jumpTo({ center: [h.centerLon, h.centerLat], zoom: 17 });
