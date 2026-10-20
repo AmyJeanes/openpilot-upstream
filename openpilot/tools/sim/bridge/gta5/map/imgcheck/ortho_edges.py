@@ -19,6 +19,8 @@ SIDES = {(-1, 0): (slice(CY0, CY0 + CH), slice(0, CX0)), (1, 0): (slice(CY0, CY0
          (-1, 1): (slice(0, CY0), slice(0, CX0)), (1, 1): (slice(0, CY0), slice(CX0 + CW, None)),
          (-1, -1): (slice(CY0 + CH, None), slice(0, CX0)), (1, -1): (slice(CY0 + CH, None), slice(CX0 + CW, None))}
 captured = set()
+RISE = 0.5  # m above the water surface that counts
+SEABED = 0.0  # also seabed shallower than this (m) under the water (the 1 m water probes; the height tiles stop at the surface)
 
 
 def scan(cell):
@@ -35,11 +37,21 @@ def scan(cell):
   w = np.load(f"{D}/o{i:03d}_{j:03d}_w.npz")
   if (w["c"] == 1).any():
     surf = float(np.nanmax(np.where(w["c"] == 1, w["h"], -1e9)))
-  land = ok & (h > surf + 0.5)
+  land = ok & (h > surf + RISE)
+  shallow = {}
+  if SEABED > 0:
+    xc, yc = -4300 + 69.12 * i, -4300 + 38.88 * j
+    wet = (w["c"] == 1) & (w["h"] - w["bed"] < SEABED)
+    rows, cols = np.nonzero(wet)
+    dx, dy = float(w["x0"]) + cols * float(w["step"]) - xc, float(w["y0"]) + rows * float(w["step"]) - yc
+    for di, dj in want:
+      inx = dx < -34.56 if di < 0 else dx > 34.56 if di > 0 else np.abs(dx) <= 34.56
+      iny = dy < -19.44 if dj < 0 else dy > 19.44 if dj > 0 else np.abs(dy) <= 19.44
+      shallow[(di, dj)] = int((inx & iny).sum()) * 1111  # 1 m2 points, counted in 3 cm px
   out = []
   for di, dj in want:
     r, c = SIDES[(di, dj)]
-    n = int(land[r, c].sum())
+    n = int(land[r, c].sum()) + shallow.get((di, dj), 0)
     if n:
       out.append(((i + di, j + dj), n, (i, j), round(surf, 2)))
   return out
@@ -49,12 +61,13 @@ def main():
   ap = argparse.ArgumentParser()
   ap.add_argument("out")
   ap.add_argument("--min-px", type=int, default=2000)
+  ap.add_argument("--seabed", type=float, default=0.0, help="also seabed shallower than this many m, which shows through the water")
   a = ap.parse_args()
   global captured
   captured = {(int(f[1:4]), int(f[5:8])) for f in os.listdir(f"{F}/full/tiles") if f.endswith(".png") and len(f) == 12}
   cells = sorted((int(f[1:4]), int(f[5:8])) for f in os.listdir(D) if f.endswith("_h.png"))
   hits = {}
-  with ProcessPoolExecutor(6, initializer=globals().update, initargs=({"captured": captured},)) as ex:
+  with ProcessPoolExecutor(6, initializer=globals().update, initargs=({"captured": captured, "SEABED": a.seabed},)) as ex:
     for res in ex.map(scan, cells, chunksize=64):
       for nb, n, src, surf in res:
         e = hits.setdefault(nb, {"px": 0, "from": [], "surf": surf})
