@@ -138,6 +138,7 @@ map.on("move", upd); upd();
 // MapLibre takes quick wheel notches for a trackpad and jumps without easing; ease every wheel step towards one target instead
 map.scrollZoom.disable();
 let wheelTarget = null, wheelAt = 0;
+let boundTo = z => {};  // set once the captures' extent is known
 map.getCanvasContainer().addEventListener("wheel", e => {
   e.preventDefault();
   const px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 800 : e.deltaY;
@@ -145,15 +146,29 @@ map.getCanvasContainer().addEventListener("wheel", e => {
   wheelAt = e.timeStamp;
   wheelTarget = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), base - px / 300));
   const r = map.getCanvasContainer().getBoundingClientRect();
+  boundTo(Math.min(wheelTarget, map.getZoom()));
   map.easeTo({ zoom: wheelTarget, around: map.unproject([e.clientX - r.left, e.clientY - r.top]), duration: 220,
     easing: t => 1 - Math.pow(1 - t, 3) });
 }, { passive: false });
 map.on("load", async () => {
   setView(view);
+  const h = await new pmtiles.PMTiles(SAT).getHeader();
   if (!location.hash) {
-    const h = await new pmtiles.PMTiles(SAT).getHeader();
     map.jumpTo({ center: [h.centerLon, h.centerLat], zoom: 17 });
   }
+  const sw = maplibregl.MercatorCoordinate.fromLngLat([h.minLon, h.minLat]);
+  const ne = maplibregl.MercatorCoordinate.fromLngLat([h.maxLon, h.maxLat]);
+  // the screen's centre stays over the captures: at most about half a screen of open sea at any zoom. The box is sized
+  // a little below the current zoom, as MapLibre refuses to zoom out past what fits the box
+  boundTo = z => {
+    const c = map.getCanvas(), s = 512 * 2 ** (z - 0.25);
+    const px = c.clientWidth / 2 / s, py = c.clientHeight / 2 / s;
+    map.setMaxBounds([new maplibregl.MercatorCoordinate(sw.x - px, sw.y + py).toLngLat(),
+                      new maplibregl.MercatorCoordinate(ne.x + px, ne.y - py).toLngLat()]);
+  };
+  boundTo(map.getZoom());
+  map.on("zoom", () => boundTo(map.getZoom()));
+  map.on("resize", () => boundTo(map.getZoom()));
 });
 </script>
 </body>
