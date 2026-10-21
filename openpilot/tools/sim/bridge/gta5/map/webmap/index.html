@@ -125,7 +125,7 @@ function setView(v) {
   view = v;
   document.querySelectorAll("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   map.setLayoutProperty("sat", "visibility", v === "street" ? "none" : "visible");
-  map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#305d63");  // satellite: the deep sea colour past the captures
+  map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#305d62");  // satellite: the sea past the captures, as WebP decodes the sea tiles
   for (const l of roadLayers) {
     map.setLayoutProperty(l.id, "visibility", l.metadata.view === v ? "visible" : "none");
   }

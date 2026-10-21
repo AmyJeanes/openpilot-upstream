@@ -31,6 +31,7 @@ Z, B = 22, 16                      # top zoom, block zoom
 S22 = 256 * (1 << Z)
 BPX = 256 << (Z - B)               # block size in z22 px
 QUALITY = 70
+SEA = np.array([0x30, 0x5d, 0x63], np.float32)  # the open sea's colour (imgcheck/water/params.json)
 
 
 def centre(i, j):
@@ -56,13 +57,16 @@ def encode(t):
   a = t[..., 3]
   if not a.any():
     return None
-  if a.min() == 255:
-    img = Image.fromarray(t[..., :3], "RGB")
-  else:
-    rgb = np.clip(t[..., :3].astype(np.float32) * 255.0 / np.maximum(a.astype(np.float32), 1)[..., None], 0, 255).astype(np.uint8)
-    img = Image.fromarray(np.dstack((rgb, a)), "RGBA")
+  rgb = t[..., :3]
+  if a.min() < 255:  # the captures' edge, laid on the colour the page shows past them so the two meet without a line
+    rgb = np.clip(rgb + SEA * (1 - a[..., None] / 255.0), 0, 255).astype(np.uint8)
+  near = (np.abs(rgb.astype(np.int16) - SEA.astype(np.int16)) <= 3).all(-1)  # resampling ripples on the open sea
+  if near.any():
+    rgb = np.where(near[..., None], SEA.astype(np.uint8), rgb)
   b = io.BytesIO()
-  img.save(b, "WEBP", quality=QUALITY, method=4)
+  # WebP decodes SEA as #305d62 at any quality (index.html's background); open sea is stored finer, as at the default
+  # quality a flat tile gets specks at its corners
+  Image.fromarray(rgb, "RGB").save(b, "WEBP", quality=95 if near.mean() > 0.5 else QUALITY, method=4)
   return b.getvalue()
 
 
