@@ -1,16 +1,16 @@
 {
- "note": "per body: teal = deep colour C (sRGB hex), a0 = opacity over the shallowest drawn bed, dcut = depth (m) where it is solid, fast ramp. Fitted from in-game shallow shots (E:/gta5_audit/water_fit_20261018/water_params.json): sea, alamo, vinewood_res, land_act, mirror_park. Colour only (measured from above, E:/gta5_audit/water_colour_20261018): lago_zancudo, tanks, ls_river, zancudo_river, pool; their opacity borrowed: murky bodies take Mirror Park's, pools a clear one. pond (golf and park lakes, never measured) = Zancudo river.",
+ "note": "per body: teal = deep colour C (sRGB hex), a0 = opacity over the shallowest drawn bed, dcut = depth (m) where it is solid, fast ramp. Fitted from in-game shallow shots (E:/gta5_audit/water_fit_20261018/water_params.json): sea, alamo, vinewood_res, land_act, mirror_park. Water joined to the sea (Alamo, the Zancudo river and Lago Zancudo, the LS river, ponds) takes the sea's colour, as other GTA maps draw it: seen from above, the game's colour for these is mostly sky reflection and haze (a flat grey on the Alamo). Colour only (measured from above, E:/gta5_audit/water_colour_20261018): tanks, pool; opacity borrowed: murky bodies take Mirror Park's, pools a clear one.",
  "bodies": {
   "sea":           {"teal": "305d63", "a0": 0.104, "dcut": 5.0, "src": "fit"},
-  "alamo":         {"teal": "5f6167", "a0": 0.124, "dcut": 3.0, "src": "fit; colour measured from above (the fitted 2c1f20 is a dark maroon unlike the game)"},
+  "alamo":         {"teal": "305d63", "a0": 0.124, "dcut": 3.0, "src": "fit; colour: the sea's"},
   "vinewood_res":  {"teal": "24503c", "a0": 0.076, "dcut": 5.0, "src": "fit"},
   "land_act":      {"teal": "003742", "a0": 0.02,  "dcut": 3.9, "src": "fit"},
   "mirror_park":   {"teal": "17243c", "a0": 0.258, "dcut": 0.8, "src": "fit"},
-  "lago_zancudo":  {"teal": "373537", "a0": 0.258, "dcut": 1.0, "src": "colour; opacity: Mirror Park (opaque alpha-80 quads)"},
+  "lago_zancudo":  {"teal": "305d63", "a0": 0.258, "dcut": 1.0, "src": "colour: the sea's; opacity: Mirror Park (opaque alpha-80 quads)"},
   "tanks":         {"teal": "1d2025", "a0": 0.258, "dcut": 0.8, "src": "colour; opacity: Mirror Park"},
-  "ls_river":      {"teal": "58513c", "a0": 0.258, "dcut": 0.8, "src": "colour; opacity: Mirror Park"},
-  "zancudo_river": {"teal": "32413c", "a0": 0.258, "dcut": 0.8, "src": "colour; opacity: Mirror Park"},
-  "pond":          {"teal": "32413c", "a0": 0.258, "dcut": 0.8, "src": "default: Zancudo river"},
+  "ls_river":      {"teal": "305d63", "a0": 0.258, "dcut": 0.8, "src": "colour: the sea's; opacity: Mirror Park"},
+  "zancudo_river": {"teal": "305d63", "a0": 0.258, "dcut": 0.8, "src": "colour: the sea's; opacity: Mirror Park"},
+  "pond":          {"teal": "305d63", "a0": 0.258, "dcut": 0.8, "src": "colour: the sea's; opacity: Mirror Park"},
   "pool":          {"teal": "84e8e1", "a0": 0.05,  "dcut": 3.0, "src": "colour: Vespucci pool; clear"}
  },
  "feather_px": 30,
