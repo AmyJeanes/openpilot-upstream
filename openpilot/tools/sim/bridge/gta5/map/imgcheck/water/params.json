@@ -15,5 +15,13 @@
  },
  "feather_px": 30,
  "edge_fade_m": 2.0,
- "body_blend_m": 4.0
+ "body_blend_m": 4.0,
+ "rivers": ["zancudo_river", "ls_river"],
+ "river_rise_m": 0.4,
+ "river_alpha_min": 0.9,
+ "river_edge_m": 2.0,
+ "river_step_m": 0.05,
+ "river_step_win_m": 3,
+ "river_step_bodies": ["alamo", "lago_zancudo", "pond"],
+ "river_hole_m2": 4.0
 }

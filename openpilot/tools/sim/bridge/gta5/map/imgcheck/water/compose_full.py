@@ -6,6 +6,10 @@ Water = inside the game's water (bilinear 0.5 contour of the 1 m probe) where th
 ramp of depth / dcut over drawn bed, solid where the albedo is empty; near empty water it rises to solid over
 edge_fade_m (the game stops drawing the bed short of dcut in deep bodies); feathered inside the water. Body colour and
 opacity are blended over body_blend_m where bodies meet. Empty albedo outside the water takes the lit frame.
+Rivers (the river bodies, and water of river_step_bodies, or sea by a river, whose height steps by over river_step_m
+within river_step_win_m) are flat
+water.xml steps down a sloping bed (the game draws no river water from above): there the water also covers bed up to
+river_rise_m above the step, empty albedo and dry islands under river_hole_m2, at least river_alpha_min opaque.
 Writes <out>/tiles/<name>.png for tiles with water, stats.jsonl."""
 import json, os, sys
 from multiprocessing import Pool
@@ -86,12 +90,32 @@ def compose(name, out):
   nan = np.isnan(H)
   below = inside & (H < W - TOL)
   water = inside & ((np.abs(H - W) <= TOL) | nan | below)
+  bw = G["body"][y0 - G["y0"]:y0 - G["y0"] + wat.shape[0], x0 - G["x0"]:x0 - G["x0"] + wat.shape[1]]
+  rv = np.isin(bw, [names.index(n) for n in P["rivers"]])
+  # river water the bodies pass gave a lake's or the sea's name: lakes and the calm sea are one flat height, rivers
+  # step down (pools and tanks also step, between basins: left alone; the sea only where a river runs into it)
+  k = 2 * P["river_step_win_m"] + 1
+  span = ndi.maximum_filter(np.where(wat, h, -1e9), k) - ndi.minimum_filter(np.where(wat, h, 1e9), k)
+  ok = np.isin(bw, [names.index(n) for n in P["river_step_bodies"]])
+  ok |= (bw == names.index("sea")) & ndi.binary_dilation(rv, iterations=30)
+  rv |= wat & ok & (span > P["river_step_m"])
+  river = inside & (smp(ndi.binary_dilation(rv, iterations=2).astype(np.float32), 1) >= 0.5)
+  if river.any():
+    water |= river & ((H <= W + P["river_rise_m"]) | empty)
+    holes = ndi.binary_fill_holes(water) & ~water
+    lab, n = ndi.label(holes)
+    if n:
+      small = np.flatnonzero(ndi.sum(np.ones_like(lab), lab, np.arange(1, n + 1)) * 0.03 ** 2 < P["river_hole_m2"]) + 1
+      water |= np.isin(lab, small) & ndi.binary_dilation(river, iterations=30)
   captured = water & ~empty
-  depth = np.clip(np.where(below, W - H, W - B), 0, None)
+  depth = np.clip(np.where(below, W - H, np.where(H > W + TOL, 0, W - B)), 0, None)
   teal = np.stack([smp(fld[..., k], 1) for k in range(3)], -1)
   a0, dcut = smp(fld[..., 3], 1), np.maximum(smp(fld[..., 4], 1), 0.1)
   s = np.clip(depth / dcut, 0, 1)
   alpha = np.where(captured, a0 + (1 - a0) * (1 - (1 - s) ** 2), 1.0).astype(np.float32)
+  if river.any():  # the step heights say little about real depth there: one even tint, eased in from the banks
+    t = np.clip(ndi.distance_transform_edt(water) * 0.03 / P["river_edge_m"], 0, 1)
+    alpha = np.where(river, np.maximum(alpha, P["river_alpha_min"] * t * t * (3 - 2 * t)), alpha)
   if (water & empty).any() and captured.any():
     d = ndi.distance_transform_edt(~(water & empty)) * 0.03  # px are 3 cm
     t = np.clip(1 - d / P["edge_fade_m"], 0, 1)
