@@ -6,7 +6,7 @@ don't each pay for loading them; steps whose inputs are ready run side by side. 
 import hashlib, json, os, pathlib, re, runpy, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
-B = ["-283", "-22", "-1320", "-1059"]  # x0 x1 y0 y1: 261 m square round the interchange
+B = ["-296", "-9", "-1333", "-1046"]  # x0 x1 y0 y1: 287 m square round the interchange
 O = "/mnt/e/gta5_audit/paintnet"
 WEB = "/mnt/e/gta5_webmap"
 RP = "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"

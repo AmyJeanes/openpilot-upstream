@@ -80,6 +80,28 @@ for i, A in enumerate(P):
 STOP_AHEAD = 3.0  # m ahead of a lane's end looked at for a stop line or crossing
 BRANCH_RUN, BRANCH_FROM, WIDEN = 15, 10, 0.3  # widened by at least WIDEN of the new lane's width: measured 0.40, 0.69, 0.75 (only part
 # of the widening is sampled where lane plus opening pass the lane step's width limit)
+OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening starts; sample spacing
+# a lane splitting in two where a line starts inside it, widened on one side before that (a turn bay opening across
+# the lane's edge, a gore's nose between the bay and the through lane): the successor on the side that ran on straight
+# carries the lane on, the other opens from it as a branch
+succ0 = {}
+for l in links:
+  succ0.setdefault(l[0], []).append(l)
+for i, ls in succ0.items():
+  A = P[i]
+  if len(ls) != 2 or len(A) < BRANCH_FROM:
+    continue
+  if A[-BRANCH_RUN:, 3].max() - np.median(A[:, 3]) < WIDEN * min(P[l[1]][0, 3] for l in ls):
+    continue
+  k0 = max(len(A) - 1 - BRANCH_RUN, 0)
+  _, n = frame(A, k0)
+  # each edge's move sideways over the widening, square to the lane before it
+  drift = {s: abs((A[-1, :2] + s * n * A[-1, 3] / 2 - A[k0, :2] - s * n * A[k0, 3] / 2) @ n) for s in (1, -1)}
+  s = max(drift, key=drift.get)
+  side = [np.sign((P[l[1]][0, :2] - A[-1, :2]) @ n) for l in ls]
+  print(f" split {lanes[i]['left']}|{lanes[i]['right']}: edges moved {drift[1]:.2f} m right, {drift[-1]:.2f} m left")
+  if side[0] != side[1] and drift[s] - drift[-s] > OPEN_TOL:
+    ls[side.index(s)].append("branch")
 has_pred = {j for _, j, *_ in links}
 for j, B in enumerate(P):
   if j in has_pred or not ok[j]:
@@ -272,7 +294,6 @@ def reshape(i, j):
   return A, np.vstack([np.array(taper).reshape(-1, 4), B])
 
 
-OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening starts; sample spacing
 STRAIGHT_TOL = 0.1  # m wider than its usual width: the lane has started widening (its centre drifting)
 OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
 EXIT_RUN = 60  # m at most an exit's taper is traced back

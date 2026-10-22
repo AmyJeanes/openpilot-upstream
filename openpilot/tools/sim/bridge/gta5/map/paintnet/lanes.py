@@ -125,7 +125,19 @@ marks = scan.src.features()
 marks = [[f["x"], f["y"], f["z"], max(f.get("len", 0), f.get("wid", 0)) / 2 + 0.5] for f in marks
          if f["kind"] != "crossing" and scan.inbox(f["x"], f["y"], 20)]
 code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
-found = arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)[1]
+zk_ = np.where(np.isnan(zz_), np.inf, zz_)
+shape_, found = arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)
+
+
+def arrow_at(X, Y, z):
+  """per point: on an arrow found by its shape (its own paint grown 0.2 m), on the deck nearest z."""
+  c = np.clip(((X - (x0 - 20)) / 0.1).astype(int), 0, shape_.shape[2] - 1)
+  r = np.clip((((y1 + 20) - Y) / 0.1).astype(int), 0, shape_.shape[1] - 1)
+  dz = np.abs(zk_[:, r, c] - z)
+  l = dz.argmin(0)
+  return shape_[l, r, c] & (dz[l, np.arange(len(l))] < 2)
+
+
 marks = np.array(marks + [[x, y, z, r + 0.5] for x, y, z, r in found])
 print(len(found), "arrows found by shape")
 raster_found = collections.Counter()
@@ -333,8 +345,9 @@ def snap(p, n, z):
   """the painted line's middle within +-0.4 m of p across n on this deck, or None (a double line counts as one:
   following one half alone jumps to a neighbouring line where the halves part)."""
   t = np.arange(-0.4, 0.401, 0.05)
-  code, h = scan.T.sample(p[0] + t * n[0], p[1] + t * n[1], z, zwin=1.0)
-  on = (code >> 3) > 0
+  X, Y = p[0] + t * n[0], p[1] + t * n[1]
+  code, h = scan.T.sample(X, Y, z, zwin=1.0)
+  on = ((code >> 3) > 0) & ~arrow_at(X, Y, z)  # (an arrow beside a gore's tip isn't its outline)
   if not on.any():
     return None, z
   return p + n * float(t[on].mean()), float(np.nanmean(h[on]))
@@ -351,6 +364,24 @@ def edge_snap(p, out, z):
   return p + out * float(t[k[0]] + 0.025), float(h[k[0]])
 
 
+def snap_in(p, inward, z, reach):
+  """snap, else the first paint inward of p within reach m (an outline closing in faster than snap's window)."""
+  q, zq = snap(p, inward, z)
+  if q is not None or reach <= 0.4:
+    return q, zq
+  t = np.arange(0.4, reach, 0.05)
+  X, Y = p[0] + t * inward[0], p[1] + t * inward[1]
+  code, h = scan.T.sample(X, Y, z, zwin=1.0)
+  paint = ((code >> 3) > 0) & ~arrow_at(X, Y, z)
+  on = np.flatnonzero(paint)
+  if not len(on):
+    return None, z
+  k = on[0]
+  while k + 1 < len(t) and paint[k + 1]:
+    k += 1
+  return p + inward * float((t[on[0]] + t[k]) / 2), float(h[on[0]])
+
+
 def tip(B, edge=(False, False)):
   """samples carrying a narrowing band on past B's last sample to where its two boundaries meet, following each
   outline's paint (a gore's outline is in the raster only and slants in too steeply for raster_line's straight test
@@ -363,7 +394,7 @@ def tip(B, edge=(False, False)):
   sides = [B[-1, :2] - n * B[-1, 3] / 2, B[-1, :2] + n * B[-1, 3] / 2]
   w, out = B[-1, 3], []
   for _ in range(int(GORE_TIP / STEP)):
-    snapped = [edge_snap(p + d * STEP, -n if k == 0 else n, z) if edge[k] else snap(p + d * STEP, n, z)
+    snapped = [edge_snap(p + d * STEP, -n if k == 0 else n, z) if edge[k] else snap_in(p + d * STEP, n if k == 0 else -n, z, w)
                for k, p in enumerate(sides)]
     if any(p is None for p, _ in snapped):
       break
@@ -380,6 +411,7 @@ def tip(B, edge=(False, False)):
 
 
 GORE_TIP = 30.0  # m at most traced past a gore's run end
+TIP_BACK = 4  # samples back from a gore's run end its tip is traced from
 GORE_W = 3.0  # m: unhatched space beside a gore narrower than this is the gore's unhatched end
 ISLAND_LEN = 10  # m: a strip narrower than any lane, between white lines and shorter than this, is a painted island
 NARROWING = 0.3  # m narrower over a run's last 4 m: its boundaries are closing in
@@ -409,12 +441,20 @@ for key, A, ids in runs:
       if np.median(A[ix, 3]) < GORE_W:
         hat[ix] = True
     # a gore reaching a run's end carries on to its tip, if its outlines meet further on
+    # (traced from TIP_BACK samples before the end: an outline slanting in to the tip is too steep for raster_line, which
+    # then measures the run's last few metres to the next straight paint beyond it, such as an arrow's shaft)
     if hat[-1]:
-      T = tip(A)
-      A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.ones(len(T), bool)]
+      n = TIP_BACK if len(A) > 2 * TIP_BACK and hat[-TIP_BACK:].all() else 0
+      T = tip(A[:len(A) - n])
+      if len(T) < n:
+        n, T = 0, tip(A)
+      A, share, hat = np.vstack([A[:len(A) - n], T]), np.r_[share[:len(share) - n], np.zeros(len(T))], np.r_[hat[:len(hat) - n], np.ones(len(T), bool)]
     if hat[0]:
-      T = tip(A[::-1])[::-1]
-      A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.ones(len(T), bool), hat]
+      n = TIP_BACK if len(A) > 2 * TIP_BACK and hat[:TIP_BACK].all() else 0
+      T = tip(A[n:][::-1])[::-1]
+      if len(T) < n:
+        n, T = 0, tip(A[::-1])[::-1]
+      A, share, hat = np.vstack([T, A[n:]]), np.r_[np.zeros(len(T)), share[n:]], np.r_[np.ones(len(T), bool), hat[n:]]
   # any other run narrowing at an end (a median closing, a lane merging away, the space beside a gore's tip) carries on
   # to where its two boundaries meet
   edge = (key[0] == "e", key[1] == "e")
