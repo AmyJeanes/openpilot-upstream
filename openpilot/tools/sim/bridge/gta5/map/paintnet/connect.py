@@ -213,7 +213,8 @@ def reshape(i, j):
   if not wide[max(k - BRANCH_RUN, 0):k + 1].any():
     return A, exit_taper(A, B, k)
   # the widened stretch: the last one starting before the new lane does, to where the lane is back to its width
-  a = max(q for q in range(max(k - BRANCH_RUN, 0), k + 1) if wide[q] and (q == 0 or not wide[q - 1]))
+  lo = max(k - BRANCH_RUN, 0)  # (a stretch already wide where the look-back starts counts from there)
+  a = max(q for q in range(lo, k + 1) if wide[q] and (q == lo or not wide[q - 1]))
   b = a
   while b + 1 < len(A) and wide[b + 1]:
     b += 1
