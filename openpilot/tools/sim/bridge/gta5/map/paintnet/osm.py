@@ -8,7 +8,8 @@ them filled in). At every track sample its neighbours either side are found (ban
 parallel); a gore between two lanes parts them, as a kerb does, except a gore whose wide end meets a junction (a
 painted island in a junction approach, which only stops lane changes). The cross-section at a sample is the chain
 of neighbours; a section is a stretch where it holds the same lanes, and a way is a section cut where its layer, its
-lanes' change rules change or a lane's width moves WIDTH_STEP, each piece with its own lanes' widths. Sections that carry on from one another share a node at the end of the one with
+lanes' change rules change or its lanes stray WIDTH_STEP from a straight taper, each piece with its own lanes' widths
+(width:lanes:start / :end where they narrow or widen along it). Sections that carry on from one another share a node at the end of the one with
 most lanes (a fork's or merge's trunk, so at the gore's tip); the others ease into it, a gore's branches over the
 gore's length, other ways at TAPER m per m sideways. A one-lane branch of a fork or merge beside a branch of two lanes
 or more (a ramp, a free turn lane round a junction) is a <class>_link of the road it leaves or joins, unnamed.
@@ -57,8 +58,11 @@ ARM = 10.0  # m: a junction arm's heading is its last ARM m (connect.py's frame 
 DECK, DECK_CLOSE = 2.5, 15  # m: a surface this far below is a road under a deck (export.py's covered), gaps closed
 ARROW_ALIGN, ARROW_DZ, ARROW_SPILL = 30.0, 2.5, 0.5  # deg, m, m outside a lane: an arrow is in it (ynd_to_osm.py's)
 EDGE_BOX = 6.0  # m: ends this near the box's edge are cut by it (lanes.py samples lines 5 m past it)
-TAPER_POINT = 1.5  # m: a lane narrower than this in a way is a taper's point there, not yet (or no longer) a lane
-WIDTH_STEP = 1.0  # m: a way is cut where a lane's width has moved this far from where the way began (a taper, a lane widening)
+TAPER_POINT = 1.5  # m: a lane narrower than this all along a way is a taper's point there, not yet (or no longer) a lane
+# a lane narrowing or widening along a way is width:lanes:start / :end on it (OSM wiki Key:lanes: a way is split where
+# a lane starts or ends, not as its width moves), the way cut where its lanes stray WIDTH_STEP m from a straight taper
+# between its ends' widths (each the median of its END_N end samples); under TAPER_MIN m of change is no taper
+WIDTH_STEP, TAPER_MIN, END_N = 1.0, 0.5, 3
 SMOOTH = 5  # samples: a way's centre averaged over this (one sample jumps where a lane's band widens at a junction)
 SIMPLIFY = 0.1  # m: way nodes dropped while the line stays this near them (under the 0.3 m spread of shared edges)
 # mph by class and GTA speed class (slow, normal, fast, faster): ynd_to_osm.py's LIMITS, a hint only
@@ -821,7 +825,8 @@ TURN_ORDER = ["reverse", "sharp_left", "left", "slight_left", "through", "slight
               "merge_to_right", "none"]  # within a lane, left to right (as mapped in LA)
 
 
-def tags_for(S, s, change, widths):
+def tags_for(S, s, change, widths, ends=None):
+  """ends: the lanes' widths at the way's first and last node where they narrow or widen along it, else None."""
   tg, iss = {}, []
   hint = S["hint"]
   if hint:
@@ -834,8 +839,9 @@ def tags_for(S, s, change, widths):
   else:
     tg["highway"] = "road"
     iss.append("no GTA link alongside: class unknown")
-  # a lane only a taper's point here (narrower than TAPER_POINT) isn't counted yet, or any more
-  gone = {t for t, w in widths.items() if w < TAPER_POINT and any(w2 >= TAPER_POINT for w2 in widths.values())}
+  # a lane only a taper's point here (narrower than TAPER_POINT all along) isn't counted yet, or any more
+  span = {t: max(w, *(e.get(t, 0.0) for e in ends)) if ends else w for t, w in widths.items()}
+  gone = {t for t, w in span.items() if w < TAPER_POINT and any(w2 >= TAPER_POINT for w2 in span.values())}
   order = [(t, d) for t, d in S["order"] if t not in gone]
   fwd = [t for t, d in order if d > 0]
   bwd = [t for t, d in order if d < 0][::-1]  # left to right as their drivers see them
@@ -873,7 +879,11 @@ def tags_for(S, s, change, widths):
     elif "?" in tv:
       iss.append(f"turn:lanes{key} partly known: " + "|".join(v if v and v != "?" else "?" for v in tv) +
                  (" (arrow painted, type unlisted)" if "?" in tv else ""))
-    tg["width:lanes" + key] = "|".join(f"{widths.get(t, S['width_lanes'][t]):.1f}" for t in grp)
+    if ends:
+      for e, end in zip(ends, ("start", "end")):
+        tg[f"width:lanes{key}:{end}"] = "|".join(f"{e.get(t, 0.0):.1f}" for t in grp)
+    else:
+      tg["width:lanes" + key] = "|".join(f"{widths.get(t, S['width_lanes'][t]):.1f}" for t in grp)
     for t in grp:
       if np.median(tracks[t]["X"][:, 3]) < NARROW:
         iss.append(f"lane {'+'.join(map(str, tracks[t]['lanes']))} {np.median(tracks[t]['X'][:, 3]):.1f} m wide: narrower than any lane")
@@ -914,6 +924,7 @@ for s, S in enumerate(sections):
         ext_.append(reach)
       if None not in ext_:
         widths.append(sum(ext_))
+        S.setdefault("width_k", {})[k] = sum(ext_)
   n_ = b - a
   sh = {}
   for side in ("L", "R"):
@@ -938,17 +949,30 @@ for s, S in enumerate(sections):
     continue
   C = S["C"]
   ks = C[:, 4].astype(int)
-  # a new piece where a lane has moved WIDTH_STEP from its width where the piece began
-  wbin, ref, n_ = [], None, 0
-  for k in ks:
-    w = [S["W"][k].get(t, 0.0) for t, _ in S["order"]]
-    if ref is None or max(abs(x - y) for x, y in zip(w, ref)) > WIDTH_STEP:
-      ref, n_ = w, n_ + 1
-    wbin.append(n_)
-  key = [(bool(d), c, w) for d, c, w in zip(S["deck"], S["change"], wbin)]
-  pieces = runs_of(key, MINLEN)
+  Wm = np.array([[S["W"][k].get(t, np.nan) for t, _ in S["order"]] for k in ks])  # (nan: no sample of the lane there)
+
+  def ends_of(a, b):
+    """each lane's width at [a, b)'s first and last node: the median of its END_N samples nearest that end (0: none)."""
+    out = []
+    for rows in (Wm[a:b], Wm[a:b][::-1]):
+      out.append(np.array([np.median(c[~np.isnan(c)][:END_N]) if (~np.isnan(c)).any() else 0.0 for c in rows.T]))
+    return tuple(out)
+
+  dist = np.r_[0, np.cumsum(np.linalg.norm(np.diff(C[:, :2], axis=0), axis=1))]
+
+  def straight(a, b):
+    """[a, b) cut where its lanes' widths stray WIDTH_STEP from a straight taper between its ends'."""
+    w0, w1 = ends_of(a, b)
+    f = ((dist[a:b] - dist[a]) / max(dist[b - 1] - dist[a], 1e-9))[:, None]
+    dev = np.nan_to_num(np.abs(Wm[a:b] - (w0 + (w1 - w0) * f))).max(1)
+    dev[:int(MINLEN)], dev[len(dev) - int(MINLEN):] = 0, 0  # (no piece shorter than MINLEN)
+    if dev.max() <= WIDTH_STEP:
+      return [(a, b)]
+    m = a + int(dev.argmax())
+    return straight(a, m) + straight(m, b)
+  pieces = [(a_, b_, v) for a, b, v in runs_of([(bool(d), c) for d, c in zip(S["deck"], S["change"])], MINLEN) for a_, b_ in straight(a, b)]
   start_node = port_node.get((s, 0))
-  for q, (a, b, (on_deck, change, _)) in enumerate(pieces):
+  for q, (a, b, (on_deck, change)) in enumerate(pieces):
     last = q == len(pieces) - 1
     P = C[a:b + (0 if last else 1), :3]  # pieces share their cut sample
     nd = []
@@ -965,10 +989,20 @@ for s, S in enumerate(sections):
       nd.append(ext[(s, 1)])
     start_node = nd[-1]
     widths = {t: float(np.median(v)) for t in S["width_lanes"] if (v := [S["W"][k][t] for k in ks[a:b] if t in S["W"][k]])}
-    tg, iss = tags_for(S, s, change, widths)
+    w0, w1 = ends_of(a, b)
+    ends = None
+    if np.abs(w1 - w0).max() >= TAPER_MIN:
+      ends = tuple({t: float(w[i]) for i, (t, _) in enumerate(S["order"])} for w in (w0, w1))
+    tg, iss = tags_for(S, s, change, widths, ends)
     if on_deck:
       tg["bridge"], tg["layer"] = "yes", "1"
-    if S["width"]:
+    kerb = [S.get("width_k", {}).get(k) for k in ks[a:b]]
+    kerb_at = [w for w in kerb if w is not None]
+    if S["width"] and ends and len(kerb_at) >= 2:  # (a kerb-to-kerb width taken every third sample)
+      tg["width:start"], tg["width:end"] = f"{np.median(kerb_at[:END_N]):.1f}", f"{np.median(kerb_at[-END_N:]):.1f}"
+    elif S["width"] and len(kerb_at) >= 2:
+      tg["width"] = f"{np.median(kerb_at):.1f}"
+    elif S["width"]:
       tg["width"] = f"{S['width']:.1f}"
     sh = S["shoulder"]
     if sh:

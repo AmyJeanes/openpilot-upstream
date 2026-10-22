@@ -1,6 +1,7 @@
 """osm_view.py in.osm out.geojson: the road as an OSM consumer would rebuild it from the export's tags alone, to see what
 the map says without reading tags: each road way's lanes laid out across it from lanes (+:forward/:backward/:both_ways)
-and width:lanes (else width shared out, else LANE m each), the way down the middle of them (OSM's default placement);
+and width:lanes (else width shared out, else LANE m each; width:lanes:start / :end and width:start / :end: the lanes
+narrowing or widening evenly between the way's first and last node), the way down the middle of them (OSM's default placement);
 backward lanes on its left, forward on its right (right-hand traffic). Lines between lanes from change:lanes (dashed:
 both may cross; solid: neither, or one only), the centre line yellow (double where divider=*, a two-way turn lane's
 solid+dashed), the kerbs white; shoulders from shoulder(:width); turn:lanes as arrows near each direction's far end;
@@ -50,8 +51,10 @@ xy = lambda n: (nodes[n][0], nodes[n][1])
 roads = {w: v for w, v in ways.items() if v[1].get("highway") and v[1]["highway"] not in ("footway", "path", "cycleway")}
 
 
-def layout(t):
-  """the way's lanes left to right along it: [(direction, width, turn, change)], and its total width."""
+def layout(t, at=""):
+  """the way's lanes left to right along it: [(direction, width, turn, change)], and its total width; at "start" or
+  "end": at the way's first or last node, where width(:lanes):start / :end say they differ."""
+  t = {**t, **{k[:-len(at) - 1]: v for k, v in t.items() if at and k.endswith(":" + at) and k.startswith("width")}}
   n = int(t.get("lanes", "1"))
   oneway = t.get("oneway") == "yes"
   both = int(t.get("lanes:both_ways", "0"))
@@ -98,8 +101,8 @@ for nd, t in roads.values():
         away[n].append(math.atan2(nodes[nd[q]][1] - nodes[n][1], nodes[nd[q]][0] - nodes[n][0]))
 crossing = lambda A: any(45 < abs((math.degrees(a - b) + 180) % 360 - 180) < 135 for a in A for b in A)
 junction = {n for n, c in inc.items() if c >= 3 and crossing(away[n])}
-lay = {w: layout(t) for w, (nd, t) in roads.items()}
-trim_at = {n: max(lay[w][1] for w, (nd, _) in roads.items() if n in nd) / 2 for n in junction}
+lay = {w: (layout(t, "start"), layout(t, "end")) for w, (nd, t) in roads.items()}
+trim_at = {n: max(lay[w][nd.index(n) != 0][1] for w, (nd, _) in roads.items() if n in nd) / 2 for n in junction}
 
 feats = []
 
@@ -111,11 +114,28 @@ def emit(geom, **p):
 
 
 def offset(line, d):
-  """the line moved d m to its right."""
+  """the line moved d m to its right; d (start, end): moving evenly from one to the other along it."""
+  if isinstance(d, tuple):
+    if abs(d[1] - d[0]) > 1e-3:
+      n_ = max(int(line.length), 2)
+      pts = []
+      for s_ in np.linspace(0, line.length, n_ + 1):
+        c, _, nrm = frame_at(line, s_)
+        pts.append(tuple(c + nrm * (d[0] + (d[1] - d[0]) * s_ / max(line.length, 1e-9))))
+      return LineString(pts)
+    d = d[0]
   if abs(d) < 1e-6:
     return line
   g = line.offset_curve(-d, join_style=2, mitre_limit=3.0)
   return g if g.geom_type == "LineString" else max(g.geoms, key=lambda q: q.length)
+
+
+def plus(a, b):
+  """offsets (numbers, or (start, end) pairs) added."""
+  if isinstance(a, tuple) or isinstance(b, tuple):
+    a, b = (a if isinstance(a, tuple) else (a, a)), (b if isinstance(b, tuple) else (b, b))
+    return a[0] + b[0], a[1] + b[1]
+  return a + b
 
 
 def band(line, a, b):
@@ -145,6 +165,7 @@ ends = collections.defaultdict(list)  # junction node -> trimmed end points
 way_line = {}
 for w, (nd, t) in roads.items():
   line = LineString([xy(n) for n in nd])
+  full = line.length
   a, b = 0.0, line.length
   if nd[0] in junction:
     a = min(trim_at[nd[0]], line.length / 3)
@@ -154,22 +175,25 @@ for w, (nd, t) in roads.items():
   if line.length < 0.5:
     continue
   way_line[w] = line
-  L, T, left = lay[w]
+  (L, T0, left0), (L1, T1, left1) = lay[w]
+  at = lambda v0, v1: (v0 + (v1 - v0) * a / full, v0 + (v1 - v0) * b / full)  # (at the trimmed ends)
+  T, left = at(T0, T1), at(left0, left1)
   hw = t["highway"]
-  for n, p in ((nd[0], line.coords[0]), (nd[-1], line.coords[-1])):
+  for n, p, i in ((nd[0], line.coords[0], 0), (nd[-1], line.coords[-1], 1)):
     if n in junction:
       d, nrm = np.subtract(line.coords[1], line.coords[0]) if p == line.coords[0] else np.subtract(line.coords[-1], line.coords[-2]), None
       d = d / np.linalg.norm(d)
       nrm = np.array([d[1], -d[0]])
-      ends[n] += [tuple(np.add(p, nrm * (T - left))), tuple(np.subtract(p, nrm * left))]
-  o = -left
+      ends[n] += [tuple(np.add(p, nrm * (T[i] - left[i]))), tuple(np.subtract(p, nrm * left[i]))]
+  o = (-left[0], -left[1])
   edges = [o]
   run = np.subtract(line.coords[-1], line.coords[0])
-  for k, (dr, wd, tu, ch) in enumerate(L):
+  for k, ((dr, w0, tu, ch), (_, w1, _, _)) in enumerate(zip(L, L1)):
+    wd = at(w0, w1)
     d = run if dr == "forward" else -run
     hd = ["east", "north", "west", "south"][int(((math.degrees(math.atan2(d[1], d[0])) % 360 + 45) % 360) // 90)]
-    emit(band(line, o, o + wd), kind="lane", dir=dr, highway=hw, way=w, col="#ffb74d" if dr == "both" else HEADING[hd])
-    o += wd
+    emit(band(line, o, plus(o, wd)), kind="lane", dir=dr, highway=hw, way=w, col="#ffb74d" if dr == "both" else HEADING[hd])
+    o = plus(o, wd)
     edges.append(o)
   # lines: kerbs, then between each pair of lanes
   for e in (edges[0], edges[-1]):
@@ -206,7 +230,7 @@ for w, (nd, t) in roads.items():
     for side, e, sg in (("left", edges[0], -1), ("right", edges[-1], 1)):
       if sh in (side, "both"):
         sw = float(t.get(f"shoulder:{side}:width", t.get("shoulder:width", "1.5")))
-        emit(band(line, e, e + sg * sw), kind="shoulder", way=w)
+        emit(band(line, e, plus(e, sg * sw)), kind="shoulder", way=w)
   # turn arrows near each direction's far end
   for dr, far in (("forward", 1), ("backward", 0)):
     lanes_ = [(k, l) for k, l in enumerate(L) if l[0] == dr]
@@ -218,7 +242,8 @@ for w, (nd, t) in roads.items():
     for k, (_, wd, tu, _) in lanes_:
       txt = "".join(GLYPH.get(v, "?") for v in tu.split(";")) if tu else ""
       if txt:
-        c = p + nrm * (edges[k] + wd / 2)
+        f = s / line.length
+        c = p + nrm * ((1 - f) * (edges[k][0] + edges[k + 1][0]) / 2 + f * (edges[k][1] + edges[k + 1][1]) / 2)
         emit(Point(c), kind="arrow", text=txt, bearing=round(math.degrees(math.atan2(head[0], head[1])), 1), way=w)
   # signals: a stop line across their direction's lanes where the way passes the node
   for k, n in enumerate(nd):
@@ -230,7 +255,9 @@ for w, (nd, t) in roads.items():
     s = line.project(p)
     if line.distance(p) > 1.0:
       continue
-    span = [(edges[i], edges[i + 1]) for i, l in enumerate(L) if l[0] == dr] or [(edges[0], edges[-1])]
+    f = s / max(line.length, 1e-9)
+    E = [(1 - f) * e[0] + f * e[1] for e in edges]
+    span = [(E[i], E[i + 1]) for i, l in enumerate(L) if l[0] == dr] or [(E[0], E[-1])]
     a_, b_ = span[0][0], span[-1][1]
     piece = substring(line, max(s - 0.25, 0), min(s + 0.25, line.length))
     emit(band(piece, a_, b_), kind="stop", way=w)
