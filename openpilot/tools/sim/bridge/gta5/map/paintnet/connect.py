@@ -193,8 +193,8 @@ def kerb_fit(C, w0, w1):
     road = np.array([scan.extent(C[q, :2], N[q], C[q, 2], s, scan.ROAD)[0] for q in range(len(C))])
     # a lane stops a gutter's width short of a kerb with a gutter along at least half of it (lanes.py's GUTTER_SHARE:
     # the raster holds the gutter in pieces)
-    g = kerb - road
-    gw = float(np.median(g[g > 0])) if (g > 0).sum() >= 0.5 * len(g) else 0.0
+    g = (kerb - road)[kerb < scan.REACH]  # (where there is a kerb on this side at all)
+    gw = float(np.median(g[g > 0])) if len(g) and (g > 0).sum() >= 0.5 * len(g) else 0.0
     v, prev = np.full(len(C), np.nan), w0 / 2
     for q in range(len(C)):
       h = C[q, 3] / 2
