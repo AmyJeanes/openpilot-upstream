@@ -4,8 +4,10 @@ A lane's end links to a lane starting just ahead of it (0 < gap <= JOIN m along 
 HEAD deg) when one of their edges lines up (within EDGE m sideways): the lane carries on with a line starting or ending
 beside it. A lane can have two successors (a turn bay opening beside it: its one edge lines up with each) or two
 predecessors (a merge). A lane opening beside one that carries on links to it as a "branch" (see BRANCH_RUN). No link where paint crosses the gap (a stop line or crossing: lanes end at a junction's box).
-Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "pts": {lane index: new pts}}: pts replace a
-lane's samples where an opening was reshaped (see reshape)."""
+Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "pts": {lane index: new pts}, "stops": {lane
+index: {"end"|"start": [x, y, ux, uy]}}}: pts replace a lane's samples where an opening was reshaped (see reshape) or
+an end runs on to its stop line; stops are where a lane meets its stop line or crossing and that line's way, to cut
+its end along."""
 import json, math, sys
 import numpy as np
 from scipy import ndimage as ndi
@@ -436,7 +438,64 @@ for i, j, g, *br in links:
       P[i] = r[0]  # a lane with two openings reshapes from the first's result
       pts[i] = np.round(r[0], 2).tolist()
       pts[j] = np.round(r[1], 2).tolist()
-json.dump({"links": links, "pts": pts}, open(sys.argv[6], "w"))
+# a lane's lines stop short of the stop line or crossing it ends at (or starts beyond): an end carrying on into nothing
+# runs on at its width to the near edge of the first wide line across it within STOP_REACH m (the interchange's
+# junctions: 0.1-3.1 m; lane lines are 0.10-0.15 m wide, stop lines and crossings' lines 0.43-0.52)
+STOP_REACH, STOP_WIDE, STOP_BACK, STEP = 4.0, 0.3, 8, 1.0  # (STOP_BACK: samples; STEP: lanes.py's sample step)
+width = {r["id"]: r["width"] for r in scan.src.paint()}
+line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint() if scan.inbox(r["pts"][0][0], r["pts"][0][1], 60)}
+stops = {}  # lane -> {"end"|"start": [x, y, ux, uy]}: where it meets its stop line or crossing, and that line's way
+linked_out, linked_in = {l[0] for l in links if l[3:] != ["branch"]}, {l[1] for l in links}  # (a branch leaves from beside its lane)
+for i, A in pts.items():  # (openings reshaped above: their bays' samples are in pts only)
+  P[i] = np.array(A)
+stopped, trimmed = 0, 0
+for i in range(len(lanes)):
+  A = P[i]
+  if len(A) < 5:
+    continue
+  for at_end in (True, False):
+    if (i in linked_out) if at_end else (i in linked_in):
+      continue
+    # a stop line set back from the crossing, with the lane lines painted on past it to the crossing: the lane ends at
+    # the stop line (the interchange: crossed 1.3-6.3 m before its end; a short wide line mid-lane is something else)
+    B = A if at_end else A[::-1]
+    for k in range(len(B) - 1, max(len(B) - 1 - STOP_BACK, 0), -1):
+      p, q = B[k - 1, :2], B[k, :2]
+      L = max(np.linalg.norm(q - p), 1e-9)
+      xs = [x for x in scan.crossings(p, (q - p) / L, B[k, 2], 0.0, L) if width.get(x[1], 0) >= STOP_WIDE and 0 <= x[0] < L]
+      if xs:
+        cut = (k - 1) + (xs[0][0] - width[xs[0][1]] / 2 - STEP / 2) / L  # sample position of the line's near edge
+        keep = int(np.floor(cut)) + 1
+        if keep >= 3:
+          B = np.vstack([B[:keep], B[keep - 1] + (B[keep] - B[keep - 1]) * (cut - keep + 1)]) if cut > keep - 1 + 0.05 else B[:keep]
+          P[i] = A = B if at_end else B[::-1]
+          pts[i] = np.round(A, 2).tolist()
+          trimmed += 1
+        break
+    p = A[-1] if at_end else A[0]
+    if not scan.inbox(p[0], p[1], -6.0):  # (cut by the pilot's edge)
+      continue
+    e = (A[-1, :2] - A[-5, :2]) if at_end else (A[0, :2] - A[4, :2])
+    e /= max(np.linalg.norm(e), 1e-9)
+    xs = [x for x in scan.crossings(p[:2], e, p[2], 0.0, STOP_REACH + 0.5) if x[0] > 0 and width.get(x[1], 0) >= STOP_WIDE]
+    if not xs:
+      continue
+    o, lid = xs[0][0] - width[xs[0][1]] / 2, xs[0][1]
+    # the line's way where it crosses: the lane's end is cut along it (lanes often meet a stop line at a slant)
+    L = line_xy[lid]
+    q = p[:2] + e * o
+    k = int(np.argmin([np.linalg.norm(q - (L[m] + L[m + 1]) / 2) for m in range(len(L) - 1)]))
+    u = (L[k + 1] - L[k]) / max(np.linalg.norm(L[k + 1] - L[k]), 1e-9)
+    stops.setdefault(i, {})["end" if at_end else "start"] = [round(float(v), 3) for v in (*q, *u)]
+    edge = o - STEP / 2  # (a sample stands for the metre round it)
+    if edge >= STEP / 2:
+      t = np.r_[np.arange(STEP, edge, STEP), edge]
+      F = np.array([[*(p[:2] + e * v), p[2], p[3]] for v in t])
+      P[i] = A = np.vstack([A, F]) if at_end else np.vstack([F[::-1], A])
+      pts[i] = np.round(A, 2).tolist()
+    stopped += 1
+print(trimmed, "lane ends cut back to a stop line across them;", stopped, "run on to their stop line or crossing")
+json.dump({"links": links, "pts": pts, "stops": stops}, open(sys.argv[6], "w"))
 succ, pred = {}, {}
 for i, j, g, *_ in links:
   succ.setdefault(i, []).append(j)

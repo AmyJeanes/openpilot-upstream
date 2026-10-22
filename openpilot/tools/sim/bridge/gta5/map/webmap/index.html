@@ -32,7 +32,7 @@
 <div id="zoom" class="panel"></div>
 <div id="legend" class="panel">
   <b>Paint-first pilot</b>
-  <div><i style="background: linear-gradient(90deg, #6fd36f 33%, #e57373 33% 66%, #b39ddb 66%)"></i>Lane, colour = direction group</div>
+  <div><i style="background: linear-gradient(90deg, #1e88e5 25%, #43a047 25% 50%, #8e24aa 50% 75%, #00897b 75%)"></i>Lane heading north, east, south, west</div>
   <div><i style="background:#ffffff; border: 1px solid #333; text-align:center; line-height:9px; font-size:11px">&rsaquo;</i>Travel direction</div>
   <div><i style="background:#808080"></i>Lane, direction unknown</div>
   <div><i style="background:#ff00ff"></i>Gore (hatched, not a lane)</div>
@@ -41,6 +41,9 @@
   <div><i style="background:#9e9e9e; opacity:.7"></i>Shoulder</div>
   <div><i style="background:#00bcd4; opacity:.7"></i>Crossing strip</div>
   <div><i style="background:#e53935; opacity:.7"></i>Strip with no traffic</div>
+  <div><i style="background:none; border-top: 3px dashed #ff9100; height: 0; vertical-align: 3px"></i>Junction box</div>
+  <div><i style="background:rgba(255,255,255,.25); border: 1px dashed #fff"></i>Junction guide (lane lines carried through the box)</div>
+  <div><b style="display:inline-block; width:22px; text-align:center">&#8592;&#8593;</b>Lane's turns at its stop line, from its arrows (? type unknown)</div>
   <div><i style="background:none; border-top: 2px solid #111; height: 0; vertical-align: 3px"></i>Lane edge (a line across a lane: one ends, the next starts)</div>
   <div><i class="ring" style="border-color:#ffffff"></i>Carries on into the next lane</div>
   <div><i class="ring" style="border-color:#ffea00"></i>Split: one lane carries on into two</div>
@@ -66,7 +69,7 @@ const base = location.origin + location.pathname.replace(/[^/]*$/, "");
 const SAT = base + "sat.pmtiles", PILOT = base + "pilot.geojson";
 const FONT = ["Noto Sans Medium"];
 
-// the paint-first pilot (scratchpad paintnet/export.py): lanes coloured by direction group, gores, shoulders,
+// the paint-first pilot (scratchpad paintnet/export.py): lanes coloured by heading, gores, shoulders,
 // crossings and strips with no traffic, and flags where the method couldn't decide; shown on Street and Hybrid
 const K = k => ["==", ["get", "kind"], k];
 const LC = ["match", ["get", "type"], "split", "#ffea00", "merge", "#00e5ff", "#ffffff"];
@@ -84,6 +87,15 @@ const roadLayers = [
   // lane sides, and a line across where a lane really ends (not where it's cut for the level switch)
   { id: "pi-lane-edge", type: "line", source: "pilot", filter: K("edge"), minzoom: 17,
     paint: { "line-color": "#111111", "line-opacity": ["case", ["get", "covered"], 0.35, 0.8], "line-width": 1 } },
+  { id: "pi-guide", type: "fill", source: "pilot", filter: K("guide"), paint: { "fill-color": "#ffffff", "fill-opacity": 0.12 } },
+  { id: "pi-guide-edge", type: "line", source: "pilot", filter: K("guide"), paint: { "line-color": "#ffffff", "line-width": 1.5, "line-dasharray": [3, 3], "line-opacity": 0.7 } },
+  { id: "pi-junction-area", type: "fill", source: "pilot", filter: K("junction"), paint: { "fill-color": "#ff9100", "fill-opacity": 0.01 } },  // (clickable)
+  { id: "pi-junction", type: "line", source: "pilot", filter: K("junction"),
+    paint: { "line-color": "#ff9100", "line-width": 3, "line-dasharray": [2, 1.5], "line-opacity": 0.95 } },
+  { id: "pi-turns", type: "symbol", source: "pilot", filter: K("turns"), minzoom: 17,
+    layout: { "text-field": ["get", "text"], "text-font": FONT, "text-size": 20, "text-rotate": ["get", "bearing"],
+              "text-rotation-alignment": "map", "text-allow-overlap": true, "text-ignore-placement": true, "text-letter-spacing": -0.1 },
+    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.9)", "text-halo-width": 2 } },
   { id: "pi-linkpt", type: "circle", source: "pilot", filter: K("linkpt"), minzoom: 16,
     paint: { "circle-radius": 7, "circle-color": "rgba(0,0,0,0.35)", "circle-stroke-color": LC, "circle-stroke-width": 3 } },
   { id: "pi-dir", type: "symbol", source: "pilot", filter: K("centre"), minzoom: 16,
@@ -205,12 +217,23 @@ map.getCanvasContainer().addEventListener("wheel", e => {
   map.easeTo({ zoom: wheelTarget, around: map.unproject([e.clientX - r.left, e.clientY - r.top]), duration: 220,
     easing: t => 1 - Math.pow(1 - t, 3) });
 }, { passive: false });
+// a click lists everything under it (overlapping lanes, strips, a junction's box, link markers), top-most first
 map.on("click", e => {
-  const f = map.queryRenderedFeatures(e.point, { layers: ["osm-node", "osm-way", "ck-flag", "pi-flag", "pi-linkpt", "pi-gore", "pi-lane", "pi-other"].filter(id => map.getLayer(id)) })[0];
-  if (!f) return;
-  const p = f.properties;
-  const rows = Object.entries(p).filter(([k]) => k !== "col").map(([k, v]) => `<b>${k}</b> ${v}`).join("<br>");
-  new maplibregl.Popup({ maxWidth: "320px" }).setLngLat(e.lngLat).setHTML(rows).addTo(map);
+  const ids = ["osm-node", "osm-way", "ck-flag", "pi-flag", "pi-turns", "pi-linkpt", "pi-gore", "pi-lane", "pi-other", "pi-guide", "pi-junction-area"];
+  const fs = map.queryRenderedFeatures(e.point, { layers: ids.filter(id => map.getLayer(id)) })
+    .sort((a, b) => (a.layer.id === "pi-junction-area") - (b.layer.id === "pi-junction-area"));  // (the box last: it's under everything)
+  const seen = new Set(), parts = [];
+  for (const f of fs) {
+    const p = f.properties, key = f.layer.id + "|" + (p.id ?? JSON.stringify(p));
+    if (seen.has(key)) continue;  // a lane cut into pieces (decks) is one lane
+    seen.add(key);
+    const head = `<b style="font-size:13px">${p.kind ?? p.osm_type ?? f.layer.id}</b> ${p.id ?? ""}`;
+    const rows = Object.entries(p).filter(([k]) => !["col", "kind", "id"].includes(k)).map(([k, v]) => `<b>${k}</b> ${v}`).join("<br>");
+    parts.push(head + (rows ? "<br>" + rows : ""));
+  }
+  if (!parts.length) return;
+  new maplibregl.Popup({ maxWidth: "340px" }).setLngLat(e.lngLat)
+    .setHTML(`<div style="max-height:50vh; overflow:auto">${parts.join('<hr style="margin:6px 0">')}</div>`).addTo(map);
 });
 map.on("load", async () => {
   setView(view);

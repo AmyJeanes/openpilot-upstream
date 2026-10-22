@@ -45,7 +45,93 @@ for r in scan.src.paint():
     continue
   if any(min(np.linalg.norm(P[k, :2] - e) for e in pair) < PIECE_GAP for pair in ends for k in (0, -1)):
     lines[r["id"]] = r
-keep = set(lines)
+# a dashed line stored dash by dash (the motorway west of the interchange: 3.9 m dashes 8 m apart): DASH_MIN or more
+# short pieces of one colour in line with each other, each within DASH_GAP m of the next, are one dashed line (named
+# for its lowest piece id; the others are found as it), and two or more carrying on in line past a dashed line's end are part
+# of it (the ramps west of the interchange: their long dashed lines stop 8-30 m short of the dashes). Arrows and text
+# don't line up three times over
+DASH_SAME = 0.1  # share a dash's length may differ from the others'
+DASH_GAP, DASH_LAT, DASH_BEND, DASH_ANG, DASH_MIN = 12.0, 0.3, 0.1, 20.0, 3  # (DASH_BEND: m more sideways per m apart, round a ramp's curve)
+short = []
+for r in scan.src.paint():
+  if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or (vis and r["id"] in hidden):
+    continue
+  P = np.array(r["pts"], float)
+  if ((P[:, 0] >= x0 - 20) & (P[:, 0] <= x1 + 20) & (P[:, 1] >= y0 - 20) & (P[:, 1] <= y1 + 20)).any():
+    d = P[-1, :2] - P[0, :2]
+    short.append((r, P, d / max(np.linalg.norm(d), 1e-9)))
+nshort = len(short)
+# (a dashed line's own ends, as pieces: dashes carrying on in line past where it stops are part of it)
+for r in list(lines.values()):
+  if r["style"] != "dashed":
+    continue
+  P = np.array(r["pts"], float)
+  for E in (P[:2], P[-2:]):
+    d = E[-1, :2] - E[0, :2]
+    if np.linalg.norm(d) > 1e-6:
+      short.append((r, E, d / np.linalg.norm(d)))
+dpar = list(range(len(short)))
+
+
+def droot(i):
+  while dpar[i] != i:
+    i = dpar[i]
+  return i
+
+
+for a in range(len(short)):
+  ra, Pa, da = short[a]
+  for b in range(a + 1, len(short)):
+    rb, Pb, db = short[b]
+    if rb["colour"] != ra["colour"] or abs(da @ db) < math.cos(math.radians(DASH_ANG)):
+      continue
+    g = min((Pb[j, :2] - Pa[i, :2] for i in (0, -1) for j in (0, -1)), key=np.linalg.norm)
+    off = (Pb[:, :2].mean(0) - Pa[:, :2].mean(0)) @ np.array([da[1], -da[0]])
+    if np.linalg.norm(g) <= DASH_GAP and abs(off) <= DASH_LAT + DASH_BEND * np.linalg.norm(Pb[:, :2].mean(0) - Pa[:, :2].mean(0)):
+      dpar[droot(b)] = droot(a)
+dash_of = {}  # piece id -> the dashed line it is part of
+groups_ = collections.defaultdict(list)
+for i in range(len(short)):
+  groups_[droot(i)].append(i)
+for mem in groups_.values():
+  # a dashed line's dashes are one length (the motorway's 3.86-3.97 m, a ramp's 1.94-1.97): a piece of another length
+  # in line with them is other paint (a solid guide line round an island, a crossing's piece)
+  dl = [short[i][0]["len"] for i in mem if i < nshort]
+  if dl:
+    L0 = float(np.median(dl))
+    mem = [i for i in mem if i >= nshort or abs(short[i][0]["len"] - L0) <= DASH_SAME * L0]
+  if sum(i < nshort for i in mem) < 2:
+    continue
+  longs = {short[i][0]["id"] for i in mem if i >= nshort}
+  if longs:  # dashes carrying on a dashed line (two lines bridged by dashes: the lower id's): it runs on through them
+    lid_ = min(longs)
+    L = np.array(lines[lid_]["pts"], float)
+    ends_ = {0: [], -1: []}
+    for i in mem:
+      if i < nshort:
+        dash_of[short[i][0]["id"]] = lid_
+        c = short[i][1][:, :2].mean(0)
+        ends_[min((0, -1), key=lambda k: np.linalg.norm(c - L[k, :2]))].append(i)
+    for k, mem_ in ends_.items():
+      mem_.sort(key=lambda i: np.linalg.norm(short[i][1][:, :2].mean(0) - L[k, :2]))
+      for i in mem_:
+        P = short[i][1]
+        P = P if np.linalg.norm(P[0, :2] - L[k, :2]) <= np.linalg.norm(P[-1, :2] - L[k, :2]) else P[::-1]  # its near end first
+        L = np.vstack([L, P]) if k == -1 else np.vstack([P[::-1], L])
+    lines[lid_] = {**lines[lid_], "pts": L.tolist(), "len": float(np.linalg.norm(np.diff(L[:, :2], axis=0), axis=1).sum())}
+    continue
+  if len(mem) < DASH_MIN:
+    continue
+  d = short[mem[0]][2]
+  mem.sort(key=lambda i: short[i][1][:, :2].mean(0) @ d)
+  pts = np.vstack([short[i][1] if (short[i][1][-1, :2] - short[i][1][0, :2]) @ d >= 0 else short[i][1][::-1] for i in mem])
+  rid = min(short[i][0]["id"] for i in mem)
+  lines[rid] = {**short[mem[0]][0], "id": rid, "pts": pts.tolist(), "style": "dashed",
+                "len": float(np.linalg.norm(np.diff(pts[:, :2], axis=0), axis=1).sum())}
+  for i in mem:
+    dash_of[short[i][0]["id"]] = rid
+print(len(dash_of), "dashes joined into", len(set(dash_of.values())), "dashed lines (or carrying one on)")
+keep = set(lines) | set(dash_of)
 
 
 def resample(P, step):
@@ -58,7 +144,7 @@ def resample(P, step):
 # yellow, solid beside dashed), whether or not the extraction paired them
 seen = []  # (lid, s, c, n, z, crossings)
 near_any = []
-parent = {}
+parent = dict(dash_of)  # (a dash is found as the dashed line it is part of)
 pair_seen, pair_close = collections.Counter(), collections.Counter()
 
 
@@ -354,6 +440,10 @@ while joined:
       gap = B[0, :2] - A[-1, :2]
       along = gap @ heading(A)
       if not shared or not 0 < along <= JOIN or abs(gap @ np.array([heading(A)[1], -heading(A)[0]])) > A[-1, 3] / 4:
+        continue
+      # a break is in a line: where the other side goes from the road's edge to a line it's another space (the sliver
+      # between a crossing's line and the kerb rounding its corner, then the crossing)
+      if any(("e" in ida[s]) != ("e" in idb[s]) for s in (0, 1) if not (ida[s] & idb[s]) - {"e"}):
         continue
       if abs(A[-1, 2] - B[0, 2]) > 1:
         continue

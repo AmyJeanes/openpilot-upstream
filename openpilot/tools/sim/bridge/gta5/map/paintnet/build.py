@@ -6,7 +6,7 @@ don't each pay for loading them; steps whose inputs are ready run side by side. 
 import hashlib, json, os, pathlib, re, runpy, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
-B = ["-296", "-9", "-1333", "-1046"]  # x0 x1 y0 y1: 287 m square round the interchange
+B = ["-346", "-9", "-1333", "-1046"]  # x0 x1 y0 y1: round the interchange, 50 m past the west junction's west arm
 O = "/mnt/e/gta5_audit/paintnet"
 WEB = "/mnt/e/gta5_webmap"
 RP = "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"
@@ -20,8 +20,10 @@ STEPS = [
   ("direction", "direction.py", B + [o("ic_lanes.json"), o("ic_dir.json")], [o("ic_lanes.json")], [o("ic_dir.json")], []),
   ("groups", "groups.py", B + [o("ic_dir.json"), o("ic_groups.json")], [o("ic_dir.json")], [o("ic_groups.json")], []),
   ("connect", "connect.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json")], [o("ic_groups.json"), o("ic_dir.json")], [o("ic_links.json")], []),
-  ("export", "export.py", [o("ic_dir.json"), o("ic_groups.json"), f"{WEB}/pilot.geojson", o("ic_links.json")],
-   [o("ic_dir.json"), o("ic_groups.json"), o("ic_links.json")], [f"{WEB}/pilot.geojson"], []),
+  ("junctions", "junctions.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json")],
+   [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json")], [o("ic_junctions.json")], []),
+  ("export", "export.py", [o("ic_dir.json"), o("ic_groups.json"), f"{WEB}/pilot.geojson", o("ic_links.json"), o("ic_junctions.json"), "--box=" + ",".join(B)],
+   [o("ic_dir.json"), o("ic_groups.json"), o("ic_links.json"), o("ic_junctions.json")], [f"{WEB}/pilot.geojson"], []),
   ("regions", "regions.py", B + [o("ic_regions.npz")], [], [o("ic_regions.npz")], []),
   ("rstats", "regionstats.py", [o("ic_regions.npz"), o("ic_rstats.json")], [o("ic_regions.npz")], [o("ic_rstats.json")], []),
   ("check", "check.py", [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json"), f"{WEB}/check.geojson"],
