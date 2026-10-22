@@ -5,9 +5,8 @@ HEAD deg) when one of their edges lines up (within EDGE m sideways): the lane ca
 beside it. A lane can have two successors (a turn bay opening beside it: its one edge lines up with each) or two
 predecessors (a merge). A lane opening beside one that carries on links to it as a "branch" (see BRANCH_RUN). No link where paint crosses the gap (a stop line or crossing: lanes end at a junction's box).
 JOIN is provisional (the one opening measured on the interchange is 13 m; re-measure on a bigger area).
-Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "connectors": [{"from", "to", "ring": [[x, y], ...], "z"}],
-"pts": {lane index: new pts}}: a connector is the successor's width carried back to its predecessor's end, filling the
-break; pts replace a lane's samples where an opening was reshaped (see reshape)."""
+Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "pts": {lane index: new pts}}: pts replace a
+lane's samples where an opening was reshaped (see reshape)."""
 import json, math, sys
 import numpy as np
 import scan
@@ -35,7 +34,7 @@ def crossed(p, q, z):
   return len(scan.crossings((p + q) / 2, d / L, z, -L / 2, L / 2)) > 0
 
 
-links, conns = [], []
+links = []
 ok = [r["dir"] != "?" for r in lanes]
 P = [np.array(r["pts"]) for r in lanes]
 for i, A in enumerate(P):
@@ -68,11 +67,6 @@ for i, A in enumerate(P):
     if crossed(ea, eb, A[-1, 2]):
       continue
     links.append([i, j, round(float(gap), 2)])
-    # the successor's edges carried back to the predecessor's end: a strip across the break
-    back = gap
-    ring = [lb - da * back, rb - da * back, rb, lb]
-    conns.append({"from": i, "to": j, "z": round(float((A[-1, 2] + B[0, 2]) / 2), 2),
-                  "ring": [[round(float(x), 2), round(float(y), 2)] for x, y in ring]})
 # a lane opening beside another (a turn lane splitting off), whether that one carries on or ends there: its band widens
 # by about the new lane's width over the BRANCH_RUN m before the new lane's own line starts (the interchange's
 # lower-deck left turn: 5.2 -> 8.8 m; the top street's left-turn bay: 5.2 -> 8.9 m), and the new lane starts touching
@@ -128,12 +122,20 @@ def reshape(i, j):
   d0 /= max(np.linalg.norm(d0), 1e-9)
   n0 = np.array([d0[1], -d0[0]])
   s = 1.0 if (B[0, :2] - A[k, :2]) @ n0 > 0 else -1.0  # the side it opens on (+1 = right of travel)
+  # the line on the side it opens on bounds the taper: the widened stretch can pass the lane step's width limit, and
+  # samples there were filled in straight
+  side_ids = set(lanes[i]["right_all" if s > 0 else "left_all"]) - {"e", "r"}
   taper = []
   for q in range(a, b + 1):
     c, w = A[q, :2].copy(), A[q, 3]
-    A[q, :2], A[q, 3] = c - s * n0 * (w - w0) / 2, w0
-    if (c - B[0, :2]) @ d0 < -0.5:  # before the new lane's own start
-      taper.append([*(c + s * n0 * w0 / 2), A[q, 2], w - w0])
+    stable = c - s * n0 * w / 2
+    A[q, :2], A[q, 3] = stable + s * n0 * w0 / 2, w0
+    outer = w
+    xs = [s * x[0] + w / 2 for x in scan.crossings(c, n0, A[q, 2], -12, 12) if x[1] in side_ids and s * x[0] > 0]
+    if xs:
+      outer = min(xs, key=lambda o: abs(o - w))  # from the stable edge
+    if (c - B[0, :2]) @ d0 < -0.5 and outer - w0 > OPEN_TOL:  # before the new lane's own start
+      taper.append([*(stable + s * n0 * (w0 + outer) / 2), A[q, 2], outer - w0])
   taper = np.array(taper).reshape(-1, 4)
   if len(taper):
     g = np.linalg.norm(B[0, :2] - taper[-1, :2])
@@ -152,7 +154,7 @@ for i, j, g, *br in links:
       P[i] = r[0]  # a lane with two openings reshapes from the first's result
       pts[i] = np.round(r[0], 2).tolist()
       pts[j] = np.round(r[1], 2).tolist()
-json.dump({"links": links, "connectors": conns, "pts": pts}, open(sys.argv[6], "w"))
+json.dump({"links": links, "pts": pts}, open(sys.argv[6], "w"))
 succ, pred = {}, {}
 for i, j, g, *_ in links:
   succ.setdefault(i, []).append(j)

@@ -82,8 +82,6 @@ const roadLayers = [
   // lane sides, and a line across where a lane really ends (not where it's cut for the level switch)
   { id: "pi-lane-edge", type: "line", source: "pilot", filter: K("edge"), minzoom: 17,
     paint: { "line-color": "#111111", "line-opacity": ["case", ["get", "covered"], 0.35, 0.8], "line-width": 1 } },
-  { id: "pi-link", type: "line", source: "pilot", filter: K("link"), layout: { "line-cap": "round" },
-    paint: { "line-color": LC, "line-width": 3 } },
   { id: "pi-linkpt", type: "circle", source: "pilot", filter: K("linkpt"), minzoom: 16,
     paint: { "circle-radius": 7, "circle-color": "rgba(0,0,0,0.35)", "circle-stroke-color": LC, "circle-stroke-width": 3 } },
   { id: "pi-dir", type: "symbol", source: "pilot", filter: K("centre"), minzoom: 16,
@@ -186,7 +184,7 @@ map.getCanvasContainer().addEventListener("wheel", e => {
     easing: t => 1 - Math.pow(1 - t, 3) });
 }, { passive: false });
 map.on("click", e => {
-  const f = map.queryRenderedFeatures(e.point, { layers: ["ck-flag", "pi-flag", "pi-linkpt", "pi-link", "pi-gore", "pi-lane", "pi-other"].filter(id => map.getLayer(id)) })[0];
+  const f = map.queryRenderedFeatures(e.point, { layers: ["ck-flag", "pi-flag", "pi-linkpt", "pi-gore", "pi-lane", "pi-other"].filter(id => map.getLayer(id)) })[0];
   if (!f) return;
   const p = f.properties;
   const rows = Object.entries(p).filter(([k]) => k !== "col").map(([k, v]) => `<b>${k}</b> ${v}`).join("<br>");

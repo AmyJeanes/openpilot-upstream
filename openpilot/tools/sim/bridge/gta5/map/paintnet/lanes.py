@@ -261,7 +261,8 @@ for i, (ki, A, _) in enumerate(runs):
 runs = [r for r, k in zip(runs, keep_run) if k]
 
 def snap(p, n, z):
-  """the painted line's middle within +-0.4 m of p across n on this deck, or None."""
+  """the painted line's middle within +-0.4 m of p across n on this deck, or None (a double line counts as one:
+  following one half alone jumps to a neighbouring line where the halves part)."""
   t = np.arange(-0.4, 0.401, 0.05)
   code, h = scan.T.sample(p[0] + t * n[0], p[1] + t * n[1], z, zwin=1.0)
   on = (code >> 3) > 0
@@ -289,7 +290,7 @@ def tip(B):
     if w2 > w + 0.2:  # the outlines part again: not a tip
       break
     z = snapped[0][1]
-    if w2 < 0.3:  # they meet
+    if w2 <= TWIN:  # they meet, or run on together as one double line
       break
     out.append([*((sides[0] + sides[1]) / 2), z, w2])
     w = w2
@@ -298,6 +299,7 @@ def tip(B):
 
 GORE_TIP = 30.0  # m at most traced past a gore's run end
 GORE_W = 3.0  # m: unhatched space beside a gore narrower than this is the gore's unhatched end
+NARROWING = 0.3  # m narrower over a run's last 4 m: its boundaries are closing in
 out = []
 for key, A, ids in runs:
   d = np.gradient(A[:, :2], axis=0)
@@ -324,13 +326,14 @@ for key, A, ids in runs:
     if hat[0]:
       T = tip(A[::-1])[::-1]
       A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.ones(len(T), bool), hat]
-    gw = np.median(A[hat, 3])
-    if A[-1, 3] < gw and not hat[-1]:
-      T = tip(A)
-      A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.zeros(len(T), bool)]
-    if A[0, 3] < gw and not hat[0]:
-      T = tip(A[::-1])[::-1]
-      A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.zeros(len(T), bool), hat]
+  # any other run narrowing at an end (a median closing, a lane merging away, the space beside a gore's tip) carries on
+  # to where its two boundaries meet
+  if len(A) >= 5 and not hat[-1] and A[-1, 3] < A[-5, 3] - NARROWING:
+    T = tip(A)
+    A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.zeros(len(T), bool)]
+  if len(A) >= 5 and not hat[0] and A[0, 3] < A[4, 3] - NARROWING:
+    T = tip(A[::-1])[::-1]
+    A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.zeros(len(T), bool), hat]
   shares.extend(share.tolist())
   # a gore's tapering tip is too narrow for the bands: a stretch of the same space beside a gore that narrows, away
   # from it, to under half the gore's width is its tip (a lane carrying on past a gore keeps its width)

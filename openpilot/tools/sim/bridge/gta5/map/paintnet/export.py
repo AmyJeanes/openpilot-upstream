@@ -139,25 +139,30 @@ if linkj:
   lid = lambda k: f"{G['lanes'][k]['left']}|{G['lanes'][k]['right']}|{k}"
   nsucc, npred = {}, {}
   for i, j, g, *br in LK["links"]:
-    nsucc[i] = nsucc.get(i, 0) + 1 + bool(br)  # a branch: the lane also carries on itself
+    if not br:  # a branch leaves a lane that carries on; it doesn't make that lane's own carrying on a split
+      nsucc[i] = nsucc.get(i, 0) + 1
     npred[j] = npred.get(j, 0) + 1
-  for c in LK["connectors"]:
-    ring = np.array(c["ring"] + c["ring"][:1])
-    mid = np.array([[*ring[:4].mean(0), c["z"]]])
-    cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])
-    to = G["lanes"][c["to"]]
-    feats.append({"type": "Feature", "properties": {"kind": "lane", "connector": True, "id": f"{lid(c['from'])} > {lid(c['to'])}",
-                                                    "group": to["group"], "col": colour(to["group"]), "dir": to["dir"], "z": c["z"], "covered": cov, "deck": deck},
-                  "geometry": {"type": "Polygon", "coordinates": [lonlat(ring)]}})
   for i, j, g, *br in LK["links"]:
-    A, b = np.array(G["lanes"][i]["pts"]), np.array(G["lanes"][j]["pts"])[0]
-    a = A[np.linalg.norm(A[:, :2] - b[:2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
-    kind = "split" if nsucc[i] > 1 else "merge" if npred[j] > 1 else "continue"
-    feats.append({"type": "Feature", "properties": {"kind": "link", "type": kind, "from": lid(i), "to": lid(j), "gap": g,
+    A, B = np.array(G["lanes"][i]["pts"]), np.array(G["lanes"][j]["pts"])
+    a = A[np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
+    kind = "split" if br or nsucc[i] > 1 else "merge" if npred[j] > 1 else "continue"
+    if not br and g > 0.5:
+      # the break filled with samples running from the lane's end to its successor's start, drawn as the lane
+      t = np.arange(1, max(int(round(g / 1.0)), 1))[:, None] / max(round(g / 1.0), 1)
+      F = A[-1] + (B[0] - A[-1]) * t
+      if len(F):
+        to = G["lanes"][j]
+        mid = F[len(F) // 2][None, :3]
+        cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])
+        props = {"kind": "lane", "connector": True, "id": f"{lid(i)} > {lid(j)}", "group": to["group"], "col": colour(to["group"]),
+                 "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck}
+        feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
+        feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck},
+                      "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
+    m = (a[:2] + B[0, :2]) / 2
+    feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g,
                                                     "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
-                  "geometry": {"type": "LineString", "coordinates": lonlat(np.array([a[:2], b[:2]]))}})
-    feats.append({**feats[-1], "properties": {**feats[-1]["properties"], "kind": "linkpt"},  # a marker, as a link can be ~0 m long
-                  "geometry": {"type": "Point", "coordinates": lonlat(((a[:2] + b[:2]) / 2)[None])[0]}})
+                  "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})
 lanes_by = {}
 for r in G["lanes"]:
   lanes_by.setdefault(r["group"], []).append(np.array(r["pts"]))
