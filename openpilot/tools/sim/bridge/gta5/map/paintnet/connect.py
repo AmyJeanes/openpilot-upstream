@@ -358,7 +358,9 @@ def reshape(i, j):
   w0 = float(np.median(A[:, 3]))
   k = int(np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin())
   wide = A[:, 3] > w0 + OPEN_TOL
-  if not wide[max(k - BRANCH_RUN, 0):k + 1].any():
+  # (widened up to where the new lane starts: a stretch a little wider further back, to a median's edge, which the
+  # lane narrows from where the new lane takes the median's space, isn't the lane widening for it)
+  if not wide[max(k - BRANCH_NEAR, 0):k + 1].any():
     return A, exit_taper(A, B, k)
   # the widened stretch: the last one starting before the new lane does, to where the lane is back to its width
   lo = max(k - BRANCH_RUN, 0)  # (a stretch already wide where the look-back starts counts from there)
@@ -415,6 +417,7 @@ def reshape(i, j):
   return A, np.vstack([np.array(taper).reshape(-1, 4), B])
 
 
+BRANCH_NEAR = 3  # samples before the new lane's start the lane it opens from must be widened within
 STRAIGHT_TOL = 0.1  # m wider than its usual width: the lane has started widening (its centre drifting)
 OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
 EXIT_RUN = 60  # m at most an exit's taper is traced back
