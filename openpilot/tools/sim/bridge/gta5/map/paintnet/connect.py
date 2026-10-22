@@ -122,30 +122,37 @@ def reshape(i, j):
   d0 /= max(np.linalg.norm(d0), 1e-9)
   n0 = np.array([d0[1], -d0[0]])
   s = 1.0 if (B[0, :2] - A[k, :2]) @ n0 > 0 else -1.0  # the side it opens on (+1 = right of travel)
-  # the line on the side it opens on bounds the taper: the widened stretch can pass the lane step's width limit, and
-  # samples there were filled in straight
-  side_ids = set(lanes[i]["right_all" if s > 0 else "left_all"]) - {"e", "r"}
-  taper = []
+  # the taper's inner edge: the lane's edge at its usual width, then on to the new lane's own inner edge where it starts
+  inner, guess = [], []  # (x, y, z) and the width the samples alone give
   for q in range(a, b + 1):
     c, w = A[q, :2].copy(), A[q, 3]
     stable = c - s * n0 * w / 2
     A[q, :2], A[q, 3] = stable + s * n0 * w0 / 2, w0
-    outer = w
-    xs = [s * x[0] + w / 2 for x in scan.crossings(c, n0, A[q, 2], -12, 12) if x[1] in side_ids and s * x[0] > 0]
-    if xs:
-      outer = min(xs, key=lambda o: abs(o - w))  # from the stable edge
-    if (c - B[0, :2]) @ d0 < -0.5 and outer - w0 > OPEN_TOL:  # before the new lane's own start
-      taper.append([*(stable + s * n0 * (w0 + outer) / 2), A[q, 2], outer - w0])
-  taper = np.array(taper).reshape(-1, 4)
-  if len(taper):
-    g = np.linalg.norm(B[0, :2] - taper[-1, :2])
-    t = np.arange(1, int(g / STEP_M)) * STEP_M / max(g, 1e-9)
-    fill = taper[-1] + (B[0] - taper[-1]) * t[:, None]
-    taper = np.vstack([taper, fill])
-  return A, np.vstack([taper, B])
+    if (c - B[0, :2]) @ d0 < -0.5:  # before the new lane's own start
+      inner.append([*(stable + s * n0 * w0), A[q, 2]])
+      guess.append(w - w0)
+  db, nb = frame(B, 0)
+  end = [*(B[0, :2] - s * nb * B[0, 3] / 2), B[0, 2]]
+  start = inner[-1] if inner else [*(A[b, :2] + s * n0 * w0 / 2), A[b, 2]]
+  g = np.linalg.norm(np.subtract(end[:2], start[:2]))
+  for t in np.arange(1, int(g / STEP_M)) * STEP_M / max(g, 1e-9):
+    inner.append(list(np.add(start, np.subtract(end, start) * t)))
+    guess.append((guess[-1] if guess else 0) * (1 - t) + B[0, 3] * t)
+  # its outer edge: the nearest line beyond the inner edge on the side it opens on (the median's edge curving away,
+  # a yellow edge line): the widened stretch can pass the lane step's width limit, where samples were filled in
+  # straight, and the gap to the new lane's own lines has no samples at all
+  taper = []
+  for (x, y, z), wg in zip(inner, guess):
+    p = np.array([x, y])
+    xs = [s * o for o, *_ in scan.crossings(p, n0, z, -OPEN_REACH, OPEN_REACH) if s * o > OPEN_TOL]
+    wd = min(xs) if xs else wg
+    if wd > OPEN_TOL:
+      taper.append([*(p + s * n0 * wd / 2), z, wd])
+  return A, np.vstack([np.array(taper).reshape(-1, 4), B])
 
 
 OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening starts; sample spacing
+OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
 pts = {}
 for i, j, g, *br in links:
   if br:
