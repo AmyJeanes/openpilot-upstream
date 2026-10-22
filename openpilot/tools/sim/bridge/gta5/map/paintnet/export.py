@@ -5,7 +5,7 @@ centre (a lane's centre line in its travel direction, for arrows); lanes and are
 or under a deck ("covered", for the page's level switch), gore, shoulder, crossing, not_traffic (areas), and
 flag (a point per flagged group, with why); from connect.py's links: connector (the strip filling a break between a
 lane and the one it carries on into) and link (a line from a lane's end to its successor's start; "type" split when a
-lane carries on into two, merge when two carry on into one, else continue) with linkpt, a point marker halfway along it.
+lane carries on into two, merge when two carry on into one, else continue) with linkpt, a point marker halfway along it; edge (a lane piece's sides, and a line across at the lane's real ends).
 Every piece says whether it runs under a deck ("covered") and whether it is one ("deck"), for the page's level switch.
 Every lane has an id (its two boundary line ids and run) so it can be
 named in a correction."""
@@ -59,6 +59,25 @@ def area(A):
   return [lonlat(ring)]
 
 
+def edges(A, start, end):
+  """a run piece's two sides as lines, plus a line across it at the run's real start or end (pieces are cut where a
+  lane goes on or off a deck, and those cuts aren't lane ends)."""
+  xy = A[:, :2].copy()
+  d = np.gradient(xy, axis=0)
+  d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+  xy[0] -= d[0] * 0.5
+  xy[-1] += d[-1] * 0.5
+  n = np.stack([d[:, 1], -d[:, 0]], 1)
+  h = A[:, 3:4] / 2
+  left, right = xy - n * h, xy + n * h
+  out = [left, right]
+  if start:
+    out.append(np.array([left[0], right[0]]))
+  if end:
+    out.append(np.array([left[-1], right[-1]]))
+  return [lonlat(e) for e in out]
+
+
 # direction groups: colours clear of the other kinds' (gore magenta, crossing cyan, median yellow, turn lane orange,
 # no-traffic and flag red, grey)
 PALETTE = ["#43a047", "#1e88e5", "#8e24aa", "#00897b", "#6d4c41", "#3949ab", "#7cb342", "#5e35b1", "#0277bd", "#2e7d32"]
@@ -98,6 +117,8 @@ for k, r in enumerate(G["lanes"]):
            "arrows": r.get("arrow_votes", 0), "links": r.get("link_votes", 0)}
   for a, b, cov, deck in pieces(A):  # one piece per stretch under a deck, on one, or neither (the level switch, arrows)
     feats.append({"type": "Feature", "properties": {**props, "covered": cov, "deck": deck}, "geometry": {"type": "Polygon", "coordinates": area(A[a:b])}})
+    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": lid, "covered": cov, "deck": deck},
+                  "geometry": {"type": "MultiLineString", "coordinates": edges(A[a:b], a == 0, b == len(A))}})
     if r["dir"] != "?":
       feats.append({"type": "Feature", "properties": {**props, "kind": "centre", "covered": cov, "deck": deck},
                     "geometry": {"type": "LineString", "coordinates": lonlat(A[a:b, :2])}})

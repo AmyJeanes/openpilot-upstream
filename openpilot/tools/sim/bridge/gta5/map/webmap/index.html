@@ -79,8 +79,8 @@ const roadLayers = [
              "fill-opacity": ["case", ["get", "covered"], 0.18, 0.42] } },
   { id: "pi-lane-under", type: "line", source: "pilot", filter: ["all", K("lane"), ["get", "covered"]],
     paint: { "line-color": ["case", ["==", ["get", "dir"], "?"], "#808080", ["get", "col"]], "line-width": 1.5, "line-dasharray": [3, 2] } },
-  // every lane piece outlined, so lanes side by side and a lane ending where the next starts show their seam
-  { id: "pi-lane-edge", type: "line", source: "pilot", filter: ["all", K("lane"), ["!", ["has", "connector"]]], minzoom: 17,
+  // lane sides, and a line across where a lane really ends (not where it's cut for the level switch)
+  { id: "pi-lane-edge", type: "line", source: "pilot", filter: K("edge"), minzoom: 17,
     paint: { "line-color": "#111111", "line-opacity": ["case", ["get", "covered"], 0.35, 0.8], "line-width": 1 } },
   { id: "pi-link", type: "line", source: "pilot", filter: K("link"), layout: { "line-cap": "round" },
     paint: { "line-color": LC, "line-width": 3 } },
