@@ -8,6 +8,7 @@ Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "pts": {la
 lane's samples where an opening was reshaped (see reshape)."""
 import json, math, sys
 import numpy as np
+from scipy import ndimage as ndi
 import scan
 
 # JOIN: breaks measured at the interchange's openings (where the lane plus the opening is wider than a lane can be, so
@@ -178,6 +179,35 @@ def path(A, B):
   return np.hstack([xy, A[-1, 2:] + (B[0, 2:] - A[-1, 2:]) * t])
 
 
+def kerb_fit(C):
+  """a lane's samples across unpainted road fitted to it: each side moved to the road's edge (kerb or gutter) where
+  that is within KERB_REACH m of where the samples put it; a side open to other road (where the road it joins
+  opens out) stays put."""
+  d = np.gradient(C[:, :2], axis=0) if len(C) > 1 else np.array([[1.0, 0.0]])
+  d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+  out = C.copy()
+  N = np.stack([d[:, 1], -d[:, 0]], 1)
+  kerb, road = np.zeros((len(C), 2)), np.zeros((len(C), 2))
+  for q in range(len(C)):
+    for k, s in enumerate((-1, 1)):
+      kerb[q, k] = scan.extent(C[q, :2], N[q], C[q, 2], s)[0]
+      road[q, k] = scan.extent(C[q, :2], N[q], C[q, 2], s, scan.ROAD)[0]
+  # the lane stops a gutter's width short of the kerb all along a side with a gutter (lanes.py's GUTTER_SHARE: the
+  # raster holds the gutter in pieces)
+  side = np.zeros_like(kerb)
+  for k in range(2):
+    g = kerb[:, k] - road[:, k]
+    gw = float(np.median(g[g > 0])) if (g > 0).sum() >= 0.5 * len(g) else 0.0
+    e = kerb[:, k] - gw
+    side[:, k] = np.where(np.abs(e - C[:, 3] / 2) <= KERB_REACH, e, C[:, 3] / 2)
+  side = ndi.median_filter(side, size=(5, 1), mode="nearest")
+  out[:, :2] = C[:, :2] + N * (side[:, 1:] - side[:, :1]) / 2
+  out[:, 3] = side.sum(1)
+  return out
+
+
+KERB_REACH = 3.0  # m: a side of a turn lane's unpainted stretch moves out or in to the road's edge within this
+turn_fill = {}  # lane index -> samples carrying it on to the lane it turns into
 has_pred, has_succ = {j for _, j, *_ in links}, {i for i, *_ in links}
 for i, A in enumerate(P):
   if i in has_succ or not ok[i] or len(A) < 3:
@@ -213,6 +243,8 @@ for i, A in enumerate(P):
   if best:
     links.append([i, best[0], round(float(best[2]), 2)])
     has_pred.add(best[0])
+    turn_fill[i] = kerb_fit(path(A, P[best[0]])[1:-1])
+
 # an exit or added lane: a lane starting beside one that has been running a while and carries on, which doesn't widen
 # for it (a motorway's edge line runs on straight; the exit's taper opens outside it)
 has_pred = {j for _, j, *_ in links}
@@ -362,6 +394,10 @@ OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the wides
 EXIT_RUN = 60  # m at most an exit's taper is traced back
 TAPER_RATE = 0.05  # m narrower per m at least: the interchange's exit and merge tapers close at 0.12-0.23 m/m
 pts = {}
+for i, F in turn_fill.items():  # (a turn lane's stretch across its crossing and round the curve is part of it)
+  if len(F):
+    P[i] = np.vstack([P[i], F])
+    pts[i] = np.round(P[i], 2).tolist()
 for i, j, g, *br in links:
   if br == ["merge"]:
     P[i] = merge_taper(P[i], P[j])
