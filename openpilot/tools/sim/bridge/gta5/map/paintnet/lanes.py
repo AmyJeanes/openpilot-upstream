@@ -191,7 +191,11 @@ for key, qs in best.values():
   for q in qs[1:] + [None]:
     if q is None or q[5] - cur[-1][5] > GAP:
       if len(cur) >= 3:
-        runs.append([key, np.array([c[:4] for c in cur]), ({key[0]}, {key[1]})])
+        # samples missing within the run (a line crossed it there) filled in, so it stays one sample per STEP
+        s = np.array([c[5] for c in cur])
+        si = np.arange(s[0], s[-1] + 1e-6, STEP)
+        A = np.array([c[:4] for c in cur])
+        runs.append([key, np.stack([np.interp(si, s, A[:, k]) for k in range(4)], 1), ({key[0]}, {key[1]})])
       cur = []
     if q is not None:
       cur.append(q)
@@ -256,6 +260,43 @@ for i, (ki, A, _) in enumerate(runs):
       break
 runs = [r for r, k in zip(runs, keep_run) if k]
 
+def snap(p, n, z):
+  """the painted line's middle within +-0.4 m of p across n on this deck, or None."""
+  t = np.arange(-0.4, 0.401, 0.05)
+  code, h = scan.T.sample(p[0] + t * n[0], p[1] + t * n[1], z, zwin=1.0)
+  on = (code >> 3) > 0
+  if not on.any():
+    return None, z
+  return p + n * float(t[on].mean()), float(np.nanmean(h[on]))
+
+
+def tip(B):
+  """samples carrying a narrowing gore on past B's last sample to where its two outlines meet, following each
+  outline's paint (the gore's outline is in the raster only and slants in too steeply for raster_line's straight
+  test near the tip)."""
+  d = B[-1, :2] - B[max(len(B) - 4, 0), :2]
+  d /= max(np.linalg.norm(d), 1e-9)
+  n = np.array([d[1], -d[0]])
+  z = B[-1, 2]
+  sides = [B[-1, :2] - n * B[-1, 3] / 2, B[-1, :2] + n * B[-1, 3] / 2]
+  w, out = B[-1, 3], []
+  for _ in range(int(GORE_TIP / STEP)):
+    snapped = [snap(p + d * STEP, n, z) for p in sides]
+    if any(p is None for p, _ in snapped):
+      break
+    sides = [p for p, _ in snapped]
+    w2 = float((sides[1] - sides[0]) @ n)
+    if w2 > w + 0.2:  # the outlines part again: not a tip
+      break
+    z = snapped[0][1]
+    if w2 < 0.3:  # they meet
+      break
+    out.append([*((sides[0] + sides[1]) / 2), z, w2])
+    w = w2
+  return np.array(out).reshape(-1, 4)
+
+
+GORE_TIP = 30.0  # m at most traced past a gore's run end
 out = []
 for key, A, ids in runs:
   d = np.gradient(A[:, :2], axis=0)
@@ -265,6 +306,15 @@ for key, A, ids in runs:
   # stretches shorter than a gore (an arrow's tip reaching a band)
   hat = ndi.binary_closing(np.r_[False, share >= HATCH, False], np.ones(7, bool))[1:-1]
   hat = ndi.binary_opening(np.r_[False, hat, False], np.ones(9, bool))[1:-1]
+  if hat.any():
+    # a gore's end narrower than its hatched part carries on to its tip
+    gw = np.median(A[hat, 3])
+    if A[-1, 3] < gw:
+      T = tip(A)
+      A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.zeros(len(T), bool)]
+    if A[0, 3] < gw:
+      T = tip(A[::-1])[::-1]
+      A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.zeros(len(T), bool), hat]
   shares.extend(share.tolist())
   # a gore's tapering tip is too narrow for the bands: a stretch of the same space beside a gore that narrows, away
   # from it, to under half the gore's width is its tip (a lane carrying on past a gore keeps its width)
