@@ -1,4 +1,4 @@
-"""lanes.py x0 x1 y0 y1 out.json: lanes as the space between neighbouring lane lines (or a line and the road's edge).
+"""lanes.py x0 x1 y0 y1 out.json [--visible=visible.json]: lanes as the space between neighbouring lane lines (or a line and the road's edge).
 
 Every lengthwise paint line (MINLEN m or longer, so hatching and arrows drop out) is sampled every STEP m; square to it
 at each sample, the nearest boundary either side on its deck is found: another lengthwise line (a double line's two
@@ -25,6 +25,12 @@ for l in open(scan.PAINT):
   if r["len"] < MINLEN or not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
     continue
   lines[r["id"]] = r
+# lines the game files hold but the game never draws (visible.py, against the captured imagery) aren't lines
+vis = next((a[10:] for a in sys.argv if a.startswith("--visible=")), None)
+if vis:
+  hidden = {int(k) for k, v in json.load(open(vis)).items() if v["drawn"] is False}
+  lines = {k: v for k, v in lines.items() if k not in hidden}
+  print(len(hidden), "lines not drawn in the game dropped")
 keep = set(lines)
 
 
