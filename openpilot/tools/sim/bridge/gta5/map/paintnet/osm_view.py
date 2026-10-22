@@ -1,6 +1,6 @@
 """osm_view.py in.osm out.geojson: the road as an OSM consumer would rebuild it from the export's tags alone, to see what
 the map says without reading tags: each road way's lanes laid out across it from lanes (+:forward/:backward/:both_ways)
-and width:lanes (else width shared out, else LANE m each; width:lanes:start / :end and width:start / :end: the lanes
+and width:lanes (else width shared out, else LANE m each; width:lanes:start / :end: the lanes
 narrowing or widening evenly between the way's first and last node), the way down the middle of them (OSM's default placement);
 backward lanes on its left, forward on its right (right-hand traffic). Lines between lanes from change:lanes (dashed:
 both may cross; solid: neither, or one only), the centre line yellow (double where divider=*, a two-way turn lane's

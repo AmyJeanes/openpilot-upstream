@@ -21,7 +21,7 @@ Restriction relations at the junction's node: no_u_turn back into a two-way arm,
 no_straight_on for a move between arms no lane makes (junctions.py's paths).
 Tags: lanes (+:forward/:backward/:both_ways); turn:lanes from junctions.py's turns at the mouths ("none": no arrow),
 merge_to_left/right on a lane merging into another, elsewhere listed arrows (a lane whose arrow is unknown leaves the
-tag off and is flagged); change:lanes from the paint between lanes, width:lanes, width (kerb to kerb, gutter in),
+tag off and is flagged); change:lanes from the paint between lanes, width:lanes (:start / :end on a taper), width (kerb to kerb, gutter in; none on a taper),
 shoulder (+:width), divider=solid_line for a painted median (and a raised island in one: the way isn't split there),
 bridge/layer where the way's centre has another surface DECK m below. GTA path nodes only hint: highway class,
 maxspeed and street name, each kept the same along a road's lanes. Every node has ele (z).
@@ -998,12 +998,10 @@ for s, S in enumerate(sections):
       tg["bridge"], tg["layer"] = "yes", "1"
     kerb = [S.get("width_k", {}).get(k) for k in ks[a:b]]
     kerb_at = [w for w in kerb if w is not None]
-    if S["width"] and ends and len(kerb_at) >= 2:  # (a kerb-to-kerb width taken every third sample)
-      tg["width:start"], tg["width:end"] = f"{np.median(kerb_at[:END_N]):.1f}", f"{np.median(kerb_at[-END_N:]):.1f}"
-    elif S["width"] and len(kerb_at) >= 2:
-      tg["width"] = f"{np.median(kerb_at):.1f}"
-    elif S["width"]:
-      tg["width"] = f"{S['width']:.1f}"
+    # a tapering way has no one kerb-to-kerb width and OSM has no settled tag for one that changes: its lanes' and
+    # shoulders' widths give its cross-section
+    if S["width"] and not ends:
+      tg["width"] = f"{np.median(kerb_at) if len(kerb_at) >= 2 else S['width']:.1f}"  # (kerb to kerb every third sample)
     sh = S["shoulder"]
     if sh:
       tg["shoulder"] = "both" if len(sh) == 2 else "left" if "L" in sh else "right"
