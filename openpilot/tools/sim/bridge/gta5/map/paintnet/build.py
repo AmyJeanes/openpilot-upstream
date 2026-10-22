@@ -19,7 +19,7 @@ STEPS = [
   ("lanes", "lanes.py", B + [o("ic_lanes.json"), "--hatch=0.1", f"--visible={o('ic_visible.json')}"], [o("ic_visible.json")], [o("ic_lanes.json")], []),
   ("direction", "direction.py", B + [o("ic_lanes.json"), o("ic_dir.json")], [o("ic_lanes.json")], [o("ic_dir.json")], []),
   ("groups", "groups.py", B + [o("ic_dir.json"), o("ic_groups.json")], [o("ic_dir.json")], [o("ic_groups.json")], []),
-  ("connect", "connect.py", B + [o("ic_groups.json"), o("ic_links.json")], [o("ic_groups.json")], [o("ic_links.json")], []),
+  ("connect", "connect.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json")], [o("ic_groups.json"), o("ic_dir.json")], [o("ic_links.json")], []),
   ("export", "export.py", [o("ic_dir.json"), o("ic_groups.json"), f"{WEB}/pilot.geojson", o("ic_links.json")],
    [o("ic_dir.json"), o("ic_groups.json"), o("ic_links.json")], [f"{WEB}/pilot.geojson"], []),
   ("regions", "regions.py", B + [o("ic_regions.npz")], [], [o("ic_regions.npz")], []),

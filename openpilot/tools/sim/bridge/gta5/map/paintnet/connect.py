@@ -1,4 +1,4 @@
-"""connect.py x0 x1 y0 y1 groups.json out.json: which lane carries on into which, where the paint between them breaks.
+"""connect.py x0 x1 y0 y1 groups.json out.json [dir.json]: which lane carries on into which, where the paint between them breaks.
 
 A lane's end links to a lane starting just ahead of it (0 < gap <= JOIN m along its travel direction, same deck, within
 HEAD deg) when one of their edges lines up (within EDGE m sideways): the lane carries on with a line starting or ending
@@ -158,6 +158,61 @@ def beside(A, p, d, w, mid_only=True):
   return k
 
 
+# a lane carrying on across a pedestrian crossing with no stop line at it (a free turn lane round a traffic island): past
+# the crossing its road has no lines until the lane it leads into starts, turned up to CROSS_TURN deg, wide where the
+# turn lane's road joins another (a junction's exit lanes start at their usual width: the junction's own work); linked
+# where a smooth path from its end to that lane's start stays on the road and crosses no line but the crossing's own
+CROSS_JOIN, CROSS_TURN = 25.0, 60.0
+strips = [r for r in json.load(open(sys.argv[7])) if r["kind"] == "crossing"] if len(sys.argv) > 7 else []
+
+
+def path(A, B):
+  """a smooth path (cubic Hermite) from A's end to B's start along their directions there: [x, y, z, w] each metre."""
+  p, q = A[-1, :2], B[0, :2]
+  dp = A[-1, :2] - A[max(len(A) - 4, 0), :2]
+  dq = B[min(3, len(B) - 1), :2] - B[0, :2]
+  dp, dq = dp / max(np.linalg.norm(dp), 1e-9), dq / max(np.linalg.norm(dq), 1e-9)
+  L = np.linalg.norm(q - p)
+  t = np.linspace(0, 1, max(int(round(L)), 1) + 1)[:, None]
+  xy = (2 * t ** 3 - 3 * t ** 2 + 1) * p + (t ** 3 - 2 * t ** 2 + t) * L * dp + (3 * t ** 2 - 2 * t ** 3) * q + (t ** 3 - t ** 2) * L * dq
+  return np.hstack([xy, A[-1, 2:] + (B[0, 2:] - A[-1, 2:]) * t])
+
+
+has_pred, has_succ = {j for _, j, *_ in links}, {i for i, *_ in links}
+for i, A in enumerate(P):
+  if i in has_succ or not ok[i] or len(A) < 3:
+    continue
+  da, _ = frame(A, len(A) - 1)
+  strip = next((r for r in strips if min(np.linalg.norm(np.array(r["pts"])[:, :2] - (A[-1, :2] + da * STOP_AHEAD), axis=1))
+                < np.median(np.array(r["pts"])[:, 3]) / 2 + STOP_AHEAD and abs(r["pts"][0][2] - A[-1, 2]) < 1.5), None)
+  if strip is None:
+    continue
+  own = {strip["left"], strip["right"]}
+  if any(x[1] not in own for x in scan.crossings(A[-1, :2], da, A[-1, 2], -1.0, STOP_AHEAD)):  # a stop line: a junction
+    continue
+  best = None
+  for j, B in enumerate(P):
+    if j in has_pred or j == i or not ok[j] or len(B) < 3 or abs(B[0, 2] - A[-1, 2]) > 1.5:
+      continue
+    if B[0, 3] <= WIDE_END * np.median(B[:, 3]):
+      continue
+    gap = (B[0, :2] - A[-1, :2]) @ da
+    if not 0 < gap <= CROSS_JOIN or frame(B, 0)[0] @ da < math.cos(math.radians(CROSS_TURN)):
+      continue
+    C = path(A, B)
+    code, _ = scan.T.sample(C[:, 0], C[:, 1], C[:, 2], zwin=1.0)
+    if not np.isin(code & 7, scan.DRIVEABLE).all():
+      continue
+    d = np.diff(C[:, :2], axis=0)
+    ln = np.linalg.norm(d, axis=1)
+    if any(x[1] not in own for (p, q), dd, l, z in zip(zip(C[:-1], C[1:]), d, ln, C[:-1, 2]) if l > 0.1
+           for x in scan.crossings((p[:2] + q[:2]) / 2, dd / l, z, -l / 2, l / 2)):
+      continue
+    if best is None or ln.sum() < best[1]:
+      best = (j, ln.sum(), gap)
+  if best:
+    links.append([i, best[0], round(float(best[2]), 2)])
+    has_pred.add(best[0])
 # an exit or added lane: a lane starting beside one that has been running a while and carries on, which doesn't widen
 # for it (a motorway's edge line runs on straight; the exit's taper opens outside it)
 has_pred = {j for _, j, *_ in links}

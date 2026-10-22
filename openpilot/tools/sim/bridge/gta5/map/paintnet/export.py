@@ -127,10 +127,17 @@ heads = [k for k in range(len(G["lanes"])) if k not in set(nxt.values())]
 
 
 def fill(A, B):
-  """samples running from A's end to B's start, one a metre."""
+  """samples running from A's end to B's start, one a metre: straight, or curving from A's direction to B's where they
+  differ (a free turn lane carrying on round a traffic island)."""
   g = np.linalg.norm(B[0, :2] - A[-1, :2])
   t = np.arange(1, max(int(round(g)), 1))[:, None] / max(round(g), 1)
-  return A[-1] + (B[0] - A[-1]) * t
+  F = A[-1] + (B[0] - A[-1]) * t
+  if len(A) > 1 and len(B) > 1:
+    dp, dq = A[-1, :2] - A[max(len(A) - 4, 0), :2], B[min(3, len(B) - 1), :2] - B[0, :2]
+    dp, dq = dp / max(np.linalg.norm(dp), 1e-9), dq / max(np.linalg.norm(dq), 1e-9)
+    if dp @ dq < math.cos(math.radians(10)):
+      F[:, :2] = (2 * t ** 3 - 3 * t ** 2 + 1) * A[-1, :2] + (t ** 3 - 2 * t ** 2 + t) * g * dp + (3 * t ** 2 - 2 * t ** 3) * B[0, :2] + (t ** 3 - t ** 2) * g * dq
+  return F
 
 
 for k in heads:
