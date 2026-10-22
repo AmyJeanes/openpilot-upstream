@@ -266,6 +266,34 @@ for key, sm in samples.items():
   lid, qs = max(byline.items(), key=lambda kv: len(kv[1]))
   if u not in best or len(qs) > len(best[u][1]):
     best[u] = (key, qs)
+# the line that saw the most of a painted median may not see all of it (its far line stored in pieces that stop 7 m
+# short of its nose): the other lines' samples carrying on past either end, in line with it, extend it (placed along
+# it by how far past the end they lie, within CARRY m). Medians only: lanes keep the one line's view (extending them
+# re-picks which of two overlapping runs survives on the motorway)
+CARRY = 30.0
+allq = collections.defaultdict(list)
+for key, sm in samples.items():
+  allq[key if set(key) & {"e", "r"} else tuple(sorted(map(str, key)))].extend(sm)
+for u, (key, qs) in best.items():
+  qs = sorted(qs, key=lambda q: q[5])
+  if len(qs) < 2 or not all(k in lines and lines[k]["colour"] == "yellow" for k in key):
+    continue
+  P, S = np.array([q[:2] for q in qs]), [q[5] for q in qs]
+  ends = []
+  for p, prev, s0, sg in ((P[0], P[1], S[0], -1), (P[-1], P[-2], S[-1], 1)):
+    e = p - prev
+    ends.append((p, e / max(np.linalg.norm(e), 1e-9), s0, sg))
+  extra = {}
+  for q in allq[u]:
+    if q[4] == qs[0][4]:
+      continue
+    for p, e, s0, sg in ends:
+      v = np.array(q[:2]) - p
+      past = v @ e
+      if STEP / 2 < past <= CARRY and abs(v[0] * e[1] - v[1] * e[0]) < q[3] / 2:
+        sn = s0 + sg * past
+        extra.setdefault(round(sn / STEP), q[:5] + (sn,) + q[6:])
+  best[u] = (key, qs + list(extra.values()))
 # outer-band paint share: lanes with arrows on the interchange read at most 0.02, a gore's chevrons 0.06-0.19
 HATCH = 0.04
 shares = []
