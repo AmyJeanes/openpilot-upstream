@@ -16,6 +16,12 @@
   #views button.on { background: #1a73e8; color: #fff; }
   #zoom { top: 58px; left: 10px; padding: 4px 9px; font-variant-numeric: tabular-nums; }
   .maplibregl-ctrl-scale { margin-bottom: 10px !important; }
+  /* temporary: what the pilot's colours mean */
+  #legend { bottom: 30px; right: 10px; padding: 8px 10px; line-height: 1.6; max-width: 240px; }
+  #legend b { display: block; margin-bottom: 2px; }
+  #legend i { display: inline-block; width: 16px; height: 10px; margin-right: 6px; vertical-align: -1px; border-radius: 2px; }
+  #legend .ring { width: 10px; height: 10px; border: 2px solid #ff1744; border-radius: 50%; background: none; }
+  #legend .note { color: #555; font-size: 12px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -24,86 +30,97 @@
   <button data-view="street">Street</button><button data-view="hybrid">Hybrid</button><button data-view="satellite">Satellite</button>
 </div>
 <div id="zoom" class="panel"></div>
+<div id="legend" class="panel">
+  <b>Paint-first pilot</b>
+  <div><i style="background: linear-gradient(90deg, #6fd36f 33%, #e57373 33% 66%, #b39ddb 66%)"></i>Lane, colour = direction group</div>
+  <div><i style="background:#ffffff; border: 1px solid #333; text-align:center; line-height:9px; font-size:11px">&rsaquo;</i>Travel direction</div>
+  <div><i style="background:#808080"></i>Lane, direction unknown</div>
+  <div><i style="background:#ff00ff"></i>Gore (hatched, not a lane)</div>
+  <div><i style="background:#fff176; opacity:.8"></i>Painted median (between opposing traffic)</div>
+  <div><i style="background:#ffb74d; opacity:.8"></i>Two-way left-turn lane</div>
+  <div><i style="background:#9e9e9e; opacity:.7"></i>Shoulder</div>
+  <div><i style="background:#00bcd4; opacity:.7"></i>Crossing strip</div>
+  <div><i style="background:#e53935; opacity:.7"></i>Strip with no traffic</div>
+  <div><i class="ring"></i>Flag: needs a look</div>
+  <div class="note">Click a band for its id and evidence.</div>
+  <label style="display:block;margin-top:6px"><input type="checkbox" id="newregions"> <b>New approach: regions + centre lines</b></label>
+  <b style="margin-top:6px">Levels</b>
+  <label><input type="radio" name="lvl" value="all" checked> All (beneath decks: faint, dashed edge)</label><br>
+  <label><input type="radio" name="lvl" value="top"> Top level only</label><br>
+  <label><input type="radio" name="lvl" value="under"> Beneath decks only</label>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
 <script>
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 const base = location.origin + location.pathname.replace(/[^/]*$/, "");
-const SAT = base + "sat.pmtiles", ROADS = base + "roads.pmtiles";
+const SAT = base + "sat.pmtiles", PILOT = base + "pilot.geojson";
 const FONT = ["Noto Sans Medium"];
 
-// width in px at z16, then doubling per zoom (real road width) above; thinner below
-const W16 = { minor: 4, major: 7, highway: 10, other: 3 };
-function lw(w16, extra = 0, low = 0.2) {
-  return ["interpolate", ["exponential", 2], ["zoom"], 12, w16 * low + extra, 16, w16 + extra, 24, w16 * 256 + extra];
+// the paint-first pilot (scratchpad paintnet/export.py): lanes coloured by direction group, gores, shoulders,
+// crossings and strips with no traffic, and flags where the method couldn't decide; shown on Street and Hybrid
+const K = k => ["==", ["get", "kind"], k];
+const roadLayers = [
+  // higher decks drawn over lower ones (a road passing under the motorway stays under it)
+  { id: "pi-other", type: "fill", source: "pilot", layout: { "fill-sort-key": ["get", "z"] }, filter: ["in", ["get", "kind"], ["literal", ["shoulder", "crossing", "not_traffic", "median", "twltl"]]],
+    paint: { "fill-color": ["match", ["get", "kind"], "shoulder", "#9e9e9e", "crossing", "#00bcd4", "median", "#fff176",
+                            "twltl", "#ffb74d", "#e53935"], "fill-opacity": 0.4 } },
+  { id: "pi-gore", type: "fill", source: "pilot", filter: K("gore"), layout: { "fill-sort-key": ["get", "z"] }, paint: { "fill-color": "#ff00ff", "fill-opacity": 0.45 } },
+  { id: "pi-lane", type: "fill", source: "pilot", filter: K("lane"), layout: { "fill-sort-key": ["get", "z"] },
+    paint: { "fill-color": ["case", ["==", ["get", "dir"], "?"], "#808080", ["get", "col"]],
+             "fill-opacity": ["case", ["get", "covered"], 0.18, 0.42] } },
+  { id: "pi-lane-under", type: "line", source: "pilot", filter: ["all", K("lane"), ["get", "covered"]],
+    paint: { "line-color": ["case", ["==", ["get", "dir"], "?"], "#808080", ["get", "col"]], "line-width": 1.5, "line-dasharray": [3, 2] } },
+  { id: "pi-dir", type: "symbol", source: "pilot", filter: K("centre"), minzoom: 16,
+    layout: { "symbol-placement": "line", "text-field": "›", "text-font": FONT, "text-size": 22, "symbol-spacing": 60,
+              "text-keep-upright": false, "text-allow-overlap": true },
+    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.8)", "text-halo-width": 1.5 } },
+  { id: "pi-flag", type: "circle", source: "pilot", filter: K("flag"),
+    paint: { "circle-radius": 9, "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#ff1744", "circle-stroke-width": 3 } },
+];
+// work in progress: the road surface cut into regions by its paint (regions.py / axes.py), toggled in the legend
+const RC = ["match", ["get", "class"], "lane", "#42a5f5", "cell", "#ff00ff", "median", "#fff176", "shoulder", "#9e9e9e", "open", "#ffcc80", "area", "#ef5350", "#ffffff"];
+const regionLayers = [
+  { id: "rg-fill", type: "fill", source: "regions", filter: K("region"), layout: { "fill-sort-key": ["get", "z"], visibility: "none" },
+    paint: { "fill-color": RC, "fill-opacity": 0.35 } },
+  { id: "rg-edge", type: "line", source: "regions", filter: K("region"), layout: { visibility: "none" },
+    paint: { "line-color": RC, "line-width": 1 } },
+  { id: "rg-axis", type: "line", source: "regions", filter: K("axis"), layout: { visibility: "none" },
+    paint: { "line-color": "#ffffff", "line-width": 2.5 } },
+];
+roadLayers.push(...regionLayers);
+for (const l of roadLayers) l.metadata = { views: ["street", "hybrid"], filter: l.filter };
+
+// level switch: everything, only what has nothing above it, or only what runs beneath a deck
+function setLevel(lv) {
+  for (const l of roadLayers) {
+    const own = l.metadata.filter;
+    // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
+    const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["get", "covered"] : null;
+    map.setFilter(l.id, cond ? (own ? ["all", own, cond] : cond) : own || null);
+  }
+  // beneath decks on their own: drawn as strongly as the top level
+  map.setPaintProperty("pi-lane", "fill-opacity", lv === "under" ? 0.42 : ["case", ["get", "covered"], 0.18, 0.42]);
 }
-function halfOffset(w16, sign) {
-  return ["interpolate", ["exponential", 2], ["zoom"], 12, sign * w16 * 0.1, 16, sign * w16 / 2, 24, sign * w16 * 128];
-}
-const KIND = {
-  highway: ["==", ["get", "kind"], "highway"],
-  major: ["==", ["get", "kind"], "major_road"],
-  minor: ["==", ["get", "kind"], "minor_road"],
-  other: ["==", ["get", "kind"], "other"],
-};
-const BRIDGE = ["==", ["get", "is_bridge"], true];
-const NOBRIDGE = ["!", BRIDGE];
-const roadLayers = [];
-const L = (view, l) => { l.metadata = { view }; roadLayers.push(l); };
-const order = ["other", "minor", "major", "highway"];
-const col = {
-  street: { casing: { other: "#cfcfcf", minor: "#c3c3c3", major: "#a8a8a8", highway: "#d98e1f" },
-            fill: { other: "#ffffff", minor: "#ffffff", major: "#ffffff", highway: "#fbc75c" } },
-};
-for (const bridge of [false, true]) {
-  for (const k of order) {
-    const flt = ["all", KIND[k], bridge ? BRIDGE : NOBRIDGE];
-    const tag = `${k}${bridge ? "-br" : ""}`;
-    const cap = { "line-cap": bridge ? "butt" : "round", "line-join": "round" };
-    L("street", { id: `st-casing-${tag}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
-      layout: cap, paint: { "line-color": bridge ? "#8a8a8a" : col.street.casing[k], "line-width": lw(W16[k], 3, 0.8) } });
-    L("street", { id: `st-fill-${tag}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
-      layout: cap, paint: { "line-color": col.street.fill[k], "line-width": lw(W16[k], 0, 0.8) } });
+document.querySelectorAll("input[name=lvl]").forEach(r => r.onchange = () => setLevel(r.value));
+// the new approach replaces the pilot's bands while it's shown
+function setRegions(on) {
+  for (const l of roadLayers) {
+    const isRegion = l.id.startsWith("rg-");
+    if (view === "satellite") continue;
+    map.setLayoutProperty(l.id, "visibility", isRegion === on ? "visible" : "none");
   }
 }
-// hybrid: translucent fill that fades out as the painted road becomes visible, plus thin edge lines
-for (const k of order) {
-  const flt = KIND[k];
-  const tint = k === "highway" ? "#ffc857" : "#ffffff";
-  L("hybrid", { id: `hy-fill-${k}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
-    layout: { "line-cap": "butt", "line-join": "round" },
-    paint: { "line-color": tint, "line-width": lw(W16[k], 0, 0.8),
-             "line-opacity": ["interpolate", ["linear"], ["zoom"], 12, 0.75, 16, 0.5, 17, 0.2, 18, 0] } });
-  for (const s of [1, -1]) {
-    L("hybrid", { id: `hy-edge-${k}${s}`, type: "line", source: "roads", "source-layer": "roads", filter: flt,
-      layout: { "line-join": "round" },
-      paint: { "line-color": k === "highway" ? "#ffd27a" : "#ffffff", "line-width": 1.2, "line-offset": halfOffset(W16[k], s),
-               "line-opacity": ["interpolate", ["linear"], ["zoom"], 15, 0, 17, 0.85] } });
-  }
-}
-const labelSize = ["interpolate", ["linear"], ["zoom"], 13, 10, 16, 12, 18, 16, 20, 26, 22, 44];
-function label(view, id, flt, minzoom, paint) {
-  L(view, { id, type: "symbol", source: "roads", "source-layer": "roads", minzoom,
-    filter: ["all", ["has", "name"], flt],
-    layout: { "symbol-placement": "line", "text-field": ["get", "name"], "text-font": FONT, "text-size": labelSize,
-              "text-max-angle": 30, "symbol-spacing": ["interpolate", ["linear"], ["zoom"], 14, 250, 22, 900],
-              "text-padding": 4 }, paint });
-}
-const labelsStreet = { "text-color": "#3c4043", "text-halo-color": "#ffffff", "text-halo-width": 2 };
-const labelsHybrid = { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.85)", "text-halo-width": 2 };
-for (const v of ["street", "hybrid"]) {
-  const p = v === "street" ? labelsStreet : labelsHybrid;
-  label(v, `${v}-lbl-major`, ["any", KIND.highway, KIND.major], 12.5, p);
-  label(v, `${v}-lbl-minor`, ["any", KIND.minor, KIND.other], 15, p);
-}
+document.getElementById("newregions").onchange = e => setRegions(e.target.checked);
 
 const style = {
   version: 8,
   glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
   sources: {
     sat: { type: "raster", url: "pmtiles://" + SAT, tileSize: 256 },
-    roads: { type: "vector", url: "pmtiles://" + ROADS },
+    pilot: { type: "geojson", data: PILOT + "?t=" + Date.now() },
+    regions: { type: "geojson", data: base + "regions.geojson?t=" + Date.now() },
   },
   layers: [
     { id: "bg", type: "background", paint: { "background-color": "#f1eee8" } },
@@ -125,9 +142,11 @@ function setView(v) {
   view = v;
   document.querySelectorAll("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   map.setLayoutProperty("sat", "visibility", v === "street" ? "none" : "visible");
+  document.getElementById("legend").style.display = v === "satellite" ? "none" : "";
   map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#305d62");  // satellite: the sea past the captures, as WebP decodes the sea tiles
   for (const l of roadLayers) {
-    map.setLayoutProperty(l.id, "visibility", l.metadata.view === v ? "visible" : "none");
+    const on = l.metadata.views.includes(v) && (l.id.startsWith("rg-") === document.getElementById("newregions").checked);
+    map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
   }
   const u = new URL(location.href); u.searchParams.set("view", v); history.replaceState(null, "", u);
 }
@@ -150,8 +169,16 @@ map.getCanvasContainer().addEventListener("wheel", e => {
   map.easeTo({ zoom: wheelTarget, around: map.unproject([e.clientX - r.left, e.clientY - r.top]), duration: 220,
     easing: t => 1 - Math.pow(1 - t, 3) });
 }, { passive: false });
+map.on("click", e => {
+  const f = map.queryRenderedFeatures(e.point, { layers: ["pi-flag", "pi-gore", "pi-lane", "pi-other", "rg-axis", "rg-fill"] })[0];
+  if (!f) return;
+  const p = f.properties;
+  const rows = Object.entries(p).filter(([k]) => k !== "col").map(([k, v]) => `<b>${k}</b> ${v}`).join("<br>");
+  new maplibregl.Popup({ maxWidth: "320px" }).setLngLat(e.lngLat).setHTML(rows).addTo(map);
+});
 map.on("load", async () => {
   setView(view);
+  setLevel(document.querySelector("input[name=lvl]:checked").value);
   const h = await new pmtiles.PMTiles(SAT).getHeader();
   if (!location.hash) {
     map.jumpTo({ center: [h.centerLon, h.centerLat], zoom: 17 });
