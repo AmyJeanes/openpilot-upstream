@@ -25,6 +25,7 @@ LANE = 3.5  # m: a lane's width where the tags give none
 LINE = 0.15  # m: a painted line's width
 DASH, GAP_ = 3.0, 6.0  # m: a dashed line's dash and gap
 ARROW_BACK = 6.0  # m before a way's far end its turn arrows sit
+STOP_BACK = 8.0  # m of the way behind a signal its stop line is drawn square to
 ZEBRA, ZEBRA_W = 0.5, 3.0  # m: a crossing's stripe and its width across
 HEADING = {"north": "#1e88e5", "east": "#43a047", "south": "#8e24aa", "west": "#00897b"}  # export.py's lane colours
 GLYPH = {"left": "←", "slight_left": "↖", "sharp_left": "←", "through": "↑", "slight_right": "↗", "right": "→", "sharp_right": "→",
@@ -102,7 +103,24 @@ for nd, t in roads.values():
 crossing = lambda A: any(45 < abs((math.degrees(a - b) + 180) % 360 - 180) < 135 for a in A for b in A)
 junction = {n for n, c in inc.items() if c >= 3 and crossing(away[n])}
 lay = {w: (layout(t, "start"), layout(t, "end")) for w, (nd, t) in roads.items()}
-trim_at = {n: max(lay[w][nd.index(n) != 0][1] for w, (nd, _) in roads.items() if n in nd) / 2 for n in junction}
+
+
+def heading_at(nd, n):
+  """unit heading of a way leaving node n (one of its ends) along its first segment."""
+  q = nd[1] if nd[0] == n else nd[-2]
+  d = np.subtract(xy(q), xy(n))
+  return d / max(np.linalg.norm(d), 1e-9)
+
+
+# each way stops short of a junction node by half the widest way there crossing it (a road carrying straight on through a
+# side road's or slip road's node is cut back by the side road's half width, not its own)
+trim_at = {}
+for n in junction:
+  here = [(w, nd) for w, (nd, _) in roads.items() if n in (nd[0], nd[-1])]
+  for w, nd in here:
+    h = heading_at(nd, n)
+    cross = [lay[w2][nd2.index(n) != 0][1] for w2, nd2 in here if w2 != w and abs(h @ heading_at(nd2, n)) < math.cos(math.radians(30))]
+    trim_at[n, w] = max(cross) / 2 if cross else 0.0
 
 feats = []
 
@@ -164,13 +182,13 @@ def dashed(line):
 ends = collections.defaultdict(list)  # junction node -> trimmed end points
 way_line = {}
 for w, (nd, t) in roads.items():
-  line = LineString([xy(n) for n in nd])
+  line = whole = LineString([xy(n) for n in nd])
   full = line.length
   a, b = 0.0, line.length
   if nd[0] in junction:
-    a = min(trim_at[nd[0]], line.length / 3)
+    a = min(trim_at.get((nd[0], w), 0.0), line.length / 3)
   if nd[-1] in junction:
-    b = max(line.length - trim_at[nd[-1]], line.length * 2 / 3)
+    b = max(line.length - trim_at.get((nd[-1], w), 0.0), line.length * 2 / 3)
   line = substring(line, a, b)
   if line.length < 0.5:
     continue
@@ -251,17 +269,19 @@ for w, (nd, t) in roads.items():
     if tg.get("highway") != "traffic_signals" and tg.get("highway") != "stop":
       continue
     dr = tg.get("traffic_signals:direction", tg.get("direction", "forward"))
-    p = Point(xy(n))
-    s = line.project(p)
-    if line.distance(p) > 1.0:
-      continue
-    f = s / max(line.length, 1e-9)
+    p = Point(xy(n))  # (on the way before it's cut back at a junction: a stop line may sit at a slip road's node)
+    s = whole.project(p)
+    f = min(max((s - a) / max(b - a, 1e-9), 0.0), 1.0)
     E = [(1 - f) * e[0] + f * e[1] for e in edges]
     span = [(E[i], E[i + 1]) for i, l in enumerate(L) if l[0] == dr] or [(E[0], E[-1])]
     a_, b_ = span[0][0], span[-1][1]
-    piece = substring(line, max(s - 0.25, 0), min(s + 0.25, line.length))
-    emit(band(piece, a_, b_), kind="stop", way=w)
-    c, _, nrm = frame_at(line, s)
+    # square to the lanes traffic stops in, behind the node (past it the way may bend on to its junction's node)
+    c = np.array(whole.interpolate(s).coords[0])
+    q = np.array(whole.interpolate(max(s - STOP_BACK, 0) if dr == "forward" else min(s + STOP_BACK, whole.length)).coords[0])
+    d = (c - q) * (1 if dr == "forward" else -1)
+    d = d / max(np.linalg.norm(d), 1e-9) if np.linalg.norm(d) > 0.5 else frame_at(whole, s)[1]
+    nrm = np.array([d[1], -d[0]])
+    emit(Polygon([c + nrm * a_ - d * 0.25, c + nrm * a_ + d * 0.25, c + nrm * b_ + d * 0.25, c + nrm * b_ - d * 0.25]), kind="stop", way=w)
     emit(Point(c + nrm * (b_ + 1.0 if dr == "forward" else a_ - 1.0)), kind="signal", control=tg["highway"], way=w)
 
 # junction areas

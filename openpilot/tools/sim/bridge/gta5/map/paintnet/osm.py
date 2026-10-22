@@ -1076,7 +1076,8 @@ for J in junctions:
     line = LineString([mid - nrm * reach, mid + nrm * reach])
     tags = {"highway": "traffic_signals", "traffic_signals:direction": "forward" if e else "backward", "source:position": "survey",
             "stop_line:bearing": f"{math.degrees(math.atan2(nrm[0], nrm[1])) % 180:.0f}"}
-    if cut_way(piece[-1] if e else piece[0], line, float(E[:, 2].mean()), tags) is None:
+    # (on the arm's last way, or the one before where the arm ends in a run-on past a fork)
+    if all(cut_way(w, line, float(E[:, 2].mean()), tags) is None for w in (piece[::-1] if e else piece)[:3]):
       J["issues"].append(f"stop line of way {s} not on it")
 
 for J in junctions:
