@@ -12,7 +12,7 @@ import scan
 
 # JOIN: breaks measured at the interchange's openings (where the lane plus the opening is wider than a lane can be, so
 # unsampled) 12.6, 13.9 and 16.2 m; a junction's break is never linked (paint crosses it)
-JOIN, HEAD, EDGE = 20.0, 15.0, 0.5
+JOIN, HEAD, EDGE, OVERLAP, WIDE_END = 20.0, 15.0, 0.5, 0.6, 1.2
 G = json.load(open(sys.argv[5]))
 lanes = G["lanes"]
 
@@ -58,12 +58,17 @@ for i, A in enumerate(P):
     # sideways offsets of the successor's edges from the predecessor's, square to the successor's direction (the
     # predecessor's end tilts where a bay opens beside it: 11 deg at the interchange, 2 m sideways over a 13 m gap)
     off_l, off_r = (lb - la) @ nb, (rb - ra) @ nb
-    if min(abs(off_l), abs(off_r)) > EDGE:
+    # the same lane carrying on: its two ends overlap mostly, side to side (a line curving and a kerb stepping across
+    # a break under a bridge: 1.1 and 1.5 m off at both edges, 75% overlap)
+    lap = min(0.0, off_l) - max(0.0, off_r) + min(A[-1, 3], B[0, 3])
+    # (not a lane ending widened, where a bay opens beside the lane carrying on: 1.36-1.7x its usual width here)
+    same = lap >= OVERLAP * min(A[-1, 3], B[0, 3]) and A[-1, 3] <= WIDE_END * np.median(A[:, 3])
+    if not same and min(abs(off_l), abs(off_r)) > EDGE:
       continue
     # the successor must lie within the predecessor's span (not beside it) for the edge that doesn't line up
-    if abs(off_l) > EDGE and not -EDGE <= off_l <= A[-1, 3] + EDGE:
+    if not same and abs(off_l) > EDGE and not -EDGE <= off_l <= A[-1, 3] + EDGE:
       continue
-    if abs(off_r) > EDGE and not -A[-1, 3] - EDGE <= off_r <= EDGE:
+    if not same and abs(off_r) > EDGE and not -A[-1, 3] - EDGE <= off_r <= EDGE:
       continue
     if crossed(ea, eb, A[-1, 2]):
       continue

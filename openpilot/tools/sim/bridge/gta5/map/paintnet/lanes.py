@@ -15,6 +15,7 @@ import arrows
 
 STEP, MINLEN, LANE_MIN, LANE_MAX, GAP = 1.0, 6.0, 1.5, 9.0, 3.0
 PIECE_GAP = 0.5  # m between a line piece's end and the next piece's start
+SHOULDER_MAX = 4.0  # m: line to road's edge, a shoulder below it, a lane from it (direction.py's SHOULDER)
 # twin lines: nearest-other-line distances on the interchange peak at 0-0.3 m, dip at 0.3-0.4, lanes from ~4 m; and they
 # must stay that close along most of where they see each other (lines meeting at a gore's nose only touch at the tip)
 TWIN, TWIN_SHARE = 0.35, 0.8
@@ -95,6 +96,25 @@ for (a, b), nc in pair_close.items():
     ra, rb = find(a), find(b)
     if ra != rb:
       parent[max(ra, rb)] = min(ra, rb)
+# yellow lines stored in pieces: a piece carrying on from another's end (within PIECE_GAP, heading on the same way:
+# not two lines leaving a point together, like a gore's sides at its tip) is the same line, so a median bounded by
+# it is one (white lines' pieces are joined where lanes are: across breaks, and by connect.py's links)
+ends_dir = []
+for lid, r in lines.items():
+  P = np.array(r["pts"], float)[:, :2]
+  if len(P) < 2 or r["colour"] != "yellow":
+    continue
+  for p, q in ((P[0], P[1]), (P[-1], P[-2])):
+    d = p - q
+    ends_dir.append((lid, p, d / max(np.linalg.norm(d), 1e-9)))  # pointing out of the line at that end
+for a in range(len(ends_dir)):
+  for b in range(a + 1, len(ends_dir)):
+    la, pa, da = ends_dir[a]
+    lb, pb, db = ends_dir[b]
+    if la != lb and np.linalg.norm(pa - pb) < PIECE_GAP and da @ db < -math.cos(math.radians(30)):
+      ra, rb = find(la), find(lb)
+      if ra != rb:
+        parent[max(ra, rb)] = min(ra, rb)
 h, bins = np.histogram(near_any, bins=[0, .1, .2, .3, .4, .5, .6, .8, 1, 1.5, 2, 3, 4, 10])
 print("nearest other line:", " ".join(f"{bins[i]:.1f}:{h[i]}" for i in range(len(h))))
 
@@ -158,7 +178,12 @@ for lid, s, c, n, z, xs in seen:
     if cand and side * cand[0][0] < edge:
       o, other = side * cand[0][0], find(cand[0][1])
     else:
+      # to the kerb a shoulder, gutter and all; a lane (as wide as a shoulder can't be, direction.py's SHOULDER)
+      # stops at the gutter
       o, other = edge, "e"
+      if edge >= SHOULDER_MAX:
+        road, _ = scan.extent(c + n * side * 0.3, n, z, side, scan.ROAD)
+        o = max(road + 0.3, SHOULDER_MAX) if road + 0.3 < edge else edge
     r = raster_line(c, n, z, side, o - TWIN)
     if r is not None:
       raster_found[other == "e"] += 1
@@ -342,7 +367,9 @@ def tip(B, edge=(False, False)):
 
 GORE_TIP = 30.0  # m at most traced past a gore's run end
 GORE_W = 3.0  # m: unhatched space beside a gore narrower than this is the gore's unhatched end
+ISLAND_LEN = 10  # m: a strip narrower than any lane, between white lines and shorter than this, is a painted island
 NARROWING = 0.3  # m narrower over a run's last 4 m: its boundaries are closing in
+GORE_MIN = 9  # m hatched at least for a lane-wide run (crossing strips and junction paint are shorter)
 out = []
 for key, A, ids in runs:
   d = np.gradient(A[:, :2], axis=0)
@@ -353,7 +380,12 @@ for key, A, ids in runs:
   # (closing pads with the run's own end values: padding with "not hatched" erodes 3 samples off a gore at a run's
   # end, which dropped a 12 m gore under the 9 m minimum)
   hat = ndi.binary_closing(np.pad(share >= HATCH, 7, mode="edge"), np.ones(7, bool))[7:-7]
-  hat = ndi.binary_opening(np.r_[False, hat, False], np.ones(9, bool))[1:-1]
+  hat = ndi.binary_opening(np.r_[False, hat, False], np.ones(GORE_MIN, bool))[1:-1]
+  # a strip narrower than any lane between white lines, hatched anywhere, is a gore (a junction approach's small one is
+  # hatched over only its wide 5 m; between yellow lines a strip is a median, and its paint reaches the bands)
+  white = all(k == "r" or k in lines and lines[k]["colour"] == "white" for k in key)
+  if not hat.any() and white and np.median(A[:, 3]) < GORE_W and ((share >= HATCH).sum() >= 3 or len(A) < ISLAND_LEN):
+    hat[:] = True  # (unhatched and short: a wedge where a solid line splits off beside a dashed one at a stop line)
   if hat.any():
     # the same space beside a gore but unhatched and narrower than any lane is the gore too (GTA doesn't hatch a gore
     # to its ends; lanes on the interchange are 4-7 m, shoulders, found separately at the road's edge, 1.5-3 m)

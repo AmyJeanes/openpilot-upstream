@@ -17,6 +17,7 @@ PED_SPECIALS = {10, 14, 15, 16}
 REACH, DS, ZSTEP = 30.0, 0.05, 0.3
 END = {0: "none", 2: "kerb", 3: "walk", 4: "gutter"}
 DRIVEABLE = (1, 4)  # road and gutter (flush beside a kerb): the road's edge is where a car would hit something
+ROAD = (1,)  # a lane stops at the gutter (often painted red: no stopping), a shoulder runs on over it to the kerb
 
 x0, x1, y0, y1 = map(float, sys.argv[1:5])
 out = sys.argv[5]
@@ -92,14 +93,14 @@ def paint_dir(c, d, z):
 
 T = rp.Tiles(TILES, cache=256)
 
-def extent(c, n, z, sign):
-  """distance from c along sign*n the surface stays road on the deck at z, and what ends it."""
+def extent(c, n, z, sign, drive=DRIVEABLE):
+  """distance from c along sign*n the surface stays driveable (classes drive) on the deck at z, and what ends it."""
   zc, last = z, 0.0
   for k in range(1, int(REACH / DS) + 1):
     p = c + sign * n * k * DS
     code, h = T.sample(np.array([p[0]]), np.array([p[1]]), zc, zwin=1.0)
     cl = int(code[0]) & 7
-    if cl not in DRIVEABLE:
+    if cl not in drive:
       return (k - 1) * DS, END.get(cl, str(cl))
     if abs(h[0] - zc) > ZSTEP:
       return (k - 1) * DS, "step"
