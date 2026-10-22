@@ -111,20 +111,48 @@ def pieces(A):
 feats = []
 lane_deck = {}
 G = json.load(open(grpj))
-if linkj:  # openings reshaped by connect.py
-  for k, p in json.load(open(linkj)).get("pts", {}).items():
-    G["lanes"][int(k)]["pts"] = p
-for k, r in enumerate(G["lanes"]):
-  A = np.array(r["pts"])
-  lid = f"{r['left']}|{r['right']}|{k}"
-  props = {"kind": "lane", "id": lid, "group": r["group"], "col": colour(r["group"]), "dir": r["dir"],
+LK = json.load(open(linkj)) if linkj else {"links": [], "pts": {}}
+for k, p in LK.get("pts", {}).items():  # openings reshaped by connect.py
+  G["lanes"][int(k)]["pts"] = p
+lid = lambda k: f"{G['lanes'][k]['left']}|{G['lanes'][k]['right']}|{k}"
+nsucc, npred = {}, {}
+for i, j, g, *br in LK["links"]:
+  if not br:  # a branch leaves a lane that carries on; it doesn't make that lane's own carrying on a split
+    nsucc[i] = nsucc.get(i, 0) + 1
+  npred[j] = npred.get(j, 0) + 1
+# a lane carrying on into exactly one, which nothing else carries on into, is the same lane (its lines are stored in
+# pieces, or one stops for a stretch): drawn as one, its break filled
+nxt = {i: j for i, j, g, *br in LK["links"] if not br and nsucc[i] == 1 and npred[j] == 1}
+heads = [k for k in range(len(G["lanes"])) if k not in set(nxt.values())]
+
+
+def fill(A, B):
+  """samples running from A's end to B's start, one a metre."""
+  g = np.linalg.norm(B[0, :2] - A[-1, :2])
+  t = np.arange(1, max(int(round(g)), 1))[:, None] / max(round(g), 1)
+  return A[-1] + (B[0] - A[-1]) * t
+
+
+for k in heads:
+  chain = [k]
+  while chain[-1] in nxt:
+    chain.append(nxt[chain[-1]])
+  A = np.array(G["lanes"][k]["pts"])
+  for q in chain[1:]:
+    B = np.array(G["lanes"][q]["pts"])
+    A = np.vstack([A, fill(A, B), B])
+  r = G["lanes"][k]
+  name = " > ".join(lid(q) for q in chain)
+  props = {"kind": "lane", "id": name, "group": r["group"], "col": colour(r["group"]), "dir": r["dir"],
            "width": round(float(np.median(A[:, 3])), 2), "z": round(float(np.median(A[:, 2])), 1),
-           "arrows": r.get("arrow_votes", 0), "links": r.get("link_votes", 0)}
+           "arrows": sum(G["lanes"][q].get("arrow_votes", 0) for q in chain), "links": sum(G["lanes"][q].get("link_votes", 0) for q in chain)}
   pcs = pieces(A)
-  props["on_deck"] = lane_deck[k] = any(p[3] for p in pcs)  # the lowest-level view hides a lane on a deck anywhere whole
+  props["on_deck"] = any(p[3] for p in pcs)  # the lowest-level view hides a lane on a deck anywhere whole
+  for q in chain:
+    lane_deck[q] = props["on_deck"]
   for a, b, cov, deck in pcs:  # one piece per stretch under a deck, on one, or neither (the level switch, arrows)
     feats.append({"type": "Feature", "properties": {**props, "covered": cov, "deck": deck}, "geometry": {"type": "Polygon", "coordinates": area(A[a:b])}})
-    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": lid, "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
+    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": name, "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
                   "geometry": {"type": "MultiLineString", "coordinates": edges(A[a:b], a == 0, b == len(A))}})
     if r["dir"] != "?":
       feats.append({"type": "Feature", "properties": {**props, "kind": "centre", "covered": cov, "deck": deck},
@@ -140,35 +168,28 @@ for k, r in enumerate(json.load(open(dirj))):
                                                     "width": round(float(np.median(A[:, 3])), 2), "z": round(float(np.median(A[:, 2])), 1),
                                                     "covered": cov, "deck": deck},
                   "geometry": {"type": "Polygon", "coordinates": area(A[a:b])}})
-if linkj:
-  LK = json.load(open(linkj))
-  lid = lambda k: f"{G['lanes'][k]['left']}|{G['lanes'][k]['right']}|{k}"
-  nsucc, npred = {}, {}
-  for i, j, g, *br in LK["links"]:
-    if not br:  # a branch leaves a lane that carries on; it doesn't make that lane's own carrying on a split
-      nsucc[i] = nsucc.get(i, 0) + 1
-    npred[j] = npred.get(j, 0) + 1
-  for i, j, g, *br in LK["links"]:
-    A, B = np.array(G["lanes"][i]["pts"]), np.array(G["lanes"][j]["pts"])
-    a = A[np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
-    kind = "split" if br or nsucc[i] > 1 else "merge" if npred[j] > 1 else "continue"
-    if not br and g > 0.5:
-      # the break filled with samples running from the lane's end to its successor's start, drawn as the lane
-      t = np.arange(1, max(int(round(g / 1.0)), 1))[:, None] / max(round(g / 1.0), 1)
-      F = A[-1] + (B[0] - A[-1]) * t
-      if len(F):
-        to = G["lanes"][j]
-        mid = F[len(F) // 2][None, :3]
-        cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])
-        props = {"kind": "lane", "connector": True, "id": f"{lid(i)} > {lid(j)}", "group": to["group"], "col": colour(to["group"]),
-                 "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck, "on_deck": lane_deck[i] or lane_deck[j]}
-        feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
-        feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
-                      "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
-    m = (a[:2] + B[0, :2]) / 2
-    feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck[i] or lane_deck[j],
-                                                    "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
-                  "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})
+for i, j, g, *br in LK["links"]:
+  if nxt.get(i) == j:  # drawn as one lane
+    continue
+  A, B = np.array(G["lanes"][i]["pts"]), np.array(G["lanes"][j]["pts"])
+  a = A[np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
+  kind = "split" if br or nsucc[i] > 1 else "merge" if npred[j] > 1 else "continue"
+  if not br and g > 0.5:
+    # the break before a split or merge filled with samples running from the lane's end to its successor's start
+    F = fill(A, B)
+    if len(F):
+      to = G["lanes"][j]
+      mid = F[len(F) // 2][None, :3]
+      cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])
+      props = {"kind": "lane", "connector": True, "id": f"{lid(i)} > {lid(j)}", "group": to["group"], "col": colour(to["group"]),
+               "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck, "on_deck": lane_deck[i] or lane_deck[j]}
+      feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
+      feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
+                    "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
+  m = (a[:2] + B[0, :2]) / 2
+  feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck[i] or lane_deck[j],
+                                                  "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
+                "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})
 lanes_by = {}
 for r in G["lanes"]:
   lanes_by.setdefault(r["group"], []).append(np.array(r["pts"]))
