@@ -41,7 +41,7 @@ G = round(rp.TILE / RES)  # grid steps per raster tile
 DZ = 2.0  # m the top surface must be over the road to hide it (as undertiles)
 DRIVEABLE = (rp.ROAD, rp.GUTTER)
 ROUGH_M = 0.15  # top height's local spread (45 cm box) over a tree crown (as undertiles)
-SHOTS = [f"{F}/under/tiles", f"{F}/under_gaps/tiles"]
+SHOTS = undertiles.SHOTS  # the shots on the map
 PED_SPECIALS = {10, 14, 15, 16}  # path node specials that aren't roads
 # plan (the rules for covers that aren't road decks set from contact sheets of random planned shots, 22 Oct: without
 # them most were trees, parked trailers and buildings' floors)
@@ -247,6 +247,7 @@ def shown(folders: list[str], workers: int, each: bool = False, box=None):
   box (x0 x1 y0 y1): only the shots whose frames touch it."""
   union, per = {}, {}
   shots = passing(folders)
+  undertiles.road_links()  # once, before the workers fork
   if box:
     shots = [(f, s) for f, s in shots if box[0] - W_M / 2 < s["x"] < box[1] + W_M / 2 and box[2] - H_M / 2 < s["y"] < box[3] + H_M / 2]
   with mp.get_context("fork").Pool(workers) as pool:

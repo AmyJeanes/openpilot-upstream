@@ -28,9 +28,11 @@ at most a few tiles in memory (the writer's queue is bounded).
   python ortho_depth.py underplan <paths.jsonl> <out.json>
   python ortho_depth.py under <run_dir> <plan.json> [--depth <height tiles dir>] [--ref x y] [--until HH:MM]
   python ortho_depth.py report <under run_dir>   (failing list + contact sheet)
+  python ortho_depth.py recheck <under run_dir> --depth <height tiles dir>   (checks again from the saved heights)
 """
 import argparse
 import collections
+import functools
 import json
 import math
 import os
@@ -53,6 +55,7 @@ CHAIN = 40.0  # m along the lower road either way from a crossing link: the road
 U_NEAR, U_FAR = 0.5, 120.0  # the game draws nothing within ~1% of the near end: (far - near) / 100 under the near plane
 U_BLIND = U_NEAR + 0.01 * (U_FAR - U_NEAR) + 0.3  # m under the camera where nothing shows
 U_MIN_ABOVE = 2.0  # m: the camera at least this far over the lower road's highest point
+DRAWN = 0.25  # share of the lower road's samples (checks a, b) a shot must draw
 WATER_STEP, WATER_BED, WATER_ABOVE = 1.0, 60.0, 50.0  # m: probe grid, bed rays' reach, probes' top over the tile's highest surface
 WATER_GIVE_UP = 20  # consecutive failed tiles after which the pass stops probing (heights first)
 
@@ -609,11 +612,14 @@ def seg_samples(segs, step=0.5):
     yield x0 + t * (x1 - x0), y0 + t * (y1 - y0), z0 + t * (z1 - z0)
 
 
-def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarray | None, ground: list | None = None) -> dict:
+def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarray | None, ground: list | None = None,
+           drawn_only: bool = True) -> dict:
   """(a) the lower road's centreline reads its node heights, or (where the nodes are off) the road's collision surface
   under the shape tests (ground: x, y, z); (b) coverage of its footprint (buffered by its width) at
   its height; (c) nothing between the road and the camera over it, nothing just under the camera; (d) outside the decks
-  (where the top-level tile's surface is under the camera) the heights match the top-level tile."""
+  (where the top-level tile's surface is under the camera) the heights match the top-level tile.
+  drawn_only: a and b count only what the shot drew, at least DRAWN of it (from some camera spots the game leaves whole
+  entities undrawn; undertiles never keeps an undrawn pixel); False: undrawn counts as wrong."""
   out: dict = {}
   errs = []
   for xs, ys, zs in seg_samples(segs):
@@ -622,19 +628,26 @@ def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarr
     if k.any():
       errs.append(h[py[k].astype(int), px[k].astype(int)] - zs[k])
   e = np.concatenate(errs) if errs else np.zeros(0)
-  ae = np.where(np.isfinite(e), np.abs(e), 99.0)
   out["a_samples"] = int(e.size)
+  out["a_drawn"] = round(float(np.isfinite(e).mean()), 3) if e.size else 0.0
+  if drawn_only:
+    e = e[np.isfinite(e)]
+  ae = np.where(np.isfinite(e), np.abs(e), 99.0)
   out["a_median_m"] = round(float(np.median(ae)), 3) if e.size else None
   out["a_share_015"] = round(float((ae < 0.15).mean()), 3) if e.size else 0.0
-  out["a"] = bool(e.size >= 6 and out["a_median_m"] < 0.1 and out["a_share_015"] >= 0.6)
+  out["a"] = bool(e.size >= 6 and out["a_median_m"] < 0.1 and out["a_share_015"] >= 0.6 and (not drawn_only or out["a_drawn"] >= DRAWN))
   if ground:
     g = np.array(ground, dtype=np.float64)
     px, py = (M[0, 0] * g[:, 0] + M[0, 2]).astype(int), (M[1, 1] * g[:, 1] + M[1, 2]).astype(int)
     k = (px >= 0) & (px < W_PX) & (py >= 0) & (py < H_PX)
+    out["a_ground_drawn"] = round(float(np.isfinite(h[py[k], px[k]]).mean()), 3) if k.any() else 0.0
+    if drawn_only:
+      k[k] = np.isfinite(h[py[k], px[k]])
     ge = np.abs(np.nan_to_num(h[py[k], px[k]] - g[k, 2], nan=99.0))
     out["a_ground_n"] = int(k.sum())
     out["a_ground_share_015"] = round(float((ge < 0.15).mean()), 3) if k.any() else 0.0
-    if not out["a"] and k.sum() >= 3 and out["a_ground_share_015"] >= 0.8:
+    if (not out["a"] and k.sum() >= 3 and out["a_ground_share_015"] >= 0.8 and
+        (not drawn_only or out["a_ground_drawn"] >= DRAWN)):
       out["a"], out["a_basis"] = True, "ground"
   # footprint on a 4 px grid
   s = 4
@@ -660,11 +673,14 @@ def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarr
       off = float(np.clip(np.nanmedian(dh), -3.0, 3.0)) if np.isfinite(dh).any() else 0.0
       out["b_node_offset_m"] = round(off, 2)
       dh = dh - off
-    out["b_coverage"] = round(float((np.abs(np.nan_to_num(dh, nan=99.0)) < 0.3).mean()), 3)
+    drawn = np.isfinite(dh)
+    out["b_drawn"] = round(float(drawn.mean()), 3)
+    cover = dh[drawn] if drawn_only else dh
+    out["b_coverage"] = round(float((np.abs(np.nan_to_num(cover, nan=99.0)) < 0.3).mean()), 3) if cover.size else 0.0
     out["c_above_road"] = round(float((np.nan_to_num(dh, nan=-99.0) > 1.0).mean()), 3)
   else:
-    out["b_coverage"], out["c_above_road"] = 0.0, 0.0
-  out["b"] = bool(foot.any() and out["b_coverage"] >= 0.5)
+    out["b_drawn"], out["b_coverage"], out["c_above_road"] = 0.0, 0.0, 0.0
+  out["b"] = bool(foot.any() and out["b_coverage"] >= 0.5 and (not drawn_only or out["b_drawn"] >= DRAWN))
   fin = np.isfinite(hs)
   out["c_near_cam"] = round(float((np.nan_to_num(hs, nan=-1e9) > cam_z - U_BLIND + 0.3).sum() / max(fin.sum(), 1)), 4)
   out["nodata"] = round(float(1 - fin.mean()), 4)  # above the camera (terrain over a trench): expected, not a failure
@@ -684,45 +700,68 @@ def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarr
   return out
 
 
+@functools.lru_cache(maxsize=9)
+def top_tile(depth: str, i: int, j: int) -> tuple[np.ndarray, list] | None:
+  """A height tile's heights and world_to_px."""
+  p = os.path.join(depth, f"o{i:03d}_{j:03d}.json")
+  if not os.path.exists(p):
+    return None
+  side = json.load(open(p))
+  return decode(os.path.join(depth, side["height"]["png"]), side["height"]), side["world_to_px"]
+
+
+def top_frame(depth: str, x: float, y: float) -> np.ndarray | None:
+  """The top-level heights over the frame centred at x, y, each pixel from its own grid cell's height tile: a shot off
+  the grid's centres (a nudge, a gap shot) spans several."""
+  M = ortho.world_to_px(x, y)
+  ci = np.round(((np.arange(W_PX) + 0.5 - M[0][2]) / M[0][0] - ortho.GRID_X0) / ortho.STEP_X).astype(int)
+  cj = np.round(((np.arange(H_PX) + 0.5 - M[1][2]) / M[1][1] - ortho.GRID_Y0) / ortho.STEP_Y).astype(int)
+  out, found = np.full((H_PX, W_PX), np.nan, np.float32), False
+  for i in np.unique(ci):
+    for j in np.unique(cj):
+      t = top_tile(depth, int(i), int(j))
+      if t is None:
+        continue
+      h, T = t
+      cols, rows = np.nonzero(ci == i)[0], np.nonzero(cj == j)[0]
+      sc, sr = cols - int(round(M[0][2] - T[0][2])), rows - int(round(M[1][2] - T[1][2]))  # the tile's pixels
+      kc, kr = (sc >= 0) & (sc < W_PX), (sr >= 0) & (sr < H_PX)
+      out[np.ix_(rows[kr], cols[kc])] = h[np.ix_(sr[kr], sc[kc])]
+      found = True
+  return out if found else None
+
+
+def recheck(run_dir: str, depth: str) -> None:
+  """The checks again over every saved under-deck shot (its best attempt) from its heights; the sidecar's checks and pass
+  replaced (the earlier ones kept as checks_was, pass_was)."""
+  d = os.path.join(run_dir, "tiles")
+  n, now, lost = 0, 0, 0
+  for f in sorted(os.listdir(d)):
+    if not f.endswith(".json"):
+      continue
+    s = json.load(open(os.path.join(d, f)))
+    h = decode(os.path.join(d, s["height"]["png"]), s["height"])
+    ch = checks(h, np.array(s["world_to_px"]), s["camera"]["cam_z"], s["road"]["segs"], top_frame(depth, s["x"], s["y"]),
+                s["clearance"].get("ground"))
+    s.setdefault("checks_was", s["checks"])
+    s.setdefault("pass_was", s["pass"])
+    s["checks"], s["pass"] = ch, ch["pass"]
+    write_json(os.path.join(d, f), s)
+    n += 1
+    now += ch["pass"] and not s["pass_was"]
+    lost += s["pass_was"] and not ch["pass"]
+  print(f"{run_dir}: {n} shots rechecked, {now} pass now that didn't, {lost} no longer pass")
+
+
 # ------------------------------------------------------------------------------------------------------- under: pass
 class UnderPass:
   def __init__(self, args, log):
     self.args, self.log = args, log
     self.sh = ZShooter(args.run_dir, log, lambda item: None)
     self.stats = collections.Counter()
-    self.tops: dict = {}
-
-  def top_tile(self, i: int, j: int) -> tuple[np.ndarray, list] | None:
-    """A height tile's heights and world_to_px (the last few kept)."""
-    if (i, j) not in self.tops:
-      p = os.path.join(self.args.depth, f"o{i:03d}_{j:03d}.json")
-      side = json.load(open(p)) if os.path.exists(p) else None
-      self.tops[(i, j)] = (decode(os.path.join(self.args.depth, side["height"]["png"]), side["height"]), side["world_to_px"]) if side else None
-      while len(self.tops) > 9:
-        self.tops.pop(next(iter(self.tops)))
-    return self.tops[(i, j)]
 
   def top_frame(self, x: float, y: float) -> np.ndarray | None:
-    """The top-level heights over the frame centred at x, y, each pixel from its own grid cell's height tile: a shot off
-    the grid's centres (a nudge, a gap shot) spans several."""
-    if not self.args.depth:
-      return None
-    M = ortho.world_to_px(x, y)
-    ci = np.round(((np.arange(W_PX) + 0.5 - M[0][2]) / M[0][0] - ortho.GRID_X0) / ortho.STEP_X).astype(int)
-    cj = np.round(((np.arange(H_PX) + 0.5 - M[1][2]) / M[1][1] - ortho.GRID_Y0) / ortho.STEP_Y).astype(int)
-    out, found = np.full((H_PX, W_PX), np.nan, np.float32), False
-    for i in np.unique(ci):
-      for j in np.unique(cj):
-        t = self.top_tile(int(i), int(j))
-        if t is None:
-          continue
-        h, T = t
-        cols, rows = np.nonzero(ci == i)[0], np.nonzero(cj == j)[0]
-        sc, sr = cols - int(round(M[0][2] - T[0][2])), rows - int(round(M[1][2] - T[1][2]))  # the tile's pixels
-        kc, kr = (sc >= 0) & (sc < W_PX), (sr >= 0) & (sr < H_PX)
-        out[np.ix_(rows[kr], cols[kc])] = h[np.ix_(sr[kr], sc[kc])]
-        found = True
-    return out if found else None
+    return top_frame(self.args.depth, x, y) if self.args.depth else None
 
   def clearance(self, t: dict) -> dict:
     """Shape tests at the crossings and 4 m either side along the lower road: up from 0.5 m over it (the first hit is
@@ -960,10 +999,16 @@ def main():
   p.add_argument("out")
   r = sub.add_parser("report")
   r.add_argument("run_dir")
+  c = sub.add_parser("recheck")
+  c.add_argument("run_dir")
+  c.add_argument("--depth", required=True, help="the height tiles (check d)")
   args = ap.parse_args()
   if args.cmd == "underplan":
     underplan(args)
   elif args.cmd == "report":
+    report(args.run_dir)
+  elif args.cmd == "recheck":
+    recheck(args.run_dir, args.depth)
     report(args.run_dir)
   else:
     run_dir_log = make_log(args.run_dir)

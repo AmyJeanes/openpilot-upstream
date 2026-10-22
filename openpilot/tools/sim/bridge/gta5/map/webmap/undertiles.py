@@ -1,13 +1,15 @@
 """Under-deck imagery for the map's "beneath decks" view: every passing under-deck shot (ortho_depth.py under) cut to
 what the top imagery can't show, as transparent WebP tiles z22..zmin over sat.pmtiles, plus their outline.
 
-A shot's pixel is kept where its own height is below the top-level height tile's (depth/) by more than --dz m: the deck,
-its parapets and anything else over the camera hide it from above. Lower levels are drawn over higher ones, so the view
+A shot's pixel is kept where its own height is below the top-level height tile's (depth/) by more than --dz m (the deck,
+its parapets and anything else over the camera hide it from above) and it is on or beside road (near_road: no buildings'
+interiors). Lower levels are drawn over higher ones, so the view
 shows the lowest level everywhere (the ground beneath a stack of decks, not the road between two of them). The albedo matches the top tiles' exactly, so no colour matching.
 
   undertiles.py <out dir> [--shots <tiles dir> ...] [--quality 70] [--zmin 10] [--dz 2] [--workers 6] [--names o061_079_L1,...]
 """
 import argparse
+import functools
 import io
 import json
 import math
@@ -22,18 +24,30 @@ from shapely.geometry import Polygon, mapping
 from shapely.ops import transform, unary_union
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "roadpaint"))
 import gframe  # noqa: E402
+import rp  # noqa: E402
 from satfull import F, Z, S22, halve  # noqa: E402
 
-SHOTS = [f"{F}/under/tiles", f"{F}/under_gaps/tiles"]  # the crossings' shots, then the gap planner's (imgcheck/under_gaps.py)
+# the crossings' shots, the gap planner's (imgcheck/under_gaps.py), the covered roads' (imgcheck/covered/)
+SHOTS = [f"{F}/{d}/tiles" for d in ("under", "under_gaps", "under_covered", "under_covered2")]
 DEPTH = f"{F}/depth/tiles"
 GRID_X0, GRID_Y0, STEP_X, STEP_Y = -4300.0, -4300.0, 69.12, 38.88  # ortho.py's grid: cell centres
 EDGE = 8            # px dropped at a shot's border
 MIN_M2 = 2.0        # smallest kept patch
 ROUGH_M = 0.15      # top height's local spread (45 cm box) over a tree crown
 TREE_M2 = 40.0      # a rough patch smaller than this is a lone crown, not a deck (car parks and roads under woods are rough too)
+# only what's on or beside road: road or gutter in the game files' surface raster at the shot's own height there (not a
+# building's floor over or under it), or the game's road links at that height (the raster keeps the top 3 surfaces, so
+# the lowest road of a stack is often missing from it), grown by ROAD_M. Of what passing shots keep, the share on road
+# rises steeply to 0.25 m off it, then by a steady ~2% per 0.25 m (pavements, plazas, floors: 120 shots each of under/,
+# under_gaps/, under_covered/, 22 Oct): 1 m takes in the kerbs with room for registration and the 12 cm grid
+RASTER = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles"
+ROAD_M, ROAD_DZ, LINK_DZ = 1.0, 0.5, 1.5  # m; LINK_DZ: the links' node heights are rougher than the raster's
+PED_SPECIALS = {10, 14, 15, 16}  # path node specials that aren't roads
 QUALITY, DZ = 70, 2.0
 FOLDER: dict[str, str] = {}  # shot name -> its tiles dir
+TILES = rp.Tiles(RASTER, cache=16)
 
 
 def height(path, m):
@@ -64,6 +78,50 @@ def top(d, W, H):
   return out if found else None
 
 
+@functools.lru_cache(maxsize=1)
+def road_links():
+  """The game's vehicle links (no ped, boat or laneless ones): x0 y0 z0 x1 y1 z1 width per row (as imgcheck/under_gaps.py)."""
+  nodes, segs, seen = {}, [], set()
+  rows = [json.loads(line) for line in open(rp.PATHS)]
+  for r in rows:
+    if r["t"] == "n" and (r["f"][1] >> 3) not in PED_SPECIALS and not r["f"][2] & 32:
+      nodes[(r["a"], r["i"])] = (r["x"], r["y"], r["z"])
+  for r in rows:
+    a, b = (r.get("a"), r.get("i")), (r.get("ta"), r.get("ti"))
+    f2 = (r.get("f") or [0, 0, 0])[2]
+    n = ((f2 >> 5) & 7) + ((f2 >> 2) & 7)
+    if r["t"] == "l" and a in nodes and b in nodes and (b, a) not in seen and n > 0:
+      seen.add((a, b))
+      segs.append(nodes[a] + nodes[b] + (min(max(3.4 * n, 3.5), 25.0),))
+  return np.array(segs, np.float64).reshape(-1, 7)
+
+
+def near_road(d, hu):
+  """The shot's pixels within ROAD_M of road or gutter at the shot's own height: the raster, or a road link (its lanes'
+  width), on a 4 px grid."""
+  s, M = 4, d["world_to_px"]
+  H, W = hu.shape
+  X, Y = np.meshgrid((np.arange(W // s) * s + s / 2 - M[0][2]) / M[0][0], (np.arange(H // s) * s + s / 2 - M[1][2]) / M[1][1])
+  h = hu[s // 2::s, s // 2::s]
+  code, _ = TILES.sample(X, Y, np.nan_to_num(h, nan=-1e6), zwin=ROAD_DZ)
+  road = np.isin(code & 7, (rp.ROAD, rp.GUTTER)).astype(np.uint8)
+  px = s * d["cm_per_px"] / 100  # m per grid step
+  x0, x1, y1, y0 = X[0, 0], X[0, -1], Y[0, 0], Y[-1, 0]
+  L = road_links()
+  for ax, ay, az, bx, by, bz, w in L[(np.maximum(L[:, 0], L[:, 3]) > x0 - 15) & (np.minimum(L[:, 0], L[:, 3]) < x1 + 15) &
+                                     (np.maximum(L[:, 1], L[:, 4]) > y0 - 15) & (np.minimum(L[:, 1], L[:, 4]) < y1 + 15)]:
+    t = np.linspace(0, 1, max(int(math.hypot(bx - ax, by - ay) / 0.5), 1) + 1)
+    c, r = ((ax + t * (bx - ax) - x0) / px).astype(int), ((y1 - (ay + t * (by - ay))) / px).astype(int)
+    k = (c >= 0) & (c < h.shape[1]) & (r >= 0) & (r < h.shape[0])
+    with np.errstate(invalid="ignore"):
+      k[k] = np.abs(h[r[k], c[k]] - (az + t[k] * (bz - az))) < LINK_DZ
+    for cc, rr in zip(c[k].tolist(), r[k].tolist(), strict=True):
+      cv2.circle(road, (cc, rr), int(w / 2 / px), 1, -1)
+  r = round(ROAD_M / px)
+  road = cv2.dilate(road, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+  return cv2.resize(road, (W, H), interpolation=cv2.INTER_NEAREST) > 0
+
+
 def mask(d, folder):
   """The shot's albedo and its kept pixels (uint8 0/255), or None without a top height tile."""
   al = cv2.imread(f"{folder}/{d['images']['albedo']}", cv2.IMREAD_COLOR)
@@ -73,7 +131,7 @@ def mask(d, folder):
   if ht is None:
     return None, None
   with np.errstate(invalid="ignore"):
-    m = (ht - hu > DZ) & (al != 0).any(axis=2)
+    m = (ht - hu > DZ) & (al != 0).any(axis=2) & near_road(d, hu)
   m[:EDGE], m[-EDGE:], m[:, :EDGE], m[:, -EDGE:] = False, False, False, False
   m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
   n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
@@ -247,6 +305,7 @@ def main():
   names.sort(key=lambda n: (-sides[n]["camera"]["cam_z"], n))  # the lowest level drawn last, over the others
   print(f"{len(sides)} shots, {sum(not d.get('pass') for d in sides.values())} failed their checks, using {len(names)}", flush=True)
   cv2.setNumThreads(2)
+  road_links()  # loaded once, before the workers fork
   tiles, polys, used, empty, notop = {}, [], 0, [], []
   with mp.get_context("fork").Pool(a.workers) as pool:
     for n, (name, ts, ps, px) in enumerate(pool.imap(shot, names, chunksize=1)):

@@ -20,10 +20,14 @@ Rebuilding everything from the captures (`/mnt/e/gta5_ortho_20261018`):
 5. View: put `index.html` beside `sat.pmtiles` and `roads.pmtiles` and serve the folder with `rangeserver.py <dir> <port>`
    (PMTiles needs HTTP range requests).
 6. Beneath decks: `undertiles.py <out dir>` cuts every passing under-deck shot (`under/` from the road crossings,
-   `under_gaps/` from `imgcheck/under_gaps.py`; sidecar `pass`) to the pixels lower than the top-level height tiles
-   (`depth/`) by over 2 m, as transparent WebP tiles `under.pmtiles` (the lowest level on top) and their outline
-   `under_footprint.geojson`; the page shows them in hybrid view with "Beneath decks only". `under_gaps.py hidden`, then
-   `plan`, plans shots (`ortho_depth.py under`) for the hidden road the shots so far don't show.
+   `under_gaps/` from `imgcheck/under_gaps.py`, `under_covered*/` from the covered roads below; sidecar `pass`) to the
+   drawn pixels lower than the top-level height tiles (`depth/`) by over 2 m and within 1 m of road at the shot's own
+   height (road or gutter in the game files' surface raster, or the game's road links: no buildings' interiors), as
+   transparent WebP tiles `under.pmtiles` (the lowest level on top) and their outline `under_footprint.geojson`; the page shows them in hybrid view with
+   "Lowest level only". A shot passes when the part of its lower road it drew (at least a quarter) reads right; after
+   changing the checks, `ortho_depth.py recheck <run dir> --depth <depth tiles>` redoes a run's sidecars from the saved
+   heights. `under_gaps.py hidden`, then `plan`, plans shots (`ortho_depth.py under`) for the hidden road the shots so
+   far don't show.
 
 After recapturing some cells (`imgcheck/ortho.py run`; `--calm` for calm water, so the surf matches between
 neighbouring shots; `imgcheck/ortho_edges.py` plans the uncaptured cells that still hold land or shallow seabed): put
@@ -32,6 +36,6 @@ only draws tiles without a water tile) and `satfull.py --redo-cells "i,j;..."`, 
 them from the spool. Without the spool, `satfull.py` rebuilds the whole map. Reload an open map after `sat.pmtiles`
 is rewritten.
 
-Covered roads (tunnels, roads under buildings and sheds) for the labeller, not the public map: `imgcheck/covered/find.py`
+Covered roads (tunnels, roads under buildings and sheds), for the labeller and the beneath-decks view: `imgcheck/covered/find.py`
 finds road nodes the height tiles show covered, `classify.py` drops foliage and groups the rest, `plan_all.py` writes
 an under-deck plan for `ortho_depth.py under`.
