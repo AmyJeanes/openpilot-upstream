@@ -15,6 +15,7 @@ import arrows
 
 STEP, MINLEN, LANE_MIN, LANE_MAX, GAP = 1.0, 6.0, 1.5, 9.0, 3.0
 PIECE_GAP = 0.5  # m between a line piece's end and the next piece's start
+GUTTER_SHARE = 0.5  # of a lane's kerb-side samples with a gutter for the rest to take one
 SHOULDER_MAX = 4.0  # m: line to road's edge, a shoulder below it, a lane from it (direction.py's SHOULDER)
 # twin lines: nearest-other-line distances on the interchange peak at 0-0.3 m, dip at 0.3-0.4, lanes from ~4 m; and they
 # must stay that close along most of where they see each other (lines meeting at a gore's nose only touch at the tip)
@@ -178,12 +179,14 @@ def look(item):
   """the lane samples beside one line sample: [(key, sample, raster line used: before the edge)]."""
   lid, s, c, n, z, xs = item
   out = []
+  gutter = math.nan  # m of gutter between a lane and the kerb (0: none; nan: not a lane to the kerb)
   me = find(lid)
   # this line's own other half, if it is one half of a double line: a lane on that side starts beyond it
   twin_at = {side: max([side * x[0] for x in xs if find(x[1]) == me and 0 < side * x[0] <= TWIN], default=0.0)
              for side in (1, -1)}
   xs = [x for x in xs if find(x[1]) != me]
   for side in (1, -1):
+    gutter = math.nan
     cand = sorted([x for x in xs if side * x[0] > 0], key=lambda x: side * x[0])
     edge, _ = scan.extent(c + n * side * 0.3, n, z, side)  # step off the line's own paint first
     edge += 0.3
@@ -196,6 +199,7 @@ def look(item):
       if edge >= SHOULDER_MAX:
         road, _ = scan.extent(c + n * side * 0.3, n, z, side, scan.ROAD)
         o = max(road + 0.3, SHOULDER_MAX) if road + 0.3 < edge else edge
+        gutter = edge - o
     r = raster_line(c, n, z, side, o - TWIN)
     raster = None
     if r is not None:
@@ -215,7 +219,7 @@ def look(item):
     o -= o0
     # key as seen travelling along this line's point order: left boundary first
     key = (me, other) if side == 1 else (other, me)
-    out.append((key, (float(m[0]), float(m[1]), float(z), float(o), lid, float(s)), raster))
+    out.append((key, (float(m[0]), float(m[1]), float(z), float(o), lid, float(s), gutter if other == "e" else math.nan), raster))
   return out
 
 
@@ -276,6 +280,17 @@ for key, qs in best.values():
         s = np.array([c[5] for c in cur])
         si = np.arange(s[0], s[-1] + 1e-6, STEP)
         A = np.array([c[:4] for c in cur])
+        # a lane to the kerb with a gutter along most of it: where the surface raster has no gutter (it holds the
+        # gutter in pieces along a kerb), the lane still stops a gutter's width short of the kerb
+        g = np.array([c[6] for c in cur])
+        if "e" in key and (g > 0).sum() >= GUTTER_SHARE * (~np.isnan(g)).sum() > 0:
+          d = np.gradient(A[:, :2], axis=0)
+          d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+          sg = 1 if key[1] == "e" else -1  # the kerb's side, right of the samples' order or left
+          fix = g == 0
+          gw = float(np.median(g[g > 0]))
+          A[fix, :2] -= sg * np.stack([d[fix, 1], -d[fix, 0]], 1) * gw / 2
+          A[fix, 3] -= gw
         runs.append([key, np.stack([np.interp(si, s, A[:, k]) for k in range(4)], 1), ({key[0]}, {key[1]})])
       cur = []
     if q is not None:
