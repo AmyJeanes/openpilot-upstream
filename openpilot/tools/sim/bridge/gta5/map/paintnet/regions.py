@@ -59,23 +59,10 @@ for f in feats:
   cv2.circle(disc, (int(round(c0)), int(round(r0))), int(math.ceil(r / RES)), 1, -1)
   for l in range(L):
     masked[l] |= (disc > 0) & (np.abs(zz[l] - f["z"]) < 1.5)
-# the markings list misses many arrows (8 of the interchange's 12 westbound motorway ones): paint pieces shaped like an
-# arrow are masked too. blobs.py on the interchange: arrows 3.4-5.7 m long, 1.6-2.9 m wide, 34-47% filled; other pieces
-# that size under 0.9 m wide or under 13% filled
-ARROW_LEN, ARROW_W, ARROW_FILL = (3.0, 6.5), 1.4, 0.3
-for l in range(L):
-  n, cl, st, _ = cv2.connectedComponentsWithStats(((paint[l] > 0) & ~masked[l]).astype(np.uint8), connectivity=8)
-  for k in range(1, n):
-    x, y, w, h, a = st[k]
-    if a < 100 or max(w, h) * RES > ARROW_LEN[1] * 1.5:
-      continue
-    rr, cc = np.nonzero(cl[y:y + h, x:x + w] == k)
-    P = np.stack([cc, rr], 1).astype(float)
-    P -= P.mean(0)
-    _, ev = np.linalg.eigh(np.cov(P.T))
-    ln, wd = np.ptp(P @ ev[:, 1]) * RES, np.ptp(P @ ev[:, 0]) * RES
-    if ARROW_LEN[0] <= ln <= ARROW_LEN[1] and wd >= ARROW_W and a * RES * RES / (ln * wd) >= ARROW_FILL:
-      masked[l, y:y + h, x:x + w] |= ndi.binary_dilation(cl[y:y + h, x:x + w] == k, iterations=2)
+# the markings list misses many arrows: paint shaped like one is masked too
+sys.path.insert(0, sys.path[0])
+import arrows
+masked |= arrows.find((paint > 0) & ~masked, zz, x0, y1, RES)[0]
 wall_col = np.where(masked, 0, paint)
 
 # lengthwise lines drawn whole, on the surface whose height matches (a dashed line's gaps are walls too)

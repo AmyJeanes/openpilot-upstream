@@ -11,6 +11,7 @@ import json, math, sys, collections
 import numpy as np
 from scipy import ndimage as ndi
 import scan
+import arrows
 
 STEP, MINLEN, LANE_MIN, LANE_MAX, GAP = 1.0, 6.0, 1.5, 9.0, 3.0
 # twin lines: nearest-other-line distances on the interchange peak at 0-0.3 m, dip at 0.3-0.4, lanes from ~4 m; and they
@@ -79,11 +80,16 @@ print("nearest other line:", " ".join(f"{bins[i]:.1f}:{h[i]}" for i in range(len
 
 # solid lines the line extraction missed (a gore's outline drawn as part of its chevron marking) are still painted in
 # the surface raster: paint at the same offset all along +-RL_ALONG m, RL_MIN-RL_MAX m wide, painted over RL_SOLID of
-# its length; chevrons move sideways along, arrows and text are masked out by the markings list
+# its length; chevrons move sideways along, arrows and text are masked out by the markings list and arrows the list
+# misses by their shape (an arrow's shaft is a short solid lengthwise stroke)
 RL_ALONG, RL_MIN, RL_MAX, RL_SOLID = 1.5, 0.08, 0.8, 0.9
 marks = [json.loads(l) for l in open(scan.PAINT.replace("polylines", "features"))]
-marks = np.array([[f["x"], f["y"], f["z"], max(f.get("len", 0), f.get("wid", 0)) / 2 + 0.5] for f in marks
-                  if f["kind"] != "crossing" and scan.inbox(f["x"], f["y"], 20)])
+marks = [[f["x"], f["y"], f["z"], max(f.get("len", 0), f.get("wid", 0)) / 2 + 0.5] for f in marks
+         if f["kind"] != "crossing" and scan.inbox(f["x"], f["y"], 20)]
+code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
+found = arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)[1]
+marks = np.array(marks + [[x, y, z, r + 0.5] for x, y, z, r in found])
+print(len(found), "arrows found by shape")
 raster_found = collections.Counter()
 
 
