@@ -47,7 +47,8 @@
   <div><i class="ring" style="border-color:#00e5ff"></i>Merge: two lanes carry on into one</div>
   <div><i class="ring"></i>Flag: needs a look</div>
   <div class="note">Click a band or marker for its id and evidence.</div>
-  <label style="display:block;margin-top:6px"><input type="checkbox" id="checker"> <b>Checker: <span style="color:#ff9100">&#9670;</span> where the paint regions disagree</b></label>
+  <label style="display:block;margin-top:6px"><input type="checkbox" id="osmview"> <b>OSM export: ways and tags (click one)</b></label>
+  <label style="display:block;margin-top:2px"><input type="checkbox" id="checker"> <b>Checker: <span style="color:#ff9100">&#9670;</span> where the paint regions disagree</b></label>
   <b style="margin-top:6px">Levels</b>
   <label><input type="radio" name="lvl" value="all" checked> All (beneath decks: faint, dashed edge)</label><br>
   <label><input type="radio" name="lvl" value="top"> Top level only</label><br>
@@ -98,13 +99,25 @@ const checkLayers = [
     paint: { "circle-radius": 8, "circle-color": "rgba(255,145,0,0.25)", "circle-stroke-color": "#ff9100", "circle-stroke-width": 3 } },
 ];
 roadLayers.push(...checkLayers);
+// the OSM export (paintnet/osm.py): ways coloured by class, as wide as their lanes, toggled in the legend
+const OT = ["==", ["get", "osm_type"], "way"];
+const osmLayers = [
+  { id: "osm-way", type: "line", source: "osm", filter: OT, layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": ["match", ["get", "highway"], "motorway", "#e8590c", "motorway_link", "#f59f00", "primary", "#fcc419",
+                            "footway", "#adb5bd", "#74c0fc"],
+             "line-width": ["interpolate", ["linear"], ["zoom"], 16, 2, 20, ["*", 4, ["to-number", ["coalesce", ["get", "lanes"], 1]]]],
+             "line-opacity": 0.9 } },
+  { id: "osm-node", type: "circle", source: "osm", filter: ["!=", ["get", "osm_type"], "way"], layout: { visibility: "none" },
+    paint: { "circle-radius": 6, "circle-color": ["match", ["get", "osm_type"], "flag", "#ff1744", "#ffffff"], "circle-stroke-color": "#000", "circle-stroke-width": 1.5 } },
+];
+roadLayers.push(...osmLayers);
 for (const l of roadLayers) l.metadata = { views: ["street", "hybrid"], filter: l.filter };
 
 // level switch: everything, only what has nothing above it, or the lowest level everywhere (a lane on a deck anywhere
 // hidden whole: a motorway shown only where it runs on the ground reads as broken)
 function setLevel(lv) {
   for (const l of roadLayers) {
-    if (l.id.startsWith("ck-")) continue;
+    if (l.id.startsWith("ck-") || l.id.startsWith("osm-")) continue;
     const own = l.metadata.filter;
     // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
     const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "on_deck"]] : null;
@@ -122,6 +135,8 @@ function showUnder() {
 document.querySelectorAll("input[name=lvl]").forEach(r => r.onchange = () => setLevel(r.value));
 const checkerOn = () => document.getElementById("checker").checked;
 document.getElementById("checker").onchange = () => setView(view);
+const osmOn = () => document.getElementById("osmview").checked;
+document.getElementById("osmview").onchange = () => setView(view);
 
 const style = {
   version: 8,
@@ -130,6 +145,7 @@ const style = {
     sat: { type: "raster", url: "pmtiles://" + SAT, tileSize: 256 },
     pilot: { type: "geojson", data: PILOT + "?t=" + Date.now() },
     check: { type: "geojson", data: base + "check.geojson?t=" + Date.now() },
+    osm: { type: "geojson", data: base + "osm.geojson?t=" + Date.now() },
     under: { type: "raster", url: "pmtiles://" + base + "under.pmtiles", tileSize: 256 },
     underEdge: { type: "geojson", data: base + "under_footprint.geojson" },
   },
@@ -159,7 +175,7 @@ function setView(v) {
   document.getElementById("legend").style.display = v === "satellite" ? "none" : "";
   map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#305d62");  // satellite: the sea past the captures, as WebP decodes the sea tiles
   for (const l of roadLayers) {
-    const on = l.metadata.views.includes(v) && (!l.id.startsWith("ck-") || checkerOn());
+    const on = l.metadata.views.includes(v) && (!l.id.startsWith("ck-") || checkerOn()) && (!l.id.startsWith("osm-") || osmOn());
     map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
   }
   showUnder();
@@ -185,7 +201,7 @@ map.getCanvasContainer().addEventListener("wheel", e => {
     easing: t => 1 - Math.pow(1 - t, 3) });
 }, { passive: false });
 map.on("click", e => {
-  const f = map.queryRenderedFeatures(e.point, { layers: ["ck-flag", "pi-flag", "pi-linkpt", "pi-gore", "pi-lane", "pi-other"].filter(id => map.getLayer(id)) })[0];
+  const f = map.queryRenderedFeatures(e.point, { layers: ["osm-node", "osm-way", "ck-flag", "pi-flag", "pi-linkpt", "pi-gore", "pi-lane", "pi-other"].filter(id => map.getLayer(id)) })[0];
   if (!f) return;
   const p = f.properties;
   const rows = Object.entries(p).filter(([k]) => k !== "col").map(([k, v]) => `<b>${k}</b> ${v}`).join("<br>");

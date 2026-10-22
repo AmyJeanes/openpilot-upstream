@@ -118,8 +118,9 @@ for g, mem in groups.items():
   for i, f in mem:
     s = sense[g] * f
     A = R[i] if s >= 0 else R[i][::-1]
+    L, Rt = ("left", "right") if s >= 0 else ("right", "left")  # reversed, its sides swap
     out.append({**lanes[i], "group": g, "pts": A.tolist(), "dir": "pts" if s else "?",
-                "left": lanes[i]["left"] if s >= 0 else lanes[i]["right"], "right": lanes[i]["right"] if s >= 0 else lanes[i]["left"]})
+                "left": lanes[i][L], "right": lanes[i][Rt], "left_all": lanes[i][L + "_all"], "right_all": lanes[i][Rt + "_all"]})
 json.dump({"lanes": out, "flags": flags}, open(sys.argv[6], "w"))
 print(len(lanes), "lanes in", len(groups), "direction groups;", len(same), "white joins,", len(centre), "yellow joins;", len(flags), "flagged")
 for f in flags:

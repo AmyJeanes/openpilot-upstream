@@ -2,10 +2,10 @@
 in the files are never drawn in the game (the top street's wide westbound dashes: no paint in the imagery), and they
 split real lanes.
 
-Per line: along its painted stretches (where the surface raster has paint under it), the imagery's brightness on the
+Per line: along its painted stretches (where the surface raster has paint under it; all along if hardly any), the imagery's brightness on the
 line against the plain road beside it (the brighter side where both are road, just clear of the line). Lines under a deck read the under-deck imagery;
-where no shot covers them they are unknown (see NOT_DRAWN). Out: {id: {"contrast": median of line minus beside (0-255 grey), "n":
-samples, "src": "sat"/"under", "drawn": true/false/null (unknown)}}."""
+where no shot covers them they are unknown (see drawn). Out: {id: {"contrast": median of line minus beside, "on": the
+line's own median (0-255 grey), "n": samples, "src": "sat"/"under", "colour", "drawn": true/false/null (unknown)}}."""
 import json, math, sys
 import numpy as np
 import cv2
@@ -47,13 +47,18 @@ def grey(src, x, y):
   return out
 
 
-# a line not drawn in the game reads like the road beside it (interchange: -7 to +5; real lines 13 and up); far darker
-# than the road, it is under something the surface raster doesn't hold (a rail bridge: -54), so unknown
-NOT_DRAWN = (-15.0, 10.0)
+# drawn white paint is white: on the interchange's imagery, lines of 6 m or more the game doesn't draw read 104-118 grey
+# (dashes over concrete, stains, a kerb's edge: a light-to-dark edge can pass a contrast test), drawn ones 148 and up
+# (dashed lines measured on their dashes; scraps under 6 m read 97-135 and aren't used as lane lines). Yellow paint isn't bright, so a
+# yellow line must stand out from the road (real ones +64..+70). Far darker than the road, a line is under something
+# the surface raster doesn't hold (a rail bridge: -54): unknown
+WHITE_MIN, YELLOW_CONTRAST, HIDDEN = 135.0, 10.0, -15.0
 
 
-def not_drawn(v):
-  return v["contrast"] is not None and NOT_DRAWN[0] < v["contrast"] < NOT_DRAWN[1]
+def drawn(v, colour):
+  if v["contrast"] is None or v["contrast"] <= HIDDEN:
+    return None
+  return v["on"] >= WHITE_MIN if colour == "white" else v["contrast"] >= YELLOW_CONTRAST
 
 
 def covered(S):
@@ -88,9 +93,8 @@ for l in open(scan.PAINT):
   nrm = np.stack([e[:, 1], -e[:, 0]], 1)
   # painted stretches only: the raster's paint at the line's height
   painted = np.array([(int(scan.T.sample(np.array([x]), np.array([y]), z, zwin=0.6)[0][0]) >> 3) > 0 for x, y, z in S])
-  if painted.sum() < 4:
-    continue
-  S, nrm = S[painted], nrm[painted]
+  if painted.sum() >= 4:  # (a line barely in the raster is measured all along: it may be one the game doesn't draw)
+    S, nrm = S[painted], nrm[painted]
   off = r["width"] / 2 + 0.35
   cov = covered(S)
   # in the open the satellite imagery shows it; under a deck only the under-deck shots can (the satellite shows the
@@ -108,13 +112,14 @@ for l in open(scan.PAINT):
   side = np.nanmax(np.stack(sides), 0)
   ok = ~np.isnan(on) & ~np.isnan(side)
   if ok.sum() >= 4:
-    res[r["id"]] = {"contrast": round(float(np.median(on[ok] - side[ok])), 1), "n": int(ok.sum()), "src": src}
+    res[r["id"]] = {"contrast": round(float(np.median(on[ok] - side[ok])), 1), "on": round(float(np.median(on[ok])), 1),
+                    "n": int(ok.sum()), "src": src, "colour": r["colour"]}
   else:
-    res[r["id"]] = {"contrast": None, "n": int(ok.sum()), "src": src}
+    res[r["id"]] = {"contrast": None, "n": int(ok.sum()), "src": src, "colour": r["colour"]}
 for v in res.values():
-  v["drawn"] = None if v["contrast"] is None or v["contrast"] <= NOT_DRAWN[0] else not not_drawn(v)
+  v["drawn"] = drawn(v, v["colour"])
 json.dump(res, open(sys.argv[5], "w"))
 c = np.array([v["contrast"] for v in res.values() if v["contrast"] is not None])
 print(len(res), "lines,", len(c), "seen; contrast:", np.histogram(c, [-300, -10, 0, 5, 10, 15, 20, 30, 50, 80, 300])[0].tolist(),
       "(bins -10 0 5 10 15 20 30 50 80)")
-print("not drawn:", sorted(k for k, v in res.items() if not_drawn(v)))
+print("not drawn:", sorted(k for k, v in res.items() if v["drawn"] is False))

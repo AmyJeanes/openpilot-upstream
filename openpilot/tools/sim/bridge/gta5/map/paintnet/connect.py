@@ -4,14 +4,15 @@ A lane's end links to a lane starting just ahead of it (0 < gap <= JOIN m along 
 HEAD deg) when one of their edges lines up (within EDGE m sideways): the lane carries on with a line starting or ending
 beside it. A lane can have two successors (a turn bay opening beside it: its one edge lines up with each) or two
 predecessors (a merge). A lane opening beside one that carries on links to it as a "branch" (see BRANCH_RUN). No link where paint crosses the gap (a stop line or crossing: lanes end at a junction's box).
-JOIN is provisional (the one opening measured on the interchange is 13 m; re-measure on a bigger area).
 Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "pts": {lane index: new pts}}: pts replace a
 lane's samples where an opening was reshaped (see reshape)."""
 import json, math, sys
 import numpy as np
 import scan
 
-JOIN, HEAD, EDGE = 15.0, 15.0, 0.5
+# JOIN: breaks measured at the interchange's openings (where the lane plus the opening is wider than a lane can be, so
+# unsampled) 12.6, 13.9 and 16.2 m; a junction's break is never linked (paint crosses it)
+JOIN, HEAD, EDGE = 20.0, 15.0, 0.5
 G = json.load(open(sys.argv[5]))
 lanes = G["lanes"]
 
@@ -71,14 +72,15 @@ for i, A in enumerate(P):
 # by about the new lane's width over the BRANCH_RUN m before the new lane's own line starts (the interchange's
 # lower-deck left turn: 5.2 -> 8.8 m; the top street's left-turn bay: 5.2 -> 8.9 m), and the new lane starts touching
 # that band (beside it, or up to JOIN m past its end)
-BRANCH_RUN, WIDEN = 15, 0.5
+BRANCH_RUN, BRANCH_FROM, WIDEN = 15, 10, 0.3  # widened by at least WIDEN of the new lane's width: measured 0.40, 0.69, 0.75 (only part
+# of the widening is sampled where lane plus opening pass the lane step's width limit)
 has_pred = {j for _, j, *_ in links}
 for j, B in enumerate(P):
   if j in has_pred or not ok[j]:
     continue
   db, nb = frame(B, 0)
   for i, A in enumerate(P):
-    if i == j or not ok[i] or len(A) < 3:
+    if i == j or not ok[i] or len(A) < BRANCH_FROM:  # a fragment (in a junction's mouth) has no usual width to widen from
       continue
     k = int(np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin())
     at_end = k == len(A) - 1
