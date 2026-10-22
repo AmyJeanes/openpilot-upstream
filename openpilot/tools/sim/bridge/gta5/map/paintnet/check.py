@@ -49,10 +49,14 @@ def paint(A, into, value=1):
     nn = np.array([d[1], -d[0]])
     P = [np.array([ax, ay]) - d * 0.5 + nn * aw / 2, np.array([bx, by]) + d * 0.5 + nn * bw / 2,
          np.array([bx, by]) + d * 0.5 - nn * bw / 2, np.array([ax, ay]) - d * 0.5 - nn * aw / 2]
-    poly = np.array([px(*p) for p in P])
-    m = np.zeros((H, W), np.uint8)
-    cv2.fillPoly(m, [np.round(poly).astype(np.int32)], 1)
+    poly = np.round(np.array([px(*p) for p in P])).astype(np.int32)
+    o = poly.min(0)
+    m = np.zeros(tuple(poly.max(0)[::-1] - o[::-1] + 1), np.uint8)  # just the band's box
+    cv2.fillPoly(m, [poly - o], 1)
     rr, cc = np.nonzero(m)
+    rr, cc = rr + o[1], cc + o[0]
+    k = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
+    rr, cc = rr[k], cc[k]
     if not len(rr):
       continue
     dz = np.abs(zk[:, rr, cc] - (az + bz) / 2)
@@ -85,17 +89,22 @@ space = np.isin(lab, [k for k, v in kind.items() if v in ("lane", "area")])
 covered = ndi.binary_dilation(anything > 0, np.ones((1, 7, 7), bool))
 gap = space & ~covered
 for l in range(L):
-  n, cl = cv2.connectedComponents(gap[l].astype(np.uint8), connectivity=4)
+  n, cl, st, _ = cv2.connectedComponentsWithStats(gap[l].astype(np.uint8), connectivity=4)
   for k in range(1, n):
-    m = cl == k
-    a = m.sum() * res * res
+    a = st[k, cv2.CC_STAT_AREA] * res * res
     if a < UNMAPPED_A:
       continue
+    # the gap's box and a ring of background round it (no background outside it is nearer)
+    bx, by, bw, bh = st[k, :4]
+    r0, c0 = max(by - 1, 0), max(bx - 1, 0)
+    box = np.s_[r0:by + bh + 1, c0:bx + bw + 1]
+    m = cl[box] == k
     d = ndi.distance_transform_edt(m)
     if 2 * d.max() * res < UNMAPPED_W:
       continue
     r, c = np.unravel_index(d.argmax(), d.shape)
-    reg = int(np.bincount(lab[l][m]).argmax())
+    r, c = r + r0, c + c0
+    reg = int(np.bincount(lab[l][box][m]).argmax())
     flag(f"unmapped: {a:.0f} m2 of lane space (region {reg}, {kind.get(reg)}) with no lane", x0 + (c + .5) * res, y1 - (r + .5) * res, f"region {reg}")
 
 # overlaps

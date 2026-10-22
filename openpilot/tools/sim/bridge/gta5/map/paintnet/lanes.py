@@ -7,7 +7,7 @@ LANE_MIN to LANE_MAX m apart bound a lane. Lane samples are keyed by their two b
 and chained along: a lane is one key's run, split at gaps over GAP m.
 Out: [{"left": id, "right": id, "left_all"/"right_all": every boundary id along it (lanes joined across a break),
 "pts": [[x, y, z, width], ...]}] with left/right as seen along pts."""
-import json, math, sys, collections
+import json, math, multiprocessing, os, sys, collections
 import numpy as np
 from scipy import ndimage as ndi
 import scan
@@ -21,8 +21,7 @@ SHOULDER_MAX = 4.0  # m: line to road's edge, a shoulder below it, a lane from i
 TWIN, TWIN_SHARE = 0.35, 0.8
 x0, x1, y0, y1 = scan.x0, scan.x1, scan.y0, scan.y1
 lines = {}
-for l in open(scan.PAINT):
-  r = json.loads(l)
+for r in scan.src.paint():
   P = np.array(r["pts"], float)
   if r["len"] < MINLEN or not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
     continue
@@ -37,8 +36,7 @@ if vis:
 # a piece shorter than MINLEN carrying on the end of a line (lines are stored in pieces: a 5.9 m piece bridges two
 # motorway edge lines at a merge) is part of that line
 ends = [(np.array(r["pts"][0][:2]), np.array(r["pts"][-1][:2])) for r in lines.values()]
-for l in open(scan.PAINT):
-  r = json.loads(l)
+for r in scan.src.paint():
   if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or (vis and r["id"] in hidden):
     continue
   P = np.array(r["pts"], float)
@@ -123,7 +121,7 @@ print("nearest other line:", " ".join(f"{bins[i]:.1f}:{h[i]}" for i in range(len
 # its length; chevrons move sideways along, arrows and text are masked out by the markings list and arrows the list
 # misses by their shape (an arrow's shaft is a short solid lengthwise stroke)
 RL_ALONG, RL_MIN, RL_MAX, RL_SOLID = 1.5, 0.08, 0.8, 0.9
-marks = [json.loads(l) for l in open(scan.PAINT.replace("polylines", "features"))]
+marks = scan.src.features()
 marks = [[f["x"], f["y"], f["z"], max(f.get("len", 0), f.get("wid", 0)) / 2 + 0.5] for f in marks
          if f["kind"] != "crossing" and scan.inbox(f["x"], f["y"], 20)]
 code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
@@ -164,8 +162,10 @@ def raster_line(c, n, z, side, lim):
 
 
 # pass 2: lanes between neighbouring markings (or a marking and the road's edge)
-samples = collections.defaultdict(list)  # (a, b) with a left of b -> [(x, y, z, w, line id, s)]
-for lid, s, c, n, z, xs in seen:
+def look(item):
+  """the lane samples beside one line sample: [(key, sample, raster line used: before the edge)]."""
+  lid, s, c, n, z, xs = item
+  out = []
   me = find(lid)
   # this line's own other half, if it is one half of a double line: a lane on that side starts beyond it
   twin_at = {side: max([side * x[0] for x in xs if find(x[1]) == me and 0 < side * x[0] <= TWIN], default=0.0)
@@ -185,22 +185,36 @@ for lid, s, c, n, z, xs in seen:
         road, _ = scan.extent(c + n * side * 0.3, n, z, side, scan.ROAD)
         o = max(road + 0.3, SHOULDER_MAX) if road + 0.3 < edge else edge
     r = raster_line(c, n, z, side, o - TWIN)
+    raster = None
     if r is not None:
-      raster_found[other == "e"] += 1
+      raster = other == "e"
       o, other = r, "r"
     # two yellow lines further apart than a double line's halves bound a painted median however narrow it is, and a
     # line and the road's edge a shoulder (driveable, not a lane) down to where they touch
     yellow_pair = lines[lid]["colour"] == "yellow" and other not in ("e", "r") and cand and cand[0][2] == "yellow"
     if not (LANE_MIN <= o <= LANE_MAX or (yellow_pair or other == "e") and TWIN < o < LANE_MIN):
+      out.append((None, None, raster))
       continue
     o0 = twin_at[side]
     if o - o0 < TWIN:
+      out.append((None, None, raster))
       continue
     m = c + n * side * (o0 + o) / 2
     o -= o0
     # key as seen travelling along this line's point order: left boundary first
     key = (me, other) if side == 1 else (other, me)
-    samples[key].append((float(m[0]), float(m[1]), float(z), float(o), lid, float(s)))
+    out.append((key, (float(m[0]), float(m[1]), float(z), float(o), lid, float(s)), raster))
+  return out
+
+
+samples = collections.defaultdict(list)  # (a, b) with a left of b -> [(x, y, z, w, line id, s)]
+with multiprocessing.get_context("fork").Pool(min(16, os.cpu_count())) as pool:  # (samples are independent)
+  for got in pool.imap(look, seen, chunksize=64):
+    for key, q, raster in got:
+      if raster is not None:
+        raster_found[raster] += 1
+      if key is not None:
+        samples[key].append(q)
 print("raster-only lines used:", raster_found[False], "before a line,", raster_found[True], "before the edge")
 
 

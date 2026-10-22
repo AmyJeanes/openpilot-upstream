@@ -429,8 +429,7 @@ for s in range(len(sections)):
     clusters[pfind((s, e))].append((s, e))
 
 # --- lanes of each section in way order, and their tags
-arrow_list = [json.loads(l) for l in open(scan.PAINT.replace("polylines", "features"))]
-arrow_list = [a for a in arrow_list if a["kind"] == "arrow" and scan.inbox(a["x"], a["y"], 10)]
+arrow_list = [a for a in scan.src.features() if a["kind"] == "arrow" and scan.inbox(a["x"], a["y"], 10)]
 code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
 shapes = arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)[1]
 shapes = [s for s in shapes if all(math.hypot(s[0] - a["x"], s[1] - a["y"]) > 3.0 for a in arrow_list)]

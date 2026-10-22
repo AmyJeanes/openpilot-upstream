@@ -24,17 +24,14 @@ STRIP_END = 5.0
 FLOW_NEAR, FLOW_ANG = 12.0, 30.0  # lane samples to the nearest parallel link on the interchange: 0-12 m, then a drop (flowdist.py)
 lanes = json.load(open(sys.argv[5]))
 paint, style = {}, {}
-for l in open(scan.PAINT):
-  r = json.loads(l)
+for r in scan.src.paint():
   paint[r["id"]], style[r["id"]] = r["colour"], r["style"]
-arrows = [json.loads(l) for l in open(scan.PAINT.replace("polylines", "features"))]
-arrows = [a for a in arrows if a["kind"] == "arrow" and scan.inbox(a["x"], a["y"], 10)]
+arrows = [a for a in scan.src.features() if a["kind"] == "arrow" and scan.inbox(a["x"], a["y"], 10)]
 
 # GTA link segments with travel sense: one-way (fwd only or back only)
 links = []
 raw = {}
-for line in open(scan.PATHS):
-  o = json.loads(line)
+for o in scan.src.paths():
   if o["t"] == "l":
     raw[((o["a"], o["i"]), (o["ta"], o["ti"]))] = o
 every = [(A, B) for (ka, kb, A, B) in scan.L]

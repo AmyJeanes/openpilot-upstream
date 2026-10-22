@@ -12,8 +12,7 @@ import scan
 
 lanes = [r for r in json.load(open(sys.argv[5])) if r["kind"] == "lane"]
 colour = {}
-for l in open(scan.PAINT):
-  r = json.loads(l)
+for r in scan.src.paint():
   colour[r["id"]] = r["colour"]
 
 

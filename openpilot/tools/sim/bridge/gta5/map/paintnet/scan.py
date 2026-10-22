@@ -9,6 +9,7 @@ import json, math, os, sys, collections
 import numpy as np
 sys.path.insert(0, "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint")
 import rp
+import src
 
 TILES = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles"
 PAINT = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/polylines.jsonl"
@@ -25,8 +26,7 @@ step = next((float(a[7:]) for a in sys.argv if a.startswith("--step=")), 2.0)
 inbox = lambda x, y, m=0: x0 - m <= x <= x1 + m and y0 - m <= y <= y1 + m
 
 nodes, links = {}, {}
-for line in open(PATHS):
-  o = json.loads(line)
+for o in src.paths():
   if o["t"] == "n":
     nodes[(o["a"], o["i"])] = o
   elif o["t"] == "l":
@@ -45,8 +45,7 @@ for (ka, kb), l in links.items():
 
 # paint segments in the area, gridded
 segs = []
-for line in open(PAINT):
-  r = json.loads(line)
+for r in src.paint():
   P = np.array(r["pts"], float)
   if not ((P[:, 0] >= x0 - REACH) & (P[:, 0] <= x1 + REACH) & (P[:, 1] >= y0 - REACH) & (P[:, 1] <= y1 + REACH)).any():
     continue
@@ -93,18 +92,46 @@ def paint_dir(c, d, z):
 
 T = rp.Tiles(TILES, cache=256)
 
+def layers(x, y):
+  """every surface layer's code and height (layers x points) at world points, as T.sample reads them."""
+  tx, ty = np.floor(x / rp.TILE).astype(int), np.floor(y / rp.TILE).astype(int)
+  cl = np.zeros((3, len(x)), np.uint8)
+  zl = np.full((3, len(x)), np.nan, np.float32)
+  for key in set(zip(tx.tolist(), ty.tolist())):
+    t = T._get(*key)
+    if t is None:
+      continue
+    c, z = t
+    m = (tx == key[0]) & (ty == key[1])
+    col = np.clip(((x[m] - key[0] * rp.TILE) / rp.RES).astype(int), 0, rp.N - 1)
+    row = np.clip(((key[1] * rp.TILE + rp.TILE - y[m]) / rp.RES).astype(int), 0, rp.N - 1)
+    cl[:len(c), m] = c[:, row, col]
+    zl[:len(c), m] = z[:, row, col]
+  return cl, zl
+
 def extent(c, n, z, sign, drive=DRIVEABLE):
   """distance from c along sign*n the surface stays driveable (classes drive) on the deck at z, and what ends it."""
-  zc, last = z, 0.0
-  for k in range(1, int(REACH / DS) + 1):
-    p = c + sign * n * k * DS
-    code, h = T.sample(np.array([p[0]]), np.array([p[1]]), zc, zwin=1.0)
-    cl = int(code[0]) & 7
-    if cl not in drive:
-      return (k - 1) * DS, END.get(cl, str(cl))
-    if abs(h[0] - zc) > ZSTEP:
-      return (k - 1) * DS, "step"
-    zc = float(h[0])
+  zc, K = z, int(REACH / DS)
+  # the raster is read a chunk of steps at a time, then walked step by step (each step's deck follows the last's height)
+  for k0 in range(1, K + 1, 64):
+    ks = np.arange(k0, min(k0 + 64, K + 1))
+    P = c + sign * n * ks[:, None] * DS
+    codes, zs = layers(P[:, 0], P[:, 1])
+    cls, zs, zf = codes.T.tolist(), zs.T, float(zc)
+    for i, k in enumerate(ks.tolist()):
+      best, bd = -1, math.inf
+      for l, code in enumerate(cls[i]):  # the layer nearest the deck's height, as T.sample picks it
+        if code:
+          d = abs(float(zs[i, l]) - zf)
+          if d < bd:
+            best, bd = l, d
+      cl = cls[i][best] & 7 if best >= 0 and bd <= 1.0 else 0
+      if cl not in drive:
+        return (k - 1) * DS, END.get(cl, str(cl))
+      h = zs[i, best]
+      if abs(h - zc) > ZSTEP:
+        return (k - 1) * DS, "step"
+      zc = zf = float(h)
   return REACH, "far"
 
 def crossings(c, n, z, lo, hi):

@@ -6,17 +6,38 @@ Per line: along its painted stretches (where the surface raster has paint under 
 line against the plain road beside it (the brighter side where both are road, just clear of the line). Lines under a deck read the under-deck imagery;
 where no shot covers them they are unknown (see drawn). Out: {id: {"contrast": median of line minus beside, "on": the
 line's own median (0-255 grey), "n": samples, "src": "sat"/"under", "colour", "drawn": true/false/null (unknown)}}."""
-import json, math, sys
+import functools, json, math, sys
 import numpy as np
 import cv2
-from pmtiles.reader import Reader, MmapSource
+from pmtiles.reader import MmapSource
+from pmtiles.tile import deserialize_header, deserialize_directory, find_tile, zxy_to_tileid
 sys.path.insert(0, "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap")
 import gframe
 import scan
 
 Z = 21
-SRC = {"sat": Reader(MmapSource(open("/mnt/e/gta5_webmap/sat.pmtiles", "rb"))),
-       "under": Reader(MmapSource(open("/mnt/e/gta5_webmap/under.pmtiles", "rb")))}
+
+
+class Reader:
+  """pmtiles tiles by z x y, its directories read once (the library's reader re-reads them for every tile)."""
+
+  def __init__(self, path):
+    self.get_bytes = MmapSource(open(path, "rb"))
+    self.h = deserialize_header(self.get_bytes(0, 127))
+    self.dir = functools.lru_cache(maxsize=None)(lambda o, n: deserialize_directory(self.get_bytes(o, n)))
+
+  def get(self, z, x, y):
+    tid, o, n = zxy_to_tileid(z, x, y), self.h["root_offset"], self.h["root_length"]
+    for _ in range(4):
+      r = find_tile(self.dir(o, n), tid)
+      if not r:
+        return None
+      if r.run_length:
+        return self.get_bytes(self.h["tile_data_offset"] + r.offset, r.length)
+      o, n = self.h["leaf_directory_offset"] + r.offset, r.length
+
+
+SRC = {"sat": Reader("/mnt/e/gta5_webmap/sat.pmtiles"), "under": Reader("/mnt/e/gta5_webmap/under.pmtiles")}
 cache = {}
 
 
@@ -35,15 +56,16 @@ def grey(src, x, y):
   fx = (lon + 180) / 360 * n
   fy = (1 - np.arcsinh(np.tan(np.radians(lat))) / math.pi) / 2 * n
   out = np.full(len(fx), np.nan)
-  for i, (a, b) in enumerate(zip(fx, fy)):
-    im = tile(src, int(a), int(b))
+  tx, ty = fx.astype(int), fy.astype(int)
+  for key in set(zip(tx.tolist(), ty.tolist())):
+    im = tile(src, *key)
     if im is None:
       continue
+    m = np.flatnonzero((tx == key[0]) & (ty == key[1]))
     s = im.shape[0]
-    px = im[min(int((b % 1) * s), s - 1), min(int((a % 1) * s), s - 1)]
-    if px.shape[0] == 4 and px[3] < 128:
-      continue
-    out[i] = float(px[:3].mean())
+    px = im[np.minimum(((fy[m] % 1) * s).astype(int), s - 1), np.minimum(((fx[m] % 1) * s).astype(int), s - 1)]
+    ok = px[:, 3] >= 128 if px.shape[1] == 4 else np.ones(len(m), bool)
+    out[m[ok]] = px[ok, :3].mean(1)
   return out
 
 
@@ -63,23 +85,13 @@ def drawn(v, colour):
 
 def covered(S):
   """per point: another surface more than 2.5 m above it (under a deck)."""
-  out = np.zeros(len(S), bool)
-  for k, (x, y, z) in enumerate(S):
-    tx, ty = int(np.floor(x / scan.rp.TILE)), int(np.floor(y / scan.rp.TILE))
-    t = scan.T._get(tx, ty)
-    if t is None:
-      continue
-    c, zz = t
-    col = min(int((x - tx * scan.rp.TILE) / scan.rp.RES), scan.rp.N - 1)
-    row = min(int((ty * scan.rp.TILE + scan.rp.TILE - y) / scan.rp.RES), scan.rp.N - 1)
-    out[k] = bool(((c[:, row, col] > 0) & (zz[:, row, col] > z + 2.5)).any())
-  return out
+  cl, zl = scan.layers(S[:, 0], S[:, 1])
+  return ((cl > 0) & (zl > S[:, 2] + 2.5)).any(0)
 
 
 x0, x1, y0, y1 = map(float, sys.argv[1:5])
 res = {}
-for l in open(scan.PAINT):
-  r = json.loads(l)
+for r in scan.src.paint():
   P = np.array(r["pts"], float)
   if not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
     continue
@@ -92,7 +104,7 @@ for l in open(scan.PAINT):
   e /= np.maximum(np.linalg.norm(e, axis=1, keepdims=True), 1e-9)
   nrm = np.stack([e[:, 1], -e[:, 0]], 1)
   # painted stretches only: the raster's paint at the line's height
-  painted = np.array([(int(scan.T.sample(np.array([x]), np.array([y]), z, zwin=0.6)[0][0]) >> 3) > 0 for x, y, z in S])
+  painted = (scan.T.sample(S[:, 0], S[:, 1], S[:, 2], zwin=0.6)[0] >> 3) > 0
   if painted.sum() >= 4:  # (a line barely in the raster is measured all along: it may be one the game doesn't draw)
     S, nrm = S[painted], nrm[painted]
   off = r["width"] / 2 + 0.35
@@ -107,7 +119,7 @@ for l in open(scan.PAINT):
   for k in (1, -1):
     X, Y = S[:, 0] + nrm[:, 0] * off * k, S[:, 1] + nrm[:, 1] * off * k
     g = grey(src, X, Y)
-    plain = np.array([int(scan.T.sample(np.array([x]), np.array([y]), z, zwin=0.6)[0][0]) == 1 for x, y, z in zip(X, Y, S[:, 2])])
+    plain = scan.T.sample(X, Y, S[:, 2], zwin=0.6)[0] == 1
     sides.append(np.where(plain, g, np.nan))
   side = np.nanmax(np.stack(sides), 0)
   ok = ~np.isnan(on) & ~np.isnan(side)

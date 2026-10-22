@@ -14,10 +14,9 @@ from scipy import ndimage as ndi
 from scipy.sparse.csgraph import connected_components
 sys.path.insert(0, "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint")
 import rp
+import src
 
 TILES = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles"
-PAINT = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/polylines.jsonl"
-FEATS = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/features.jsonl"
 RES, DZ, LINE_ZWIN = 0.1, 0.25, 0.6
 MASKED = ("arrow", "text_", "parking_marker", "disabled", "pedestrian", "bicycle", "keep_clear")
 
@@ -48,7 +47,7 @@ present = cls > 0
 zz[~present] = np.nan
 
 # arrows and text are paint inside lanes, not walls
-feats = [json.loads(l) for l in open(FEATS)]
+feats = src.features()
 masked = np.zeros((L, H, W), bool)
 for f in feats:
   if not f["kind"].startswith(MASKED) or not (x0 - 10 <= f["x"] <= x1 + 10 and y0 - 10 <= f["y"] <= y1 + 10):
@@ -66,8 +65,7 @@ masked |= arrows.find((paint > 0) & ~masked, zz, x0, y1, RES)[0]
 wall_col = np.where(masked, 0, paint)
 
 # lengthwise lines drawn whole, on the surface whose height matches (a dashed line's gaps are walls too)
-for line in open(PAINT):
-  r = json.loads(line)
+for r in src.paint():
   P = np.array(r["pts"], float)
   if not ((P[:, 0] >= x0 - 5) & (P[:, 0] <= x1 + 5) & (P[:, 1] >= y0 - 5) & (P[:, 1] <= y1 + 5)).any():
     continue
