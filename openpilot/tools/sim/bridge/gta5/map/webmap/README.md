@@ -19,6 +19,9 @@ Rebuilding everything from the captures (`/mnt/e/gta5_ortho_20261018`):
    (it needs `osmium`, `mapbox_vector_tile` and `pmtiles` in one environment).
 5. View: put `index.html` beside `sat.pmtiles` and `roads.pmtiles` and serve the folder with `rangeserver.py <dir> <port>`
    (PMTiles needs HTTP range requests).
+6. Beneath decks: `undertiles.py <out dir>` cuts every passing under-deck shot (`under/`, sidecar `pass`) to the pixels
+   lower than the top-level height tile (`depth/`) by over 2 m, as transparent WebP tiles `under.pmtiles` (the lowest
+   level on top) and their outline `under_footprint.geojson`; the page shows them in hybrid view with "Beneath decks only".
 
 After recapturing some cells (`imgcheck/ortho.py run`; `--calm` for calm water, so the surf matches between
 neighbouring shots; `imgcheck/ortho_edges.py` plans the uncaptured cells that still hold land or shallow seabed): put
