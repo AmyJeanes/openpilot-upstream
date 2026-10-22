@@ -100,13 +100,14 @@ const checkLayers = [
 roadLayers.push(...checkLayers);
 for (const l of roadLayers) l.metadata = { views: ["street", "hybrid"], filter: l.filter };
 
-// level switch: everything, only what has nothing above it, or the lowest level everywhere (everything but decks)
+// level switch: everything, only what has nothing above it, or the lowest level everywhere (a lane on a deck anywhere
+// hidden whole: a motorway shown only where it runs on the ground reads as broken)
 function setLevel(lv) {
   for (const l of roadLayers) {
     if (l.id.startsWith("ck-")) continue;
     const own = l.metadata.filter;
     // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
-    const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "deck"]] : null;
+    const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "on_deck"]] : null;
     map.setFilter(l.id, cond ? (own ? ["all", own, cond] : cond) : own || null);
   }
   // beneath decks on their own: drawn as strongly as the top level

@@ -6,7 +6,8 @@ or under a deck ("covered", for the page's level switch), gore, shoulder, crossi
 flag (a point per flagged group, with why); from connect.py's links: connector (the strip filling a break between a
 lane and the one it carries on into) and link (a line from a lane's end to its successor's start; "type" split when a
 lane carries on into two, merge when two carry on into one, else continue) with linkpt, a point marker halfway along it; edge (a lane piece's sides, and a line across at the lane's real ends).
-Every piece says whether it runs under a deck ("covered") and whether it is one ("deck"), for the page's level switch.
+Every piece says whether it runs under a deck ("covered"), whether it is one ("deck"), and whether its lane is one
+anywhere ("on_deck"), for the page's level switch.
 Every lane has an id (its two boundary line ids and run) so it can be
 named in a correction."""
 import json, math, sys
@@ -108,6 +109,7 @@ def pieces(A):
 
 
 feats = []
+lane_deck = {}
 G = json.load(open(grpj))
 if linkj:  # openings reshaped by connect.py
   for k, p in json.load(open(linkj)).get("pts", {}).items():
@@ -118,9 +120,11 @@ for k, r in enumerate(G["lanes"]):
   props = {"kind": "lane", "id": lid, "group": r["group"], "col": colour(r["group"]), "dir": r["dir"],
            "width": round(float(np.median(A[:, 3])), 2), "z": round(float(np.median(A[:, 2])), 1),
            "arrows": r.get("arrow_votes", 0), "links": r.get("link_votes", 0)}
-  for a, b, cov, deck in pieces(A):  # one piece per stretch under a deck, on one, or neither (the level switch, arrows)
+  pcs = pieces(A)
+  props["on_deck"] = lane_deck[k] = any(p[3] for p in pcs)  # the lowest-level view hides a lane on a deck anywhere whole
+  for a, b, cov, deck in pcs:  # one piece per stretch under a deck, on one, or neither (the level switch, arrows)
     feats.append({"type": "Feature", "properties": {**props, "covered": cov, "deck": deck}, "geometry": {"type": "Polygon", "coordinates": area(A[a:b])}})
-    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": lid, "covered": cov, "deck": deck},
+    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": lid, "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
                   "geometry": {"type": "MultiLineString", "coordinates": edges(A[a:b], a == 0, b == len(A))}})
     if r["dir"] != "?":
       feats.append({"type": "Feature", "properties": {**props, "kind": "centre", "covered": cov, "deck": deck},
@@ -129,8 +133,10 @@ for k, r in enumerate(json.load(open(dirj))):
   if r["kind"] in ("lane",):
     continue
   A = np.array(r["pts"])
-  for a, b, cov, deck in pieces(A):
-    feats.append({"type": "Feature", "properties": {"kind": r["kind"], "id": f"{r['left']}|{r['right']}|{r['kind'][0]}{k}",
+  pcs = pieces(A)
+  on_deck = any(p[3] for p in pcs)
+  for a, b, cov, deck in pcs:
+    feats.append({"type": "Feature", "properties": {"kind": r["kind"], "on_deck": on_deck, "id": f"{r['left']}|{r['right']}|{r['kind'][0]}{k}",
                                                     "width": round(float(np.median(A[:, 3])), 2), "z": round(float(np.median(A[:, 2])), 1),
                                                     "covered": cov, "deck": deck},
                   "geometry": {"type": "Polygon", "coordinates": area(A[a:b])}})
@@ -155,12 +161,12 @@ if linkj:
         mid = F[len(F) // 2][None, :3]
         cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])
         props = {"kind": "lane", "connector": True, "id": f"{lid(i)} > {lid(j)}", "group": to["group"], "col": colour(to["group"]),
-                 "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck}
+                 "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck, "on_deck": lane_deck[i] or lane_deck[j]}
         feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
-        feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck},
+        feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
                       "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
     m = (a[:2] + B[0, :2]) / 2
-    feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g,
+    feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck[i] or lane_deck[j],
                                                     "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
                   "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})
 lanes_by = {}
@@ -169,7 +175,7 @@ for r in G["lanes"]:
 for f in G["flags"]:
   P = np.vstack(lanes_by.get(f["group"], [np.zeros((1, 4))]))
   m = P[len(P) // 2]
-  feats.append({"type": "Feature", "properties": {"kind": "flag", "group": f["group"], "why": "; ".join(f["why"]), "covered": False, "deck": False},
+  feats.append({"type": "Feature", "properties": {"kind": "flag", "group": f["group"], "why": "; ".join(f["why"]), "covered": False, "deck": False, "on_deck": False},
                 "geometry": {"type": "Point", "coordinates": lonlat(m[None, :2])[0]}})
 json.dump({"type": "FeatureCollection", "features": feats}, open(out, "w"))
 print(len(feats), "features ->", out)

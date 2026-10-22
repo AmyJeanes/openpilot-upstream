@@ -2,8 +2,8 @@
 link in an area, square to the paint (the links zigzag across lanes; the paint doesn't).
 
 Per section: link (a, b as "area:id"), s along it, centre x y z, unit normal pointing right of a->b, the road surface's
-extent left and right of the centre on the link's deck (followed outwards at 5 cm while it stays road within 0.3 m of
-height; "end" says what stopped it: kerb, walk, gutter, none, step = a height jump, far = still road at REACH), and the
+extent left and right of the centre on the link's deck (followed outwards at 5 cm while it stays road or gutter within 0.3 m
+of height; "end" says what stopped it: kerb, walk, none, step = a height jump, far = still road at REACH), and the
 paint lines crossed: offset right of centre, polyline id, colour, style, height."""
 import json, math, os, sys, collections
 import numpy as np
@@ -16,6 +16,7 @@ PATHS = os.path.expanduser("~/gta5map/paths.jsonl")
 PED_SPECIALS = {10, 14, 15, 16}
 REACH, DS, ZSTEP = 30.0, 0.05, 0.3
 END = {0: "none", 2: "kerb", 3: "walk", 4: "gutter"}
+DRIVEABLE = (1, 4)  # road and gutter (flush beside a kerb): the road's edge is where a car would hit something
 
 x0, x1, y0, y1 = map(float, sys.argv[1:5])
 out = sys.argv[5]
@@ -98,7 +99,7 @@ def extent(c, n, z, sign):
     p = c + sign * n * k * DS
     code, h = T.sample(np.array([p[0]]), np.array([p[1]]), zc, zwin=1.0)
     cl = int(code[0]) & 7
-    if cl != 1:
+    if cl not in DRIVEABLE:
       return (k - 1) * DS, END.get(cl, str(cl))
     if abs(h[0] - zc) > ZSTEP:
       return (k - 1) * DS, "step"

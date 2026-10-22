@@ -140,7 +140,10 @@ for lid, s, c, n, z, xs in seen:
     if r is not None:
       raster_found[other == "e"] += 1
       o, other = r, "r"
-    if not LANE_MIN <= o <= LANE_MAX:
+    # two yellow lines further apart than a double line's halves bound a painted median however narrow it is, and a
+    # line and the road's edge a shoulder (driveable, not a lane) down to where they touch
+    yellow_pair = lines[lid]["colour"] == "yellow" and other not in ("e", "r") and cand and cand[0][2] == "yellow"
+    if not (LANE_MIN <= o <= LANE_MAX or (yellow_pair or other == "e") and TWIN < o < LANE_MIN):
       continue
     m = c + n * side * o / 2
     # key as seen travelling along this line's point order: left boundary first
@@ -225,7 +228,7 @@ while joined:
       (ka, A, ida), (kb, B, idb) = runs[i], runs[j]
       if heading(A) @ heading(B) < 0:
         B, idb = B[::-1], idb[::-1]
-      shared = [x for x in (ida[0] & idb[0]) | (ida[1] & idb[1]) if x != "e"]
+      shared = sorted((x for x in (ida[0] & idb[0]) | (ida[1] & idb[1]) if x != "e"), key=str)  # sorted: sets of str vary by run
       gap = B[0, :2] - A[-1, :2]
       along = gap @ heading(A)
       if not shared or not 0 < along <= JOIN or abs(gap @ np.array([heading(A)[1], -heading(A)[0]])) > A[-1, 3] / 4:
@@ -271,10 +274,22 @@ def snap(p, n, z):
   return p + n * float(t[on].mean()), float(np.nanmean(h[on]))
 
 
-def tip(B):
-  """samples carrying a narrowing gore on past B's last sample to where its two outlines meet, following each
-  outline's paint (the gore's outline is in the raster only and slants in too steeply for raster_line's straight
-  test near the tip)."""
+def edge_snap(p, out, z):
+  """the road surface's edge within +-0.6 m of p, going outwards along out on this deck, or None."""
+  t = np.arange(-0.6, 0.601, 0.05)
+  code, h = scan.T.sample(p[0] + t * out[0], p[1] + t * out[1], z, zwin=1.0)
+  road = np.isin(code & 7, scan.DRIVEABLE)
+  k = np.flatnonzero(road[:-1] & ~road[1:])
+  if not len(k):
+    return None, z
+  return p + out * float(t[k[0]] + 0.025), float(h[k[0]])
+
+
+def tip(B, edge=(False, False)):
+  """samples carrying a narrowing band on past B's last sample to where its two boundaries meet, following each
+  outline's paint (a gore's outline is in the raster only and slants in too steeply for raster_line's straight test
+  near the tip), or the road's edge on a side that is the edge (a shoulder closing to where kerb and line touch);
+  edge says which of B's sides, left and right along it, are the road's edge."""
   d = B[-1, :2] - B[max(len(B) - 4, 0), :2]
   d /= max(np.linalg.norm(d), 1e-9)
   n = np.array([d[1], -d[0]])
@@ -282,12 +297,13 @@ def tip(B):
   sides = [B[-1, :2] - n * B[-1, 3] / 2, B[-1, :2] + n * B[-1, 3] / 2]
   w, out = B[-1, 3], []
   for _ in range(int(GORE_TIP / STEP)):
-    snapped = [snap(p + d * STEP, n, z) for p in sides]
+    snapped = [edge_snap(p + d * STEP, -n if k == 0 else n, z) if edge[k] else snap(p + d * STEP, n, z)
+               for k, p in enumerate(sides)]
     if any(p is None for p, _ in snapped):
       break
     sides = [p for p, _ in snapped]
     w2 = float((sides[1] - sides[0]) @ n)
-    if w2 > w + 0.2:  # the outlines part again: not a tip
+    if w2 > w + 0.2:  # the boundaries part again: not a tip
       break
     z = snapped[0][1]
     if w2 <= TWIN:  # they meet, or run on together as one double line
@@ -328,11 +344,12 @@ for key, A, ids in runs:
       A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.ones(len(T), bool), hat]
   # any other run narrowing at an end (a median closing, a lane merging away, the space beside a gore's tip) carries on
   # to where its two boundaries meet
+  edge = (key[0] == "e", key[1] == "e")
   if len(A) >= 5 and not hat[-1] and A[-1, 3] < A[-5, 3] - NARROWING:
-    T = tip(A)
+    T = tip(A, edge)
     A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.zeros(len(T), bool)]
   if len(A) >= 5 and not hat[0] and A[0, 3] < A[4, 3] - NARROWING:
-    T = tip(A[::-1])[::-1]
+    T = tip(A[::-1], edge[::-1])[::-1]
     A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.zeros(len(T), bool), hat]
   shares.extend(share.tolist())
   # a gore's tapering tip is too narrow for the bands: a stretch of the same space beside a gore that narrows, away
