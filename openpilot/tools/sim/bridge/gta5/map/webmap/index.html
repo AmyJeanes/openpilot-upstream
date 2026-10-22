@@ -57,7 +57,9 @@
 <script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
 <script>
 const protocol = new pmtiles.Protocol();
-maplibregl.addProtocol("pmtiles", protocol.tile);
+// a raster archive answers a tile it lacks with no data, which MapLibre 4 leaves loading forever: give it a blank pixel
+const BLANK = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAbitOmMAAAAASUVORK5CYII="), c => c.charCodeAt(0));
+maplibregl.addProtocol("pmtiles", async (p, ac) => { const r = await protocol.tile(p, ac); return r.data ? r : { data: BLANK.slice().buffer }; });
 const base = location.origin + location.pathname.replace(/[^/]*$/, "");
 const SAT = base + "sat.pmtiles", PILOT = base + "pilot.geojson";
 const FONT = ["Noto Sans Medium"];
