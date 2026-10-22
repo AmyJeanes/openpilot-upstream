@@ -6,7 +6,7 @@ don't each pay for loading them; steps whose inputs are ready run side by side. 
 import hashlib, json, os, pathlib, re, runpy, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
-B = ["-260", "-45", "-1297", "-1082"]
+B = ["-271", "-34", "-1308", "-1071"]  # x0 x1 y0 y1: 237 m square round the interchange
 O = "/mnt/e/gta5_audit/paintnet"
 WEB = "/mnt/e/gta5_webmap"
 RP = "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"
@@ -14,6 +14,7 @@ WEBMAP = "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap"
 o = lambda n: f"{O}/{n}"
 # name, script, args, inputs (other steps' outputs), outputs, other files it reads
 STEPS = [
+  ("area", "area.py", B + [f"{WEB}/pilot_area.geojson"], [], [f"{WEB}/pilot_area.geojson"], []),
   ("visible", "visible.py", B + [o("ic_visible.json")], [], [o("ic_visible.json")], ["/mnt/e/gta5_webmap/sat.pmtiles", "/mnt/e/gta5_webmap/under.pmtiles"]),
   ("lanes", "lanes.py", B + [o("ic_lanes.json"), "--hatch=0.1", f"--visible={o('ic_visible.json')}"], [o("ic_visible.json")], [o("ic_lanes.json")], []),
   ("direction", "direction.py", B + [o("ic_lanes.json"), o("ic_dir.json")], [o("ic_lanes.json")], [o("ic_dir.json")], []),
