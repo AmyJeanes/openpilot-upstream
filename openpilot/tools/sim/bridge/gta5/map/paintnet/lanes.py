@@ -27,18 +27,21 @@ for r in scan.src.paint():
   if r["len"] < MINLEN or not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
     continue
   lines[r["id"]] = r
-# lines the game files hold but the game never draws (visible.py, against the captured imagery) aren't lines
+# lines the game files hold but the game never draws (visible.py, against the captured imagery) aren't lines; a pale
+# deck's panel seams and gutter edges (visible.py's "edge") aren't paint either but are where its lanes divide
 vis = next((a[10:] for a in sys.argv if a.startswith("--visible=")), None)
-hidden = set()
+hidden, edge, V = set(), set(), {}
 if vis:
-  hidden = {int(k) for k, v in json.load(open(vis)).items() if v["drawn"] is False}
+  V = json.load(open(vis))
+  edge = {int(k) for k, v in V.items() if v.get("edge")}
+  hidden = {int(k) for k, v in V.items() if v["drawn"] is False} - edge
   lines = {k: v for k, v in lines.items() if k not in hidden}
   print(len(hidden), "lines not drawn in the game dropped")
 # a piece shorter than MINLEN carrying on the end of a line (lines are stored in pieces: a 5.9 m piece bridges two
 # motorway edge lines at a merge) is part of that line
 ends = [(np.array(r["pts"][0][:2]), np.array(r["pts"][-1][:2])) for r in lines.values()]
 for r in scan.src.paint():
-  if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or (vis and r["id"] in hidden):
+  if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or r["id"] in hidden | edge:
     continue
   P = np.array(r["pts"], float)
   if not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
@@ -54,7 +57,7 @@ DASH_SAME = 0.1  # share a dash's length may differ from the others'
 DASH_GAP, DASH_LAT, DASH_BEND, DASH_ANG, DASH_MIN = 12.0, 0.3, 0.1, 20.0, 3  # (DASH_BEND: m more sideways per m apart, round a ramp's curve)
 short = []
 for r in scan.src.paint():
-  if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or (vis and r["id"] in hidden):
+  if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or r["id"] in hidden | edge:
     continue
   P = np.array(r["pts"], float)
   if ((P[:, 0] >= x0 - 20) & (P[:, 0] <= x1 + 20) & (P[:, 1] >= y0 - 20) & (P[:, 1] <= y1 + 20)).any():
@@ -63,7 +66,7 @@ for r in scan.src.paint():
 nshort = len(short)
 # (a dashed line's own ends, as pieces: dashes carrying on in line past where it stops are part of it)
 for r in list(lines.values()):
-  if r["style"] != "dashed":
+  if r["style"] != "dashed" or r["id"] in edge:  # (an edge's pieces carry it on below)
     continue
   P = np.array(r["pts"], float)
   for E in (P[:2], P[-2:]):
@@ -131,6 +134,46 @@ for mem in groups_.values():
   for i in mem:
     dash_of[short[i][0]["id"]] = rid
 print(len(dash_of), "dashes joined into", len(set(dash_of.values())), "dashed lines (or carrying one on)")
+# the surface raster holds a deck's panel seam in pieces (0.6-2 m every other panel joint, 12-13 m apart): past an edge
+# line's end, the piece nearest the line carried straight on (from EDGE_BACK m back), up to EDGE_GAP m ahead and within
+# EDGE_LAT m of it sideways, carries it on, across the gap too
+EDGE_GAP, EDGE_LAT, EDGE_DZ, EDGE_BACK = 13.0, 0.5, 1.0, 10.0
+pool = {}
+for r in scan.src.paint():
+  P = np.array(r["pts"], float)
+  if (r["len"] < MINLEN and r["colour"] == "white" and r.get("src") == "surface" and r["id"] not in lines
+      and r["id"] not in dash_of and not V.get(str(r["id"]), {}).get("drawn")
+      and ((P[:, 0] >= x0 - 20) & (P[:, 0] <= x1 + 20) & (P[:, 1] >= y0 - 20) & (P[:, 1] <= y1 + 20)).any()):
+    pool[r["id"]] = P
+carried = 0
+for lid in sorted(edge & set(lines)):
+  L = np.array(lines[lid]["pts"], float)
+  for k in (0, -1):
+    while True:
+      Lk = L if k == -1 else L[::-1]
+      d = np.cumsum(np.linalg.norm(np.diff(Lk[::-1, :2], axis=0), axis=1))
+      back = Lk[::-1][1:][min(np.searchsorted(d, EDGE_BACK), len(d) - 1)]
+      e = Lk[-1, :2] - back[:2]
+      run = max(np.linalg.norm(e), 1e-9)
+      e /= run
+      best = None
+      for pid, P in pool.items():
+        near0 = np.linalg.norm(P[0, :2] - Lk[-1, :2]) <= np.linalg.norm(P[-1, :2] - Lk[-1, :2])
+        q = P[0] if near0 else P[-1]
+        v = q[:2] - Lk[-1, :2]
+        a, lat = v @ e, abs(v[0] * e[1] - v[1] * e[0])
+        zq = Lk[-1, 2] + (Lk[-1, 2] - back[2]) / run * a
+        if 0 < a <= EDGE_GAP and lat <= EDGE_LAT and abs(q[2] - zq) <= EDGE_DZ and (best is None or lat < best[0]):
+          best = (lat, pid, P if near0 else P[::-1])
+      if best is None:
+        break
+      scan.bridge(Lk[-1, :3], best[2][0, :3], best[1], dashed=lines[lid]["style"] == "dashed")  # (found as the line, its piece's id)
+      L = np.vstack([L, best[2]]) if k == -1 else np.vstack([best[2][::-1], L])
+      dash_of[best[1]] = lid
+      del pool[best[1]]
+      carried += 1
+  lines[lid] = {**lines[lid], "pts": L.tolist(), "len": float(np.linalg.norm(np.diff(L[:, :2], axis=0), axis=1).sum())}
+print(len(edge & set(lines)), "edge lines (panel seams, gutter edges),", carried, "pieces carrying them on")
 keep = set(lines) | set(dash_of)
 
 
@@ -138,6 +181,34 @@ def resample(P, step):
   d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(P[:, :2], axis=0), axis=1))]
   s = np.arange(step / 2, d[-1], step)
   return np.stack([np.interp(s, d, P[:, k]) for k in range(3)], 1), s
+
+
+# two edge lines closer than a lane runs (a deck's gutter edge and a stripe on its panels a metre in) are one edge: the
+# strip between them is no lane, so the lane beside them runs to the outer one. The inner one, with another edge line
+# under LANE_MIN m to one side and a lane's width of road to the other over most of its length, is dropped
+inner = set()
+for lid in sorted(edge & set(lines)):
+  Q, _ = resample(np.array(lines[lid]["pts"], float), STEP)
+  hit = 0
+  for k in range(1, len(Q) - 1):
+    e = Q[k + 1, :2] - Q[k - 1, :2]
+    e /= max(np.linalg.norm(e), 1e-9)
+    n = np.array([e[1], -e[0]])
+    xs = [(o, dash_of.get(i, i)) for o, i, *_ in scan.crossings(Q[k, :2], n, Q[k, 2], -LANE_MAX, LANE_MAX)]
+    xs = [(o, i) for o, i in xs if i in keep and i != lid and abs(o) > TWIN]
+    for side in (1, -1):
+      near_ = [i for o, i in xs if 0 < side * o < LANE_MIN]
+      far_ = [side * o for o, i in xs if side * o < 0]
+      if near_ and near_[0] in edge and far_ and min(-np.array(far_)) >= LANE_MIN:
+        hit += 1
+        break
+  if hit > 0.5 * max(len(Q) - 2, 1):
+    inner.add(lid)
+for lid in inner:
+  del lines[lid]
+  dash_of = {k: v for k, v in dash_of.items() if v != lid}
+keep = set(lines) | set(dash_of)
+print(len(inner), "edge lines inside another (one edge):", sorted(inner))
 
 
 # pass 1: what each line sample sees square to it; lines running within TWIN m of each other are one marking (a double

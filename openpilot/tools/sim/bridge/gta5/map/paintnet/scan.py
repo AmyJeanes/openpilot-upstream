@@ -61,6 +61,14 @@ for i, s in enumerate(S):
     for gy in range(int(math.floor(min(s[1], s[4]) / G)), int(math.floor(max(s[1], s[4]) / G)) + 1):
       grid[(gx, gy)].append(i)
 
+def bridge(a, b, lid, yellow=False, dashed=False):
+  """a segment from a to b (x, y, z) that crossings() finds as line lid: across the gap between two of its pieces."""
+  global S
+  S = np.vstack([S, [*a, *b, lid, yellow, dashed]])
+  for gx in range(int(math.floor(min(a[0], b[0]) / G)), int(math.floor(max(a[0], b[0]) / G)) + 1):
+    for gy in range(int(math.floor(min(a[1], b[1]) / G)), int(math.floor(max(a[1], b[1]) / G)) + 1):
+      grid[(gx, gy)].append(len(S) - 1)
+
 def near(x, y, r):
   ids = set()
   for gx in range(int(math.floor((x - r) / G)), int(math.floor((x + r) / G)) + 1):

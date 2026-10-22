@@ -5,7 +5,8 @@ split real lanes.
 Per line: along its painted stretches (where the surface raster has paint under it; all along if hardly any), the imagery's brightness on the
 line against the plain road beside it (the brighter side where both are road, just clear of the line). Lines under a deck read the under-deck imagery;
 where no shot covers them they are unknown (see drawn). Out: {id: {"contrast": median of line minus beside, "on": the
-line's own median (0-255 grey), "n": samples, "src": "sat"/"under", "colour", "drawn": true/false/null (unknown)}}."""
+line's own median (0-255 grey), "n": samples, "src": "sat"/"under", "colour", "drawn": true/false/null (unknown), "edge": not paint but a pale deck's panel seam or
+gutter edge (see SURFACE_CONTRAST)}}."""
 import functools, json, math, sys
 import numpy as np
 import cv2
@@ -76,7 +77,7 @@ def grey(src, x, y):
 # the surface raster doesn't hold (a rail bridge: -54): unknown. On pale concrete (a ramp's deck: 185-200 grey bare) a
 # white line from the surface raster must also stand out from the road beside it: the deck's panel seams and kerb edges
 # it holds as paint read +20..+27 there, drawn lines +42 and up (a decal is a painted texture: bright paint on bright
-# concrete reads +33 and is drawn)
+# concrete reads +33 and is drawn). Such a seam or edge is no paint but still where the deck's lanes divide: "edge"
 WHITE_MIN, YELLOW_CONTRAST, HIDDEN, SURFACE_CONTRAST = 135.0, 10.0, -15.0, 35.0
 
 
@@ -135,6 +136,7 @@ for r in scan.src.paint():
     res[r["id"]] = {"contrast": None, "n": int(ok.sum()), "src": src, "colour": r["colour"], "paint": r["src"]}
 for v in res.values():
   v["drawn"] = drawn(v, v["colour"])
+  v["edge"] = v["drawn"] is False and v["colour"] == "white" and v["paint"] == "surface" and v["on"] >= WHITE_MIN
 json.dump(res, open(sys.argv[5], "w"))
 c = np.array([v["contrast"] for v in res.values() if v["contrast"] is not None])
 print(len(res), "lines,", len(c), "seen; contrast:", np.histogram(c, [-300, -10, 0, 5, 10, 15, 20, 30, 50, 80, 300])[0].tolist(),
