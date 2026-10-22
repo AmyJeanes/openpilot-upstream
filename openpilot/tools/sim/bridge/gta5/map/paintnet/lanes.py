@@ -285,6 +285,7 @@ for key, qs in best.values():
 # dashed line stored as two pieces); in a junction both lines stop, so nothing joins across one. JOIN is provisional:
 # the one break measured on the interchange is 8.2 m; re-measure on a bigger area
 JOIN = 12.0
+JOIN_W = 0.5  # the narrower end at least this share of the wider
 line_pts = collections.defaultdict(list)
 for lid, s_, c, n, z, xs in seen:
   line_pts[find(lid)].append((c[0], c[1], z))
@@ -312,6 +313,10 @@ while joined:
       if not shared or not 0 < along <= JOIN or abs(gap @ np.array([heading(A)[1], -heading(A)[0]])) > A[-1, 3] / 4:
         continue
       if abs(A[-1, 2] - B[0, 2]) > 1:
+        continue
+      # (the same lane is about as wide either side of a break: not a lane and a sliver beyond it, such as the space
+      # between its line and a traffic island's kerb)
+      if min(A[-1, 3], B[0, 3]) < JOIN_W * max(A[-1, 3], B[0, 3]):
         continue
       mid = (A[-1, :2] + B[0, :2]) / 2
       S = line_pts.get(shared[0])
