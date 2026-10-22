@@ -213,6 +213,7 @@ def kerb_fit(C, w0, w1):
   return out
 
 
+pts = {}  # lane index -> reshaped samples
 KERB_REACH = 3.0  # m: a side of a turn lane's unpainted stretch moves out or in to a line or the road's edge within this
 KERB_STEP = 0.8  # m a side moves at most from one metre's sample to the next and still follows the same line or kerb
 turn_fill = {}  # lane index -> samples carrying it on to the lane it turns into
@@ -249,9 +250,24 @@ for i, A in enumerate(P):
     if best is None or ln.sum() < best[1]:
       best = (j, ln.sum(), gap)
   if best:
-    links.append([i, best[0], round(float(best[2]), 2)])
-    has_pred.add(best[0])
-    turn_fill[i] = kerb_fit(path(A, P[best[0]])[1:-1], A[-1, 3], P[best[0]][0, 3])
+    j = best[0]
+    links.append([i, j, round(float(best[2]), 2)])
+    has_pred.add(j)
+    # the lane it joins starts wide where the other road's lane merges in beside it: the turn lane keeps its width
+    # along the side it comes in on, and the rest is that merging lane's taper
+    B = P[j]
+    _, nb = frame(B, 0)
+    side_in = 1.0 if (A[-1, :2] - B[0, :2]) @ nb > 0 else -1.0
+    w0 = float(np.median(B[:, 3]))
+    q = 0
+    while q < len(B) and B[q, 3] > w0 + OPEN_TOL:
+      _, n = frame(B, q)
+      edge = B[q, :2] + side_in * n * B[q, 3] / 2
+      B[q, :2], B[q, 3] = edge - side_in * n * w0 / 2, w0
+      q += 1
+    if q:
+      pts[j] = np.round(B, 2).tolist()
+    turn_fill[i] = kerb_fit(path(A, B)[1:-1], A[-1, 3], B[0, 3])
 
 # an exit or added lane: a lane starting beside one that has been running a while and carries on, which doesn't widen
 # for it (a motorway's edge line runs on straight; the exit's taper opens outside it)
@@ -401,7 +417,6 @@ STRAIGHT_TOL = 0.1  # m wider than its usual width: the lane has started widenin
 OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
 EXIT_RUN = 60  # m at most an exit's taper is traced back
 TAPER_RATE = 0.05  # m narrower per m at least: the interchange's exit and merge tapers close at 0.12-0.23 m/m
-pts = {}
 for i, F in turn_fill.items():  # (a turn lane's stretch across its crossing and round the curve is part of it)
   if len(F):
     P[i] = np.vstack([P[i], F])
