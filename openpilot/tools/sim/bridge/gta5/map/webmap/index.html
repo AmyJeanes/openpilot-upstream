@@ -46,6 +46,7 @@
   <div><i class="ring" style="border-color:#ffea00"></i>Split: one lane carries on into two</div>
   <div><i class="ring" style="border-color:#00e5ff"></i>Merge: two lanes carry on into one</div>
   <div><i class="ring"></i>Flag: needs a look</div>
+  <div><i style="background:none; border-top: 2px dashed #888; height: 0; vertical-align: 3px"></i>Pilot area (nothing built outside it)</div>
   <div class="note">Click a band or marker for its id and evidence.</div>
   <label style="display:block;margin-top:6px"><input type="checkbox" id="osmview"> <b>OSM export: ways and tags (click one)</b></label>
   <label style="display:block;margin-top:2px"><input type="checkbox" id="checker"> <b>Checker: <span style="color:#ff9100">&#9670;</span> where the paint regions disagree</b></label>
@@ -111,13 +112,16 @@ const osmLayers = [
     paint: { "circle-radius": 6, "circle-color": ["match", ["get", "osm_type"], "flag", "#ff1744", "#ffffff"], "circle-stroke-color": "#000", "circle-stroke-width": 1.5 } },
 ];
 roadLayers.push(...osmLayers);
+// the pilot's box (what the pilot covers; outside it nothing is built)
+roadLayers.unshift({ id: "pi-area", type: "line", source: "area",
+  paint: { "line-color": "#ffffff", "line-width": 2, "line-dasharray": [2, 2], "line-opacity": 0.9 } });
 for (const l of roadLayers) l.metadata = { views: ["street", "hybrid"], filter: l.filter };
 
 // level switch: everything, only what has nothing above it, or the lowest level everywhere (a lane on a deck anywhere
 // hidden whole: a motorway shown only where it runs on the ground reads as broken)
 function setLevel(lv) {
   for (const l of roadLayers) {
-    if (l.id.startsWith("ck-") || l.id.startsWith("osm-")) continue;
+    if (l.id.startsWith("ck-") || l.id.startsWith("osm-") || l.id === "pi-area") continue;
     const own = l.metadata.filter;
     // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
     const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "on_deck"]] : null;
@@ -146,6 +150,7 @@ const style = {
     pilot: { type: "geojson", data: PILOT + "?t=" + Date.now() },
     check: { type: "geojson", data: base + "check.geojson?t=" + Date.now() },
     osm: { type: "geojson", data: base + "osm.geojson?t=" + Date.now() },
+    area: { type: "geojson", data: base + "pilot_area.geojson?t=" + Date.now() },
     under: { type: "raster", url: "pmtiles://" + base + "under.pmtiles", tileSize: 256 },
     underEdge: { type: "geojson", data: base + "under_footprint.geojson" },
   },

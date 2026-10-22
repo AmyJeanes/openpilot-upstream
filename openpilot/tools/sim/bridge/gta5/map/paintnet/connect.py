@@ -151,25 +151,55 @@ for i, A in enumerate(P):
         break
 
 
-def exit_taper(A, B, k):
-  """an exit's start, A not widening for it: back from where its own lines start, the space between A's edge on its
-  side and the nearest line or the road's edge beyond, while it keeps narrowing (the exit's edge line closing in on
-  A's; beyond the tip is the road's usual shoulder, a step wider) and is wider than OPEN_TOL."""
-  db, nb = frame(B, 0)
-  s = 1.0 if (B[0, :2] - A[k, :2]) @ nb > 0 else -1.0
-  taper, last = [], None
-  for q in range(k - 1, max(k - EXIT_RUN, 0) - 1, -1):
+def side_taper(A, k, s, step):
+  """samples filling the space beside lane A on side s (+1 = right of travel), from A's sample k + step on in steps of
+  step (-1: back from an exit's start, +1: on from a merging lane's end), between A's edge and the nearest line or
+  the road's edge beyond, while it narrows at TAPER_RATE or more (an exit's or merge's edge line closing in on A's;
+  a shoulder beside it doesn't) and is wider than OPEN_TOL. Where the edge line stops short of A's (beyond it the
+  space is a step wider), the taper closes at the rate it was closing. In A's order."""
+  taper, w = [], []
+  q = k + step
+  while 0 <= q < len(A) and abs(q - k) <= EXIT_RUN:
     d, n = frame(A, q)
     inner = A[q, :2] + s * n * A[q, 3] / 2
     z = A[q, 2]
     edge, _ = scan.extent(inner + s * n * 0.3, n, z, s)  # step off A's own edge line first
     xs = [s * o for o, *_ in scan.crossings(inner, n, z, -OPEN_REACH, OPEN_REACH) if s * o > OPEN_TOL]
     wd = min(xs + [edge + 0.3])
-    if wd <= OPEN_TOL or last is not None and wd > last + OPEN_TOL:
+    if len(w) >= 3 and (w[-3] - w[-1]) / 2 < TAPER_RATE:  # not closing in: a shoulder, not a taper
+      taper, w = taper[:-2], w[:-2]
+      break
+    if wd <= OPEN_TOL:
+      break
+    if w and wd > w[-1] + OPEN_TOL:  # the edge line stopped short: close at the rate it was closing
+      rate = (w[-3] - w[-1]) / 2 if len(w) >= 3 else TAPER_RATE
+      wd = w[-1] - rate
+      while wd > OPEN_TOL and 0 <= q < len(A):
+        d, n = frame(A, q)
+        inner = A[q, :2] + s * n * A[q, 3] / 2
+        taper.append([*(inner + s * n * wd / 2), A[q, 2], wd])
+        wd -= rate
+        q += step
       break
     taper.append([*(inner + s * n * wd / 2), z, wd])
-    last = wd
-  return np.vstack([np.array(taper[::-1]).reshape(-1, 4), B])
+    w.append(wd)
+    q += step
+  return np.array(taper[::step]).reshape(-1, 4)
+
+
+def exit_taper(A, B, k):
+  """an exit's start, A not widening for it: the space beside A narrowing back from where the exit's own lines start."""
+  db, nb = frame(B, 0)
+  s = 1.0 if (B[0, :2] - A[k, :2]) @ nb > 0 else -1.0
+  return np.vstack([side_taper(A, k, s, -1), B])
+
+
+def merge_taper(A, B):
+  """a merging lane A's end carried on beside the lane B it merges into, narrowing until its edge line meets B's."""
+  da, na = frame(A, len(A) - 1)
+  k = int(np.linalg.norm(B[:, :2] - A[-1, :2], axis=1).argmin())
+  s = 1.0 if (A[-1, :2] - B[k, :2]) @ frame(B, k)[1] > 0 else -1.0
+  return np.vstack([A, side_taper(B, k, s, 1)])
 
 
 def reshape(i, j):
@@ -240,8 +270,12 @@ OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening sta
 STRAIGHT_TOL = 0.1  # m wider than its usual width: the lane has started widening (its centre drifting)
 OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
 EXIT_RUN = 60  # m at most an exit's taper is traced back
+TAPER_RATE = 0.05  # m narrower per m at least: the interchange's exit and merge tapers close at 0.12-0.23 m/m
 pts = {}
 for i, j, g, *br in links:
+  if br == ["merge"]:
+    P[i] = merge_taper(P[i], P[j])
+    pts[i] = np.round(P[i], 2).tolist()
   if br == ["branch"]:
     r = reshape(i, j)
     if r is not None:
