@@ -122,18 +122,34 @@ def reshape(i, j):
   d0 /= max(np.linalg.norm(d0), 1e-9)
   n0 = np.array([d0[1], -d0[0]])
   s = 1.0 if (B[0, :2] - A[k, :2]) @ n0 > 0 else -1.0  # the side it opens on (+1 = right of travel)
+  # the edge that runs on straight read from its own line's paint (each sample's centre and width were measured square
+  # to a centre drifting as the lane widens: rebuilt from them, the edge wobbles); from where the lane starts widening
+  while a > 0 and A[a - 1, 3] > w0 + STRAIGHT_TOL:
+    a -= 1
+  stable_ids = set(lanes[i]["left_all" if s > 0 else "right_all"]) - {"e", "r"}
+  edge = []
+  for q in range(a, b + 1):
+    c, w = A[q, :2], A[q, 3]
+    xs = [c + n0 * x[0] for x in scan.crossings(c, n0, A[q, 2], -w / 2 - 1, w / 2 + 1) if x[1] in stable_ids]
+    edge.append(min(xs, key=lambda p: np.linalg.norm(p - (c - s * n0 * w / 2))) if xs else c - s * n0 * w / 2)
+  edge = np.array(edge)
+  de = np.gradient(edge, axis=0) if len(edge) > 1 else np.array([d0])
+  de /= np.maximum(np.linalg.norm(de, axis=1, keepdims=True), 1e-9)
+  ne = np.stack([de[:, 1], -de[:, 0]], 1)
   # the taper's inner edge: the lane's edge at its usual width, then on to the new lane's own inner edge where it starts
   inner, guess = [], []  # (x, y, z) and the width the samples alone give
   for q in range(a, b + 1):
     c, w = A[q, :2].copy(), A[q, 3]
-    stable = c - s * n0 * w / 2
-    A[q, :2], A[q, 3] = stable + s * n0 * w0 / 2, w0
+    stable, nq = edge[q - a], ne[q - a]
+    A[q, :2], A[q, 3] = stable + s * nq * w0 / 2, w0
+    if w <= w0 + OPEN_TOL:  # only starting to widen: no taper yet
+      continue
     if (c - B[0, :2]) @ d0 < -0.5:  # before the new lane's own start
-      inner.append([*(stable + s * n0 * w0), A[q, 2]])
+      inner.append([*(stable + s * nq * w0), A[q, 2]])
       guess.append(w - w0)
   db, nb = frame(B, 0)
   end = [*(B[0, :2] - s * nb * B[0, 3] / 2), B[0, 2]]
-  start = inner[-1] if inner else [*(A[b, :2] + s * n0 * w0 / 2), A[b, 2]]
+  start = inner[-1] if inner else [*(A[b, :2] + s * ne[-1] * w0 / 2), A[b, 2]]
   g = np.linalg.norm(np.subtract(end[:2], start[:2]))
   for t in np.arange(1, int(g / STEP_M)) * STEP_M / max(g, 1e-9):
     inner.append(list(np.add(start, np.subtract(end, start) * t)))
@@ -152,6 +168,7 @@ def reshape(i, j):
 
 
 OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening starts; sample spacing
+STRAIGHT_TOL = 0.1  # m wider than its usual width: the lane has started widening (its centre drifting)
 OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
 pts = {}
 for i, j, g, *br in links:
