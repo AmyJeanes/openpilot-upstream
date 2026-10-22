@@ -45,7 +45,7 @@ by_line = collections.defaultdict(list)
 for i, r in enumerate(lanes):
   for side in ("left", "right"):
     for lid in r.get(side + "_all", [r[side]]):
-      if lid not in ("e", "r"):  # the road's edge and raster-only lines have no identity to share
+      if lid not in ("e", "r", "u"):  # the road's edge, raster-only lines and unpainted divides have no identity to share
         by_line[lid].append((i, side))
 same, centre = [], []  # (i, j, relation)
 for lid, uses in by_line.items():

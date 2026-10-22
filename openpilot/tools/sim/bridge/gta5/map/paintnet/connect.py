@@ -4,7 +4,7 @@ A lane's end links to a lane starting just ahead of it (0 < gap <= JOIN m along 
 HEAD deg) when one of their edges lines up (within EDGE m sideways): the lane carries on with a line starting or ending
 beside it. A lane can have two successors (a turn bay opening beside it: its one edge lines up with each) or two
 predecessors (a merge). A lane opening beside one that carries on links to it as a "branch" (see BRANCH_RUN). No link where paint crosses the gap (a stop line or crossing: lanes end at a junction's box).
-Out: {"links": [[from lane index, to lane index, gap m(, "branch")]], "pts": {lane index: new pts}, "stops": {lane
+Out: {"links": [[from lane index, to lane index, gap m(, "branch"|"merge")]], "pts": {lane index: new pts}, "stops": {lane
 index: {"end"|"start": [x, y, ux, uy]}}}: pts replace a lane's samples where an opening was reshaped (see reshape) or
 an end runs on to its stop line; stops are where a lane meets its stop line or crossing and that line's way, to cut
 its end along."""
@@ -163,9 +163,15 @@ def beside(A, p, d, w, mid_only=True):
 
 # a lane carrying on across a pedestrian crossing with no stop line at it (a free turn lane round a traffic island): past
 # the crossing its road has no lines until the lane it leads into starts, turned up to CROSS_TURN deg, wide where the
-# turn lane's road joins another (a junction's exit lanes start at their usual width: the junction's own work); linked
-# where a smooth path from its end to that lane's start stays on the road and crosses no line but the crossing's own
+# turn lane's road joins another (a junction's exit lanes start at their usual width: the junction's own work); it
+# merges into that lane where a smooth path from its end to that lane's start stays on the road and crosses no line
+# but the crossing's own
 CROSS_JOIN, CROSS_TURN = 25.0, 60.0
+EDGE_NEAR = 1.0  # m from a lane's edge to the line along it (lanes.py's: a lane's sides are its lines' centres)
+# lane lines are 0.10-0.15 m wide, stop lines and crossings' lines 0.43-0.52; the interchange's lane ends stop
+# 0.1-3.1 m short of theirs
+STOP_REACH, STOP_WIDE, STOP_BACK, STEP = 4.0, 0.3, 8, 1.0  # (STOP_BACK: samples; STEP: lanes.py's sample step)
+width = {r["id"]: r["width"] for r in scan.src.paint()}
 strips = [r for r in json.load(open(sys.argv[7])) if r["kind"] == "crossing"] if len(sys.argv) > 7 else []
 
 
@@ -181,11 +187,43 @@ def path(A, B):
   return np.hstack([xy, A[-1, 2:] + (B[0, 2:] - A[-1, 2:]) * t])
 
 
-def kerb_fit(C, w0, w1):
+def back(B, s):
+  """samples running lane B back from its start at its width to the near edge of the first wide line across it (a
+  junction's crossing or stop line) within CROSS_JOIN m, in B's order, where a line runs along its edge on side s (+1 =
+  right of travel) most of the way (within EDGE_NEAR m; lines are stored in pieces: not necessarily its own); none
+  where none does (the lane really starts there)."""
+  d, n = frame(B, 0)
+  p = B[0]
+  xs = [x for x in scan.crossings(p[:2], -d, p[2], 0.0, CROSS_JOIN) if x[0] > 0 and width.get(x[1], 0) >= STOP_WIDE]
+  if not xs:
+    return np.zeros((0, 4))
+  edge = xs[0][0] - width[xs[0][1]] / 2 - STEP / 2  # (a sample stands for the metre round it)
+  F = np.array([[*(p[:2] - d * v), p[2], p[3]] for v in np.r_[np.arange(STEP, edge, STEP), edge] if v > 0]).reshape(-1, 4)
+  along = [any(abs(x[0] - s * f[3] / 2) <= EDGE_NEAR for x in scan.crossings(f[:2], n, f[2], -f[3] / 2 - EDGE_NEAR, f[3] / 2 + EDGE_NEAR)) for f in F]
+  return F[::-1] if len(F) and np.mean(along) >= 0.5 else np.zeros((0, 4))
+
+
+def cuts(p, n, line):
+  """where the section through p along n crosses polyline line (Nx2): offsets along n."""
+  out = []
+  for a, b in zip(line[:-1], line[1:]):
+    e = b - a
+    den = n[0] * -e[1] + e[0] * n[1]
+    if abs(den) < 1e-9:
+      continue
+    r = a - p
+    t, u = (r[0] * -e[1] + e[0] * r[1]) / den, (n[0] * r[1] - n[1] * r[0]) / den
+    if 0 <= u <= 1:
+      out.append(t)
+  return out
+
+
+def kerb_fit(C, w0, w1, guide=None):
   """a lane's samples across unpainted road (from a lane end w0 wide to a lane start w1 wide) fitted to it: each side
   follows the nearest lane line or the road's edge (kerb, less a gutter) on it while that carries on from the side's
   last position (a line guiding a turn lane past where an island ends; not the next road's lines where it opens out),
-  and runs smoothly on to the next lane's edge where neither does."""
+  and runs smoothly on to the next lane's edge where neither does. guide (Nx2): an edge followed like a line (the side
+  of the lane a turn lane merges into)."""
   d = np.gradient(C[:, :2], axis=0) if len(C) > 1 else np.array([[1.0, 0.0]])
   d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
   N = np.stack([d[:, 1], -d[:, 0]], 1)
@@ -201,6 +239,8 @@ def kerb_fit(C, w0, w1):
     for q in range(len(C)):
       h = C[q, 3] / 2
       xs = [s * x[0] for x in scan.crossings(C[q, :2], N[q], C[q, 2], -h - KERB_REACH, h + KERB_REACH) if s * x[0] > OPEN_TOL]
+      if guide is not None:
+        xs += [s * t for t in cuts(C[q, :2], N[q], guide) if OPEN_TOL < s * t <= h + KERB_REACH]
       e = min(xs + [kerb[q] - gw])
       if abs(e - prev) <= KERB_STEP:
         v[q] = prev = e
@@ -253,23 +293,30 @@ for i, A in enumerate(P):
       best = (j, ln.sum(), gap)
   if best:
     j = best[0]
-    links.append([i, j, round(float(best[2]), 2)])
+    links.append([i, j, round(float(best[2]), 2), "merge"])
     has_pred.add(j)
-    # the lane it joins starts wide where the other road's lane merges in beside it: the turn lane keeps its width
-    # along the side it comes in on, and the rest is that merging lane's taper
+    # the lane it joins starts wide where the turn lane merges in beside it: that lane (its road's own, through the
+    # junction behind) keeps its usual width along its far side and runs back along its line there to the junction;
+    # the turn lane carries on into the rest, the taper, narrowing
     B = P[j]
     _, nb = frame(B, 0)
     side_in = 1.0 if (A[-1, :2] - B[0, :2]) @ nb > 0 else -1.0
     w0 = float(np.median(B[:, 3]))
-    q = 0
+    taper, q = [], 0
     while q < len(B) and B[q, 3] > w0 + OPEN_TOL:
       _, n = frame(B, q)
-      edge = B[q, :2] + side_in * n * B[q, 3] / 2
-      B[q, :2], B[q, 3] = edge - side_in * n * w0 / 2, w0
+      far = B[q, :2] - side_in * n * B[q, 3] / 2
+      taper.append([*(far + side_in * n * (w0 + B[q, 3]) / 2), B[q, 2], B[q, 3] - w0])
+      B[q, :2], B[q, 3] = far + side_in * n * w0 / 2, w0
       q += 1
-    if q:
-      pts[j] = np.round(B, 2).tolist()
-    turn_fill[i] = kerb_fit(path(A, B)[1:-1], A[-1, 3], B[0, 3])
+    T = np.array(taper).reshape(-1, 4) if taper else B[:1]
+    P[j] = B = np.vstack([back(B, -side_in), B])
+    pts[j] = np.round(B, 2).tolist()
+    E = B[:60]  # (its start: where the turn lane comes in)
+    nE = np.stack([np.gradient(E[:, 1]), -np.gradient(E[:, 0])], 1)
+    nE /= np.maximum(np.linalg.norm(nE, axis=1, keepdims=True), 1e-9)
+    near = E[:, :2] + side_in * nE * E[:, 3:4] / 2  # the side it merges on: the turn lane runs along it
+    turn_fill[i] = np.vstack([kerb_fit(path(A, T)[1:-1], A[-1, 3], T[0, 3], near), T[:len(taper)]])
 
 # an exit or added lane: a lane starting beside one that has been running a while and carries on, which doesn't widen
 # for it (a motorway's edge line runs on straight; the exit's taper opens outside it)
@@ -345,11 +392,17 @@ def exit_taper(A, B, k):
 
 
 def merge_taper(A, B):
-  """a merging lane A's end carried on beside the lane B it merges into, narrowing until its edge line meets B's."""
+  """a merging lane A's end carried on beside the lane B it merges into, narrowing until its edge line meets B's (only
+  narrowing: beyond a taper already closed lies the gutter)."""
   da, na = frame(A, len(A) - 1)
   k = int(np.linalg.norm(B[:, :2] - A[-1, :2], axis=1).argmin())
   s = 1.0 if (A[-1, :2] - B[k, :2]) @ frame(B, k)[1] > 0 else -1.0
-  return np.vstack([A, side_taper(B, k, s, 1)])
+  F = side_taper(B, k, s, 1)
+  n, w = 0, A[-1, 3]
+  while n < len(F) and F[n, 3] <= w:
+    w = F[n, 3]
+    n += 1
+  return np.vstack([A, F[:n]])
 
 
 def reshape(i, j):
@@ -439,13 +492,11 @@ for i, j, g, *br in links:
       pts[i] = np.round(r[0], 2).tolist()
       pts[j] = np.round(r[1], 2).tolist()
 # a lane's lines stop short of the stop line or crossing it ends at (or starts beyond): an end carrying on into nothing
-# runs on at its width to the near edge of the first wide line across it within STOP_REACH m (the interchange's
-# junctions: 0.1-3.1 m; lane lines are 0.10-0.15 m wide, stop lines and crossings' lines 0.43-0.52)
-STOP_REACH, STOP_WIDE, STOP_BACK, STEP = 4.0, 0.3, 8, 1.0  # (STOP_BACK: samples; STEP: lanes.py's sample step)
-width = {r["id"]: r["width"] for r in scan.src.paint()}
+# runs on at its width to the near edge of the first wide line across it within STOP_REACH m
 line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint() if scan.inbox(r["pts"][0][0], r["pts"][0][1], 60)}
 stops = {}  # lane -> {"end"|"start": [x, y, ux, uy]}: where it meets its stop line or crossing, and that line's way
-linked_out, linked_in = {l[0] for l in links if l[3:] != ["branch"]}, {l[1] for l in links}  # (a branch leaves from beside its lane)
+# (a branch leaves from beside its lane; a lane merging joins another beside it)
+linked_out, linked_in = {l[0] for l in links if l[3:] != ["branch"]}, {l[1] for l in links if l[3:] != ["merge"]}
 for i, A in pts.items():  # (openings reshaped above: their bays' samples are in pts only)
   P[i] = np.array(A)
 stopped, trimmed = 0, 0

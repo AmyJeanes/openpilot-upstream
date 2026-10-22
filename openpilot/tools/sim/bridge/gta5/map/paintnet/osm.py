@@ -15,7 +15,7 @@ their hull are guide lines through it (dropped), and way ends near it run on to 
 centre lines best cross. Crossings become footway=crossing ways, noded where they cross a road.
 Tags: lanes (+:forward/:backward/:both_ways), turn:lanes from listed arrows only (a lane whose arrow is unknown leaves
 the tag off and is flagged), change:lanes from the paint between lanes, width:lanes, width (kerb to kerb, gutter in),
-shoulder (+:width), divider=solid_line for a painted median, bridge/layer where the way's centre has another surface
+shoulder (+:width), divider=solid_line for a painted median (and a raised island in one: the way isn't split there), bridge/layer where the way's centre has another surface
 DECK m below. GTA path nodes only hint: highway class, maxspeed, traffic signals. Every node has ele (z).
 Anything undecided goes in each way's fixme tag and the geojson's "issues"."""
 import json, math, sys, collections
@@ -242,7 +242,8 @@ for k, A in strips["gore"]:
   wide = ends[int(A[-1, 3] > A[0, 3])]
   gore_at_j.append(any(J["hull"].distance(wide) <= ATTACH and abs(J["z"] - A[0, 2]) < 2 for J in junctions))
 gores = [(prep(band(A).buffer(0.3)), atj, A) for (k, A), atj in zip(strips["gore"], gore_at_j)]
-centres = [(prep(band(A).buffer(0.3)), kind, A) for kind in ("median", "twltl") for k, A in strips[kind]]
+# (a raised island in a median keeps the road one way: it is the median carried on, kerbed)
+centres = [(prep(band(A).buffer(0.3)), "median" if kind == "island" else kind, A) for kind in ("median", "twltl", "island") for k, A in strips[kind]]
 live = [t for t in range(len(tracks)) if t not in narrow_tracks]
 S_xy = np.vstack([tracks[t]["X"][:, :2] for t in live])
 S_id = np.concatenate([np.stack([np.full(len(tracks[t]["X"]), t), np.arange(len(tracks[t]["X"]))], 1) for t in live])

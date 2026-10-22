@@ -20,7 +20,10 @@ a two-way left-turn lane. Marked "median" / "twltl", given no direction.
 Medians, two-way turn lanes, gores and shoulders must run alongside a GTA link as lanes must (no-traffic strips, across
 it, only near one): what doesn't is paint off the road network (car parks, loading yards), dropped.
 Shoulders (a line and the road's edge less than SHOULDER m apart: measured line-to-edge widths on the interchange
-fall in 1.5-3.0 m or 5 m and up, none in 3.5-4.5) are marked, not given lanes."""
+fall in 1.5-3.0 m or 5 m and up, none in 3.5-4.5) are marked, not given lanes.
+A gore, median, two-way turn lane or shoulder whose end a stop line or crossing's line crosses (within END_BACK m of
+it, or END_AHEAD m ahead) ends at that line's near edge, cut along it ("stops": {"start"|"end": [x, y, ux, uy]}).
+A raised island interrupting a painted median or two-way turn lane is marked "island" (not driveable)."""
 import json, math, sys, collections
 import numpy as np
 import cv2
@@ -29,6 +32,11 @@ import scan
 SHOULDER = 4.0
 STRIP_END = 5.0
 PAINT_PAST = 0.5  # m a crossing reaches past its own paint's end (GTA paints a crossing to the gutter)
+# stop lines and crossings' lines are 0.43-0.52 m wide, lane lines 0.10-0.31; the east junction's gores end 0.05 and
+# 0.66 m past the middle of their crossing's line
+STOP_WIDE, END_BACK, END_AHEAD = 0.4, 3.0, 1.0
+ISLAND_GAP = 60.0  # m at most between a median's stretches either side of an island (the interchange's: 33 m)
+ISLAND_REACH = 5.0  # m: an island is narrower than this either way (the interchange's: 2.3 m kerb to kerb)
 # (a shoulder lies outside the outermost lane: up to SHOULDER m further from the link; a strip between a stop line
 # and its crossing beside a junction's arm is 11-18 m from the links down the arms' middles)
 ACROSS_NEAR = 25.0
@@ -345,6 +353,99 @@ off = [r for r in out if r["kind"] in ("median", "twltl", "gore", "shoulder", "n
        and not on_network(r["pts"], r["kind"] != "not_traffic", FLOW_NEAR + SHOULDER if r["kind"] == "shoulder" else FLOW_NEAR)]
 stats["off the road network (dropped)"] = len(off)
 out = [r for r in out if not any(r is o for o in off)]
+# a gore's or median's paint runs on into the crossing or stop line at its end: cut back to that line's near edge
+width = {r["id"]: r["width"] for r in scan.src.paint()}
+line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint() if scan.inbox(r["pts"][0][0], r["pts"][0][1], 60)}
+for r in out:
+  if r["kind"] not in ("gore", "median", "twltl", "shoulder"):
+    continue
+  A, own, stops = np.array(r["pts"], float), set(r.get("left_all", [r["left"]]) + r.get("right_all", [r["right"]])), {}
+  for which in ("end", "start"):
+    B = A if which == "end" else A[::-1]
+    if len(B) < 3:
+      break
+    e = B[-1, :2] - B[max(len(B) - 6, 0), :2]  # (over 5 m)
+    e /= max(np.linalg.norm(e), 1e-9)
+    xs = [x for x in scan.crossings(B[-1, :2], e, B[-1, 2], -END_BACK, END_AHEAD) if width.get(x[1], 0) >= STOP_WIDE and x[1] not in own and x[1] in line_xy]
+    if not xs:
+      continue
+    o, lid = min(xs, key=lambda x: x[0])[:2]
+    c = B[-1, :2] + e * o  # (where the line crosses the strip)
+    L = line_xy[lid]
+    k = int(np.argmin([np.linalg.norm(c - (L[m] + L[m + 1]) / 2) for m in range(len(L) - 1)]))
+    u = (L[k + 1] - L[k]) / max(np.linalg.norm(L[k + 1] - L[k]), 1e-9)
+    m = np.array([-u[1], u[0]]) * (-1.0 if np.array([-u[1], u[0]]) @ e > 0 else 1.0)  # square to the line, into the strip
+    # the samples wholly before its near edge (the paint past its lines' ends drifts: a gore's centre at its tip), the
+    # last carried on its own way to the edge
+    keep = B[(B[:, :2] - c) @ m > width[lid] / 2 + 0.1]
+    if len(keep) < 2:
+      continue
+    ek = keep[-1, :2] - keep[-2, :2]
+    ek /= max(np.linalg.norm(ek), 1e-9)
+    if ek @ m > -0.3:
+      continue
+    q = keep[-1, :2] + ek * ((width[lid] / 2 - (keep[-1, :2] - c) @ m) / (ek @ m))
+    B = np.vstack([keep, [*q, keep[-1, 2], keep[-1, 3]]])
+    A = B if which == "end" else B[::-1]
+    stops[which] = [round(float(v), 3) for v in (*q, *u)]
+  if stops:
+    r["pts"], r["stops"] = np.round(A, 2).tolist(), stops
+    stats["strip ends cut back to a stop line or crossing"] += len(stops)
+
+
+def kerbed(c, n, z):
+  """the surface that isn't driveable across c (along n) on this deck, round c: (offset of its middle, width), or
+  None where c is on the road."""
+  t = np.arange(-ISLAND_REACH, ISLAND_REACH + 1e-6, 0.05)
+  code, _ = scan.T.sample(c[0] + t * n[0], c[1] + t * n[1], z, zwin=1.0)
+  off = ~np.isin(code & 7, scan.DRIVEABLE)
+  k = len(t) // 2
+  if not off[k]:
+    return None
+  a, b = k, k
+  while a > 0 and off[a - 1]:
+    a -= 1
+  while b < len(t) - 1 and off[b + 1]:
+    b += 1
+  return (t[a] + t[b]) / 2, t[b] - t[a] + 0.05
+
+
+# a raised island in a painted median (kerbed, not driveable; the median's paint stops at its noses): between two
+# stretches of one median or two-way turn lane in line, where the gap's middle isn't road, marked "island", as wide as
+# the kerbed surface, so the divider runs on unbroken
+cen = [r for r in out if r["kind"] in ("median", "twltl")]
+for a in cen:
+  for b in cen:
+    if a is b or {a["left"], a["right"]} != {b["left"], b["right"]}:
+      continue
+    A, B = np.array(a["pts"], float), np.array(b["pts"], float)
+    g = B[0, :2] - A[-1, :2]
+    L = np.linalg.norm(g)
+    da, db = A[-1, :2] - A[max(len(A) - 4, 0), :2], B[min(3, len(B) - 1), :2] - B[0, :2]
+    if not 1.0 < L <= ISLAND_GAP or abs(B[0, 2] - A[-1, 2]) > 2 or min(da @ g / max(np.linalg.norm(da), 1e-9), db @ g / max(np.linalg.norm(db), 1e-9)) < L * math.cos(math.radians(15)):
+      continue
+    e = g / L
+    n = np.array([e[1], -e[0]])
+    pts, kerb = [], 0
+    own = {a["left"], a["right"]}
+    m = max(int(round(L)), 2)
+    for s in np.arange(1, m) * L / m:  # (filling the gap: each sample stands for the metre round it)
+      c, z = A[-1, :2] + e * s, A[-1, 2] + (B[0, 2] - A[-1, 2]) * s / L
+      k = kerbed(c, n, z)
+      kerb += k is not None and k[1] <= ISLAND_REACH
+      # out to the median's lines where they run on along its sides (the gutter between is the island's, not a shoulder)
+      side = [x[0] for x in scan.crossings(c, n, z, -ISLAND_REACH, ISLAND_REACH) if x[1] in own]
+      w = A[-1, 3] + (B[0, 3] - A[-1, 3]) * s / L
+      lo, hi = min([o for o in side if o < 0], default=-w / 2), max([o for o in side if o > 0], default=w / 2)
+      pts.append([*np.round(c + n * (lo + hi) / 2, 2), round(float(z), 2), round(float(hi - lo), 2)])
+    if len(pts) >= 3 and kerb >= 0.5 * len(pts):
+      out.append({"kind": "island", "left": a["left"], "right": a["right"], "pts": pts})
+      stats["island in a median"] += 1
+      P = np.array(pts)
+      gut = [r for r in out if r["kind"] == "shoulder" and "e" in (r["left"], r["right"]) and {r["left"], r["right"]} - {"e"} <= own
+             and np.mean([np.min(np.linalg.norm(P[:, :2] - q[:2], axis=1)) < P[0, 3] for q in np.array(r["pts"])]) >= 0.5]
+      out = [r for r in out if not any(r is g for g in gut)]
+      stats["gutter beside an island (shoulder dropped)"] += len(gut)
 json.dump(out, open(sys.argv[6], "w"))
 for k, v in sorted(stats.items(), key=lambda kv: -kv[1]):
   print(v, k)

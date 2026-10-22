@@ -479,6 +479,102 @@ for i, (ki, A, _) in enumerate(runs):
       break
 runs = [r for r, k in zip(runs, keep_run) if k]
 
+# a lane widening on one side only while both its lines carry on, out past where one lane can be: a road widening
+# ahead of a split whose dividing line isn't painted (GTA marks some with faint road texture and raised markers only).
+# The lane carries straight on at its usual width along its straight side, and a new lane opens in the space beside it
+# out to the far line, its inner side "u" (an unpainted divide); connect.py links the opening and shapes its taper
+SPLIT_WIDEN = 1.5  # m wider than its usual width at its end (the east road's: 6.6 -> 8.6 m over its last 21 m)
+SPLIT_RUN = 15  # samples before it starts widening (within SPLIT_START m of its usual width) its edges' ways are read over
+SPLIT_START = 0.2
+SPLIT_EDGE = 0.5  # m: the most its straight line is from where it's expected, carrying on
+# m more one edge moves out than the other (the east road's: 1.44 and 0.84 m, the road bending 2 deg as it widens)
+SPLIT_SIDE = 0.5
+SPLIT_FAR = 2 * LANE_MAX  # m: lines further apart aren't one road's
+SPLIT_LEN = 200  # m at most carried on
+wide_line = {r["id"] for r in scan.src.paint() if r["width"] >= 0.4}  # stop lines and crossings' lines (0.43-0.52 m; lane lines 0.10-0.31)
+
+
+def widen_split(B, ids, others):
+  """for a run B (ids: its left and right boundaries along it) widening at its end as above: B's samples carried on
+  and the new lane's samples beside them, along B, and which side it opens on (+1 right); else None (others: the
+  other runs' samples)."""
+  w0 = float(np.median(B[:, 3]))
+  if len(B) < SPLIT_RUN + 2 or B[-1, 3] < w0 + SPLIT_WIDEN:
+    return None
+  # (from where it starts widening)
+  k0 = max([k for k in range(len(B)) if B[k, 3] <= w0 + SPLIT_START] + [0])
+  if k0 < SPLIT_RUN:
+    return None
+  g = np.gradient(B[:, :2], axis=0)
+  g /= np.maximum(np.linalg.norm(g, axis=1, keepdims=True), 1e-9)
+  nk = np.stack([g[:, 1], -g[:, 0]], 1)
+  move = {}
+  for s in (1, -1):  # how far each edge has moved out from the line it ran along before (fitted there)
+    E = B[:, :2] + s * nk * B[:, 3:4] / 2
+    R = E[k0 - SPLIT_RUN:k0 + 1]
+    e = np.linalg.svd(R - R.mean(0))[2][0]
+    e = e if e @ (R[-1] - R[0]) > 0 else -e
+    move[s] = float((E[-1] - R.mean(0)) @ np.array([e[1], -e[0]]) * s)
+  s = 1 if move[1] > move[-1] else -1  # the side it opens on
+  if move[s] - move[-s] < SPLIT_SIDE or not (ids[0 if s > 0 else 1] - {"e", "r", "u"}):
+    return None
+  edge = B[-SPLIT_RUN:, :2] - s * nk[-SPLIT_RUN:] * B[-SPLIT_RUN:, 3:4] / 2  # the straight side
+  d = edge[-1] - edge[0]
+  d /= max(np.linalg.norm(d), 1e-9)
+  n = np.array([d[1], -d[0]])
+  p, z = edge[-1], B[-1, 2]
+  keep, new = [], []
+  for _ in range(int(SPLIT_LEN / STEP)):
+    q = p + d * STEP
+    if not scan.inbox(q[0], q[1], 5.0) or any(x[1] in wide_line for x in scan.crossings(p, d, z, 0.0, STEP)):
+      break
+    xs = [x for x in scan.crossings(q, n, z, -SPLIT_FAR, SPLIT_FAR) if x[1] not in wide_line]
+    at = [x[0] for x in xs if abs(x[0]) <= SPLIT_EDGE]  # its straight line, carrying on
+    far = sorted(s * x[0] for x in xs if s * x[0] > w0 + LANE_MIN)
+    if not at or not far:
+      break
+    q = q + n * min(at, key=abs)
+    d = q - p
+    d /= max(np.linalg.norm(d), 1e-9)
+    n = np.array([d[1], -d[0]])
+    c = q + s * n * w0 / 2
+    code, h = scan.T.sample(np.array([c[0]]), np.array([c[1]]), z, zwin=1.0)
+    if np.isfinite(h[0]):
+      z = float(h[0])
+    m = q + s * n * (w0 + far[0]) / 2
+    if any(np.any((np.linalg.norm(R[:, :2] - m, axis=1) < R[:, 3] / 2) & (np.abs(R[:, 2] - z) < 1.5)) for R in others):
+      return None  # (the opening has a lane of its own further on: a bay, linked by connect.py)
+    keep.append([*c, z, w0])
+    new.append([*m, z, far[0] - w0])
+    p = q
+  if len(keep) < 3:
+    return None
+  return np.array(keep), np.array(new), s
+
+
+SPLIT_ADD = []
+for r in runs:
+  key, A, ids = r
+  others = [o[1] for o in runs if o is not r]
+  for at_end in (True, False):
+    B, bids = (A, ids) if at_end else (A[::-1], (ids[1], ids[0]))
+    got = widen_split(B, bids, others)
+    if got is None:
+      continue
+    K, N, s = got
+    far_ids = bids[1] if s > 0 else bids[0]
+    nkey = ("u", key[1] if at_end else key[0]) if s > 0 else (key[0] if at_end else key[1], "u")
+    nids = ({"u"}, far_ids) if s > 0 else (far_ids, {"u"})
+    if at_end:
+      A = np.vstack([A, K])
+    else:
+      A = np.vstack([K[::-1], A])
+      N, nkey, nids = N[::-1], nkey[::-1], nids[::-1]
+    SPLIT_ADD.append([nkey, N, nids])
+    print(f"widening split: {key} carried on {len(K)} m, a lane opening on its {'right' if s > 0 else 'left'} ({nkey})")
+  r[1] = A
+runs += SPLIT_ADD
+
 def snap(p, n, z):
   """the painted line's middle within +-0.4 m of p across n on this deck, or None (a double line counts as one:
   following one half alone jumps to a neighbouring line where the halves part)."""

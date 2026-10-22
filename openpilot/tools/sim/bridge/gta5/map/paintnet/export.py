@@ -7,7 +7,8 @@ or under a deck ("covered", for the page's level switch), gore, shoulder, crossi
 not_traffic (areas; not those in a junction's box, between a stop line and its crossing), and
 flag (a point per flagged group, with why), junction (junctions.py's box, its lanes inside named), guide (a lane inside
 a junction's box: its lines carried through it, guiding traffic, not a lane), turns (a lane arriving at a junction: its
-arrows' turns, at its stop line); from connect.py's links: connector (the strip filling a break between a
+arrows' turns, at its stop line), path (junctions.py's: an arriving lane's way across the box to a leaving lane, by
+its turn); from connect.py's links: connector (the strip filling a break between a
 lane and the one it carries on into) and link (a line from a lane's end to its successor's start; "type" split when a
 lane carries on into two, merge when two carry on into one, else continue) with linkpt, a point marker halfway along it; edge (a lane piece's sides, and a line across at the lane's real ends).
 Every piece says whether it runs under a deck ("covered"), whether it is one ("deck"), and whether its lane is one
@@ -226,9 +227,11 @@ for k, r in enumerate(json.load(open(dirj))):
     continue
   if r["kind"] == "not_traffic" and k in in_box:  # (between a stop line and its crossing: the junction's box, driven over)
     continue
-  A = clip(np.array(r["pts"]))[0]
+  A, i0, i1 = clip(np.array(r["pts"]))
   if A is None:
     continue
+  st = r.get("stops", {})  # (a strip's end cut along the stop line or crossing it runs to)
+  st = {"start": st.get("start") if i0 == 0 else None, "end": st.get("end") if i1 == len(r["pts"]) else None}
   pcs = pieces(A)
   on_deck = any(p[3] for p in pcs)
   if r.get("outline"):  # a crossing cut to the road's surface: one area
@@ -243,7 +246,7 @@ for k, r in enumerate(json.load(open(dirj))):
     feats.append({"type": "Feature", "properties": {"kind": r["kind"], "on_deck": on_deck, "id": f"{r['left']}|{r['right']}|{r['kind'][0]}{k}",
                                                     "width": round(float(np.median(A[:, 3])), 2), "z": round(float(np.median(A[:, 2])), 1),
                                                     "covered": cov, "deck": deck},
-                  "geometry": {"type": "Polygon", "coordinates": area(A[a:b])}})
+                  "geometry": {"type": "Polygon", "coordinates": area(A[a:b], st["start"] if a == 0 else None, st["end"] if b == len(A) else None)}})
 for i, j, g, *br in LK["links"]:
   if nxt.get(i) == j:  # drawn as one lane
     continue
@@ -263,12 +266,12 @@ for i, j, g, *br in LK["links"]:
       cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])
       hd = heading(B)  # (the lane it leads into)
       props = {"kind": "lane", "connector": True, "id": f"{lid(i)} > {lid(j)}", "group": to["group"], "heading": hd, "col": HEADING[hd],
-               "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck, "on_deck": lane_deck[i] or lane_deck[j]}
+               "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck, "on_deck": lane_deck.get(i, False) or lane_deck.get(j, False)}
       feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
       feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
                     "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
   m = (a[:2] + b0[:2]) / 2
-  feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck[i] or lane_deck[j],
+  feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck.get(i, False) or lane_deck.get(j, False),
                                                   "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
                 "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})
 # each lane arriving at a junction: its turns from its arrows, drawn just before its stop line as arrows pointing the
@@ -294,6 +297,24 @@ if JUNCTIONS:
     feats.append({"type": "Feature", "properties": {"kind": "junction", "id": f"junction {J['id']}", "inside": ", ".join(lid(i) for i in J["inside"]),
                                                     "z": J["z"], "covered": False, "deck": False, "on_deck": False},
                   "geometry": {"type": "Polygon", "coordinates": [lonlat(np.array(J["ring"] + J["ring"][:1]))]}})
+    # its paths: an arriving lane's end to a leaving lane's start, by its turn; an arrow with no road its way, and a
+    # leaving lane nothing reaches, flagged
+    flat = {"covered": False, "deck": False, "on_deck": False}
+    for p in J.get("paths", []):
+      if p["to"] is None:
+        e = np.array(G["lanes"][p["from"]]["pts"])[-1, :2]
+        feats.append({"type": "Feature", "properties": {"kind": "flag", "group": None, "why": f"{lid(p['from'])}: turns {p['turn']}, no road leaves that way", **flat},
+                      "geometry": {"type": "Point", "coordinates": lonlat(e[None])[0]}})
+        continue
+      P = np.array(p["pts"])
+      feats.append({"type": "Feature", "properties": {"kind": "path", "id": f"{lid(p['from'])} > {lid(p['to'])}", "turn": p["turn"],
+                                                      "guide": lid(p["guide"]) if p["guide"] is not None else "", "flags": ", ".join(p["flags"]),
+                                                      "junction": J["id"], "z": round(float(np.median(P[:, 2])), 1), **flat},
+                    "geometry": {"type": "LineString", "coordinates": lonlat(P[:, :2])}})
+    for j in J.get("unreached", []):
+      s = np.array(G["lanes"][j]["pts"])[0, :2]
+      feats.append({"type": "Feature", "properties": {"kind": "flag", "group": None, "why": f"{lid(j)}: leaves junction {J['id']}, no path reaches it", **flat},
+                    "geometry": {"type": "Point", "coordinates": lonlat(s[None])[0]}})
 lanes_by = {}
 for r in G["lanes"]:
   lanes_by.setdefault(r["group"], []).append(np.array(r["pts"]))

@@ -15,8 +15,18 @@ the junction within ARROW_BACK m (along it and the lane it carries straight on f
 the lane it opens from has the through lane's arrows). GTA paints a left+right arrow as a left and a right decal on
 one spot (6 on the map), so decals stacked within ARROW_STACK m pointing the same way are one arrow with all their
 turns. An arrow found only by its shape (arrows.py: the list misses many) takes the type its paint matches (arrows.kind), else "?"; a lane with no arrow, None.
+Paths across it: its mouths make arms (the ways its roads leave it, within CROSS deg); an arm's arriving lanes reach
+another arm's leaving lanes by the turn between them (through within TURN_ANG deg of straight on, left or right
+beyond, a U-turn past UTURN: none). Each turn's lanes pair off with the leaving lanes in order across the road, from
+the inside of a left turn, from the kerb for through and right; a guide (lane paint carried through the box) running
+from an arriving lane's end to a leaving lane's start pairs them and is the path's way. A lane with no arrow
+(or "?") is taken as through, plus left as its arm's leftmost and right as its rightmost where no arrowed lane in its
+arm turns that way and no free turn lane round the box does (a single lane: every turn); flagged "inferred". Flags:
+"merge" (more lanes turning than leaving lanes: the outer ones share the last), "no exit" (an arrow's way has no
+road leaving), and per junction "unreached" (leaving lanes no path or free turn lane reaches).
 Out: [{"id", "z", "ring": [[x, y], ...], "strips": [dir.json index], "mouths": [[lane, "start"|"end", turns]],
-"inside": [lane]}]; turns like "left", "through;right", "left;right" (OSM turn:lanes values), only at "end" mouths."""
+"inside": [lane], "paths": [{"from", "to", "turn", "guide", "flags", "pts": [[x, y, z, w], ...]}], "unreached": [lane]}];
+turns like "left", "through;right", "left;right" (OSM turn:lanes values), only at "end" mouths."""
 import json, os, sys
 import numpy as np
 import cv2
@@ -34,9 +44,12 @@ ARROW_STACK = 1.5  # m between stacked decals of one arrow (twice-placed decals 
 ARROW_BACK = 60.0  # m back from a lane's end its arrows are looked for (GTA paints them 5-40 m before a stop line)
 INSIDE = 0.5  # share of a lane's samples inside a box for it to be the junction's own
 EDGE_BOX = 6.0  # m: lane ends this near the pilot box's edge are cut by it, not a junction's (osm.py's)
+GUIDE_MIN = 6.0  # m: shorter lanes inside a box (beside a corner's arc) guide nothing (export.py's)
 RES = 0.1  # m: raster step of the cut to the road
 SLIVER = 9  # raster steps: narrower slivers dropped (direction.py's OUTLINE_SLIVER)
 SEAL = 0.3  # m the walls are grown by: neighbouring lanes' bands part by up to 0.3 m at a shared line (osm.py's ADJ)
+TURN_ANG, UTURN = 45.0, 150.0  # deg off straight on: a turn beyond the first, a U-turn beyond the second (the interchange's: 0-6 and 69-106)
+GUIDE_NEAR = 10.0  # m from a guide's end to the lane end it carries on (the interchange's: 0.5-7.3 m along, 0.5-2.0 m across)
 x0, x1, y0, y1 = scan.x0, scan.x1, scan.y0, scan.y1
 G = json.load(open(sys.argv[5]))
 LK = json.load(open(sys.argv[6]))
@@ -82,7 +95,7 @@ def band(A, stop=None):
 # (a no-traffic strip at the pilot's edge is a lane cut by it, not a junction's)
 strips = [(k, np.array(r["pts"], float), Polygon(r["outline"]).buffer(0) if r.get("outline") else band(np.array(r["pts"], float)))
           for k, r in enumerate(D) if r["kind"] == "crossing" or r["kind"] == "not_traffic" and not (at_edge(r["pts"][0]) or at_edge(r["pts"][-1]))]
-walls_dir = [np.array(r["pts"], float) for r in D if r["kind"] in ("gore", "median", "twltl", "shoulder")]
+walls_dir = [(np.array(r["pts"], float), r.get("stops")) for r in D if r["kind"] in ("gore", "median", "twltl", "shoulder", "island")]
 
 
 def cut(hull, pts, walls, seed):
@@ -138,11 +151,14 @@ for x, y, z, _ in arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)[1]:
     marks.append([x, y, z, None, None])
 TURN_ORDER = ["left", "through", "right"]
 TMPL = arrows.templates(scan.T, scan.src.features(), os.path.expanduser("~/.cache/paintnet/arrow_templates.npz"))
-pred, succ = {}, {}
+pred, succ, feeds = {}, {}, {}  # feeds: what carries on or merges into a lane
 for i, j, g, *br in LK["links"]:
   if not br:
     pred.setdefault(j, []).append(i)
     succ.setdefault(i, []).append(j)
+  if br != ["branch"]:
+    feeds.setdefault(j, []).append(i)
+merging = {i for i, j, g, *br in LK["links"] if br == ["merge"]}
 
 
 def turns_of(i):
@@ -190,7 +206,117 @@ def junction(mem):
 
 
 def walls_of(z, on_deck, own):
-  return [band(LA[i], STOPS.get(i)) for i in on_deck if i not in own] + [band(A) for A in walls_dir if abs(np.median(A[:, 2]) - z) < 2]
+  return [band(LA[i], STOPS.get(i)) for i in on_deck if i not in own] + [band(A, st) for A, st in walls_dir if abs(np.median(A[:, 2]) - z) < 2]
+
+
+deg = lambda v: float(np.degrees(np.arctan2(v[1], v[0])))
+wrap = lambda a: (a + 180) % 360 - 180
+length = lambda A: float(np.linalg.norm(np.diff(A[:, :2], axis=0), axis=1).sum())
+
+
+def curve(A, B, g=None):
+  """samples a metre apart (x, y, z, width) from A's end to B's start: along guide g's centre, else a cubic from A's
+  heading into B's."""
+  if g is not None:
+    C = LA[g][:, :4]
+    P = np.vstack([A[-1:, :4], C if np.linalg.norm(C[0, :2] - A[-1, :2]) < np.linalg.norm(C[-1, :2] - A[-1, :2]) else C[::-1], B[:1, :4]])
+  else:
+    da, db = frame(A)[0][-1], frame(B)[0][0]
+    c = np.linalg.norm(B[0, :2] - A[-1, :2])
+    t = np.linspace(0, 1, 50)[:, None]
+    P = A[-1, :4] + (B[0, :4] - A[-1, :4]) * t
+    P[:, :2] = (2 * t ** 3 - 3 * t ** 2 + 1) * A[-1, :2] + (t ** 3 - 2 * t ** 2 + t) * c * da + (3 * t ** 2 - 2 * t ** 3) * B[0, :2] + (t ** 3 - t ** 2) * c * db
+  s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(P[:, :2], axis=0), axis=1))]
+  q = np.linspace(0, s[-1], max(int(round(s[-1])), 1) + 1)
+  return np.stack([np.interp(q, s, P[:, c]) for c in range(4)], 1)
+
+
+def near_end(p, A, k, slack=0.0):
+  """p lies within GUIDE_NEAR m along A's sample k and within half A's width (+ slack) across it."""
+  d, n = frame(A)
+  off = p - A[k, :2]
+  return abs(off @ d[k]) <= GUIDE_NEAR and abs(off @ n[k]) <= A[k, 3] / 2 + slack
+
+
+def paths(mouths, guides):
+  """the paths across a junction from its mouths, and the leaving lanes none reaches (the module's docstring)."""
+  M = []  # lane, "end"|"start", turns, the way its road leaves the box (deg)
+  for i, which, tu in mouths:
+    d = frame(LA[i])[0][-1 if which == "end" else 0]
+    M.append((i, which, tu, deg(-d if which == "end" else d)))
+  # arms: the mouths round the box by the way they leave it, split where that turns more than CROSS
+  order = sorted(range(len(M)), key=lambda m: M[m][3])
+  gaps = [(M[order[(k + 1) % len(order)]][3] - M[order[k]][3]) % 360 for k in range(len(order))]
+  arms, cur = [], []
+  s = next((k + 1 for k, g in enumerate(gaps) if g > CROSS), 0)
+  for m, g in zip(order[s:] + order[:s], gaps[s:] + gaps[:s]):
+    cur.append(m)
+    if g > CROSS:
+      arms.append(cur); cur = []
+  if cur:
+    arms.append(cur)
+  out = [deg(np.sum([[np.cos(np.radians(M[m][3])), np.sin(np.radians(M[m][3]))] for m in a], 0)) for a in arms]
+
+  def across(lanes, flow, which):
+    """lanes in order across the road, left to right facing flow (deg)."""
+    r = np.array([np.sin(np.radians(flow)), -np.cos(np.radians(flow))])
+    return sorted(lanes, key=lambda i: LA[i][-1 if which == "end" else 0, :2] @ r)
+
+  arriving = [across([M[m][0] for m in a if M[m][1] == "end"], o + 180, "end") for a, o in zip(arms, out)]
+  leaving = [across([M[m][0] for m in a if M[m][1] == "start"], o, "start") for a, o in zip(arms, out)]
+  turns = {M[m][0]: M[m][2] for m in range(len(M))}
+  reached = set()
+  bypass = set()  # (arm, turn) a free turn lane round the box takes: a lane carrying on into a leaving lane from that arm's road
+  res = []
+  for a in range(len(arms)):
+    ways = {}
+    for b in range(len(arms)):
+      th = wrap(out[b] - out[a] - 180)
+      t = "through" if abs(th) <= TURN_ANG else "left" if TURN_ANG < th <= UTURN else "right" if -UTURN <= th < -TURN_ANG else None
+      if b != a and t and (t not in ways or abs(th - {"left": 90, "through": 0, "right": -90}[t]) < ways[t][1]):
+        ways[t] = (b, abs(th - {"left": 90, "through": 0, "right": -90}[t]))
+    for t, (b, _) in ways.items():
+      for j in leaving[b]:
+        for p in feeds.get(j, []):
+          if p not in turns and abs(wrap(deg(frame(LA[p])[0][0]) - (out[a] + 180))) < CROSS:
+            bypass.add((a, t)); reached.add(j)
+    L = arriving[a]
+    known = {i: set(turns[i].split(";")) for i in L if turns[i] and turns[i] != "?"}
+    sets, guessed = {}, set()
+    for k, i in enumerate(L):
+      if i in known:
+        sets[i] = known[i]
+        continue
+      guessed.add(i)
+      sets[i] = {"through"} | {t for t, edge in (("left", k == 0), ("right", k == len(L) - 1))
+                               if edge and (a, t) not in bypass and not any(t in v for v in known.values())}
+    for t in ("left", "through", "right"):
+      want = [i for i in L if t in sets[i]]
+      if not want:
+        continue
+      if t not in ways or not leaving[ways[t][0]]:
+        res += [{"from": i, "to": None, "turn": t, "guide": None, "flags": ["no exit"]} for i in want if i in known]
+        continue
+      T = leaving[ways[t][0]]
+      fixed = {}
+      for i in want:
+        for g in guides:
+          G0, G1 = LA[g][0, :2], LA[g][-1, :2]
+          for e0, e1 in ((G0, G1), (G1, G0)):
+            y = next((y for y in T if near_end(e1, LA[y], 0)), None)
+            if near_end(e0, LA[i], -1) and y is not None and y not in [v[0] for v in fixed.values()]:
+              fixed[i] = (y, g)
+      rest = [i for i in want if i not in fixed]
+      free = [y for y in T if y not in [v[0] for v in fixed.values()]] or T
+      if t != "left":  # (paired from the kerb)
+        rest, free = rest[::-1], free[::-1]
+      pairs = list(fixed.items()) + [(i, (free[min(k, len(free) - 1)], None)) for k, i in enumerate(rest)]
+      for k, (i, (y, g)) in enumerate(pairs):
+        flags = (["inferred"] if i in guessed else []) + (["merge"] if [v[0] for _, v in pairs].count(y) > 1 else [])
+        res.append({"from": i, "to": y, "turn": t, "guide": g, "flags": flags, "pts": curve(LA[i], LA[y], g).round(2).tolist()})
+        reached.add(y)
+  unreached = [j for lv in leaving for j in lv if j not in reached]
+  return res, unreached, [[round(o, 1), arriving[k], leaving[k]] for k, o in enumerate(out)]
 
 
 out, taken = [], set()
@@ -221,7 +347,8 @@ for s0 in range(len(strips)):
     A = LA[i]
     d, n = frame(A)
     for k, which in ((-1, "end"), (0, "start")):
-      if at_edge(A[k]) or (succ if which == "end" else pred).get(i) or (region if region is not None else seed).distance(Point(A[k, :2])) > ATTACH:
+      # (a lane leaving may also be carried on or merged into: a free turn lane round the box joining it)
+      if at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or (region if region is not None else seed).distance(Point(A[k, :2])) > ATTACH:
         continue
       mouths.append([i, which, turns_of(i) if which == "end" else None])
       heads.append(np.arctan2(d[k, 1], d[k, 0]) % np.pi)
@@ -236,10 +363,15 @@ for s0 in range(len(strips)):
     continue
   box = Polygon(ring).buffer(0)
   inside = [i for i in on_deck if np.mean([box.contains(Point(p)) for p in LA[i][:, :2]]) >= INSIDE]
-  out.append({"id": len(out), "z": round(z, 2), "ring": ring, "strips": [k for k, _, _ in mem], "mouths": mouths, "inside": inside})
+  ps, unreached, arms = paths(mouths, [i for i in inside if length(LA[i]) >= GUIDE_MIN])
+  out.append({"id": len(out), "z": round(z, 2), "ring": ring, "strips": [k for k, _, _ in mem], "mouths": mouths, "inside": inside,
+              "paths": ps, "unreached": unreached})
   print(f"junction {len(out) - 1}: {len(mem)} strips, {len(mouths)} mouths, {box.area:.0f} m2, lanes inside {inside}")
-  for i, which, tu in mouths:
-    if which == "end":
-      print(f"  arriving {G['lanes'][i]['left']}|{G['lanes'][i]['right']}|{i}: {tu}")
+  for o, arr, lv in arms:
+    print(f"  arm leaving {o:6.1f} deg: arriving {arr} ({', '.join(str(tu) for i in arr for j, w, tu in mouths if j == i and w == 'end')}), leaving {lv}")
+  for p in ps:
+    print(f"    {p['from']:3d} -> {p['to']}  {p['turn']:8s} {'guide ' + str(p['guide']) if p['guide'] is not None else ''} {' '.join(p['flags'])}")
+  if unreached:
+    print(f"  unreached: {unreached}")
 json.dump(out, open(sys.argv[8], "w"))
 print(len(out), "junctions ->", sys.argv[8])
