@@ -26,6 +26,7 @@ LINE = 0.15  # m: a painted line's width
 DASH, GAP_ = 3.0, 6.0  # m: a dashed line's dash and gap
 ARROW_BACK = 6.0  # m before a way's far end its turn arrows sit
 STOP_BACK = 8.0  # m of the way behind a signal its stop line is drawn square to
+JUNCTION_REACH = 35.0  # m from a junction node its arms' crossings and stop lines bound its area
 ZEBRA, ZEBRA_W = 0.5, 3.0  # m: a crossing's stripe and its width across
 HEADING = {"north": "#1e88e5", "east": "#43a047", "south": "#8e24aa", "west": "#00897b"}  # export.py's lane colours
 GLYPH = {"left": "←", "slight_left": "↖", "sharp_left": "←", "through": "↑", "slight_right": "↗", "right": "→", "sharp_right": "→",
@@ -121,6 +122,18 @@ for n in junction:
     h = heading_at(nd, n)
     cross = [lay[w2][nd2.index(n) != 0][1] for w2, nd2 in here if w2 != w and abs(h @ heading_at(nd2, n)) < math.cos(math.radians(30))]
     trim_at[n, w] = max(cross) / 2 if cross else 0.0
+    # where the way has a crossing (else a stop line) further out, within JUNCTION_REACH m, the junction's area starts there
+    seq = nd if nd[0] == n else nd[::-1]
+    length = sum(math.dist(xy(p_), xy(q_)) for p_, q_ in zip(seq, seq[1:]))
+    run, prev = 0.0, xy(n)
+    for m in seq[1:-1]:
+      run += math.dist(prev, xy(m))
+      prev = xy(m)
+      if run > JUNCTION_REACH or seq[-1] in junction and run > length / 2:  # (one nearer another junction is that one's)
+        break
+      if nodes[m][2].get("highway") in ("crossing", "traffic_signals", "stop") and run > trim_at[n, w]:
+        trim_at[n, w] = run - (ZEBRA_W / 2 if nodes[m][2].get("highway") == "crossing" else 0.0)
+        break
 
 feats = []
 
@@ -184,11 +197,10 @@ way_line = {}
 for w, (nd, t) in roads.items():
   line = whole = LineString([xy(n) for n in nd])
   full = line.length
-  a, b = 0.0, line.length
-  if nd[0] in junction:
-    a = min(trim_at.get((nd[0], w), 0.0), line.length / 3)
-  if nd[-1] in junction:
-    b = max(line.length - trim_at.get((nd[-1], w), 0.0), line.length * 2 / 3)
+  ta = trim_at.get((nd[0], w), 0.0) if nd[0] in junction else 0.0
+  tb = trim_at.get((nd[-1], w), 0.0) if nd[-1] in junction else 0.0
+  k_ = min(1.0, (line.length - 1.0) / max(ta + tb, 1e-9))  # (a way all inside a junction keeps its last metre)
+  a, b = ta * k_, line.length - tb * k_
   line = substring(line, a, b)
   if line.length < 0.5:
     continue
