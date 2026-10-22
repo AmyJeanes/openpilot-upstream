@@ -5,7 +5,7 @@ A shot's pixel is kept where its own height is below the top-level height tile's
 its parapets and anything else over the camera hide it from above. Lower levels are drawn over higher ones, so the view
 shows the lowest level everywhere (the ground beneath a stack of decks, not the road between two of them). The albedo matches the top tiles' exactly, so no colour matching.
 
-  undertiles.py <out dir> [--quality 70] [--zmin 10] [--dz 2] [--workers 6] [--names o061_079_L1,...]
+  undertiles.py <out dir> [--shots <tiles dir> ...] [--quality 70] [--zmin 10] [--dz 2] [--workers 6] [--names o061_079_L1,...]
 """
 import argparse
 import io
@@ -25,12 +25,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gframe  # noqa: E402
 from satfull import F, Z, S22, halve  # noqa: E402
 
-UNDER, DEPTH = f"{F}/under/tiles", f"{F}/depth/tiles"
+SHOTS = [f"{F}/under/tiles", f"{F}/under_gaps/tiles"]  # the crossings' shots, then the gap planner's (imgcheck/under_gaps.py)
+DEPTH = f"{F}/depth/tiles"
+GRID_X0, GRID_Y0, STEP_X, STEP_Y = -4300.0, -4300.0, 69.12, 38.88  # ortho.py's grid: cell centres
 EDGE = 8            # px dropped at a shot's border
 MIN_M2 = 2.0        # smallest kept patch
 ROUGH_M = 0.15      # top height's local spread (45 cm box) over a tree crown
 TREE_M2 = 40.0      # a rough patch smaller than this is a lone crown, not a deck (car parks and roads under woods are rough too)
 QUALITY, DZ = 70, 2.0
+FOLDER: dict[str, str] = {}  # shot name -> its tiles dir
 
 
 def height(path, m):
@@ -40,20 +43,35 @@ def height(path, m):
   return h
 
 
-def mask(d):
+def top(d, W, H):
+  """The top-level heights in the shot's pixels (same scale), each pixel from the height tile of its own grid cell: a
+  shot off the grid's centres spans several. None without any."""
+  M = d["world_to_px"]
+  ci = np.round(((np.arange(W) + 0.5 - M[0][2]) / M[0][0] - GRID_X0) / STEP_X).astype(int)
+  cj = np.round(((np.arange(H) + 0.5 - M[1][2]) / M[1][1] - GRID_Y0) / STEP_Y).astype(int)
+  out, found = np.full((H, W), np.nan, np.float32), False
+  for i in np.unique(ci):
+    for j in np.unique(cj):
+      tp = f"{DEPTH}/o{i:03d}_{j:03d}.json"
+      if not os.path.exists(tp):
+        continue
+      t = json.load(open(tp))
+      ox, oy = (M[k][2] - t["world_to_px"][k][2] for k in (0, 1))
+      ht = cv2.warpAffine(height(f"{DEPTH}/{t['height']['png']}", t["height"]), np.float32([[1, 0, ox], [0, 1, oy]]), (W, H),
+                          flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan)
+      k = np.ix_(cj == j, ci == i)
+      out[k], found = ht[k], True
+  return out if found else None
+
+
+def mask(d, folder):
   """The shot's albedo and its kept pixels (uint8 0/255), or None without a top height tile."""
-  i, j = d["cell"]
-  tp = f"{DEPTH}/o{i:03d}_{j:03d}.json"
-  if not os.path.exists(tp):
-    return None, None
-  t = json.load(open(tp))
-  al = cv2.imread(f"{UNDER}/{d['images']['albedo']}", cv2.IMREAD_COLOR)
-  hu = height(f"{UNDER}/{d['height']['png']}", d["height"])
+  al = cv2.imread(f"{folder}/{d['images']['albedo']}", cv2.IMREAD_COLOR)
+  hu = height(f"{folder}/{d['height']['png']}", d["height"])
   H, W = hu.shape
-  # the top tile in the shot's pixels: same scale, offset by the shot's nudge
-  ox, oy = (d["world_to_px"][k][2] - t["world_to_px"][k][2] for k in (0, 1))
-  ht = cv2.warpAffine(height(f"{DEPTH}/{t['height']['png']}", t["height"]), np.float32([[1, 0, ox], [0, 1, oy]]), (W, H),
-                      flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan)
+  ht = top(d, W, H)
+  if ht is None:
+    return None, None
   with np.errstate(invalid="ignore"):
     m = (ht - hu > DZ) & (al != 0).any(axis=2)
   m[:EDGE], m[-EDGE:], m[:, :EDGE], m[:, -EDGE:] = False, False, False, False
@@ -92,8 +110,8 @@ def z22(x, y):
 
 def shot(name):
   """One shot warped to z22: {(tx, ty): RGBA tile}, its outline (world polygons) and kept px."""
-  d = json.load(open(f"{UNDER}/{name}.json"))
-  al, m = mask(d)
+  d = json.load(open(f"{FOLDER[name]}/{name}.json"))
+  al, m = mask(d, FOLDER[name])
   if al is None or not m.any():
     return name, {}, [], 0 if al is None else -1
   M = np.array(d["world_to_px"], np.float64)
@@ -216,11 +234,17 @@ def main():
   ap.add_argument("--dz", type=float, default=2.0, help="m the top surface must be above the shot's to keep a pixel")
   ap.add_argument("--workers", type=int, default=6)
   ap.add_argument("--names", default="", help="only these shots (a test)")
+  ap.add_argument("--shots", nargs="+", default=SHOTS, help="the passing under-deck shots' tiles dirs (missing ones skipped)")
   a = ap.parse_args()
   QUALITY, DZ = a.quality, a.dz
-  sides = {f[:-5]: json.load(open(f"{UNDER}/{f}")) for f in os.listdir(UNDER) if f.endswith(".json")}
+  sides = {}
+  for folder in a.shots:
+    for f in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+      if f.endswith(".json"):
+        sides[f[:-5]] = json.load(open(f"{folder}/{f}"))
+        FOLDER[f[:-5]] = folder
   names = a.names.split(",") if a.names else [n for n, d in sides.items() if d.get("pass")]
-  names.sort(key=lambda n: (-sides[n]["level"], n))  # the lowest level drawn last, over the others
+  names.sort(key=lambda n: (-sides[n]["camera"]["cam_z"], n))  # the lowest level drawn last, over the others
   print(f"{len(sides)} shots, {sum(not d.get('pass') for d in sides.values())} failed their checks, using {len(names)}", flush=True)
   cv2.setNumThreads(2)
   tiles, polys, used, empty, notop = {}, [], 0, [], []

@@ -609,8 +609,7 @@ def seg_samples(segs, step=0.5):
     yield x0 + t * (x1 - x0), y0 + t * (y1 - y0), z0 + t * (z1 - z0)
 
 
-def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarray | None, top_shift: tuple[int, int],
-           ground: list | None = None) -> dict:
+def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarray | None, ground: list | None = None) -> dict:
   """(a) the lower road's centreline reads its node heights, or (where the nodes are off) the road's collision surface
   under the shape tests (ground: x, y, z); (b) coverage of its footprint (buffered by its width) at
   its height; (c) nothing between the road and the camera over it, nothing just under the camera; (d) outside the decks
@@ -671,9 +670,8 @@ def checks(h: np.ndarray, M: np.ndarray, cam_z: float, segs: list, top: np.ndarr
   out["nodata"] = round(float(1 - fin.mean()), 4)  # above the camera (terrain over a trench): expected, not a failure
   out["c"] = bool(out["c_above_road"] < 0.15)  # c_near_cam is only recorded: terrain beside a trench is that high too
   out["d"] = None
-  if top is not None:
-    ox, oy = top_shift
-    t2 = np.roll(top, (-oy, -ox), axis=(0, 1))[s // 2::s, s // 2::s]
+  if top is not None:  # the top-level heights over the shot's own frame
+    t2 = top[s // 2::s, s // 2::s]
     open_ = np.isfinite(t2) & fin & (t2 < cam_z - U_BLIND - 0.7)
     out["d_px"] = int(open_.sum()) * s * s
     if open_.sum() > 1000:
@@ -692,16 +690,39 @@ class UnderPass:
     self.args, self.log = args, log
     self.sh = ZShooter(args.run_dir, log, lambda item: None)
     self.stats = collections.Counter()
+    self.tops: dict = {}
 
-  def top_tile(self, t: dict) -> np.ndarray | None:
+  def top_tile(self, i: int, j: int) -> tuple[np.ndarray, list] | None:
+    """A height tile's heights and world_to_px (the last few kept)."""
+    if (i, j) not in self.tops:
+      p = os.path.join(self.args.depth, f"o{i:03d}_{j:03d}.json")
+      side = json.load(open(p)) if os.path.exists(p) else None
+      self.tops[(i, j)] = (decode(os.path.join(self.args.depth, side["height"]["png"]), side["height"]), side["world_to_px"]) if side else None
+      while len(self.tops) > 9:
+        self.tops.pop(next(iter(self.tops)))
+    return self.tops[(i, j)]
+
+  def top_frame(self, x: float, y: float) -> np.ndarray | None:
+    """The top-level heights over the frame centred at x, y, each pixel from its own grid cell's height tile: a shot off
+    the grid's centres (a nudge, a gap shot) spans several."""
     if not self.args.depth:
       return None
-    name = f"o{t['i']:03d}_{t['j']:03d}"
-    p = os.path.join(self.args.depth, name + ".json")
-    if not os.path.exists(p):
-      return None
-    side = json.load(open(p))
-    return decode(os.path.join(self.args.depth, side["height"]["png"]), side["height"])
+    M = ortho.world_to_px(x, y)
+    ci = np.round(((np.arange(W_PX) + 0.5 - M[0][2]) / M[0][0] - ortho.GRID_X0) / ortho.STEP_X).astype(int)
+    cj = np.round(((np.arange(H_PX) + 0.5 - M[1][2]) / M[1][1] - ortho.GRID_Y0) / ortho.STEP_Y).astype(int)
+    out, found = np.full((H_PX, W_PX), np.nan, np.float32), False
+    for i in np.unique(ci):
+      for j in np.unique(cj):
+        t = self.top_tile(int(i), int(j))
+        if t is None:
+          continue
+        h, T = t
+        cols, rows = np.nonzero(ci == i)[0], np.nonzero(cj == j)[0]
+        sc, sr = cols - int(round(M[0][2] - T[0][2])), rows - int(round(M[1][2] - T[1][2]))  # the tile's pixels
+        kc, kr = (sc >= 0) & (sc < W_PX), (sr >= 0) & (sr < H_PX)
+        out[np.ix_(rows[kr], cols[kc])] = h[np.ix_(sr[kr], sc[kc])]
+        found = True
+    return out if found else None
 
   def clearance(self, t: dict) -> dict:
     """Shape tests at the crossings and 4 m either side along the lower road: up from 0.5 m over it (the first hit is
@@ -795,7 +816,6 @@ class UnderPass:
       if zmin - 0.2 <= z <= zmax and all(abs(z - c[0]) > 0.3 for c in tries):
         tries.append((z, 0.0, 0.0))
     tries += [(base, 3.0 * ux, 3.0 * uy), (base, -3.0 * ux, -3.0 * uy)]
-    top_h = self.top_tile(t)
     attempts, best, best_files = [], None, None
     for k, (cz, dx, dy) in enumerate(tries):
       got = self.attempt(t, f"{t['name']}_a{k}", cz, dx, dy, 1.0 if k else 1.5)
@@ -803,8 +823,7 @@ class UnderPass:
         attempts.append({"k": k, "camera": round(cz, 2), "nudge_m": [round(dx, 2), round(dy, 2)], "error": "no shot"})
         continue
       M = np.array(ortho.world_to_px(got["x"], got["y"]))
-      shift = (int(round(dx * M[0, 0])), int(round(-dy * M[0, 0])))
-      ch = checks(got["h"], M, got["cam_z"], t["segs"], top_h, shift, cl["ground"])
+      ch = checks(got["h"], M, got["cam_z"], t["segs"], self.top_frame(got["x"], got["y"]), cl["ground"])
       attempts.append({"k": k, "camera": round(got["cam_z"], 2), "nudge_m": [round(dx, 2), round(dy, 2)], **ch})
       if best is None or ch["score"] > best[1]["score"]:
         if best_files:
