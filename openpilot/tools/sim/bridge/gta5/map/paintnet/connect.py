@@ -25,6 +25,14 @@ def frame(A, k):
   return d, np.array([d[1], -d[0]])
 
 
+def abreast(A, p):
+  """A's sample level with p along A: the nearest one, moved on to the one p is least ahead of or behind (where A's
+  centre drifts sideways as it widens, the nearest sample to a point beside it can be metres along)."""
+  k = int(np.linalg.norm(A[:, :2] - p, axis=1).argmin())
+  near = range(max(k - 5, 0), min(k + 6, len(A)))
+  return min(near, key=lambda q: abs((p - A[q, :2]) @ frame(A, q)[0]))
+
+
 def crossed(p, q, z):
   """paint crossing the segment p -> q square-ish (over 60 deg to it) on this deck: a stop line or crossing."""
   d = q - p
@@ -110,7 +118,7 @@ for j, B in enumerate(P):
   for i, A in enumerate(P):
     if i == j or not ok[i] or len(A) < BRANCH_FROM:  # a fragment (in a junction's mouth) has no usual width to widen from
       continue
-    k = int(np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin())
+    k = abreast(A, B[0, :2])
     at_end = k == len(A) - 1
     if k == 0 or abs(A[k, 2] - B[0, 2]) > 1.5:
       continue
