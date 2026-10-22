@@ -179,34 +179,42 @@ def path(A, B):
   return np.hstack([xy, A[-1, 2:] + (B[0, 2:] - A[-1, 2:]) * t])
 
 
-def kerb_fit(C):
-  """a lane's samples across unpainted road fitted to it: each side moved to the road's edge (kerb or gutter) where
-  that is within KERB_REACH m of where the samples put it; a side open to other road (where the road it joins
-  opens out) stays put."""
+def kerb_fit(C, w0, w1):
+  """a lane's samples across unpainted road (from a lane end w0 wide to a lane start w1 wide) fitted to it: each side
+  follows the nearest lane line or the road's edge (kerb, less a gutter) on it while that carries on from the side's
+  last position (a line guiding a turn lane past where an island ends; not the next road's lines where it opens out),
+  and runs smoothly on to the next lane's edge where neither does."""
   d = np.gradient(C[:, :2], axis=0) if len(C) > 1 else np.array([[1.0, 0.0]])
   d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
-  out = C.copy()
   N = np.stack([d[:, 1], -d[:, 0]], 1)
-  kerb, road = np.zeros((len(C), 2)), np.zeros((len(C), 2))
-  for q in range(len(C)):
-    for k, s in enumerate((-1, 1)):
-      kerb[q, k] = scan.extent(C[q, :2], N[q], C[q, 2], s)[0]
-      road[q, k] = scan.extent(C[q, :2], N[q], C[q, 2], s, scan.ROAD)[0]
-  # the lane stops a gutter's width short of the kerb all along a side with a gutter (lanes.py's GUTTER_SHARE: the
-  # raster holds the gutter in pieces)
-  side = np.zeros_like(kerb)
-  for k in range(2):
-    g = kerb[:, k] - road[:, k]
+  side = np.zeros((len(C), 2))
+  for k, s in enumerate((-1, 1)):
+    kerb = np.array([scan.extent(C[q, :2], N[q], C[q, 2], s)[0] for q in range(len(C))])
+    road = np.array([scan.extent(C[q, :2], N[q], C[q, 2], s, scan.ROAD)[0] for q in range(len(C))])
+    # a lane stops a gutter's width short of a kerb with a gutter along at least half of it (lanes.py's GUTTER_SHARE:
+    # the raster holds the gutter in pieces)
+    g = kerb - road
     gw = float(np.median(g[g > 0])) if (g > 0).sum() >= 0.5 * len(g) else 0.0
-    e = kerb[:, k] - gw
-    side[:, k] = np.where(np.abs(e - C[:, 3] / 2) <= KERB_REACH, e, C[:, 3] / 2)
+    v, prev = np.full(len(C), np.nan), w0 / 2
+    for q in range(len(C)):
+      h = C[q, 3] / 2
+      xs = [s * x[0] for x in scan.crossings(C[q, :2], N[q], C[q, 2], -h - KERB_REACH, h + KERB_REACH) if s * x[0] > OPEN_TOL]
+      e = min(xs + [kerb[q] - gw])
+      if abs(e - prev) <= KERB_STEP:
+        v[q] = prev = e
+    t = np.arange(-1, len(C) + 1)
+    known = np.r_[True, ~np.isnan(v), True]
+    side[:, k] = np.interp(t, t[known], np.r_[w0 / 2, v, w1 / 2][known])[1:-1]
+    side[:, k] = np.minimum(side[:, k], kerb - gw)
   side = ndi.median_filter(side, size=(5, 1), mode="nearest")
+  out = C.copy()
   out[:, :2] = C[:, :2] + N * (side[:, 1:] - side[:, :1]) / 2
   out[:, 3] = side.sum(1)
   return out
 
 
-KERB_REACH = 3.0  # m: a side of a turn lane's unpainted stretch moves out or in to the road's edge within this
+KERB_REACH = 3.0  # m: a side of a turn lane's unpainted stretch moves out or in to a line or the road's edge within this
+KERB_STEP = 0.8  # m a side moves at most from one metre's sample to the next and still follows the same line or kerb
 turn_fill = {}  # lane index -> samples carrying it on to the lane it turns into
 has_pred, has_succ = {j for _, j, *_ in links}, {i for i, *_ in links}
 for i, A in enumerate(P):
@@ -243,7 +251,7 @@ for i, A in enumerate(P):
   if best:
     links.append([i, best[0], round(float(best[2]), 2)])
     has_pred.add(best[0])
-    turn_fill[i] = kerb_fit(path(A, P[best[0]])[1:-1])
+    turn_fill[i] = kerb_fit(path(A, P[best[0]])[1:-1], A[-1, 3], P[best[0]][0, 3])
 
 # an exit or added lane: a lane starting beside one that has been running a while and carries on, which doesn't widen
 # for it (a motorway's edge line runs on straight; the exit's taper opens outside it)
