@@ -1,6 +1,7 @@
 """connect.py x0 x1 y0 y1 groups.json out.json [dir.json]: which lane carries on into which, where the paint between them breaks.
 
-A lane's end links to a lane starting just ahead of it (0 < gap <= JOIN m along its travel direction, same deck, within
+A lane's end links to a lane starting just ahead of it (0 < gap <= JOIN m along its travel direction, or up to SEAM m
+before its end where the two are one lane side by side: cut back to it), same deck, within
 HEAD deg) when one of their edges lines up (within EDGE m sideways): the lane carries on with a line starting or ending
 beside it. A lane can have two successors (a turn bay opening beside it: its one edge lines up with each) or two
 predecessors (a merge). A lane opening beside one that carries on links to it as a "branch" (see BRANCH_RUN). No link where paint crosses the gap (a stop line or crossing: lanes end at a junction's box).
@@ -8,7 +9,7 @@ Out: {"links": [[from lane index, to lane index, gap m(, "branch"|"merge")]], "p
 index: {"end"|"start": [x, y, ux, uy]}}}: pts replace a lane's samples where an opening was reshaped (see reshape) or
 an end runs on to its stop line; stops are where a lane meets its stop line or crossing and that line's way, to cut
 its end along."""
-import json, math, sys
+import json, math, sys, collections
 import numpy as np
 from scipy import ndimage as ndi
 import scan
@@ -16,6 +17,9 @@ import scan
 # JOIN: breaks measured at the interchange's openings (where the lane plus the opening is wider than a lane can be, so
 # unsampled) 12.6, 13.9 and 16.2 m; a junction's break is never linked (paint crosses it)
 JOIN, HEAD, EDGE, OVERLAP, WIDE_END = 20.0, 15.0, 0.5, 0.6, 1.2
+# m: the same lane carries on where the next one starts this far before it ends, side by side with it (GTA's paint
+# pieces overlap at a seam: 3.3 m on the ramp's deck); the earlier one is cut back to where the next starts
+SEAM = 5.0
 G = json.load(open(sys.argv[5]))
 lanes = G["lanes"]
 
@@ -63,7 +67,7 @@ for i, A in enumerate(P):
       continue
     eb = B[0, :2]
     gap = (eb - ea) @ da
-    if not 0 < gap <= JOIN:
+    if not -SEAM <= gap <= JOIN or abs(gap) < 1e-9:
       continue
     lb, rb = eb - nb * B[0, 3] / 2, eb + nb * B[0, 3] / 2
     # sideways offsets of the successor's edges from the predecessor's, square to the successor's direction (the
@@ -74,6 +78,8 @@ for i, A in enumerate(P):
     lap = min(0.0, off_l) - max(0.0, off_r) + min(A[-1, 3], B[0, 3])
     # (not a lane ending widened, where a bay opens beside the lane carrying on: 1.36-1.7x its usual width here)
     same = lap >= OVERLAP * min(A[-1, 3], B[0, 3]) and A[-1, 3] <= WIDE_END * np.median(A[:, 3])
+    if gap < 0 and not same:
+      continue
     if not same and min(abs(off_l), abs(off_r)) > EDGE:
       continue
     # the successor must lie within the predecessor's span (not beside it) for the edge that doesn't line up
@@ -84,6 +90,14 @@ for i, A in enumerate(P):
     if crossed(ea, eb, A[-1, 2]):
       continue
     links.append([i, j, round(float(gap), 2)])
+seam_cut = []  # lanes cut back at a seam to where the lane they carry on into starts
+for i, j, gap in links:
+  if gap < 0:
+    A, d = P[i], frame(P[i], len(P[i]) - 1)[0]
+    keep = (A[:, :2] - P[j][0, :2]) @ d < 0
+    if keep.sum() >= 2:
+      P[i] = A[keep]
+      seam_cut.append(i)
 # a lane opening beside another (a turn lane splitting off), whether that one carries on or ends there: its band widens
 # by about the new lane's width over the BRANCH_RUN m before the new lane's own line starts (the interchange's
 # lower-deck left turn: 5.2 -> 8.8 m; the top street's left-turn bay: 5.2 -> 8.9 m), and the new lane starts touching
@@ -91,6 +105,7 @@ for i, A in enumerate(P):
 STOP_AHEAD = 3.0  # m ahead of a lane's end looked at for a stop line or crossing
 BRANCH_RUN, BRANCH_FROM, WIDEN = 15, 10, 0.3  # widened by at least WIDEN of the new lane's width: measured 0.40, 0.69, 0.75 (only part
 # of the widening is sampled where lane plus opening pass the lane step's width limit)
+BOX_CUT = 3.0  # m inside the box's edge a lane starting is cut by it (lanes run on a metre or so past it)
 OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening starts; sample spacing
 # a lane splitting in two where a line starts inside it, widened on one side before that (a turn bay opening across
 # the lane's edge, a gore's nose between the bay and the through lane): the successor on the side that ran on straight
@@ -115,8 +130,8 @@ for i, ls in succ0.items():
     ls[side.index(s)].append("branch")
 has_pred = {j for _, j, *_ in links}
 for j, B in enumerate(P):
-  if j in has_pred or not ok[j]:
-    continue
+  if j in has_pred or not ok[j] or not scan.inbox(B[0, 0], B[0, 1], -BOX_CUT):
+    continue  # (a lane starting at the box's edge is cut there, not opening)
   db, nb = frame(B, 0)
   for i, A in enumerate(P):
     if i == j or not ok[i] or len(A) < BRANCH_FROM:  # a fragment (in a junction's mouth) has no usual width to widen from
@@ -148,7 +163,7 @@ def beside(A, p, d, w, mid_only=True):
   """where on lane A a lane whose end is at p (direction d, width w) touches it running alongside: A's sample index, or
   None. mid_only: A must have been running BRANCH_FROM m already and carry on as far past it (not lanes starting or
   ending together at a junction, a turn bay a couple of metres short of its neighbour at the stop line)."""
-  k = int(np.linalg.norm(A[:, :2] - p, axis=1).argmin())
+  k = abreast(A, p)  # (level with p: the nearest sample can be a lane piece's start a step sideways, metres along)
   if mid_only and not BRANCH_FROM <= k <= len(A) - BRANCH_FROM:
     return None
   da, na = frame(A, k)
@@ -255,7 +270,7 @@ def kerb_fit(C, w0, w1, guide=None):
   return out
 
 
-pts = {}  # lane index -> reshaped samples
+pts = {i: np.round(P[i], 2).tolist() for i in seam_cut}  # lane index -> reshaped samples
 KERB_REACH = 3.0  # m: a side of a turn lane's unpainted stretch moves out or in to a line or the road's edge within this
 KERB_STEP = 0.8  # m a side moves at most from one metre's sample to the next and still follows the same line or kerb
 turn_fill = {}  # lane index -> samples carrying it on to the lane it turns into
@@ -331,18 +346,24 @@ for j, B in enumerate(P):
       if k is not None and abs(A[k, 2] - B[0, 2]) <= 1.5:
         links.append([i, j, 0.0, "branch"])
         break
-# a merge: a lane ending beside one that has been running a while and carries on (an on-ramp's lane tapering out)
+# a merge: a lane ending beside one that has been running a while and carries on (an on-ramp's lane tapering out; the
+# lane beside may carry on into the next, its lines stored in pieces)
 has_succ = {i for i, *_ in links}
+on_to = {}  # a lane's plain successor nearest its end
+for i, j, g, *br in links:
+  if not br and (i not in on_to or np.linalg.norm(P[j][0, :2] - P[i][-1, :2]) < np.linalg.norm(P[on_to[i]][0, :2] - P[i][-1, :2])):
+    on_to[i] = j
 for i, A in enumerate(P):
   if i in has_succ or not ok[i] or len(A) < 3:
     continue
   da, _ = frame(A, len(A) - 1)
   for j, B in enumerate(P):
     if j != i and ok[j] and len(B) >= BRANCH_FROM:
-      k = beside(B, A[-1, :2], da, A[-1, 3])
+      Bx = np.vstack([B, P[on_to[j]]]) if j in on_to else B
+      k = beside(Bx, A[-1, :2], da, A[-1, 3])
       # (not a lane stopping at a stop line or crossing, the lane beside running on a little further)
-      if k is not None and abs(B[k, 2] - A[-1, 2]) <= 1.5 and not crossed(A[-1, :2], A[-1, :2] + da * STOP_AHEAD, A[-1, 2]):
-        links.append([i, j, 0.0, "merge"])
+      if k is not None and abs(Bx[k, 2] - A[-1, 2]) <= 1.5 and not crossed(A[-1, :2], A[-1, :2] + da * STOP_AHEAD, A[-1, 2]):
+        links.append([i, j if k < len(B) else on_to[j], 0.0, "merge"])
         break
 
 

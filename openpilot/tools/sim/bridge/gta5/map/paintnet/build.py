@@ -28,8 +28,9 @@ STEPS = [
   ("rstats", "regionstats.py", [o("ic_regions.npz"), o("ic_rstats.json")], [o("ic_regions.npz")], [o("ic_rstats.json")], []),
   ("check", "check.py", [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json"), f"{WEB}/check.geojson"],
    [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json")], [f"{WEB}/check.geojson"], [str(HERE / "axes.py")]),
-  ("osm", "osm.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"],
-   [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json")], [f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"], []),
+  ("osm", "osm.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json"), f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"],
+   [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json")],[f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"], []),
+  ("osmview", "osm_view.py", [f"{WEB}/osm_ic.osm", f"{WEB}/osm_view.geojson"], [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_view.geojson"], []),
 ]
 STATE, LOGS = pathlib.Path(o(".build_state.json")), pathlib.Path(o("logs"))
 

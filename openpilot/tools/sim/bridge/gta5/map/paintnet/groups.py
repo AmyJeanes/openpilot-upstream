@@ -56,6 +56,15 @@ for lid, uses in by_line.items():
       if not t:
         continue
       (same if colour.get(lid) == "white" else centre).append((i, j, t, lid, uses[a][1], uses[b][1]))
+# a lane opening beside another across an unpainted divide (lanes.py's widening split) runs the same way as the lanes it
+# touches
+for i, r in enumerate(lanes):
+  for side in ("left", "right"):
+    if r[side] == "u":
+      for j in range(len(lanes)):
+        t = touching(i, j) if j != i else 0
+        if t:
+          same.append((i, j, t, "u", side, None))
 
 # direction groups: union over white lines, keeping each lane's flip relative to its group's reference
 parent, flip = list(range(len(lanes))), [1] * len(lanes)

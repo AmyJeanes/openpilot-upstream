@@ -1,4 +1,5 @@
-"""osm.py x0 x1 y0 y1 groups.json links.json dir.json out.osm out.geojson: the pilot's lanes as OpenStreetMap ways.
+"""osm.py x0 x1 y0 y1 groups.json links.json dir.json junctions.json out.osm out.geojson: the pilot's lanes as
+OpenStreetMap ways, tagged as LA's own map tags its roads (survey of downtown LA's OSM, Oct 2026).
 
 A way is a carriageway: the lanes side by side with no kerb between them, one direction or both where only paint
 separates them (a centre line, a painted median, a two-way left-turn lane), drawn down the middle of its outer lane
@@ -6,25 +7,30 @@ edges. Lanes first become tracks (a lane and the lanes it carries on into, by co
 them filled in). At every track sample its neighbours either side are found (bands touching within ADJ m, same deck,
 parallel); a gore between two lanes parts them, as a kerb does, except a gore whose wide end meets a junction (a
 painted island in a junction approach, which only stops lane changes). The cross-section at a sample is the chain
-of neighbours; a section is a stretch where it holds the same lanes, and a way is a section cut where its layer or
-its lanes' change rules change. Sections that carry on from one another share a node at the end of the one with
+of neighbours; a section is a stretch where it holds the same lanes, and a way is a section cut where its layer, its
+lanes' change rules change or a lane's width moves WIDTH_STEP, each piece with its own lanes' widths. Sections that carry on from one another share a node at the end of the one with
 most lanes (a fork's or merge's trunk, so at the gore's tip); the others ease into it, a gore's branches over the
-gore's length, other ways at TAPER m per m sideways.
-Junctions are the crossings and no-traffic strips (stop line to crossing) lying together on a deck; lanes inside
-their hull are guide lines through it (dropped), and way ends near it run on to one junction node where the arms'
-centre lines best cross. Crossings become footway=crossing ways, noded where they cross a road.
-Tags: lanes (+:forward/:backward/:both_ways), turn:lanes from listed arrows only (a lane whose arrow is unknown leaves
-the tag off and is flagged), change:lanes from the paint between lanes, width:lanes, width (kerb to kerb, gutter in),
-shoulder (+:width), divider=solid_line for a painted median (and a raised island in one: the way isn't split there), bridge/layer where the way's centre has another surface
-DECK m below. GTA path nodes only hint: highway class, maxspeed, traffic signals. Every node has ele (z).
+gore's length, other ways at TAPER m per m sideways. A one-lane branch of a fork or merge beside a branch of two lanes
+or more (a ramp, a free turn lane round a junction) is a <class>_link of the road it leaves or joins, unnamed.
+Junctions are junctions.py's boxes: lanes inside are guide lines (dropped); the ways at their mouths run on to one
+node where the arms' lines (through their mouth lanes' ends) best cross. Crossings become footway=crossing ways,
+noded where they cross a road. Signals (GTA's traffic light nodes in the box) go on each arm at its stop line with
+traffic_signals:direction (stop_paint.py's tags, as on the live map); the crossings there are crossing=traffic_signals.
+Restriction relations at the junction's node: no_u_turn back into a two-way arm, and no_left_turn / no_right_turn /
+no_straight_on for a move between arms no lane makes (junctions.py's paths).
+Tags: lanes (+:forward/:backward/:both_ways); turn:lanes from junctions.py's turns at the mouths ("none": no arrow),
+merge_to_left/right on a lane merging into another, elsewhere listed arrows (a lane whose arrow is unknown leaves the
+tag off and is flagged); change:lanes from the paint between lanes, width:lanes, width (kerb to kerb, gutter in),
+shoulder (+:width), divider=solid_line for a painted median (and a raised island in one: the way isn't split there),
+bridge/layer where the way's centre has another surface DECK m below. GTA path nodes only hint: highway class,
+maxspeed and street name, each kept the same along a road's lanes. Every node has ele (z).
 Anything undecided goes in each way's fixme tag and the geojson's "issues"."""
-import json, math, sys, collections
+import json, math, os, sys, collections
 from xml.sax.saxutils import quoteattr
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
 from shapely.geometry import Polygon, Point, LineString
-from shapely.ops import unary_union
 from shapely.prepared import prep
 import scan
 import arrows
@@ -33,22 +39,26 @@ sys.path.insert(0, "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/w
 import gframe
 
 x0, x1, y0, y1 = scan.x0, scan.x1, scan.y0, scan.y1
-grpj, linkj, dirj, out_osm, out_geo = sys.argv[5:10]
+grpj, linkj, dirj, junj, out_osm, out_geo = sys.argv[5:11]
 
 ADJ = 0.5  # m between two lanes' bands that still share a line: measured 0 +- 0.3 at shared lines (connect.py's EDGE)
 PARALLEL, DZ = 30.0, 1.5  # deg, m: a neighbour runs alongside on this deck (direction.py's FLOW_ANG, connect.py's deck)
 MINLEN, GAP = 6.0, 3.0  # m: lanes.py's shortest line, and its longest break inside one lane
 NARROW = 3.5  # m: no lane is narrower (measured 4.1 m up), no shoulder wider than 3.2 (direction.py: none in 3.5-4.5)
 SHOULDER = 4.0  # m: direction.py's widest shoulder; a kerb further out than this is not this carriageway's
-JCLUST = 10.0  # m between a junction's crossings and stop-line strips (2.0-5.3 m in the interchange's; next 140 m off)
 ATTACH = 8.0  # m from a way's end to its junction's strips (0-1.8 m on the interchange; the nearest other ends 24 m)
 # m along per m sideways a way's centre moves into a shared node: lanes open and close at 0.20-0.46 m of width per m
 # on the interchange (motorway 0.2, city bays 0.3-0.46; median 0.34), moving the carriageway's centre half that
 TAPER = 6.0
+# a two-way road parting into two one-way roads round a kerbed island: each eases in at this m along per m sideways
+# (its own lanes part at the island's nose, not over a lane's opening)
+DUAL_TAPER = 2.0
 ARM = 10.0  # m: a junction arm's heading is its last ARM m (connect.py's frame looks 10 m along)
 DECK, DECK_CLOSE = 2.5, 15  # m: a surface this far below is a road under a deck (export.py's covered), gaps closed
 ARROW_ALIGN, ARROW_DZ, ARROW_SPILL = 30.0, 2.5, 0.5  # deg, m, m outside a lane: an arrow is in it (ynd_to_osm.py's)
 EDGE_BOX = 6.0  # m: ends this near the box's edge are cut by it (lanes.py samples lines 5 m past it)
+TAPER_POINT = 1.5  # m: a lane narrower than this in a way is a taper's point there, not yet (or no longer) a lane
+WIDTH_STEP = 1.0  # m: a way is cut where a lane's width has moved this far from where the way began (a taper, a lane widening)
 SMOOTH = 5  # samples: a way's centre averaged over this (one sample jumps where a lane's band widens at a junction)
 SIMPLIFY = 0.1  # m: way nodes dropped while the line stays this near them (under the 0.3 m spread of shared edges)
 # mph by class and GTA speed class (slow, normal, fast, faster): ynd_to_osm.py's LIMITS, a hint only
@@ -135,30 +145,15 @@ for k, r in enumerate(json.load(open(dirj))):
     strips[r["kind"]].append((k, np.array(r["pts"], float)))
 at_edge = lambda p: min(p[0] - x0, x1 - p[0], p[1] - y0, y1 - p[1]) < EDGE_BOX
 
-# --- junctions: crossings and stop-line strips lying together on a deck
-js = [(kind, k, A) for kind in ("crossing", "not_traffic") for k, A in strips[kind]]
-par = list(range(len(js)))
-
-
-def root(i):
-  while par[i] != i:
-    i = par[i]
-  return i
-
-
-for a in range(len(js)):
-  for b in range(a + 1, len(js)):
-    A, B = js[a][2], js[b][2]
-    if abs(np.median(A[:, 2]) - np.median(B[:, 2])) > 2:
-      continue
-    if np.linalg.norm(A[:, None, :2] - B[None, :, :2], axis=2).min() <= JCLUST:
-      par[root(b)] = root(a)
+# --- junctions: junctions.py's boxes, the lanes ending and starting at their mouths, and the lanes inside them
+dir_at = {k: (kind, A) for kind, L_ in strips.items() for k, A in L_}
 junctions = []
-for r in sorted({root(i) for i in range(len(js))}):
-  mem = [js[i] for i in range(len(js)) if root(i) == r]
-  hull = unary_union([band(A) for _, _, A in mem]).convex_hull
-  junctions.append({"hull": hull, "z": float(np.median(np.vstack([A for _, _, A in mem])[:, 2])), "strips": [(kd, k) for kd, k, _ in mem],
-                    "crossings": [A for kd, _, A in mem if kd == "crossing"], "ends": [], "issues": []})
+for r in json.load(open(junj)):
+  junctions.append({"hull": Polygon(r["ring"]).buffer(0), "z": r["z"], "strips": [(dir_at[k][0], k) for k in r["strips"]],
+                    "crossings": [dir_at[k][1] for k in r["strips"] if dir_at[k][0] == "crossing"], "mouths": r["mouths"],
+                    "inside": set(r["inside"]), "paths": r.get("paths", []), "ends": [], "issues": []})
+end_turns = {i: tu for J in junctions for i, which, tu in J["mouths"] if which == "end"}
+merge_into = {i: j for i, j, g, *br in LK["links"] if br == ["merge"]}
 
 # --- lanes kept: known direction, MINLEN long, not painted through a junction
 keep = []
@@ -168,11 +163,8 @@ for i, A in enumerate(LA):
     continue
   if len(A) < MINLEN:
     continue  # stubs between a stop line and a crossing
-  inside = [J for J in junctions if abs(J["z"] - np.median(A[:, 2])) < 2 and
-            np.mean([J["hull"].contains(Point(p)) for p in A[:, :2]]) >= 0.5]
-  if inside:
-    inside[0]["issues"].append(f"lane {i} painted through the junction: not a way")
-    continue
+  if any(i in J["inside"] for J in junctions):
+    continue  # a guide line through a junction
   keep.append(i)
 
 # --- tracks: lanes chained by their links (a break filled in), and by an end meeting a start within GAP m in line
@@ -370,18 +362,44 @@ for members in sec_runs.values():
   mid = (a + b) // 2
   mem, joints = XS[t][mid]
   flip = sum(e[4] < 0 for e in mem) > sum(e[4] > 0 for e in mem)
-  C = []
+  # the way's line (tagged placement where it isn't the middle of all its lanes, as LA maps it): a two-way road's
+  # centre line between its directions; a one-way road's middle of its full lanes, a lane opening or merging beside
+  # them (narrower than any lane somewhere along here: a taper, a slip lane's merge, a motorway's acceleration lane)
+  # counted in its lanes but not moving its line
+  signs = [e[4] for e in mem]
+  span_ = collections.defaultdict(list)
+  for i in members:
+    span_[runs[i][0]] += [runs[i][1], runs[i][2]]
+  side = {t2 for t2, v in span_.items() if tracks[t2]["X"][min(v):max(v), 3].min() < NARROW}
+  two_way = len(set(signs)) == 2 and sum(signs[q] != signs[q + 1] for q in range(len(signs) - 1)) == 1 and "twltl" not in joints
+  C, mids, W = [], [], {}
   for k in range(a, b):
     m = XS[t][k][0]
+    W[k] = {e[0]: e[3] for e in m}  # each lane's width here
     lo = min(e[2] - e[3] / 2 for e in m)
     hi = max(e[2] + e[3] / 2 for e in m)
-    C.append([*(T["X"][k, :2] + T["n"][k] * (lo + hi) / 2), T["X"][k, 2], hi - lo, k])
-  C = np.array(C)
+    mid = None  # (a sample or two without both directions, or without a full lane: a short run merged in)
+    if two_way:
+      q = next((q for q in range(len(m) - 1) if m[q][4] != m[q + 1][4]), None)
+      if q is not None:
+        mid = (m[q][2] + m[q][3] / 2 + m[q + 1][2] - m[q + 1][3] / 2) / 2
+    else:
+      core = [e for e in m if e[0] not in side]
+      if core:
+        mid = (min(e[2] - e[3] / 2 for e in core) + max(e[2] + e[3] / 2 for e in core)) / 2
+    mids.append(mid)
+    C.append([T["X"][k, 2], hi - lo, k])
+  # those samples keep the way where it is beside them
+  known = [q for q, v in enumerate(mids) if v is not None]
+  for q in range(len(mids)):
+    if mids[q] is None:
+      mids[q] = mids[min(known, key=lambda r: abs(r - q))] if known else 0.0
+  C = np.array([[*(T["X"][k, :2] + T["n"][k] * md), z, w, k] for (z, w, k), md in zip(C, mids)])
   C[:, :2] = ndi.uniform_filter1d(C[:, :2], SMOOTH, axis=0, mode="nearest")
   if flip:
     C = C[::-1]
   sections.append({"ref": (t, a, b), "flip": flip, "runs": members, "tracks": {runs[i][0] for i in members}, "C": C,
-                   "mem": mem, "joints": joints, "issues": []})
+                   "mem": mem, "joints": joints, "issues": [], "two_way": two_way, "side": side, "W": W})
 sec_of_run = {i: s for s, S in enumerate(sections) for i in S["runs"]}
 
 # --- section ends that meet: a track carrying on from one section into the next, or a link between tracks
@@ -420,6 +438,17 @@ for i, j in other_links + branch_links:
   if ti not in XS or tj not in XS:
     continue
   X = tracks[ti]["X"]
+  if merge_into.get(i) == j:
+    # a lane merging into another meets it where it ends; nothing to join where the two run in one section (an
+    # acceleration lane, a slip lane's merge: tagged merge_to_*)
+    if any(ti in S["tracks"] and tj in S["tracks"] for S in sections):
+      continue
+    p = X[b_, :2]
+    kj = int(np.linalg.norm(tracks[tj]["X"][:, :2] - p, axis=1).argmin())
+    si, sj = sec_of_run[run_of[ti, b_]], sec_of_run[run_of[tj, kj]]
+    if si != sj:
+      meet(end_near(si, p), end_near(sj, p))
+    continue
   ki = int(np.linalg.norm(X[:, :2] - tracks[tj]["X"][aj, :2], axis=1).argmin()) if (i, j) in branch_links else b_
   si, sj = sec_of_run[run_of[ti, ki]], sec_of_run[run_of[tj, aj]]
   if si != sj:
@@ -458,11 +487,17 @@ for a in arrow_list:
   hit = in_lane(a["x"], a["y"], a["z"], a["heading"])
   if hit:
     arrows_at[hit[0]].append((hit[1], a["arrow"]))
+# an arrow found only by its shape takes the type its paint matches, as junctions.py's (else it's of unknown type)
+TMPL = arrows.templates(scan.T, scan.src.features(), os.path.expanduser("~/.cache/paintnet/arrow_templates.npz"))
 unknown_at = collections.defaultdict(list)
 for x, y, z, _ in shapes:
   hit = in_lane(x, y, z)
   if hit:
-    unknown_at[hit[0]].append(hit[1])
+    kind = arrows.kind(scan.T, x, y, z, tracks[hit[0]]["d"][hit[1]], TMPL)
+    if kind:
+      arrows_at[hit[0]].append((hit[1], kind))
+    else:
+      unknown_at[hit[0]].append(hit[1])
 
 
 def line_styles(c, n, z, e):
@@ -533,7 +568,7 @@ def new_node(x, y, z, tags=None):
   return nid[0]
 
 
-port_node, port_reach = {}, {}
+port_node, port_reach, port_rate = {}, {}, {}
 for cl, ports in clusters.items():
   if len(ports) < 2:
     continue
@@ -545,13 +580,15 @@ for cl, ports in clusters.items():
   # where it ends (the gore's length); elsewhere they ease in at TAPER
   tips = [len(A) for _, A in strips["gore"] if abs(A[0, 2] - P[2]) < 2 and
           min(np.linalg.norm(A[0, :2] - P[:2]), np.linalg.norm(A[-1, :2] - P[:2])) <= max(sections[s]["C"][:, 3].max() for s, _ in ports) / 2]
+  dual = all(sections[s]["two_way"] for s, _ in top)
   for p in ports:
     port_node[p] = nd
     port_reach[p] = float(max(tips)) if tips and p not in top else None
+    port_rate[p] = DUAL_TAPER if dual and p not in top and len({d for _, d in sections[p[0]]["order"]}) == 1 else TAPER
 
 
-def blend(C, e, q, share, reach=None):
-  """move a way's end e (0 start, 1 end) onto q, easing in over `reach` m, or TAPER m per m it moves sideways within
+def blend(C, e, q, share, reach=None, rate=TAPER):
+  """move a way's end e (0 start, 1 end) onto q, easing in over `reach` m, or `rate` m per m it moves sideways within
   `share` of the way's length."""
   C = C.copy()
   i = -1 if e else 0
@@ -562,7 +599,7 @@ def blend(C, e, q, share, reach=None):
     return C
   s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(C[:, :2], axis=0), axis=1))]
   s = s if not e else s[-1] - s
-  L = min(reach, s.max()) if reach else min(TAPER * dist, s.max() * share if s.max() > 0 else 1)
+  L = min(reach, s.max()) if reach else min(rate * dist, s.max() * share if s.max() > 0 else 1)
   w = np.clip(1 - s / max(L, 1e-6), 0, 1)
   C[:, :2] += w[:, None] * delta
   return C
@@ -573,18 +610,60 @@ for s, S in enumerate(sections):
   for e in (0, 1):
     if (s, e) in port_node:
       q = np.array(nodes[port_node[(s, e)]][:3])
-      S["C"] = blend(S["C"], e, q, 0.5 if moves[1 - e] > ADJ else 1.0, port_reach[(s, e)])  # the whole way when its other end stays
+      S["C"] = blend(S["C"], e, q, 0.5 if moves[1 - e] > ADJ else 1.0, port_reach[(s, e)], port_rate[(s, e)])  # the whole way when its other end stays
 
-# --- junctions: dead ends near a junction's strips run on to one node where the arms' lines best cross
+# --- junctions: the ways at a junction's mouths run on to one node where the arms' lines best cross
 gta_nodes = [n for n in scan.nodes.values() if scan.inbox(n["x"], n["y"], 20)]
-dead = [(s, e) for s in range(len(sections)) for e in (0, 1) if (s, e) not in port_node]
-ext = {}  # (s, e) -> junction node
-for s, e in dead:
+def way_end(s, e):
+  """a section's end point and the way it heads out there (over its last ARM m)."""
   C = sections[s]["C"]
   p = C[-1 if e else 0]
   s_ = np.r_[0, np.cumsum(np.linalg.norm(np.diff(C[:, :2], axis=0), axis=1))]
   back = C[np.searchsorted(s_, s_[-1] - ARM)] if e else C[min(np.searchsorted(s_, ARM), len(C) - 1)]
-  out_dir = unit(p[:2] - back[:2])
+  return p, unit(p[:2] - back[:2])
+
+
+# the section ends at a junction's mouths, then any other dead end ATTACH m short of a box it heads into. Each mouth
+# lane's track offers the end nearest the mouth of the sections holding it; the end holding most of the mouths' lanes
+# goes first, and an end whose mouth lanes are all reached already isn't an arm (a stretch where only an arm's leaving
+# lanes have started, short of its arriving lanes' stop line, is dropped: the arm's way runs on to the junction, both
+# ways). A mouth's end may also be where another section meets it (a free turn lane leaving or joining at the mouth):
+# the arm still runs on to the junction, the other way meeting it at its end
+dead = [(s, e) for s in range(len(sections)) for e in (0, 1) if (s, e) not in port_node]
+ext = {}  # (s, e) -> junction node
+attached, met = set(), set()
+for J in junctions:
+  mouth_t = {lane_track[i][0]: (i, which) for i, which, _ in J["mouths"] if i in lane_track and lane_track[i][0] in XS}
+  cand = set()
+  for t, (i, which) in mouth_t.items():
+    _, a_, b_ = lane_track[i]
+    q = tracks[t]["X"][b_ if which == "end" else a_, :2]
+    cand.add(min(((s, e) for s, S in enumerate(sections) if t in S["tracks"] for e in (0, 1)),
+                 key=lambda se: np.linalg.norm(sections[se[0]]["C"][-1 if se[1] else 0, :2] - q)))
+  cov = {se: {t for t in mouth_t if t in sections[se[0]]["tracks"]} for se in cand}
+  gap = {se: J["hull"].distance(Point(sections[se[0]]["C"][-1 if se[1] else 0, :2])) for se in cand}
+  reached = set()
+  for s, e in sorted(cand, key=lambda se: (-len(cov[se]), round(gap[se], 1), -len(sections[se[0]]["order"]))):
+    if (s, e) in attached or pfind((s, e)) in met or gap[s, e] > ATTACH:
+      continue
+    if cov[s, e] <= reached:
+      if sections[s]["tracks"] <= set(mouth_t):
+        sections[s]["drop"] = True
+      continue
+    if (s, e) in port_node:
+      met.add(pfind((s, e)))
+    attached.add((s, e))
+    reached |= cov[s, e]
+    J["ends"].append((s, e, *way_end(s, e)))
+    J.setdefault("arm_lanes", {})[s, e] = [mouth_t[t] for t in cov[s, e]]
+    # the arm's line for the junction's node: through its mouth lanes' ends, the way they run there (the way's own end
+    # leans where a lane opens or merges beside it)
+    M = [(LA[i][-1 if which == "end" else 0], frame(LA[i])[0][-1 if which == "end" else 0]) for t, (i, which) in mouth_t.items() if t in cov[s, e]]
+    J.setdefault("arms", []).append((np.mean([m[0][:2] for m in M], 0), unit(np.sum([m[1] * np.sign(m[1] @ M[0][1]) for m in M], 0))))
+for s, e in dead:
+  if (s, e) in attached or sections[s].get("drop"):
+    continue
+  p, out_dir = way_end(s, e)
   best = None
   for j, J in enumerate(junctions):
     if abs(J["z"] - p[2]) > 2:
@@ -606,7 +685,7 @@ for J in junctions:
         sections[s]["issues"].append(f"ends at a junction with only this arm in the box: not connected")
     continue
   M, bb = np.zeros((2, 2)), np.zeros(2)
-  for s, e, p, u in J["ends"]:
+  for p, u in J.get("arms") or [(p, u) for s, e, p, u in J["ends"]]:
     Q = np.eye(2) - np.outer(u, u)
     M += Q
     bb += Q @ p[:2]
@@ -617,8 +696,8 @@ for J in junctions:
     J["issues"].append("arms' lines don't cross inside it: node at the strips' centre")
   sig = [n for n in gta_nodes if (n["f"][1] >> 3) == TRAFFIC_LIGHT and J["hull"].buffer(5).contains(Point(n["x"], n["y"]))]
   gn = min(gta_nodes, key=lambda n: math.hypot(n["x"] - xy[0], n["y"] - xy[1]) if abs(n["z"] - J["z"]) < 3 else 1e9)
-  tags = {"highway": "traffic_signals"} if sig else {}
-  J["node"] = new_node(*xy, np.mean([p[2] for _, _, p, _ in J["ends"]]), tags)
+  J["signals"] = bool(sig)  # tagged on each arm at its stop line, below
+  J["node"] = new_node(*xy, np.mean([p[2] for _, _, p, _ in J["ends"]]))
   J["gta_offset"] = round(math.hypot(gn["x"] - xy[0], gn["y"] - xy[1]), 1)
   for s, e, p, u in J["ends"]:
     ext[(s, e)] = J["node"]
@@ -630,7 +709,8 @@ for (ka, kb), l in scan.links.items():
 
 
 def gta_hint(C):
-  fw, lanes_, sp = [], [], []
+  """(class, speed class, street name) from the GTA links along a way, or None."""
+  fw, lanes_, sp, st = [], [], [], []
   for p in C[::4]:
     best = None
     for ka, kb, A, B in scan.L:
@@ -651,35 +731,83 @@ def gta_hint(C):
       fw.append(bool(na["f"][2] & nb["f"][2] & FREEWAY))
       lanes_.append(max((l["f"][2] >> 5) & 7, (l["f"][2] >> 2) & 7))
       sp.append(max(na.get("sp", 1), nb.get("sp", 1)))
+      st += [scan.streets[n["st"]] for n in (na, nb) if n.get("st") in scan.streets]
   if not fw:
     return None
   cls = "motorway" if np.mean(fw) >= 0.5 else "primary" if max(lanes_) >= 2 else "residential"
-  return cls, collections.Counter(sp).most_common(1)[0][0]
+  return cls, collections.Counter(sp).most_common(1)[0][0], collections.Counter(st).most_common(1)[0][0] if st else None
 
 
-for s, S in enumerate(sections):
-  S["hint"] = gta_hint(S["C"])
-# a one-lane branch of a motorway fork or merge, beside a branch of two lanes or more, is a link; so on through 1:1 joins
-link_secs = set()  # (GTA doesn't mark ramps: ynd_to_osm.py's ramps())
-for ports in clusters.values():
-  if len(ports) >= 3:
+hints = [gta_hint(S["C"]) for S in sections]
+# a one-lane branch of a fork or merge, beside a branch of two lanes or more, is a link (a motorway's ramp, a free turn
+# lane round a junction); so on through 1:1 joins. Its class is the road's it leaves or joins (the most important).
+# (GTA doesn't mark them: ynd_to_osm.py's ramps())
+LINKS = ("motorway", "trunk", "primary", "secondary", "tertiary")  # classes with a _link, most important first
+link_of = {}  # section -> the class it's a link of
+for cl, ports in clusters.items():
+  if len(ports) >= 3 or cl in met:  # (at a mouth the junction is the other branch)
     nl = {s: len(sections[s]["order"]) for s, _ in ports}
     trunk = max(nl, key=nl.get)
-    if sections[trunk]["hint"] and sections[trunk]["hint"][0] == "motorway" and min(nl.values()) == 1 and max(nl.values()) >= 2:
-      link_secs |= {s for s, n_ in nl.items() if n_ == 1}
+    if hints[trunk] and hints[trunk][0] in LINKS and min(nl.values()) == 1 and max(nl.values()) >= 2:
+      for s in (s for s, n_ in nl.items() if n_ == 1):
+        link_of[s] = min(link_of.get(s, hints[trunk][0]), hints[trunk][0], key=LINKS.index)
 grow = True
 while grow:
   grow = False
-  for ports in clusters.values():
-    if len(ports) == 2 and len({s for s, _ in ports} & link_secs) == 1:
-      link_secs |= {s for s, _ in ports}
+  for cl, ports in clusters.items():
+    ss = {s for s, _ in ports}
+    if len(ports) == 2 and cl not in met and len(ss & set(link_of)) == 1:
+      cls = link_of[next(iter(ss & set(link_of)))]
+      link_of.update({s: cls for s in ss})
       grow = True
+# a road keeps its class, speed and name along its lanes: each track takes the value most of its length has, a section
+# the value most of its tracks' length has (GTA's links beside a bay or across a junction's mouth read another road's).
+# A track's stretch on a link votes apart from its stretch on the road (a ramp's lane carries on from the motorway's).
+span = {s: {(t, s in link_of): r[1] - r[0] for t, r in S["rng"].items()} for s, S in enumerate(sections)}
+track_len = collections.Counter()
+for sp_ in span.values():
+  track_len.update(sp_)
+for q in range(3):
+  vote = collections.defaultdict(collections.Counter)
+  for s, h in enumerate(hints):
+    if h and h[q] is not None:
+      for t, L_ in span[s].items():
+        vote[t][h[q]] += L_
+  for s, S in enumerate(sections):
+    tally = collections.Counter()
+    for t in span[s]:
+      if vote[t]:
+        tally[vote[t].most_common(1)[0][0]] += track_len[t]
+    S.setdefault("hint", [None] * 3)[q] = tally.most_common(1)[0][0] if tally else None
+for S in sections:
+  S["hint"] = tuple(S["hint"]) if S["hint"][0] else None
+# a named road keeps one class: the most important along it (GTA lays an arterial as a link per lane in places, which
+# read as a one-lane road), with the speed most of its length at that class has
+RANK = ["motorway", "trunk", "primary", "secondary", "tertiary", "residential"]
+by_name = collections.defaultdict(list)
+for s, S in enumerate(sections):
+  if S["hint"] and S["hint"][2] and s not in link_of:
+    by_name[S["hint"][2]].append(s)
+for name, ss in by_name.items():
+  cls = min((sections[s]["hint"][0] for s in ss), key=lambda c: RANK.index(c) if c in RANK else len(RANK))
+  sp = collections.Counter()
+  for s in ss:
+    if sections[s]["hint"][0] == cls:
+      sp[sections[s]["hint"][1]] += len(sections[s]["C"])
+  for s in ss:
+    sections[s]["hint"] = (cls, sp.most_common(1)[0][0], name)
 
 
 def turn_value(S, t, sign):
-  """the listed arrow in track t's stretch of this section (the last along travel if several), "?" if an arrow of
-  unknown type is painted there, None if none."""
+  """a track's turns in this section: where it ends here at a junction's mouth, junctions.py's ("none": no arrow);
+  where it ends merging into another lane, "merge" (its side is worked out by the caller); else the listed arrow in
+  its stretch (the last along travel if several), "?" if an arrow of unknown type is painted there, None if none."""
   a, b = S["rng"][t]
+  last = tracks[t]["lanes"][-1]
+  if b == len(tracks[t]["X"]) and last in end_turns:
+    return end_turns[last] or "none", None
+  if b == len(tracks[t]["X"]) and last in merge_into:
+    return "merge", None
   hits = sorted((k, v) for k, v in arrows_at.get(t, []) if a <= k < b)
   if hits:
     vals = {v for _, v in hits}
@@ -689,23 +817,40 @@ def turn_value(S, t, sign):
   return None, None
 
 
-def tags_for(S, s, change):
+TURN_ORDER = ["reverse", "sharp_left", "left", "slight_left", "through", "slight_right", "right", "sharp_right", "merge_to_left",
+              "merge_to_right", "none"]  # within a lane, left to right (as mapped in LA)
+
+
+def tags_for(S, s, change, widths):
   tg, iss = {}, []
   hint = S["hint"]
   if hint:
-    cls, sp = hint
-    tg["highway"] = "motorway_link" if s in link_secs else cls
-    tg["maxspeed"] = f"{LIMITS['motorway' if s in link_secs else cls][sp]} mph"
+    cls, sp, name = hint
+    link = s in link_of
+    tg["highway"] = link_of[s] + "_link" if link else cls
+    tg["maxspeed"] = f"{LIMITS[link_of[s] if link and link_of[s] in LIMITS else cls][sp]} mph"
+    if name and not link:  # a link turns off the road (ynd_to_osm.py's naming)
+      tg["name"] = name
   else:
     tg["highway"] = "road"
     iss.append("no GTA link alongside: class unknown")
-  fwd = [t for t, d in S["order"] if d > 0]
-  bwd = [t for t, d in S["order"] if d < 0][::-1]  # left to right as their drivers see them
+  # a lane only a taper's point here (narrower than TAPER_POINT) isn't counted yet, or any more
+  gone = {t for t, w in widths.items() if w < TAPER_POINT and any(w2 >= TAPER_POINT for w2 in widths.values())}
+  order = [(t, d) for t, d in S["order"] if t not in gone]
+  fwd = [t for t, d in order if d > 0]
+  bwd = [t for t, d in order if d < 0][::-1]  # left to right as their drivers see them
   twltl = "twltl" in S["joints_way"]
   oneway = not bwd
   if oneway:
     tg["oneway"] = "yes"
   tg["lanes"] = str(len(fwd) + len(bwd) + int(twltl))
+  # where the way's line is among its lanes (the sections' line above)
+  core = [q for q, t in enumerate(fwd) if t not in S["side"]]
+  if not oneway and S["two_way"]:
+    tg["placement:forward"] = "left_of:1"
+  elif oneway and core and len(core) < len(fwd) and core == list(range(core[0], core[-1] + 1)):
+    m_ = core[len(core) // 2] + 1
+    tg["placement"] = f"middle_of:{m_}" if len(core) % 2 else f"left_of:{m_}"
   if not oneway:
     tg["lanes:forward"], tg["lanes:backward"] = str(len(fwd)), str(len(bwd))
     if twltl:
@@ -718,18 +863,23 @@ def tags_for(S, s, change):
     vals = [turn_value(S, t, 1) for t in grp]
     iss += [v[1] for v in vals if v[1]]
     tv = [v[0] for v in vals]
-    if all(v and v != "?" for v in tv):
-      tg["turn:lanes" + key] = "|".join(tv)
-    elif any(tv):
+    for q, v in enumerate(tv):
+      if v == "merge":
+        into = lane_track.get(merge_into[tracks[grp[q]]["lanes"][-1]], (None,))[0]
+        tv[q] = "none" if into not in grp else "merge_to_left" if grp.index(into) < q else "merge_to_right"
+    tv = [";".join(sorted(v.split(";"), key=lambda x: TURN_ORDER.index(x) if x in TURN_ORDER else 99)) if v else v for v in tv]
+    if all(v != "?" for v in tv) and any(v not in (None, "none") for v in tv):
+      tg["turn:lanes" + key] = "|".join(v or "none" for v in tv)
+    elif "?" in tv:
       iss.append(f"turn:lanes{key} partly known: " + "|".join(v if v and v != "?" else "?" for v in tv) +
                  (" (arrow painted, type unlisted)" if "?" in tv else ""))
-    tg["width:lanes" + key] = "|".join(f"{S['width_lanes'][t]:.1f}" for t in grp)
+    tg["width:lanes" + key] = "|".join(f"{widths.get(t, S['width_lanes'][t]):.1f}" for t in grp)
     for t in grp:
       if np.median(tracks[t]["X"][:, 3]) < NARROW:
         iss.append(f"lane {'+'.join(map(str, tracks[t]['lanes']))} {np.median(tracks[t]['X'][:, 3]):.1f} m wide: narrower than any lane")
   if change:
-    cf = [change[i] for i, (t, d) in enumerate(S["order"]) if d > 0]
-    cb = [change[i] for i, (t, d) in enumerate(S["order"]) if d < 0][::-1]
+    cf = [change[i] for i, (t, d) in enumerate(S["order"]) if d > 0 and t not in gone]
+    cb = [change[i] for i, (t, d) in enumerate(S["order"]) if d < 0 and t not in gone][::-1]
     for grp, key in ((cf, "" if oneway else ":forward"), (cb, ":backward")):
       if grp and any(v != "yes" for v in grp) and len(grp) > 1:
         tg["change:lanes" + key] = "|".join(grp)
@@ -784,11 +934,21 @@ for s, S in enumerate(sections):
 # --- ways: each section cut where its layer or lane change rules change
 ways = []
 for s, S in enumerate(sections):
+  if S.get("drop"):
+    continue
   C = S["C"]
-  key = [(bool(d), c) for d, c in zip(S["deck"], S["change"])]
+  ks = C[:, 4].astype(int)
+  # a new piece where a lane has moved WIDTH_STEP from its width where the piece began
+  wbin, ref, n_ = [], None, 0
+  for k in ks:
+    w = [S["W"][k].get(t, 0.0) for t, _ in S["order"]]
+    if ref is None or max(abs(x - y) for x, y in zip(w, ref)) > WIDTH_STEP:
+      ref, n_ = w, n_ + 1
+    wbin.append(n_)
+  key = [(bool(d), c, w) for d, c, w in zip(S["deck"], S["change"], wbin)]
   pieces = runs_of(key, MINLEN)
   start_node = port_node.get((s, 0))
-  for q, (a, b, (on_deck, change)) in enumerate(pieces):
+  for q, (a, b, (on_deck, change, _)) in enumerate(pieces):
     last = q == len(pieces) - 1
     P = C[a:b + (0 if last else 1), :3]  # pieces share their cut sample
     nd = []
@@ -804,7 +964,8 @@ for s, S in enumerate(sections):
     if last and (s, 1) in ext:
       nd.append(ext[(s, 1)])
     start_node = nd[-1]
-    tg, iss = tags_for(S, s, change)
+    widths = {t: float(np.median(v)) for t in S["width_lanes"] if (v := [S["W"][k][t] for k in ks[a:b] if t in S["W"][k]])}
+    tg, iss = tags_for(S, s, change, widths)
     if on_deck:
       tg["bridge"], tg["layer"] = "yes", "1"
     if S["width"]:
@@ -825,7 +986,52 @@ def node_xy(i):
   return np.array(nodes[i][:2])
 
 
+def cut_way(w, line, z, tags, near=0.3):
+  """node way w where it crosses `line` (on its deck), tagging that node, or the node within `near` m of it; the
+  node, or None if it doesn't cross."""
+  for q in range(len(w["nodes"]) - 1):
+    a_, b_ = w["nodes"][q], w["nodes"][q + 1]
+    if abs(nodes[a_][2] - z) > 2:
+      continue
+    hit = LineString([node_xy(a_), node_xy(b_)]).intersection(line)
+    if hit.is_empty or hit.geom_type != "Point":
+      continue
+    p = np.array(hit.coords[0])
+    for i in (a_, b_):
+      if np.linalg.norm(p - node_xy(i)) < near:
+        nodes[i][3].update(tags)
+        return i
+    zc = nodes[a_][2] + (nodes[b_][2] - nodes[a_][2]) * np.linalg.norm(p - node_xy(a_)) / max(np.linalg.norm(node_xy(b_) - node_xy(a_)), 1e-9)
+    cn = new_node(*p, zc, tags)
+    w["nodes"].insert(q + 1, cn)
+    return cn
+  return None
+
+
+# signals where traffic stops for them: on each arm's way at its stop line (the line across its arriving lanes' ends),
+# tagged with the way's direction it applies to (stop_paint.py's tags, as on the live map)
 for J in junctions:
+  if not J.get("signals"):
+    continue
+  for s, e, p, u in J["ends"]:
+    ends = [LA[i][-1] for i, which, _ in J["mouths"] if which == "end" and i in lane_track and lane_track[i][0] in sections[s]["tracks"]]
+    piece = [w for w in ways if w["section"] == s]
+    if not ends or not piece:
+      continue
+    E = np.array(ends)
+    nrm = np.array([-u[1], u[0]])
+    o = (E[:, :2] - E[:, :2].mean(0)) @ nrm
+    mid = E[:, :2].mean(0)
+    reach = max(np.abs(o).max() + E[:, 3].max(), sections[s]["C"][:, 3].max()) / 2 + 2
+    line = LineString([mid - nrm * reach, mid + nrm * reach])
+    tags = {"highway": "traffic_signals", "traffic_signals:direction": "forward" if e else "backward", "source:position": "survey",
+            "stop_line:bearing": f"{math.degrees(math.atan2(nrm[0], nrm[1])) % 180:.0f}"}
+    if cut_way(piece[-1] if e else piece[0], line, float(E[:, 2].mean()), tags) is None:
+      J["issues"].append(f"stop line of way {s} not on it")
+
+for J in junctions:
+  ctl = "traffic_signals" if J.get("signals") else "marked"  # a crossing at a signalled junction has its own lights
+  sigs = {"crossing:signals": "yes"} if J.get("signals") else {}
   for A in J["crossings"]:
     foot = LineString(A[:, :2])
     cuts = []
@@ -842,7 +1048,7 @@ for J in junctions:
         if min(np.linalg.norm(p - node_xy(a_)), np.linalg.norm(p - node_xy(b_))) < 0.3:
           continue
         zc = nodes[a_][2] + (nodes[b_][2] - nodes[a_][2]) * np.linalg.norm(p - node_xy(a_)) / max(np.linalg.norm(node_xy(b_) - node_xy(a_)), 1e-9)
-        cn = new_node(*p, zc, {"highway": "crossing", "crossing": "marked"})
+        cn = new_node(*p, zc, {"highway": "crossing", "crossing": ctl, "crossing:markings": "yes", **sigs})
         w["nodes"].insert(q + 1, cn)
         cuts.append((foot.project(Point(p)), cn))
         break
@@ -850,7 +1056,31 @@ for J in junctions:
     pts = [(foot.project(Point(p)), None, p) for p in A[:, :3]] + [(d, cn, None) for d, cn in cuts]
     for d, cn, p in sorted(pts, key=lambda v: v[0]):
       fn.append(cn if cn is not None else new_node(*p))
-    ways.append({"nodes": fn, "tags": {"highway": "footway", "footway": "crossing", "crossing": "marked"}, "issues": [] if cuts else ["crosses no way"], "section": None})
+    ways.append({"nodes": fn, "tags": {"highway": "footway", "footway": "crossing", "crossing": ctl, "crossing:markings": "yes", **sigs},
+                 "issues": [] if cuts else ["crosses no way"], "section": None})
+
+# turn restrictions at a junction's node (ynd_to_osm.py's, as on the live map): no U-turn back into the arm a two-way
+# arm's traffic arrives on, and none of the moves between arms that no lane makes (junctions.py's paths: a free turn
+# lane round the box makes it instead, or no arrow turns that way)
+TURN_ANG, UTURN = 45.0, 150.0  # deg: junctions.py's
+restrictions = []  # (kind, from way, via node, to way)
+for J in junctions:
+  if "node" not in J:
+    continue
+  moves = {(p_["from"], p_["to"]) for p_ in J["paths"]}
+  arms = []
+  for (s, e), ml in J.get("arm_lanes", {}).items():
+    w = [w for w in ways if w["section"] == s and J["node"] in (w["nodes"][0], w["nodes"][-1])]
+    if w:
+      o = np.mean([LA[i][-1 if which == "end" else 0, :2] for i, which in ml], 0) - node_xy(J["node"])
+      arms.append((w[0], {i for i, which in ml if which == "end"}, {i for i, which in ml if which == "start"}, math.degrees(math.atan2(o[1], o[0]))))
+  for wa, arr, _, oa in arms:
+    for wb, _, lea, ob in arms:
+      if not arr or not lea or (wa is not wb and any((i, j) in moves for i in arr for j in lea)):
+        continue
+      th = (ob - oa) % 360 - 180  # the turn from arriving (heading -oa) to leaving (heading ob), left positive
+      kind = "no_u_turn" if wa is wb or abs(th) > UTURN else "no_straight_on" if abs(th) <= TURN_ANG else "no_left_turn" if th > 0 else "no_right_turn"
+      restrictions.append((kind, wa, J["node"], wb))
 
 for J in junctions:
   if "node" in J:
@@ -923,6 +1153,9 @@ with open(out_osm, "w") as f:
     for k, v in tg.items():
       f.write(f"    <tag k={quoteattr(k)} v={quoteattr(str(v))}/>\n")
     f.write("  </way>\n")
+  for q, (kind, wa, via, wb) in enumerate(restrictions):
+    f.write(f"  <relation id='{-1 - q}'>\n    <member type='way' ref='{wa['id']}' role='from'/>\n    <member type='node' ref='{via}' role='via'/>\n"
+            f"    <member type='way' ref='{wb['id']}' role='to'/>\n    <tag k='type' v='restriction'/>\n    <tag k='restriction' v='{kind}'/>\n  </relation>\n")
   f.write("</osm>\n")
 feats = []
 for w in ways:
@@ -940,7 +1173,9 @@ for x, y, why in issues_free:
 json.dump({"type": "FeatureCollection", "features": feats}, open(out_geo, "w"))
 
 # --- report
-print(len(tracks), "tracks;", len(sections), "sections;", len(ways), "ways;", len(nodes), "nodes ->", out_osm, out_geo)
+print(len(tracks), "tracks;", len(sections), "sections;", len(ways), "ways;", len(nodes), "nodes;", len(restrictions), "restrictions ->", out_osm, out_geo)
+for kind, wa, via, wb in restrictions:
+  print(f" restriction {kind}: way {wa['id']} -> {wb['id']} at node {via}")
 for i, j, wa, wb in implied:
   print(f" carries on without a link: lane {i} -> {j} ({wa} -> {wb} m wide)")
 for J in junctions:

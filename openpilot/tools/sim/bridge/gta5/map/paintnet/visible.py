@@ -73,14 +73,19 @@ def grey(src, x, y):
 # (dashes over concrete, stains, a kerb's edge: a light-to-dark edge can pass a contrast test), drawn ones 148 and up
 # (dashed lines measured on their dashes; scraps under 6 m read 97-135 and aren't used as lane lines). Yellow paint isn't bright, so a
 # yellow line must stand out from the road (real ones +64..+70). Far darker than the road, a line is under something
-# the surface raster doesn't hold (a rail bridge: -54): unknown
-WHITE_MIN, YELLOW_CONTRAST, HIDDEN = 135.0, 10.0, -15.0
+# the surface raster doesn't hold (a rail bridge: -54): unknown. On pale concrete (a ramp's deck: 185-200 grey bare) a
+# white line from the surface raster must also stand out from the road beside it: the deck's panel seams and kerb edges
+# it holds as paint read +20..+27 there, drawn lines +42 and up (a decal is a painted texture: bright paint on bright
+# concrete reads +33 and is drawn)
+WHITE_MIN, YELLOW_CONTRAST, HIDDEN, SURFACE_CONTRAST = 135.0, 10.0, -15.0, 35.0
 
 
 def drawn(v, colour):
   if v["contrast"] is None or v["contrast"] <= HIDDEN:
     return None
-  return v["on"] >= WHITE_MIN if colour == "white" else v["contrast"] >= YELLOW_CONTRAST
+  if colour != "white":
+    return v["contrast"] >= YELLOW_CONTRAST
+  return v["on"] >= WHITE_MIN and (v.get("paint") != "surface" or v["contrast"] >= SURFACE_CONTRAST)
 
 
 def covered(S):
@@ -125,9 +130,9 @@ for r in scan.src.paint():
   ok = ~np.isnan(on) & ~np.isnan(side)
   if ok.sum() >= 4:
     res[r["id"]] = {"contrast": round(float(np.median(on[ok] - side[ok])), 1), "on": round(float(np.median(on[ok])), 1),
-                    "n": int(ok.sum()), "src": src, "colour": r["colour"]}
+                    "n": int(ok.sum()), "src": src, "colour": r["colour"], "paint": r["src"]}
   else:
-    res[r["id"]] = {"contrast": None, "n": int(ok.sum()), "src": src, "colour": r["colour"]}
+    res[r["id"]] = {"contrast": None, "n": int(ok.sum()), "src": src, "colour": r["colour"], "paint": r["src"]}
 for v in res.values():
   v["drawn"] = drawn(v, v["colour"])
 json.dump(res, open(sys.argv[5], "w"))

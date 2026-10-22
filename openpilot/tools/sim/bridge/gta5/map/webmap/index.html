@@ -53,7 +53,8 @@
   <div><i class="ring"></i>Flag: needs a look</div>
   <div><i style="background:none; border-top: 2px dashed #888; height: 0; vertical-align: 3px"></i>Pilot area (nothing built outside it)</div>
   <div class="note">Click a band or marker for its id and evidence.</div>
-  <label style="display:block;margin-top:6px"><input type="checkbox" id="osmview"> <b>OSM export: ways and tags (click one)</b></label>
+  <label style="display:block;margin-top:6px"><input type="checkbox" id="osmview"> <b>OSM export only: ways and tags (click one)</b> (hides the lanes)</label>
+  <label style="display:block;margin-left:18px"><input type="checkbox" id="s2view" checked> drawn by osm2streets (third party; else ours, osm_view.py)</label>
   <label style="display:block;margin-top:2px"><input type="checkbox" id="checker"> <b>Checker: <span style="color:#ff9100">&#9670;</span> where the paint regions disagree</b></label>
   <b style="margin-top:6px">Levels</b>
   <label><input type="radio" name="lvl" value="all" checked> All (beneath decks: faint, dashed edge)</label><br>
@@ -125,16 +126,43 @@ const checkLayers = [
     paint: { "circle-radius": 8, "circle-color": "rgba(255,145,0,0.25)", "circle-stroke-color": "#ff9100", "circle-stroke-width": 3 } },
 ];
 roadLayers.push(...checkLayers);
-// the OSM export (paintnet/osm.py): ways coloured by class, as wide as their lanes, toggled in the legend
+// the OSM export (paintnet/osm.py) on its own, toggled in the legend: the road rebuilt from its tags alone (osm_view.py:
+// lanes, lines, arrows, stop lines, crossings, restrictions) under its ways (coloured by class) and tagged nodes
 const OT = ["==", ["get", "osm_type"], "way"];
+const OV = k => ["==", ["get", "kind"], k];
+const LINE_COL = ["match", ["get", "style"], "centre", "#ffd600", "#ffffff"];
+// osm2streets (A/B Street's lane-level renderer, run here in the browser on the export): what a third party makes of it
+const S2_LANE = ["match", ["get", "type"], "Driving", "#546e7a", "Sidewalk", "#bcaaa4", "Shoulder", "#9e9e9e", "Biking", "#2e7d32", "Parking", "#455a64", "#78909c"];
+const S2_MARK = ["match", ["get", "type"], "center line", "#ffd600", "vehicle stop line", "#ffffff", "lane arrow", "#ffffff", "#ffffff"];
 const osmLayers = [
+  { id: "osm-s2-int", type: "fill", source: "s2plain", filter: ["==", ["get", "type"], "intersection"], layout: { visibility: "none" },
+    paint: { "fill-color": "#37474f", "fill-opacity": 0.75 } },
+  { id: "osm-s2-lane", type: "fill", source: "s2lanes", layout: { visibility: "none" }, paint: { "fill-color": S2_LANE, "fill-opacity": 0.75 } },
+  { id: "osm-s2-lane-edge", type: "line", source: "s2lanes", layout: { visibility: "none" }, paint: { "line-color": "#263238", "line-width": 0.5 } },
+  { id: "osm-s2-mark", type: "fill", source: "s2marks", layout: { visibility: "none" }, paint: { "fill-color": S2_MARK, "fill-opacity": 0.95 } },
+  { id: "osm-v-junction", type: "fill", source: "osmview", filter: OV("junction"), layout: { visibility: "none" }, paint: { "fill-color": "#424242", "fill-opacity": 0.55 } },
+  { id: "osm-v-shoulder", type: "fill", source: "osmview", filter: OV("shoulder"), layout: { visibility: "none" }, paint: { "fill-color": "#9e9e9e", "fill-opacity": 0.45 } },
+  { id: "osm-v-lane", type: "fill", source: "osmview", filter: OV("lane"), layout: { visibility: "none" }, paint: { "fill-color": ["get", "col"], "fill-opacity": 0.5 } },
+  { id: "osm-v-line", type: "fill", source: "osmview", filter: OV("line"), layout: { visibility: "none" }, paint: { "fill-color": LINE_COL, "fill-opacity": 0.95 } },
+  { id: "osm-v-zebra", type: "fill", source: "osmview", filter: OV("zebra"), layout: { visibility: "none" }, paint: { "fill-color": "#ffffff", "fill-opacity": 0.85 } },
+  { id: "osm-v-stop", type: "fill", source: "osmview", filter: OV("stop"), layout: { visibility: "none" }, paint: { "fill-color": "#ffffff", "fill-opacity": 1 } },
   { id: "osm-way", type: "line", source: "osm", filter: OT, layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
     paint: { "line-color": ["match", ["get", "highway"], "motorway", "#e8590c", "motorway_link", "#f59f00", "primary", "#fcc419",
                             "footway", "#adb5bd", "#74c0fc"],
-             "line-width": ["interpolate", ["linear"], ["zoom"], 16, 2, 20, ["*", 4, ["to-number", ["coalesce", ["get", "lanes"], 1]]]],
-             "line-opacity": 0.9 } },
+             "line-width": ["interpolate", ["linear"], ["zoom"], 16, 2, 20, 3], "line-opacity": 0.9 } },
+  { id: "osm-v-arrow", type: "symbol", source: "osmview", filter: OV("arrow"), minzoom: 17,
+    layout: { visibility: "none", "text-field": ["get", "text"], "text-font": FONT, "text-size": 26, "text-rotate": ["get", "bearing"],
+              "text-rotation-alignment": "map", "text-allow-overlap": true, "text-ignore-placement": true, "text-letter-spacing": -0.1 },
+    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.9)", "text-halo-width": 2 } },
+  { id: "osm-v-signal", type: "circle", source: "osmview", filter: OV("signal"), layout: { visibility: "none" },
+    paint: { "circle-radius": 7, "circle-color": "#ffd600", "circle-stroke-color": "#000", "circle-stroke-width": 2 } },
+  { id: "osm-v-restriction", type: "symbol", source: "osmview", filter: OV("restriction"), minzoom: 17,
+    layout: { visibility: "none", "text-field": ["get", "text"], "text-font": FONT, "text-size": 12, "text-offset": ["literal", [0, 0]],
+              "text-variable-anchor": ["top", "bottom", "left", "right"], "text-radial-offset": ["+", 1, ["*", 1.2, ["get", "offset"]]],
+              "text-allow-overlap": false },
+    paint: { "text-color": "#ff5252", "text-halo-color": "rgba(0,0,0,0.9)", "text-halo-width": 2 } },
   { id: "osm-node", type: "circle", source: "osm", filter: ["!=", ["get", "osm_type"], "way"], layout: { visibility: "none" },
-    paint: { "circle-radius": 6, "circle-color": ["match", ["get", "osm_type"], "flag", "#ff1744", "#ffffff"], "circle-stroke-color": "#000", "circle-stroke-width": 1.5 } },
+    paint: { "circle-radius": 4, "circle-color": ["match", ["get", "osm_type"], "flag", "#ff1744", "#ffffff"], "circle-stroke-color": "#000", "circle-stroke-width": 1.5 } },
 ];
 roadLayers.push(...osmLayers);
 // the pilot's box (what the pilot covers; outside it nothing is built)
@@ -165,7 +193,29 @@ document.querySelectorAll("input[name=lvl]").forEach(r => r.onchange = () => set
 const checkerOn = () => document.getElementById("checker").checked;
 document.getElementById("checker").onchange = () => setView(view);
 const osmOn = () => document.getElementById("osmview").checked;
+document.getElementById("osmview").checked = new URL(location.href).searchParams.get("osm") === "1";
 document.getElementById("osmview").onchange = () => setView(view);
+const s2On = () => document.getElementById("s2view").checked;
+document.getElementById("s2view").onchange = () => setView(view);
+// osm2streets runs once, on the export, the first time it's shown
+let s2Started = false;
+async function runS2() {
+  if (s2Started) return;
+  s2Started = true;
+  const V = "https://cdn.jsdelivr.net/npm/osm2streets-js@0.1.4/";
+  try {
+    const m = await import(V + "osm2streets_js.js");
+    await m.default(V + "osm2streets_js_bg.wasm");
+    const [xml, area] = await Promise.all([fetch(base + "osm_ic.osm?t=" + Date.now()).then(r => r.text()), fetch(base + "pilot_area.geojson").then(r => r.text())]);
+    const net = new m.JsStreetNetwork(xml, area, { debug_each_step: false, dual_carriageway_experiment: false, sidepath_zipping_experiment: false,
+                                                   inferred_sidewalks: false, osm2lanes: false });
+    map.getSource("s2plain").setData(JSON.parse(net.toGeojsonPlain()));
+    map.getSource("s2lanes").setData(JSON.parse(net.toLanePolygonsGeojson()));
+    map.getSource("s2marks").setData(JSON.parse(net.toLaneMarkingsGeojson()));
+  } catch (e) {
+    console.error("osm2streets:", e);
+  }
+}
 
 const style = {
   version: 8,
@@ -175,6 +225,10 @@ const style = {
     pilot: { type: "geojson", data: PILOT + "?t=" + Date.now() },
     check: { type: "geojson", data: base + "check.geojson?t=" + Date.now() },
     osm: { type: "geojson", data: base + "osm.geojson?t=" + Date.now() },
+    osmview: { type: "geojson", data: base + "osm_view.geojson?t=" + Date.now() },
+    s2plain: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+    s2lanes: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+    s2marks: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
     area: { type: "geojson", data: base + "pilot_area.geojson?t=" + Date.now() },
     under: { type: "raster", url: "pmtiles://" + base + "under.pmtiles", tileSize: 256 },
     underEdge: { type: "geojson", data: base + "under_footprint.geojson" },
@@ -205,11 +259,17 @@ function setView(v) {
   document.getElementById("legend").style.display = v === "satellite" ? "none" : "";
   map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#305d62");  // satellite: the sea past the captures, as WebP decodes the sea tiles
   for (const l of roadLayers) {
-    const on = l.metadata.views.includes(v) && (!l.id.startsWith("ck-") || checkerOn()) && (!l.id.startsWith("osm-") || osmOn());
+    // the OSM export shows alone (with the pilot's outline): the lanes under it read as part of it
+    const own = l.id.startsWith("osm-s2-") ? s2On() : l.id.startsWith("osm-v-") ? !s2On() : true;  // whose rebuilt road
+    const on = l.metadata.views.includes(v) && (l.id.startsWith("osm-") ? osmOn() && own : !osmOn() || l.id === "pi-area" || !/^(pi|ck)-/.test(l.id)) &&
+      (!l.id.startsWith("ck-") || checkerOn());
     map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
   }
   showUnder();
-  const u = new URL(location.href); u.searchParams.set("view", v); history.replaceState(null, "", u);
+  if (osmOn() && s2On()) runS2();
+  const u = new URL(location.href); u.searchParams.set("view", v);
+  if (osmOn()) u.searchParams.set("osm", "1"); else u.searchParams.delete("osm");
+  history.replaceState(null, "", u);
 }
 document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.view));
 const zl = document.getElementById("zoom");
@@ -234,7 +294,7 @@ map.getCanvasContainer().addEventListener("wheel", e => {
 map.on("click", e => {
   const ids = ["osm-node", "osm-way", "ck-flag", "pi-flag", "pi-turns", "pi-linkpt", "pi-gore", "pi-lane", "pi-other", "pi-guide", "pi-junction-area"];
   const near = [[e.point.x - 5, e.point.y - 5], [e.point.x + 5, e.point.y + 5]];  // (a path is a thin line)
-  const fs = map.queryRenderedFeatures(near, { layers: ["pi-path", "pi-path-flag"].filter(id => map.getLayer(id)) })
+  const fs = map.queryRenderedFeatures(near, { layers: ["pi-path", "pi-path-flag", "osm-way", "osm-node"].filter(id => map.getLayer(id)) })
     .concat(map.queryRenderedFeatures(e.point, { layers: ids.filter(id => map.getLayer(id)) }))
     .sort((a, b) => (a.layer.id === "pi-junction-area") - (b.layer.id === "pi-junction-area"));  // (the box last: it's under everything)
   const seen = new Set(), parts = [];

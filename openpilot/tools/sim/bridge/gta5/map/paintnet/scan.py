@@ -25,12 +25,14 @@ out = sys.argv[5]
 step = next((float(a[7:]) for a in sys.argv if a.startswith("--step=")), 2.0)
 inbox = lambda x, y, m=0: x0 - m <= x <= x1 + m and y0 - m <= y <= y1 + m
 
-nodes, links = {}, {}
+nodes, links, streets = {}, {}, {}  # streets: a node's "st" -> its street's name
 for o in src.paths():
   if o["t"] == "n":
     nodes[(o["a"], o["i"])] = o
   elif o["t"] == "l":
     links[((o["a"], o["i"]), (o["ta"], o["ti"]))] = o
+  elif o["t"] == "s":
+    streets[o["h"]] = o["name"]
 ok = lambda n: (n["f"][1] >> 3) not in PED_SPECIALS and not n["f"][2] & 32
 L = []
 for (ka, kb), l in links.items():

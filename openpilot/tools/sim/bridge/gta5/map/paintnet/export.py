@@ -164,7 +164,8 @@ nsucc, npred = {}, {}
 for i, j, g, *br in LK["links"]:
   if not br:  # a branch leaves a lane that carries on; it doesn't make that lane's own carrying on a split
     nsucc[i] = nsucc.get(i, 0) + 1
-  npred[j] = npred.get(j, 0) + 1
+  if br != ["merge"]:  # nor does a lane merging into one make its carrying on a merge
+    npred[j] = npred.get(j, 0) + 1
 # a lane carrying on into exactly one, which nothing else carries on into, is the same lane (its lines are stored in
 # pieces, or one stops for a stretch): drawn as one, its break filled
 nxt = {i: j for i, j, g, *br in LK["links"] if not br and nsucc[i] == 1 and npred[j] == 1}

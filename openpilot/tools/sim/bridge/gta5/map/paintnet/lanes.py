@@ -479,10 +479,11 @@ for i, (ki, A, _) in enumerate(runs):
       break
 runs = [r for r, k in zip(runs, keep_run) if k]
 
-# a lane widening on one side only while both its lines carry on, out past where one lane can be: a road widening
-# ahead of a split whose dividing line isn't painted (GTA marks some with faint road texture and raised markers only).
-# The lane carries straight on at its usual width along its straight side, and a new lane opens in the space beside it
-# out to the far line, its inner side "u" (an unpainted divide); connect.py links the opening and shapes its taper
+# a lane widening on one side only while both its sides carry on, out past where one lane can be: a road widening
+# ahead of a split whose dividing line isn't painted (GTA marks some with faint road texture and raised markers only),
+# or narrowing after a merge (read against the traffic). The lane carries straight on at its usual width along its
+# straight side (a line, or the road's edge: a ramp's deck with no paint beside its gutter), and a new lane opens in the
+# space beside it out to the far line, its inner side "u" (an unpainted divide); connect.py links it and shapes its taper
 SPLIT_WIDEN = 1.5  # m wider than its usual width at its end (the east road's: 6.6 -> 8.6 m over its last 21 m)
 SPLIT_RUN = 15  # samples before it starts widening (within SPLIT_START m of its usual width) its edges' ways are read over
 SPLIT_START = 0.2
@@ -491,13 +492,19 @@ SPLIT_EDGE = 0.5  # m: the most its straight line is from where it's expected, c
 SPLIT_SIDE = 0.5
 SPLIT_FAR = 2 * LANE_MAX  # m: lines further apart aren't one road's
 SPLIT_LEN = 200  # m at most carried on
+SPLIT_JUMP = 1.0  # m the far line moves sideways at most from one metre to the next
+SPLIT_MIN = 10  # m at least carried on: a taper is longer (the ramp deck's 57 m, the east road's 43)
+EDGE_SMOOTH = 9  # samples a lane carried on along the road's edge is smoothed over
 wide_line = {r["id"] for r in scan.src.paint() if r["width"] >= 0.4}  # stop lines and crossings' lines (0.43-0.52 m; lane lines 0.10-0.31)
 
 
-def widen_split(B, ids, others):
-  """for a run B (ids: its left and right boundaries along it) widening at its end as above: B's samples carried on
-  and the new lane's samples beside them, along B, and which side it opens on (+1 right); else None (others: the
-  other runs' samples)."""
+def widen_split(B0, ids, others, pre=None):
+  """for a run B0 (ids: its left and right boundaries along it; pre: the samples of the run it carries on from, if
+  any, read for its usual width and way) widening at its end as above: B0's samples with its widened stretch narrowed
+  back to its usual width along its straight side, the samples it carries on with, the new lane's samples beside both,
+  and which side it opens on (+1 right); else None (others: the other runs' samples)."""
+  B = np.vstack([pre, B0]) if pre is not None else B0
+  n_pre = len(B) - len(B0)
   w0 = float(np.median(B[:, 3]))
   if len(B) < SPLIT_RUN + 2 or B[-1, 3] < w0 + SPLIT_WIDEN:
     return None
@@ -515,24 +522,51 @@ def widen_split(B, ids, others):
     e = np.linalg.svd(R - R.mean(0))[2][0]
     e = e if e @ (R[-1] - R[0]) > 0 else -e
     move[s] = float((E[-1] - R.mean(0)) @ np.array([e[1], -e[0]]) * s)
-  s = 1 if move[1] > move[-1] else -1  # the side it opens on
-  if move[s] - move[-s] < SPLIT_SIDE or not (ids[0 if s > 0 else 1] - {"e", "r", "u"}):
-    return None
+  painted = [bool(ids[q] - {"e", "r", "u"}) for q in (0, 1)]
+  if painted[0] != painted[1]:
+    # a line one side, the road's edge (kerb) the other: the lane against the kerb carries on, and the one opening (or,
+    # against the traffic, ending) is the one along the line (the ramp deck's merge; which edge moves out more there
+    # depends on how the road bends, not on which lane drops)
+    if ids[0 if painted[1] else 1] != {"e"}:
+      return None
+    s = 1 if painted[1] else -1
+  else:
+    s = 1 if move[1] > move[-1] else -1  # the side it opens on
+    if move[s] - move[-s] < SPLIT_SIDE or not painted[0]:
+      return None
+  straight = ids[0 if s > 0 else 1]
+  by_edge = not (straight - {"e", "r", "u"})
+  # its own widened stretch: back to its usual width along its straight side, the rest the new lane's start
+  B1, tail = B0.copy(), []
+  for k in range(max(k0 + 1, n_pre), len(B)):
+    e = B[k, :2] - s * nk[k] * B[k, 3] / 2
+    B1[k - n_pre] = [*(e + s * nk[k] * w0 / 2), B[k, 2], min(w0, B[k, 3])]
+    if B[k, 3] - w0 > 0.1:
+      tail.append([*(e + s * nk[k] * (w0 + B[k, 3]) / 2), B[k, 2], B[k, 3] - w0])
   edge = B[-SPLIT_RUN:, :2] - s * nk[-SPLIT_RUN:] * B[-SPLIT_RUN:, 3:4] / 2  # the straight side
   d = edge[-1] - edge[0]
   d /= max(np.linalg.norm(d), 1e-9)
   n = np.array([d[1], -d[0]])
   p, z = edge[-1], B[-1, 2]
-  keep, new = [], []
+  keep, new, prev_far = [], [], None
   for _ in range(int(SPLIT_LEN / STEP)):
     q = p + d * STEP
     if not scan.inbox(q[0], q[1], 5.0) or any(x[1] in wide_line for x in scan.crossings(p, d, z, 0.0, STEP)):
       break
-    xs = [x for x in scan.crossings(q, n, z, -SPLIT_FAR, SPLIT_FAR) if x[1] not in wide_line]
-    at = [x[0] for x in xs if abs(x[0]) <= SPLIT_EDGE]  # its straight line, carrying on
+    xs = [x for x in scan.crossings(q, n, z, -SPLIT_FAR, SPLIT_FAR) if x[1] not in wide_line and x[1] in lines]  # (drawn ones)
+    if by_edge:  # the road's edge (to the gutter, as a lane's "e" side), found from a metre inside the lane
+      inside = q + s * n * 1.0
+      ext, _ = scan.extent(inside, n, z, -s, scan.ROAD)
+      at = [x for x in [s * (1.0 - ext)] if abs(x) <= SPLIT_EDGE]
+    else:
+      at = [x[0] for x in xs if abs(x[0]) <= SPLIT_EDGE]  # its straight line, carrying on
     far = sorted(s * x[0] for x in xs if s * x[0] > w0 + LANE_MIN)
     if not at or not far:
       break
+    farpt = q + s * n * far[0]  # (before q moves onto the straight side: far is measured from q)
+    if prev_far is not None and abs((farpt - prev_far) @ n) > SPLIT_JUMP:
+      break  # the far side found is another line: the opening's far line can't jump a metre sideways in one
+    prev_far = farpt
     q = q + n * min(at, key=abs)
     d = q - p
     d /= max(np.linalg.norm(d), 1e-9)
@@ -547,9 +581,34 @@ def widen_split(B, ids, others):
     keep.append([*c, z, w0])
     new.append([*m, z, far[0] - w0])
     p = q
-  if len(keep) < 3:
+  if len(keep) < SPLIT_MIN:
     return None
-  return np.array(keep), np.array(new), s
+  keep, new = np.array(keep), np.array(new)
+  if by_edge:  # (the road's edge read from the raster wavers by a few tenths: the lanes along it follow it smoothed)
+    side = new[:, :2] - keep[:, :2]
+    side /= np.maximum(np.linalg.norm(side, axis=1, keepdims=True), 1e-9)
+    q = keep[:, :2] - side * w0 / 2  # (the edge)
+    qs = ndi.uniform_filter1d(q, EDGE_SMOOTH, axis=0, mode="nearest")
+    far = new[:, :2] + side * new[:, 3:4] / 2
+    keep[:, :2] = qs + side * w0 / 2
+    new[:, :2] = (qs + side * w0 + far) / 2
+    new[:, 3] = np.linalg.norm(far - (qs + side * w0), axis=1)
+  return B1, keep, np.array(tail + new.tolist()).reshape(-1, 4), s
+
+
+def carries_on_from(B, bids, r):
+  """the samples, along B, of the run B carries on from (its end within GAP m of B's start, heading B's way, with a line
+  of B's on the same side), or None."""
+  best = None
+  for o in runs:
+    if o is r:
+      continue
+    for O, oids in ((o[1], o[2]), (o[1][::-1], (o[2][1], o[2][0]))):
+      dd = np.linalg.norm(O[-1, :2] - B[0, :2])
+      head = (O[-1, :2] - O[max(len(O) - 5, 0), :2]) @ (B[min(4, len(B) - 1), :2] - B[0, :2])
+      if dd <= GAP and head > 0 and ((oids[0] & bids[0]) | (oids[1] & bids[1])) - {"e", "r", "u"} and (best is None or dd < best[0]):
+        best = (dd, O)
+  return best and best[1]
 
 
 SPLIT_ADD = []
@@ -558,17 +617,17 @@ for r in runs:
   others = [o[1] for o in runs if o is not r]
   for at_end in (True, False):
     B, bids = (A, ids) if at_end else (A[::-1], (ids[1], ids[0]))
-    got = widen_split(B, bids, others)
+    got = widen_split(B, bids, others, carries_on_from(B, bids, r))
     if got is None:
       continue
-    K, N, s = got
+    B1, K, N, s = got
     far_ids = bids[1] if s > 0 else bids[0]
     nkey = ("u", key[1] if at_end else key[0]) if s > 0 else (key[0] if at_end else key[1], "u")
     nids = ({"u"}, far_ids) if s > 0 else (far_ids, {"u"})
     if at_end:
-      A = np.vstack([A, K])
+      A = np.vstack([B1, K])
     else:
-      A = np.vstack([K[::-1], A])
+      A = np.vstack([B1, K])[::-1]
       N, nkey, nids = N[::-1], nkey[::-1], nids[::-1]
     SPLIT_ADD.append([nkey, N, nids])
     print(f"widening split: {key} carried on {len(K)} m, a lane opening on its {'right' if s > 0 else 'left'} ({nkey})")
