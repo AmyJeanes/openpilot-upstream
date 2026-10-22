@@ -297,6 +297,7 @@ def tip(B):
 
 
 GORE_TIP = 30.0  # m at most traced past a gore's run end
+GORE_W = 3.0  # m: unhatched space beside a gore narrower than this is the gore's unhatched end
 out = []
 for key, A, ids in runs:
   d = np.gradient(A[:, :2], axis=0)
@@ -304,15 +305,30 @@ for key, A, ids in runs:
   share = np.array([hatch_share(A[k, :2], d[k], A[k, 2], A[k, 3]) for k in range(len(A))])
   # chevrons repeat about every 5 m (measured on the interchange's gores): bridge the gaps between them, and drop
   # stretches shorter than a gore (an arrow's tip reaching a band)
-  hat = ndi.binary_closing(np.r_[False, share >= HATCH, False], np.ones(7, bool))[1:-1]
+  # (closing pads with the run's own end values: padding with "not hatched" erodes 3 samples off a gore at a run's
+  # end, which dropped a 12 m gore under the 9 m minimum)
+  hat = ndi.binary_closing(np.pad(share >= HATCH, 7, mode="edge"), np.ones(7, bool))[7:-7]
   hat = ndi.binary_opening(np.r_[False, hat, False], np.ones(9, bool))[1:-1]
   if hat.any():
-    # a gore's end narrower than its hatched part carries on to its tip
+    # the same space beside a gore but unhatched and narrower than any lane is the gore too (GTA doesn't hatch a gore
+    # to its ends; lanes on the interchange are 4-7 m, shoulders, found separately at the road's edge, 1.5-3 m)
+    lab, nl = ndi.label(~hat)
+    for j in range(1, nl + 1):
+      ix = np.flatnonzero(lab == j)
+      if np.median(A[ix, 3]) < GORE_W:
+        hat[ix] = True
+    # a gore reaching a run's end carries on to its tip, if its outlines meet further on
+    if hat[-1]:
+      T = tip(A)
+      A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.ones(len(T), bool)]
+    if hat[0]:
+      T = tip(A[::-1])[::-1]
+      A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.ones(len(T), bool), hat]
     gw = np.median(A[hat, 3])
-    if A[-1, 3] < gw:
+    if A[-1, 3] < gw and not hat[-1]:
       T = tip(A)
       A, share, hat = np.vstack([A, T]), np.r_[share, np.zeros(len(T))], np.r_[hat, np.zeros(len(T), bool)]
-    if A[0, 3] < gw:
+    if A[0, 3] < gw and not hat[0]:
       T = tip(A[::-1])[::-1]
       A, share, hat = np.vstack([T, A]), np.r_[np.zeros(len(T)), share], np.r_[np.zeros(len(T), bool), hat]
   shares.extend(share.tolist())

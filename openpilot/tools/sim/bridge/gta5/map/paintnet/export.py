@@ -109,6 +109,9 @@ def pieces(A):
 
 feats = []
 G = json.load(open(grpj))
+if linkj:  # openings reshaped by connect.py
+  for k, p in json.load(open(linkj)).get("pts", {}).items():
+    G["lanes"][int(k)]["pts"] = p
 for k, r in enumerate(G["lanes"]):
   A = np.array(r["pts"])
   lid = f"{r['left']}|{r['right']}|{k}"
@@ -135,8 +138,8 @@ if linkj:
   LK = json.load(open(linkj))
   lid = lambda k: f"{G['lanes'][k]['left']}|{G['lanes'][k]['right']}|{k}"
   nsucc, npred = {}, {}
-  for i, j, g in LK["links"]:
-    nsucc[i] = nsucc.get(i, 0) + 1
+  for i, j, g, *br in LK["links"]:
+    nsucc[i] = nsucc.get(i, 0) + 1 + bool(br)  # a branch: the lane also carries on itself
     npred[j] = npred.get(j, 0) + 1
   for c in LK["connectors"]:
     ring = np.array(c["ring"] + c["ring"][:1])
@@ -146,8 +149,9 @@ if linkj:
     feats.append({"type": "Feature", "properties": {"kind": "lane", "connector": True, "id": f"{lid(c['from'])} > {lid(c['to'])}",
                                                     "group": to["group"], "col": colour(to["group"]), "dir": to["dir"], "z": c["z"], "covered": cov, "deck": deck},
                   "geometry": {"type": "Polygon", "coordinates": [lonlat(ring)]}})
-  for i, j, g in LK["links"]:
-    a, b = np.array(G["lanes"][i]["pts"])[-1], np.array(G["lanes"][j]["pts"])[0]
+  for i, j, g, *br in LK["links"]:
+    A, b = np.array(G["lanes"][i]["pts"]), np.array(G["lanes"][j]["pts"])[0]
+    a = A[np.linalg.norm(A[:, :2] - b[:2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
     kind = "split" if nsucc[i] > 1 else "merge" if npred[j] > 1 else "continue"
     feats.append({"type": "Feature", "properties": {"kind": "link", "type": kind, "from": lid(i), "to": lid(j), "gap": g,
                                                     "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
