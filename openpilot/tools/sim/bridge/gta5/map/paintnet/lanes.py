@@ -127,6 +127,9 @@ def raster_line(c, n, z, side, lim):
 samples = collections.defaultdict(list)  # (a, b) with a left of b -> [(x, y, z, w, line id, s)]
 for lid, s, c, n, z, xs in seen:
   me = find(lid)
+  # this line's own other half, if it is one half of a double line: a lane on that side starts beyond it
+  twin_at = {side: max([side * x[0] for x in xs if find(x[1]) == me and 0 < side * x[0] <= TWIN], default=0.0)
+             for side in (1, -1)}
   xs = [x for x in xs if find(x[1]) != me]
   for side in (1, -1):
     cand = sorted([x for x in xs if side * x[0] > 0], key=lambda x: side * x[0])
@@ -145,7 +148,11 @@ for lid, s, c, n, z, xs in seen:
     yellow_pair = lines[lid]["colour"] == "yellow" and other not in ("e", "r") and cand and cand[0][2] == "yellow"
     if not (LANE_MIN <= o <= LANE_MAX or (yellow_pair or other == "e") and TWIN < o < LANE_MIN):
       continue
-    m = c + n * side * o / 2
+    o0 = twin_at[side]
+    if o - o0 < TWIN:
+      continue
+    m = c + n * side * (o0 + o) / 2
+    o -= o0
     # key as seen travelling along this line's point order: left boundary first
     key = (me, other) if side == 1 else (other, me)
     samples[key].append((float(m[0]), float(m[1]), float(z), float(o), lid, float(s)))
