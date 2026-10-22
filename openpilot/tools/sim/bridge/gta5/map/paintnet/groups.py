@@ -4,7 +4,8 @@ Lanes sharing a white line run the same way (white separates lanes going the sam
 doesn't follow one rule: GTA paints both edges of some motorway carriageways yellow). A group is lanes joined by white
 lines. Its direction is voted by road arrows in its lanes and GTA one-way links along them (direction.py's votes).
 A yellow line with lanes both sides is a centre line only sometimes (GTA also paints left-turn bays yellow), so it
-only gives a group with no votes of its own a direction: right-hand traffic puts a centre line on the driver's left.
+only gives a group with no votes of its own a direction: right-hand traffic puts a centre line on the driver's left;
+failing that, direction.py's yellow-on-the-left reading of its lanes does.
 Groups whose arrows and links disagree, or which have no evidence at all, are flagged rather than guessed."""
 import json, sys, collections
 import numpy as np
@@ -102,6 +103,12 @@ for _ in range(len(groups)):
       sense[gi] = si
     if sense[gj] == 0 and gi != gj:
       sense[gj] = sj
+# still none (a carriageway beside a painted median, which isn't a lane to pair with): direction.py's own reading,
+# the nearest yellow line across the lane's road on its left
+for g, mem in groups.items():
+  if not sense[g]:
+    y = sum(f * (1 if lanes[i].get("sense") == "+" else -1 if lanes[i].get("sense") == "-" else 0) * lanes[i].get("yellow_votes", 0) for i, f in mem)
+    sense[g] = 1 if y > 0 else -1 if y < 0 else 0
 flags = []
 for g, mem in groups.items():
   a, l = votes[g, "arrows"], votes[g, "links"]

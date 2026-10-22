@@ -144,10 +144,10 @@ for j, B in enumerate(P):
 
 def beside(A, p, d, w, mid_only=True):
   """where on lane A a lane whose end is at p (direction d, width w) touches it running alongside: A's sample index, or
-  None. mid_only: A must have been running BRANCH_FROM m already and carry on past it (not lanes starting or ending
-  together at a junction)."""
+  None. mid_only: A must have been running BRANCH_FROM m already and carry on as far past it (not lanes starting or
+  ending together at a junction, a turn bay a couple of metres short of its neighbour at the stop line)."""
   k = int(np.linalg.norm(A[:, :2] - p, axis=1).argmin())
-  if mid_only and not BRANCH_FROM <= k <= len(A) - 3:
+  if mid_only and not BRANCH_FROM <= k <= len(A) - BRANCH_FROM:
     return None
   da, na = frame(A, k)
   if da @ d < math.cos(math.radians(HEAD)):
@@ -312,6 +312,8 @@ def side_taper(A, k, s, step):
     edge, _ = scan.extent(inner + s * n * 0.3, n, z, s)  # step off A's own edge line first
     xs = [s * o for o, *_ in scan.crossings(inner, n, z, -OPEN_REACH, OPEN_REACH) if s * o > OPEN_TOL]
     wd = min(xs + [edge + 0.3])
+    if wd > OPEN_REACH:  # (open road: no taper's outer line)
+      break
     if len(w) >= 3 and (w[-3] - w[-1]) / 2 < TAPER_RATE:  # not closing in: a shoulder, not a taper
       taper, w = taper[:-2], w[:-2]
       break

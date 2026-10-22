@@ -450,6 +450,8 @@ for key, A, ids in runs:
   # a strip narrower than any lane between white lines, hatched anywhere, is a gore (a junction approach's small one is
   # hatched over only its wide 5 m; between yellow lines a strip is a median, and its paint reaches the bands)
   white = all(k == "r" or k in lines and lines[k]["colour"] == "white" for k in key)
+  if all(k in lines and lines[k]["colour"] == "yellow" for k in key):
+    hat[:] = False  # hatching between yellow lines is a painted median's (direction.py), not a gore
   if not hat.any() and white and np.median(A[:, 3]) < GORE_W and ((share >= HATCH).sum() >= 3 or len(A) < ISLAND_LEN):
     hat[:] = True  # (unhatched and short: a wedge where a solid line splits off beside a dashed one at a stop line)
   if hat.any():
