@@ -944,6 +944,9 @@ for s, S in enumerate(sections):
 
 # --- ways: each section cut where its layer or lane change rules change
 ways = []
+# an arm's way running on to its junction's node from a fork or merge (a free turn lane leaving or joining just short of
+# the mouth) carries on with only the lanes reaching the mouth, as its own way
+arm_tracks = {se: {lane_track[i][0] for i, _ in ml} for J in junctions for se, ml in J.get("arm_lanes", {}).items()}
 for s, S in enumerate(sections):
   if S.get("drop"):
     continue
@@ -983,10 +986,16 @@ for s, S in enumerate(sections):
         nd.append(port_node[(s, 1)])
       else:
         nd.append(new_node(*p))
-    if q == 0 and (s, 0) in ext:
-      nd.insert(0, ext[(s, 0)])
-    if last and (s, 1) in ext:
-      nd.append(ext[(s, 1)])
+    stubs = []
+    for e, here in ((0, q == 0), (1, last)):
+      if here and (s, e) in ext:
+        keep = arm_tracks.get((s, e))
+        if (s, e) in port_node and keep is not None and {t for t, _ in S["order"]} - keep:
+          stubs.append((e, keep))
+        elif e:
+          nd.append(ext[(s, 1)])
+        else:
+          nd.insert(0, ext[(s, 0)])
     start_node = nd[-1]
     widths = {t: float(np.median(v)) for t in S["width_lanes"] if (v := [S["W"][k][t] for k in ks[a:b] if t in S["W"][k]])}
     w0, w1 = ends_of(a, b)
@@ -1012,6 +1021,15 @@ for s, S in enumerate(sections):
     lanes_src = [tracks[t]["lanes"] for t, _ in S["order"]]
     tg["paintnet:lanes"] = ";".join("+".join(map(str, l)) for l in lanes_src)
     ways.append({"nodes": nd, "tags": tg, "issues": S["issues"] + iss, "section": s})
+    for e, keep in stubs:
+      S2 = {**S, "order": [(t, d) for t, d in S["order"] if t in keep]}
+      change2 = tuple(c for c, (t, _) in zip(change, S["order"]) if t in keep) if change else change
+      tg2, iss2 = tags_for(S2, s, change2, {t: float((w1 if e else w0)[i]) for i, (t, _) in enumerate(S["order"]) if t in keep})
+      if on_deck:
+        tg2["bridge"], tg2["layer"] = "yes", "1"
+      tg2["paintnet:lanes"] = ";".join("+".join(map(str, tracks[t]["lanes"])) for t, _ in S2["order"])
+      ways.append({"nodes": [port_node[(s, 1)], ext[(s, 1)]] if e else [ext[(s, 0)], port_node[(s, 0)]], "tags": tg2,
+                   "issues": S["issues"] + iss2, "section": s})
 
 # --- crossings: a footway along each crossing strip, noded where it crosses a way on its deck
 def node_xy(i):
