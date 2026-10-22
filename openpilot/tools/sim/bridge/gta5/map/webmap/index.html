@@ -41,13 +41,17 @@
   <div><i style="background:#9e9e9e; opacity:.7"></i>Shoulder</div>
   <div><i style="background:#00bcd4; opacity:.7"></i>Crossing strip</div>
   <div><i style="background:#e53935; opacity:.7"></i>Strip with no traffic</div>
+  <div><i style="background:none; border-top: 2px solid #111; height: 0; vertical-align: 3px"></i>Lane edge (a line across a lane: one ends, the next starts)</div>
+  <div><i class="ring" style="border-color:#ffffff"></i>Carries on into the next lane</div>
+  <div><i class="ring" style="border-color:#ffea00"></i>Split: one lane carries on into two</div>
+  <div><i class="ring" style="border-color:#00e5ff"></i>Merge: two lanes carry on into one</div>
   <div><i class="ring"></i>Flag: needs a look</div>
-  <div class="note">Click a band for its id and evidence.</div>
-  <label style="display:block;margin-top:6px"><input type="checkbox" id="newregions"> <b>New approach: regions + centre lines</b></label>
+  <div class="note">Click a band or marker for its id and evidence.</div>
+  <label style="display:block;margin-top:6px"><input type="checkbox" id="checker"> <b>Checker: <span style="color:#ff9100">&#9670;</span> where the paint regions disagree</b></label>
   <b style="margin-top:6px">Levels</b>
   <label><input type="radio" name="lvl" value="all" checked> All (beneath decks: faint, dashed edge)</label><br>
   <label><input type="radio" name="lvl" value="top"> Top level only</label><br>
-  <label><input type="radio" name="lvl" value="under"> Beneath decks only</label>
+  <label><input type="radio" name="lvl" value="under"> Lowest level only (decks hidden)</label>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
@@ -61,6 +65,7 @@ const FONT = ["Noto Sans Medium"];
 // the paint-first pilot (scratchpad paintnet/export.py): lanes coloured by direction group, gores, shoulders,
 // crossings and strips with no traffic, and flags where the method couldn't decide; shown on Street and Hybrid
 const K = k => ["==", ["get", "kind"], k];
+const LC = ["match", ["get", "type"], "split", "#ffea00", "merge", "#00e5ff", "#ffffff"];
 const roadLayers = [
   // higher decks drawn over lower ones (a road passing under the motorway stays under it)
   { id: "pi-other", type: "fill", source: "pilot", layout: { "fill-sort-key": ["get", "z"] }, filter: ["in", ["get", "kind"], ["literal", ["shoulder", "crossing", "not_traffic", "median", "twltl"]]],
@@ -72,6 +77,13 @@ const roadLayers = [
              "fill-opacity": ["case", ["get", "covered"], 0.18, 0.42] } },
   { id: "pi-lane-under", type: "line", source: "pilot", filter: ["all", K("lane"), ["get", "covered"]],
     paint: { "line-color": ["case", ["==", ["get", "dir"], "?"], "#808080", ["get", "col"]], "line-width": 1.5, "line-dasharray": [3, 2] } },
+  // every lane piece outlined, so lanes side by side and a lane ending where the next starts show their seam
+  { id: "pi-lane-edge", type: "line", source: "pilot", filter: ["all", K("lane"), ["!", ["has", "connector"]]], minzoom: 17,
+    paint: { "line-color": "#111111", "line-opacity": ["case", ["get", "covered"], 0.35, 0.8], "line-width": 1 } },
+  { id: "pi-link", type: "line", source: "pilot", filter: K("link"), layout: { "line-cap": "round" },
+    paint: { "line-color": LC, "line-width": 3 } },
+  { id: "pi-linkpt", type: "circle", source: "pilot", filter: K("linkpt"), minzoom: 16,
+    paint: { "circle-radius": 7, "circle-color": "rgba(0,0,0,0.35)", "circle-stroke-color": LC, "circle-stroke-width": 3 } },
   { id: "pi-dir", type: "symbol", source: "pilot", filter: K("centre"), minzoom: 16,
     layout: { "symbol-placement": "line", "text-field": "›", "text-font": FONT, "text-size": 22, "symbol-spacing": 60,
               "text-keep-upright": false, "text-allow-overlap": true },
@@ -79,40 +91,36 @@ const roadLayers = [
   { id: "pi-flag", type: "circle", source: "pilot", filter: K("flag"),
     paint: { "circle-radius": 9, "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#ff1744", "circle-stroke-width": 3 } },
 ];
-// work in progress: the road surface cut into regions by its paint (regions.py / axes.py), toggled in the legend
-const RC = ["match", ["get", "class"], "lane", "#42a5f5", "cell", "#ff00ff", "median", "#fff176", "shoulder", "#9e9e9e", "open", "#ffcc80", "area", "#ef5350", "#ffffff"];
-const regionLayers = [
-  { id: "rg-fill", type: "fill", source: "regions", filter: K("region"), layout: { "fill-sort-key": ["get", "z"], visibility: "none" },
-    paint: { "fill-color": RC, "fill-opacity": 0.35 } },
-  { id: "rg-edge", type: "line", source: "regions", filter: K("region"), layout: { visibility: "none" },
-    paint: { "line-color": RC, "line-width": 1 } },
-  { id: "rg-axis", type: "line", source: "regions", filter: K("axis"), layout: { visibility: "none" },
-    paint: { "line-color": "#ffffff", "line-width": 2.5 } },
+// the checker (paintnet/check.py): where the surface raster's paint regions disagree with the pilot's lanes, toggled in
+// the legend
+const checkLayers = [
+  { id: "ck-flag", type: "circle", source: "check", layout: { visibility: "none" },
+    paint: { "circle-radius": 8, "circle-color": "rgba(255,145,0,0.25)", "circle-stroke-color": "#ff9100", "circle-stroke-width": 3 } },
 ];
-roadLayers.push(...regionLayers);
+roadLayers.push(...checkLayers);
 for (const l of roadLayers) l.metadata = { views: ["street", "hybrid"], filter: l.filter };
 
-// level switch: everything, only what has nothing above it, or only what runs beneath a deck
+// level switch: everything, only what has nothing above it, or the lowest level everywhere (everything but decks)
 function setLevel(lv) {
   for (const l of roadLayers) {
+    if (l.id.startsWith("ck-")) continue;
     const own = l.metadata.filter;
     // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
-    const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["get", "covered"] : null;
+    const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "deck"]] : null;
     map.setFilter(l.id, cond ? (own ? ["all", own, cond] : cond) : own || null);
   }
   // beneath decks on their own: drawn as strongly as the top level
   map.setPaintProperty("pi-lane", "fill-opacity", lv === "under" ? 0.42 : ["case", ["get", "covered"], 0.18, 0.42]);
+  showUnder();
+}
+// beneath decks on the hybrid view: the under-deck shots (undertiles.py) replace the decks in the imagery
+function showUnder() {
+  const on = view === "hybrid" && document.querySelector("input[name=lvl]:checked").value === "under";
+  for (const id of ["under", "under-edge"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 document.querySelectorAll("input[name=lvl]").forEach(r => r.onchange = () => setLevel(r.value));
-// the new approach replaces the pilot's bands while it's shown
-function setRegions(on) {
-  for (const l of roadLayers) {
-    const isRegion = l.id.startsWith("rg-");
-    if (view === "satellite") continue;
-    map.setLayoutProperty(l.id, "visibility", isRegion === on ? "visible" : "none");
-  }
-}
-document.getElementById("newregions").onchange = e => setRegions(e.target.checked);
+const checkerOn = () => document.getElementById("checker").checked;
+document.getElementById("checker").onchange = () => setView(view);
 
 const style = {
   version: 8,
@@ -120,12 +128,17 @@ const style = {
   sources: {
     sat: { type: "raster", url: "pmtiles://" + SAT, tileSize: 256 },
     pilot: { type: "geojson", data: PILOT + "?t=" + Date.now() },
-    regions: { type: "geojson", data: base + "regions.geojson?t=" + Date.now() },
+    check: { type: "geojson", data: base + "check.geojson?t=" + Date.now() },
+    under: { type: "raster", url: "pmtiles://" + base + "under.pmtiles", tileSize: 256 },
+    underEdge: { type: "geojson", data: base + "under_footprint.geojson" },
   },
   layers: [
     { id: "bg", type: "background", paint: { "background-color": "#f1eee8" } },
     { id: "sat", type: "raster", source: "sat", paint: { "raster-resampling": "linear" },
       layout: { visibility: "none" } },
+    { id: "under", type: "raster", source: "under", paint: { "raster-resampling": "linear" }, layout: { visibility: "none" } },
+    { id: "under-edge", type: "line", source: "underEdge", layout: { visibility: "none" },
+      paint: { "line-color": "#ffffff", "line-opacity": 0.7, "line-width": 1.2, "line-dasharray": [4, 3] } },
     ...roadLayers,
   ],
 };
@@ -145,9 +158,10 @@ function setView(v) {
   document.getElementById("legend").style.display = v === "satellite" ? "none" : "";
   map.setPaintProperty("bg", "background-color", v === "street" ? "#f1eee8" : "#305d62");  // satellite: the sea past the captures, as WebP decodes the sea tiles
   for (const l of roadLayers) {
-    const on = l.metadata.views.includes(v) && (l.id.startsWith("rg-") === document.getElementById("newregions").checked);
+    const on = l.metadata.views.includes(v) && (!l.id.startsWith("ck-") || checkerOn());
     map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
   }
+  showUnder();
   const u = new URL(location.href); u.searchParams.set("view", v); history.replaceState(null, "", u);
 }
 document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.view));
@@ -170,7 +184,7 @@ map.getCanvasContainer().addEventListener("wheel", e => {
     easing: t => 1 - Math.pow(1 - t, 3) });
 }, { passive: false });
 map.on("click", e => {
-  const f = map.queryRenderedFeatures(e.point, { layers: ["pi-flag", "pi-gore", "pi-lane", "pi-other", "rg-axis", "rg-fill"] })[0];
+  const f = map.queryRenderedFeatures(e.point, { layers: ["ck-flag", "pi-flag", "pi-linkpt", "pi-link", "pi-gore", "pi-lane", "pi-other"].filter(id => map.getLayer(id)) })[0];
   if (!f) return;
   const p = f.properties;
   const rows = Object.entries(p).filter(([k]) => k !== "col").map(([k, v]) => `<b>${k}</b> ${v}`).join("<br>");

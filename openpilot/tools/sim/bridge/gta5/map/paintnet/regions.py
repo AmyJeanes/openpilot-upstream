@@ -59,6 +59,23 @@ for f in feats:
   cv2.circle(disc, (int(round(c0)), int(round(r0))), int(math.ceil(r / RES)), 1, -1)
   for l in range(L):
     masked[l] |= (disc > 0) & (np.abs(zz[l] - f["z"]) < 1.5)
+# the markings list misses many arrows (8 of the interchange's 12 westbound motorway ones): paint pieces shaped like an
+# arrow are masked too. blobs.py on the interchange: arrows 3.4-5.7 m long, 1.6-2.9 m wide, 34-47% filled; other pieces
+# that size under 0.9 m wide or under 13% filled
+ARROW_LEN, ARROW_W, ARROW_FILL = (3.0, 6.5), 1.4, 0.3
+for l in range(L):
+  n, cl, st, _ = cv2.connectedComponentsWithStats(((paint[l] > 0) & ~masked[l]).astype(np.uint8), connectivity=8)
+  for k in range(1, n):
+    x, y, w, h, a = st[k]
+    if a < 100 or max(w, h) * RES > ARROW_LEN[1] * 1.5:
+      continue
+    rr, cc = np.nonzero(cl[y:y + h, x:x + w] == k)
+    P = np.stack([cc, rr], 1).astype(float)
+    P -= P.mean(0)
+    _, ev = np.linalg.eigh(np.cov(P.T))
+    ln, wd = np.ptp(P @ ev[:, 1]) * RES, np.ptp(P @ ev[:, 0]) * RES
+    if ARROW_LEN[0] <= ln <= ARROW_LEN[1] and wd >= ARROW_W and a * RES * RES / (ln * wd) >= ARROW_FILL:
+      masked[l, y:y + h, x:x + w] |= ndi.binary_dilation(cl[y:y + h, x:x + w] == k, iterations=2)
 wall_col = np.where(masked, 0, paint)
 
 # lengthwise lines drawn whole, on the surface whose height matches (a dashed line's gaps are walls too)
@@ -79,15 +96,88 @@ for line in open(PAINT):
     for l in range(L):
       on = np.abs(zz[l, rr, cc] - pz) < LINE_ZWIN
       wall_col[l, rr[on], cc[on]] = np.maximum(wall_col[l, rr[on], cc[on]], colour)
+
+# a line's end carries on along its own direction across the gap to the next paint, so lanes don't join through it:
+# to the next dash of the same line within JOIN_DASH m (gaps.py on the interchange: dash gaps 7-8 m, none 9-20 m),
+# to any other paint or the road's edge within JOIN_NEAR m (line ends before a crossing or stop line: up to 2.5 m,
+# a dip at 2.5-3 m). Ends are skeleton ends of paint no wider than LINE_W; direction from the last END_RUN m.
+JOIN_DASH, JOIN_NEAR, LINE_W, END_RUN, SAME_DIR = 9.0, 2.5, 0.6, 1.5, math.cos(math.radians(15))
+sys.path.insert(0, sys.path[0])
+from skel import thin, degree, walk
+paintw = wall_col > 0
+ends = []  # (layer, row, col, unit dir (dr, dc), colour)
+for l in range(L):
+  sk = thin(paintw[l])
+  dist = ndi.distance_transform_edt(paintw[l])
+  for r, c in zip(*np.nonzero(degree(sk) == 1)):
+    p = walk(sk, (r, c), int(END_RUN / RES))
+    if len(p) < int(END_RUN / RES) // 2:
+      continue
+    pr, pc = np.array(p).T
+    if 2 * np.median(dist[pr, pc]) * RES > LINE_W:
+      continue
+    d = np.array([r - pr[-1], c - pc[-1]], float)
+    ends.append((l, r, c, d / np.linalg.norm(d), int(wall_col[l, r, c])))
+end_at = {}
+for i, e in enumerate(ends):
+  end_at.setdefault((e[0], e[1] // 5, e[2] // 5), []).append(i)
+
+
+def facing(l, r, c, d):
+  """an end of another line near (r, c) on layer l pointing back along d: the next dash."""
+  for dr in (-1, 0, 1):
+    for dc in (-1, 0, 1):
+      for i in end_at.get((l, r // 5 + dr, c // 5 + dc), ()):
+        e = ends[i]
+        if abs(e[1] - r) <= 6 and abs(e[2] - c) <= 6 and e[3] @ d < -SAME_DIR:
+          return True
+  return False
+
+
+joined = 0
+for l, r, c, d, colour in ends:
+  zr = zz[l, r, c]
+  path, left, la = [], False, l
+  for i in range(1, int(2 * JOIN_DASH / RES)):
+    fr, fc = r + d[0] * i / 2, c + d[1] * i / 2
+    rr, cc = int(round(fr)), int(round(fc))
+    if not (0 <= rr < H and 0 <= cc < W):
+      break
+    dz = np.abs(zz[:, rr, cc] - zr)
+    dz = np.where(np.isnan(dz), np.inf, dz)
+    la = int(dz.argmin())
+    gone = dz[la] > DZ * 2 or cls[la, rr, cc] != 1
+    hit = not gone and paintw[la, rr, cc]
+    if not left:
+      left = not hit
+      if gone:
+        break
+      continue
+    run = i / 2 * RES
+    if gone or hit:
+      if run <= JOIN_NEAR or (hit and facing(la, rr, cc, d)):
+        for pl, pr_, pc_ in path:
+          wall_col[pl, pr_, pc_] = max(wall_col[pl, pr_, pc_], colour)
+        joined += 1
+      break
+    zr = zz[la, rr, cc]
+    path.append((la, rr, cc))
+print(f"{len(ends)} line ends, {joined} carried across a gap")
 wall = wall_col > 0
 free = present & (cls == 1) & ~wall
 # lane space reaches at most LANE_REACH m from paint (lane regions measured 5-7.5 m wide, each beside a painted line):
 # unmarked surface beyond (a plaza, driveways, a car park joined to a street with no kerb) is cut away so lanes don't
 # leak into it; it stays road, just not lane space
 LANE_REACH = 7.5
+# (paint on the same surface: layers hold whichever surfaces a pixel has, so a layer can switch between a street and the
+# deck above it; the nearest paint on each layer must be within PAINT_DZ m of the pixel's height)
+PAINT_DZ = 1.0
 near_paint = np.zeros_like(free)
-for l in range(L):
-  near_paint[l] = ndi.distance_transform_edt(~wall[l]) * RES <= LANE_REACH
+for l2 in range(L):
+  d, (ir, ic) = ndi.distance_transform_edt(~wall[l2], return_indices=True)
+  zw = zz[l2, ir, ic]
+  for l in range(L):
+    near_paint[l] |= (d * RES <= LANE_REACH) & (np.abs(zz[l] - zw) < PAINT_DZ)
 offlane = free & ~near_paint
 free &= near_paint
 

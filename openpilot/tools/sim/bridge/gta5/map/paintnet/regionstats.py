@@ -29,8 +29,11 @@ for k in range(1, n + 1):
   zr = float(np.nanmean(zl[m]))
   foot = m.any(0)
   ring = ndi.binary_dilation(foot) & ~foot
-  # what lies on the ring, on the surface nearest the region's height
-  zz = np.where(np.isnan(zl), np.inf, np.abs(zl - zr))
+  # what lies on the ring, on the surface nearest the height of the region beside it (not the region's mean: ramps
+  # climb metres along their length)
+  zk = np.nanmean(np.where(m, zl, np.nan), 0)
+  _, (ir, ic) = ndi.distance_transform_edt(~foot, return_indices=True)
+  zz = np.where(np.isnan(zl), np.inf, np.abs(zl - zk[ir, ic][None]))
   li = zz.argmin(0)
   pick = lambda a: np.take_along_axis(a, li[None], 0)[0]
   near = pick(zz) < 0.5

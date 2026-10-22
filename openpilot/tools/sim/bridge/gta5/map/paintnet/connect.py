@@ -54,14 +54,15 @@ for i, A in enumerate(P):
     if not 0 < gap <= JOIN:
       continue
     lb, rb = eb - nb * B[0, 3] / 2, eb + nb * B[0, 3] / 2
-    # sideways offsets of the successor's edges from the predecessor's, square to its direction
-    off_l, off_r = (lb - la) @ na, (rb - ra) @ na
+    # sideways offsets of the successor's edges from the predecessor's, square to the successor's direction (the
+    # predecessor's end tilts where a bay opens beside it: 11 deg at the interchange, 2 m sideways over a 13 m gap)
+    off_l, off_r = (lb - la) @ nb, (rb - ra) @ nb
     if min(abs(off_l), abs(off_r)) > EDGE:
       continue
     # the successor must lie within the predecessor's span (not beside it) for the edge that doesn't line up
-    if abs(off_l) > EDGE and not -EDGE <= (lb - la) @ na <= A[-1, 3] + EDGE:
+    if abs(off_l) > EDGE and not -EDGE <= off_l <= A[-1, 3] + EDGE:
       continue
-    if abs(off_r) > EDGE and not -A[-1, 3] - EDGE <= (rb - ra) @ na <= EDGE:
+    if abs(off_r) > EDGE and not -A[-1, 3] - EDGE <= off_r <= EDGE:
       continue
     if crossed(ea, eb, A[-1, 2]):
       continue
