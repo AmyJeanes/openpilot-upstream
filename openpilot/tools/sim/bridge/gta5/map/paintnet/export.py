@@ -172,9 +172,13 @@ for i, j, g, *br in LK["links"]:
   if nxt.get(i) == j:  # drawn as one lane
     continue
   A, B = np.array(G["lanes"][i]["pts"]), np.array(G["lanes"][j]["pts"])
-  a = A[np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
-  kind = "split" if br or nsucc[i] > 1 else "merge" if npred[j] > 1 else "continue"
-  if not br and g > 0.5:
+  if br == ["merge"]:  # a lane ending beside one that carries on: marked where it ends
+    a, b0 = A[-1], B[np.linalg.norm(B[:, :2] - A[-1, :2], axis=1).argmin()]
+  else:
+    a = A[np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin()] if br else A[-1]  # a branch leaves from beside its start
+    b0 = B[0]
+  kind = "merge" if br == ["merge"] or (not br and npred[j] > 1) else "split" if br or nsucc[i] > 1 else "continue"
+  if not br and g > 0.5:  # (a merge's or branch's lanes touch)
     # the break before a split or merge filled with samples running from the lane's end to its successor's start
     F = fill(A, B)
     if len(F):
@@ -186,7 +190,7 @@ for i, j, g, *br in LK["links"]:
       feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
       feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
                     "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
-  m = (a[:2] + B[0, :2]) / 2
+  m = (a[:2] + b0[:2]) / 2
   feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck[i] or lane_deck[j],
                                                   "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
                 "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})

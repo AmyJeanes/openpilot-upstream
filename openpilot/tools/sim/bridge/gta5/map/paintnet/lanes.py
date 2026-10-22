@@ -14,6 +14,7 @@ import scan
 import arrows
 
 STEP, MINLEN, LANE_MIN, LANE_MAX, GAP = 1.0, 6.0, 1.5, 9.0, 3.0
+PIECE_GAP = 0.5  # m between a line piece's end and the next piece's start
 # twin lines: nearest-other-line distances on the interchange peak at 0-0.3 m, dip at 0.3-0.4, lanes from ~4 m; and they
 # must stay that close along most of where they see each other (lines meeting at a gore's nose only touch at the tip)
 TWIN, TWIN_SHARE = 0.35, 0.8
@@ -27,10 +28,23 @@ for l in open(scan.PAINT):
   lines[r["id"]] = r
 # lines the game files hold but the game never draws (visible.py, against the captured imagery) aren't lines
 vis = next((a[10:] for a in sys.argv if a.startswith("--visible=")), None)
+hidden = set()
 if vis:
   hidden = {int(k) for k, v in json.load(open(vis)).items() if v["drawn"] is False}
   lines = {k: v for k, v in lines.items() if k not in hidden}
   print(len(hidden), "lines not drawn in the game dropped")
+# a piece shorter than MINLEN carrying on the end of a line (lines are stored in pieces: a 5.9 m piece bridges two
+# motorway edge lines at a merge) is part of that line
+ends = [(np.array(r["pts"][0][:2]), np.array(r["pts"][-1][:2])) for r in lines.values()]
+for l in open(scan.PAINT):
+  r = json.loads(l)
+  if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or (vis and r["id"] in hidden):
+    continue
+  P = np.array(r["pts"], float)
+  if not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
+    continue
+  if any(min(np.linalg.norm(P[k, :2] - e) for e in pair) < PIECE_GAP for pair in ends for k in (0, -1)):
+    lines[r["id"]] = r
 keep = set(lines)
 
 

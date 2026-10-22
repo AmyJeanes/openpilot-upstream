@@ -72,6 +72,7 @@ for i, A in enumerate(P):
 # by about the new lane's width over the BRANCH_RUN m before the new lane's own line starts (the interchange's
 # lower-deck left turn: 5.2 -> 8.8 m; the top street's left-turn bay: 5.2 -> 8.9 m), and the new lane starts touching
 # that band (beside it, or up to JOIN m past its end)
+STOP_AHEAD = 3.0  # m ahead of a lane's end looked at for a stop line or crossing
 BRANCH_RUN, BRANCH_FROM, WIDEN = 15, 10, 0.3  # widened by at least WIDEN of the new lane's width: measured 0.40, 0.69, 0.75 (only part
 # of the widening is sampled where lane plus opening pass the lane step's width limit)
 has_pred = {j for _, j, *_ in links}
@@ -105,6 +106,72 @@ for j, B in enumerate(P):
     break
 
 
+def beside(A, p, d, w, mid_only=True):
+  """where on lane A a lane whose end is at p (direction d, width w) touches it running alongside: A's sample index, or
+  None. mid_only: A must have been running BRANCH_FROM m already and carry on past it (not lanes starting or ending
+  together at a junction)."""
+  k = int(np.linalg.norm(A[:, :2] - p, axis=1).argmin())
+  if mid_only and not BRANCH_FROM <= k <= len(A) - 3:
+    return None
+  da, na = frame(A, k)
+  if da @ d < math.cos(math.radians(HEAD)):
+    return None
+  off = p - A[k, :2]
+  c = off @ na
+  if abs(off @ da) > 1.5 or min(A[k, 3] / 2, c + w / 2) - max(-A[k, 3] / 2, c - w / 2) < -EDGE:
+    return None
+  return k
+
+
+# an exit or added lane: a lane starting beside one that has been running a while and carries on, which doesn't widen
+# for it (a motorway's edge line runs on straight; the exit's taper opens outside it)
+has_pred = {j for _, j, *_ in links}
+for j, B in enumerate(P):
+  if j in has_pred or not ok[j] or len(B) < 3:
+    continue
+  db, _ = frame(B, 0)
+  for i, A in enumerate(P):
+    if i != j and ok[i] and len(A) >= BRANCH_FROM:
+      k = beside(A, B[0, :2], db, B[0, 3])
+      if k is not None and abs(A[k, 2] - B[0, 2]) <= 1.5:
+        links.append([i, j, 0.0, "branch"])
+        break
+# a merge: a lane ending beside one that has been running a while and carries on (an on-ramp's lane tapering out)
+has_succ = {i for i, *_ in links}
+for i, A in enumerate(P):
+  if i in has_succ or not ok[i] or len(A) < 3:
+    continue
+  da, _ = frame(A, len(A) - 1)
+  for j, B in enumerate(P):
+    if j != i and ok[j] and len(B) >= BRANCH_FROM:
+      k = beside(B, A[-1, :2], da, A[-1, 3])
+      # (not a lane stopping at a stop line or crossing, the lane beside running on a little further)
+      if k is not None and abs(B[k, 2] - A[-1, 2]) <= 1.5 and not crossed(A[-1, :2], A[-1, :2] + da * STOP_AHEAD, A[-1, 2]):
+        links.append([i, j, 0.0, "merge"])
+        break
+
+
+def exit_taper(A, B, k):
+  """an exit's start, A not widening for it: back from where its own lines start, the space between A's edge on its
+  side and the nearest line or the road's edge beyond, while it keeps narrowing (the exit's edge line closing in on
+  A's; beyond the tip is the road's usual shoulder, a step wider) and is wider than OPEN_TOL."""
+  db, nb = frame(B, 0)
+  s = 1.0 if (B[0, :2] - A[k, :2]) @ nb > 0 else -1.0
+  taper, last = [], None
+  for q in range(k - 1, max(k - EXIT_RUN, 0) - 1, -1):
+    d, n = frame(A, q)
+    inner = A[q, :2] + s * n * A[q, 3] / 2
+    z = A[q, 2]
+    edge, _ = scan.extent(inner + s * n * 0.3, n, z, s)  # step off A's own edge line first
+    xs = [s * o for o, *_ in scan.crossings(inner, n, z, -OPEN_REACH, OPEN_REACH) if s * o > OPEN_TOL]
+    wd = min(xs + [edge + 0.3])
+    if wd <= OPEN_TOL or last is not None and wd > last + OPEN_TOL:
+      break
+    taper.append([*(inner + s * n * wd / 2), z, wd])
+    last = wd
+  return np.vstack([np.array(taper[::-1]).reshape(-1, 4), B])
+
+
 def reshape(i, j):
   """an opening drawn as the lanes are: the lane it opens from keeps its usual width along its edge that runs on
   straight, and the widened part becomes the new lane's start, a taper growing out of its side (filled on across any
@@ -114,7 +181,7 @@ def reshape(i, j):
   k = int(np.linalg.norm(A[:, :2] - B[0, :2], axis=1).argmin())
   wide = A[:, 3] > w0 + OPEN_TOL
   if not wide[max(k - BRANCH_RUN, 0):k + 1].any():
-    return None
+    return A, exit_taper(A, B, k)
   # the widened stretch: the last one starting before the new lane does, to where the lane is back to its width
   a = max(q for q in range(max(k - BRANCH_RUN, 0), k + 1) if wide[q] and (q == 0 or not wide[q - 1]))
   b = a
@@ -172,9 +239,10 @@ def reshape(i, j):
 OPEN_TOL, STEP_M = 0.3, 1.0  # m wider than its usual width where an opening starts; sample spacing
 STRAIGHT_TOL = 0.1  # m wider than its usual width: the lane has started widening (its centre drifting)
 OPEN_REACH = 9.0  # m: a taper's outer line looked for no further than the widest lane
+EXIT_RUN = 60  # m at most an exit's taper is traced back
 pts = {}
 for i, j, g, *br in links:
-  if br:
+  if br == ["branch"]:
     r = reshape(i, j)
     if r is not None:
       P[i] = r[0]  # a lane with two openings reshapes from the first's result
@@ -185,7 +253,8 @@ succ, pred = {}, {}
 for i, j, g, *_ in links:
   succ.setdefault(i, []).append(j)
   pred.setdefault(j, []).append(i)
-split = {i for i, v in succ.items() if len(v) > 1} | {l[0] for l in links if l[3:]}  # a branch's lane also carries on
-print(len(links), "links;", len(split), "splits;", sum(len(v) > 1 for v in pred.values()), "merges")
+split = {i for i, v in succ.items() if len(v) > 1} | {l[0] for l in links if l[3:] == ["branch"]}  # a branch's lane also carries on
+merges = sum(len(v) > 1 for v in pred.values()) + sum(1 for l in links if l[3:] == ["merge"])
+print(len(links), "links;", len(split), "splits;", merges, "merges")
 for i, j, g, *kind in links:
   print(f" {lanes[i]['left']}|{lanes[i]['right']} -> {lanes[j]['left']}|{lanes[j]['right']}  gap {g} m", *kind)
