@@ -116,23 +116,46 @@ def heading_at(nd, n):
 # each way stops short of a junction node by half the widest way there crossing it (a road carrying straight on through a
 # side road's or slip road's node is cut back by the side road's half width, not its own)
 trim_at = {}
+# junctions where roads cross, not only a slip road meeting a road
+crossroads = {n for n in junction if crossing([math.atan2(*heading_at(nd, n)[::-1]) for w, (nd, t) in roads.items() if n in (nd[0], nd[-1]) and not t["highway"].endswith("_link")])}
 for n in junction:
   here = [(w, nd) for w, (nd, _) in roads.items() if n in (nd[0], nd[-1])]
   for w, nd in here:
     h = heading_at(nd, n)
-    cross = [lay[w2][nd2.index(n) != 0][1] for w2, nd2 in here if w2 != w and abs(h @ heading_at(nd2, n)) < math.cos(math.radians(30))]
+    link = roads[w][1]["highway"].endswith("_link")
+    # (a road carries on past a slip road meeting it: only the slip road is cut back)
+    cross = [lay[w2][nd2.index(n) != 0][1] for w2, nd2 in here if w2 != w and abs(h @ heading_at(nd2, n)) < math.cos(math.radians(30))
+             and (link or not roads[w2][1]["highway"].endswith("_link"))]
     trim_at[n, w] = max(cross) / 2 if cross else 0.0
-    # where the way has a crossing (else a stop line) further out, within JUNCTION_REACH m, the junction's area starts there
+    if link:  # a slip road starts where it clears the lanes of the roads it meets: half its width out from their edges
+      others = [(LineString([xy(m) for m in nd2]), lay[w2][nd2.index(n) != 0]) for w2, nd2 in here
+                if w2 != w and not roads[w2][1]["highway"].endswith("_link")]
+      own = LineString([xy(m) for m in (nd if nd[0] == n else nd[::-1])])
+      half = lay[w][nd.index(n) != 0][1] / 2
+      def inside(q, ln, lt):
+        """point q on another way's lanes, or within half this way's width of them: its lanes span `left` m left of
+        its line to T - left m right."""
+        t_ = ln.project(Point(q))
+        a0, b0 = (np.array(ln.interpolate(v).coords[0]) for v in (max(t_ - 0.5, 0), min(t_ + 0.5, ln.length)))
+        d0 = (b0 - a0) / max(np.linalg.norm(b0 - a0), 1e-9)
+        o = (np.array(q) - np.array(ln.interpolate(t_).coords[0])) @ np.array([d0[1], -d0[0]])
+        return -lt[2] - half < o < lt[1] - lt[2] + half
+
+      d_ = 0.0
+      while d_ < own.length and any(inside(own.interpolate(d_).coords[0], ln, lt) for ln, lt in others):
+        d_ += 0.5
+      trim_at[n, w] = d_
+    # where the way has a crossing (its outer edge; else a stop line) further out, within JUNCTION_REACH m, the junction's area starts there
     seq = nd if nd[0] == n else nd[::-1]
     length = sum(math.dist(xy(p_), xy(q_)) for p_, q_ in zip(seq, seq[1:]))
     run, prev = 0.0, xy(n)
     for m in seq[1:-1]:
       run += math.dist(prev, xy(m))
       prev = xy(m)
-      if run > JUNCTION_REACH or seq[-1] in junction and run > length / 2:  # (one nearer another junction is that one's)
+      if run > JUNCTION_REACH or seq[-1] in crossroads and run > length / 2:  # (one nearer another crossroads is that one's)
         break
       if nodes[m][2].get("highway") in ("crossing", "traffic_signals", "stop") and run > trim_at[n, w]:
-        trim_at[n, w] = run - (ZEBRA_W / 2 if nodes[m][2].get("highway") == "crossing" else 0.0)
+        trim_at[n, w] = run + (ZEBRA_W / 2 if nodes[m][2].get("highway") == "crossing" else 0.0)  # (the zebra in the junction)
         break
 
 feats = []
@@ -193,14 +216,15 @@ def dashed(line):
 
 
 ends = collections.defaultdict(list)  # junction node -> trimmed end points
-way_line = {}
+way_line, whole_line = {}, {}
 for w, (nd, t) in roads.items():
   line = whole = LineString([xy(n) for n in nd])
   full = line.length
   ta = trim_at.get((nd[0], w), 0.0) if nd[0] in junction else 0.0
   tb = trim_at.get((nd[-1], w), 0.0) if nd[-1] in junction else 0.0
-  k_ = min(1.0, (line.length - 1.0) / max(ta + tb, 1e-9))  # (a way all inside a junction keeps its last metre)
+  k_ = min(1.0, line.length / max(ta + tb, 1e-9))  # (a way all inside a junction isn't drawn)
   a, b = ta * k_, line.length - tb * k_
+  whole_line[w] = whole  # (a restriction's label goes on its from way, drawn or not)
   line = substring(line, a, b)
   if line.length < 0.5:
     continue
@@ -323,9 +347,9 @@ WORD = {"no_u_turn": "no U", "no_left_turn": "no ←", "no_right_turn": "no →"
         "only_left_turn": "only ←", "only_right_turn": "only →", "only_straight_on": "only ↑"}
 stack = collections.Counter()
 for m, t in rels:
-  if t.get("type") != "restriction" or m.get("from") not in way_line:
+  if t.get("type") != "restriction" or m.get("from") not in whole_line:
     continue
-  line, via = way_line[m["from"]], m.get("via")
+  line, via = whole_line[m["from"]], m.get("via")
   near_end = line.coords[-1] if np.hypot(*np.subtract(line.coords[-1], xy(via))) < np.hypot(*np.subtract(line.coords[0], xy(via))) else line.coords[0]
   stack[m["from"]] += 1
   p = np.add(near_end, 0)

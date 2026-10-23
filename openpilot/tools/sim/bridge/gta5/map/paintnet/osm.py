@@ -585,10 +585,15 @@ for cl, ports in clusters.items():
   tips = [len(A) for _, A in strips["gore"] if abs(A[0, 2] - P[2]) < 2 and
           min(np.linalg.norm(A[0, :2] - P[:2]), np.linalg.norm(A[-1, :2] - P[:2])) <= max(sections[s]["C"][:, 3].max() for s, _ in ports) / 2]
   dual = all(sections[s]["two_way"] for s, _ in top)
+  # a one-lane branch meeting its road at a junction's mouth (a free turn lane round the corner) follows its own lane
+  # and meets the road's node in one straight stretch, as mapped: eased in, its whole length would leave its lane
+  at_mouth = any(abs(J["z"] - P[2]) < 2 and J["hull"].distance(Point(P[:2])) <= ATTACH for J in junctions)
   for p in ports:
     port_node[p] = nd
     port_reach[p] = float(max(tips)) if tips and p not in top else None
     port_rate[p] = DUAL_TAPER if dual and p not in top and len({d for _, d in sections[p[0]]["order"]}) == 1 else TAPER
+    if at_mouth and p not in top and len(sections[p[0]]["order"]) == 1:
+      port_rate[p] = port_reach[p] = None
 
 
 def blend(C, e, q, share, reach=None, rate=TAPER):
@@ -612,7 +617,7 @@ def blend(C, e, q, share, reach=None, rate=TAPER):
 for s, S in enumerate(sections):
   moves = [np.linalg.norm(np.array(nodes[port_node[(s, e)]][:2]) - S["C"][-1 if e else 0, :2]) if (s, e) in port_node else 0 for e in (0, 1)]
   for e in (0, 1):
-    if (s, e) in port_node:
+    if (s, e) in port_node and port_rate[(s, e)] is not None:
       q = np.array(nodes[port_node[(s, e)]][:3])
       S["C"] = blend(S["C"], e, q, 0.5 if moves[1 - e] > ADJ else 1.0, port_reach[(s, e)], port_rate[(s, e)])  # the whole way when its other end stays
 
