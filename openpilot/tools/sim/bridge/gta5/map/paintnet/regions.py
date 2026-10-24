@@ -65,10 +65,8 @@ masked |= arrows.find((paint > 0) & ~masked, zz, x0, y1, RES)[0]
 wall_col = np.where(masked, 0, paint)
 
 # lengthwise lines drawn whole, on the surface whose height matches (a dashed line's gaps are walls too)
-for r in src.paint():
+for r in src.paint_near(x0 - 5, x1 + 5, y0 - 5, y1 + 5):
   P = np.array(r["pts"], float)
-  if not ((P[:, 0] >= x0 - 5) & (P[:, 0] <= x1 + 5) & (P[:, 1] >= y0 - 5) & (P[:, 1] <= y1 + 5)).any():
-    continue
   colour = 2 if r["colour"] == "yellow" else 1
   for (ax, ay, az), (bx, by, bz) in zip(P[:-1], P[1:]):
     n = max(2, int(math.hypot(bx - ax, by - ay) / (RES / 2)))
@@ -189,5 +187,6 @@ order = np.argsort(-cnt)
 remap = np.zeros(lab.max() + 1, np.int32)
 remap[u[order]] = np.arange(1, len(u) + 1)
 lab = remap[lab]
-np.savez_compressed(out, lab=lab, z=zz, wall=wall_col, cls=cls, offlane=offlane, x0=x0, y1=y1, res=RES)
+# (uncompressed: 345 MB on WSL's disk writes and reads in a fraction of the 1.5 s zlib takes)
+np.savez(out, lab=lab, z=zz, wall=wall_col, cls=cls, offlane=offlane, x0=x0, y1=y1, res=RES)
 print(f"{W}x{H} px, {int(free.sum())} free px, {len(u)} regions; over 2 m2: {int((cnt * RES * RES > 2).sum())}; over 20 m2: {int((cnt * RES * RES > 20).sum())}")

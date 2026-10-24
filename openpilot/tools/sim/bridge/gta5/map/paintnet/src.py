@@ -29,6 +29,12 @@ def paint():
   return records(PAINT)
 
 
+@functools.cache
+def paint_near(x0, x1, y0, y1):
+  """the paint lines with a point in the box, in paint()'s order, found once per process (shared: don't change them)."""
+  return tuple(r for r in paint() if any(x0 <= p[0] <= x1 and y0 <= p[1] <= y1 for p in r["pts"]))
+
+
 def features():
   return records(FEATS)
 
@@ -39,9 +45,11 @@ def paths():
 
 def fast_tiles(rp):
   """rp.read_tile reading each surface raster tile from an uncompressed copy in the cache, mapped rather than read
-  (decompressing a tile takes ~30 ms and most steps only read scattered pixels of it)."""
+  (decompressing a tile takes ~30 ms and most steps only read scattered pixels of it), once per process; and rp.Tiles
+  telling which tiles exist from one listing of their directory (a stat on /mnt/e takes ~2.4 ms)."""
   read_tile = rp.read_tile
 
+  @functools.cache
   def read(path):
     st = os.stat(path)
     c = CACHE / "tiles" / f"{pathlib.Path(path).stem}.{st.st_mtime_ns}.{st.st_size}"
@@ -58,4 +66,11 @@ def fast_tiles(rp):
     import numpy as np
     return tuple(np.asarray(np.load(c.with_suffix(s + ".npy"), mmap_mode="r")) for s in (".code", ".z"))
 
+  listing = functools.cache(lambda d: set(os.listdir(d)))
+
+  def load(self, tx, ty):
+    name = f"{tx}_{ty}.bin"
+    return read(str(self.d / name)) if name in listing(str(self.d)) else None
+
   rp.read_tile = read
+  rp.Tiles._load = load

@@ -97,10 +97,8 @@ def covered(S):
 
 x0, x1, y0, y1 = map(float, sys.argv[1:5])
 res = {}
-for r in scan.src.paint():
+for r in scan.src.paint_near(x0, x1, y0, y1):
   P = np.array(r["pts"], float)
-  if not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
-    continue
   d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(P[:, :2], axis=0), axis=1))]
   t = np.arange(0.1, d[-1], 0.25)
   if not len(t):

@@ -2,7 +2,7 @@
 interchange's 12 westbound motorway ones), and an arrow's shaft reads as a short lengthwise line.
 blobs.py on the interchange: arrows 3.4-5.7 m long, 1.6-2.9 m wide, 34-47% filled; other paint pieces that size are
 under 0.9 m wide or under 13% filled."""
-import math, sys
+import functools, math, sys
 import numpy as np
 import cv2
 from scipy import ndimage as ndi
@@ -57,6 +57,17 @@ def find(paint, zz, x0, y1, res):
         mask[l, y:y + h, x:x + w] |= ndi.binary_dilation(m, iterations=max(1, int(round(0.2 / res))))
         out.append((x0 + (x + ctr[0] + 0.5) * res, y1 - (y + ctr[1] + 0.5) * res, float(np.nanmean(zz[l, y:y + h, x:x + w][m])), ln / 2))
   return mask, out
+
+
+@functools.cache
+def box(x0, x1, y0, y1, res):
+  """load and find over a box, once per process (build.py does its box's before forking the steps): the codes, heights,
+  arrow mask and arrows, read-only (shared)."""
+  code, zz = load(x0, x1, y0, y1, res)
+  mask, found = find((code >> 3) > 0, zz, x0, y1, res)
+  for a in (code, zz, mask):
+    a.setflags(write=False)
+  return code, zz, mask, tuple(found)
 
 
 # an arrow found by its shape has no type: it takes the type whose average picture (from the listed arrows of the

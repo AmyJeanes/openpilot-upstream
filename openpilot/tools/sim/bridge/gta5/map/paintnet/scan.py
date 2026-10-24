@@ -47,10 +47,8 @@ for (ka, kb), l in links.items():
 
 # paint segments in the area, gridded
 segs = []
-for r in src.paint():
+for r in src.paint_near(x0 - REACH, x1 + REACH, y0 - REACH, y1 + REACH):
   P = np.array(r["pts"], float)
-  if not ((P[:, 0] >= x0 - REACH) & (P[:, 0] <= x1 + REACH) & (P[:, 1] >= y0 - REACH) & (P[:, 1] <= y1 + REACH)).any():
-    continue
   for k in range(len(P) - 1):
     segs.append((*P[k], *P[k + 1], r["id"], r["colour"] == "yellow", r["style"] == "dashed"))
 S = np.array(segs, float)

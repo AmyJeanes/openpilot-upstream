@@ -7,7 +7,7 @@ import hashlib, json, os, pathlib, re, runpy, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
 B = ["-346", "-9", "-1333", "-1046"]  # x0 x1 y0 y1: round the interchange, 50 m past the west junction's west arm
-O = "/mnt/e/gta5_audit/paintnet"
+O = os.path.expanduser("~/.cache/paintnet/pilot")  # the steps' own files, on WSL's disk (/mnt/e is slow to read and write)
 WEB = "/mnt/e/gta5_webmap"
 RP = "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"
 WEBMAP = "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap"
@@ -35,6 +35,7 @@ STEPS = [
   ("osmroute", "osm_route.py", B + [f"{WEB}/osm_ic.osm", "/home/amy/.cache/paintnet/valhalla", f"{WEB}/osm_route.geojson"],
    [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_route.geojson"], []),
 ]
+CV_THREADS = None
 STATE, LOGS = pathlib.Path(o(".build_state.json")), pathlib.Path(o("logs"))
 
 
@@ -70,10 +71,18 @@ def load():
   """what the steps share, loaded once before the first step runs."""
   t0 = time.time()
   import numpy, scipy.ndimage, cv2, rp, gframe, src
+  global CV_THREADS
+  CV_THREADS = cv2.getNumThreads()
+  cv2.setNumThreads(1)  # no OpenCV worker threads in the process that forks the steps (each step gets them back)
   src.fast_tiles(rp)
   for f in (src.paint, src.features, src.paths):
     f()
   import scan, arrows
+  x0, x1, y0, y1 = map(float, B)
+  for tx in range(int((x0 - rp.TILE) // rp.TILE), int((x1 + rp.TILE) // rp.TILE) + 1):  # the box's tiles and a ring round
+    for ty in range(int((y0 - rp.TILE) // rp.TILE), int((y1 + rp.TILE) // rp.TILE) + 1):
+      scan.T._get(tx, ty)
+  arrows.box(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)  # lanes, junctions and osm read arrows found over the box and 20 m round
   print(f"loaded shared data in {time.time() - t0:.1f} s", flush=True)
 
 
@@ -84,6 +93,8 @@ def run(name, script, args, prof):
     fd = os.open(LOGS / f"{name}.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     os.dup2(fd, 1); os.dup2(fd, 2)
     sys.argv = [str(HERE / script)] + args
+    import cv2
+    cv2.setNumThreads(CV_THREADS)
     if prof:
       import cProfile
       cProfile.runctx("runpy.run_path(p, run_name='__main__')", {"runpy": runpy, "p": sys.argv[0]}, {}, str(LOGS / f"{name}.prof"))

@@ -1,5 +1,5 @@
 """plotspot.py x0 x1 y0 y1 out.png [lane ids...]: the surface raster's paint and kerbs, paint line ids, and lane bands."""
-import json, sys
+import json, os, sys
 import numpy as np
 import cv2
 sys.path[:0] = ["/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"]
@@ -17,7 +17,7 @@ img[(c >> 3) == 1] = (230, 230, 230)
 img[(c >> 3) == 2] = (0, 200, 230)
 s = 1 / res
 P = lambda p: (int(round((p[0] - x0) * s)), int(round((y1 - p[1]) * s)))
-O = "/mnt/e/gta5_audit/paintnet"
+O = os.path.expanduser("~/.cache/paintnet/pilot")
 G = json.load(open(f"{O}/ic_groups.json")); L = json.load(open(f"{O}/ic_links.json"))
 want = set(sys.argv[6:])
 cols = [(0, 255, 0), (255, 0, 255), (0, 128, 255), (255, 255, 0), (255, 128, 0), (128, 255, 128)]

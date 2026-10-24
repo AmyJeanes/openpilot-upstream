@@ -237,9 +237,9 @@ for k, A in strips["gore"]:
   ends = [Point(A[0, :2]), Point(A[-1, :2])]
   wide = ends[int(A[-1, 3] > A[0, 3])]
   gore_at_j.append(any(J["hull"].distance(wide) <= ATTACH and abs(J["z"] - A[0, 2]) < 2 for J in junctions))
-gores = [(prep(band(A).buffer(0.3)), atj, A) for (k, A), atj in zip(strips["gore"], gore_at_j)]
+gores = [(prep(band(A).buffer(0.3)), atj, np.median(A[:, 2])) for (k, A), atj in zip(strips["gore"], gore_at_j)]
 # (a raised island in a median keeps the road one way: it is the median carried on, kerbed)
-centres = [(prep(band(A).buffer(0.3)), "median" if kind == "island" else kind, A) for kind in ("median", "twltl", "island") for k, A in strips[kind]]
+centres = [(prep(band(A).buffer(0.3)), "median" if kind == "island" else kind, np.median(A[:, 2])) for kind in ("median", "twltl", "island") for k, A in strips[kind]]
 live = [t for t in range(len(tracks)) if t not in narrow_tracks]
 S_xy = np.vstack([tracks[t]["X"][:, :2] for t in live])
 S_id = np.concatenate([np.stack([np.full(len(tracks[t]["X"]), t), np.arange(len(tracks[t]["X"]))], 1) for t in live])
@@ -249,11 +249,11 @@ tree = cKDTree(S_xy)
 def between(p, z):
   """what lies at p between two bands on this deck: ("gore", at a junction?), ("median"|"twltl",) or None."""
   pt = Point(p)
-  for g, atj, A in gores:
-    if abs(np.median(A[:, 2]) - z) < 2 and g.contains(pt):
+  for g, atj, zm in gores:
+    if abs(zm - z) < 2 and g.contains(pt):
       return ("gore", atj)
-  for g, kind, A in centres:
-    if abs(np.median(A[:, 2]) - z) < 2 and g.contains(pt):
+  for g, kind, zm in centres:
+    if abs(zm - z) < 2 and g.contains(pt):
       return (kind,)
   return None
 
@@ -468,8 +468,7 @@ for s in range(len(sections)):
 
 # --- lanes of each section in way order, and their tags
 arrow_list = [a for a in scan.src.features() if a["kind"] == "arrow" and scan.inbox(a["x"], a["y"], 10)]
-code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
-shapes = arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)[1]
+code_, zz_, _, shapes = arrows.box(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
 shapes = [s for s in shapes if all(math.hypot(s[0] - a["x"], s[1] - a["y"]) > 3.0 for a in arrow_list)]
 
 

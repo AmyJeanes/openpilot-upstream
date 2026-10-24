@@ -53,22 +53,30 @@ raw = {}
 for o in scan.src.paths():
   if o["t"] == "l":
     raw[((o["a"], o["i"]), (o["ta"], o["ti"]))] = o
-every = [(A, B) for (ka, kb, A, B) in scan.L]
+def segs(pairs):
+  """GTA link segments as arrays (start, along, length, mid height), those 1 m or longer."""
+  A = np.array([a[:3] for a, _ in pairs], float).reshape(-1, 3)
+  B = np.array([b[:3] for _, b in pairs], float).reshape(-1, 3)
+  ab = B[:, :2] - A[:, :2]
+  L = np.linalg.norm(ab, axis=1)
+  k = L >= 1
+  return A[k, :2], ab[k], L[k], ((A[:, 2] + B[:, 2]) / 2)[k]
+
+
+def near_segs(G, p, z, near):
+  """the segments of G on this deck (within 3 m) passing within near m of p, and their unit directions."""
+  A, ab, L, zm = G
+  t = np.clip(((p - A) * ab).sum(1) / L ** 2, 0, 1)
+  hit = (np.abs(zm - z) <= 3) & (np.linalg.norm(A + t[:, None] * ab - p, axis=1) <= near)
+  return ab[hit] / L[hit, None]
+
+
+every = segs([(A, B) for (ka, kb, A, B) in scan.L])
 
 
 def flows(p, d, z, near=FLOW_NEAR):
   """a GTA link on this deck runs past p within near m, along d either way within FLOW_ANG deg."""
-  for A, B in every:
-    if abs((A[2] + B[2]) / 2 - z) > 3:
-      continue
-    ab = B[:2] - A[:2]
-    L = np.linalg.norm(ab)
-    if L < 1:
-      continue
-    t = np.clip((p - A[:2]) @ ab / L ** 2, 0, 1)
-    if np.linalg.norm(A[:2] + t * ab - p) <= near and abs((ab / L) @ d) >= math.cos(math.radians(FLOW_ANG)):
-      return True
-  return False
+  return bool((np.abs(near_segs(every, p, z, near) @ d) >= math.cos(math.radians(FLOW_ANG))).any())
 
 
 for (ka, kb, A, B) in scan.L:
@@ -80,25 +88,13 @@ for (ka, kb, A, B) in scan.L:
     links.append((A, B))
   elif f[1] and not f[0]:
     links.append((B, A))
+one_way = segs(links)
 
 
 def link_votes(p, d, z, w):
   """+1 / -1 per one-way link on this deck passing within w/2 of p, running along d / against it."""
-  v = 0
-  for A, B in links:
-    if abs((A[2] + B[2]) / 2 - z) > 3:
-      continue
-    ab = B[:2] - A[:2]
-    L = np.linalg.norm(ab)
-    if L < 1:
-      continue
-    t = np.clip((p - A[:2]) @ ab / L ** 2, 0, 1)
-    if np.linalg.norm(A[:2] + t * ab - p) > w / 2:
-      continue
-    c = (ab / L) @ d
-    if abs(c) > 0.9:
-      v += 1 if c > 0 else -1
-  return v
+  c = near_segs(one_way, p, z, w / 2) @ d
+  return int((c > 0.9).sum() - (c < -0.9).sum())
 
 
 # zebra crossings: the game's crossing decals (their outlines); a strip lying mostly inside one is that crossing, its
@@ -255,16 +251,7 @@ def outline(A, paint, others=(), own=()):
 
 def near_link(p, z):
   """a GTA vehicle link on this deck within ACROSS_NEAR m of p, any way."""
-  for A, B in every:
-    if abs((A[2] + B[2]) / 2 - z) > 3:
-      continue
-    ab = B[:2] - A[:2]
-    L = np.linalg.norm(ab)
-    if L < 1:
-      continue
-    if np.linalg.norm(A[:2] + np.clip((p - A[:2]) @ ab / L ** 2, 0, 1) * ab - p) <= ACROSS_NEAR:
-      return True
-  return False
+  return len(near_segs(every, p, z, ACROSS_NEAR)) > 0
 
 
 def on_network(A, along, near=FLOW_NEAR):

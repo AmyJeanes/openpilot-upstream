@@ -1,10 +1,10 @@
 """where.py lat lon [r]: a map spot in game coordinates, and the pilot's lanes, gores and links within r m (default 15)."""
-import json, sys
+import json, os, sys
 import numpy as np
 sys.path.insert(0, "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap")
 import gframe
 
-O = "/mnt/e/gta5_audit/paintnet"
+O = os.path.expanduser("~/.cache/paintnet/pilot")
 lat, lon = float(sys.argv[1]), float(sys.argv[2])
 R = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 p = np.array([0.0, 0.0])

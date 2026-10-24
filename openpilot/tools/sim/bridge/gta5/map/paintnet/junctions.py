@@ -145,8 +145,7 @@ for a in listed:
       break
   else:
     marks.append([a["x"], a["y"], a["z"], a["heading"], set(a["arrow"].split(";"))])
-code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
-for x, y, z, _ in arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)[1]:
+for x, y, z, _ in arrows.box(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)[3]:
   if all(np.hypot(x - m[0], y - m[1]) > 3.0 for m in marks):
     marks.append([x, y, z, None, None])
 TURN_ORDER = ["left", "through", "right"]

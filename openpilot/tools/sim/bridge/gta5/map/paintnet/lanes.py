@@ -22,11 +22,9 @@ SHOULDER_MAX = 4.0  # m: line to road's edge, a shoulder below it, a lane from i
 TWIN, TWIN_SHARE = 0.35, 0.8
 x0, x1, y0, y1 = scan.x0, scan.x1, scan.y0, scan.y1
 lines = {}
-for r in scan.src.paint():
-  P = np.array(r["pts"], float)
-  if r["len"] < MINLEN or not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
-    continue
-  lines[r["id"]] = r
+for r in scan.src.paint_near(x0, x1, y0, y1):
+  if r["len"] >= MINLEN:
+    lines[r["id"]] = r
 # lines the game files hold but the game never draws (visible.py, against the captured imagery) aren't lines; a pale
 # deck's panel seams and gutter edges (visible.py's "edge") aren't paint either but are where its lanes divide
 vis = next((a[10:] for a in sys.argv if a.startswith("--visible=")), None)
@@ -39,14 +37,12 @@ if vis:
   print(len(hidden), "lines not drawn in the game dropped")
 # a piece shorter than MINLEN carrying on the end of a line (lines are stored in pieces: a 5.9 m piece bridges two
 # motorway edge lines at a merge) is part of that line
-ends = [(np.array(r["pts"][0][:2]), np.array(r["pts"][-1][:2])) for r in lines.values()]
-for r in scan.src.paint():
+ends = np.array([[r["pts"][0][:2], r["pts"][-1][:2]] for r in lines.values()], float).reshape(-1, 2)
+for r in scan.src.paint_near(x0, x1, y0, y1):
   if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or r["id"] in hidden | edge:
     continue
   P = np.array(r["pts"], float)
-  if not ((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any():
-    continue
-  if any(min(np.linalg.norm(P[k, :2] - e) for e in pair) < PIECE_GAP for pair in ends for k in (0, -1)):
+  if len(ends) and min(np.linalg.norm(ends - P[k, :2], axis=1).min() for k in (0, -1)) < PIECE_GAP:
     lines[r["id"]] = r
 # a dashed line stored dash by dash (the motorway west of the interchange: 3.9 m dashes 8 m apart): DASH_MIN or more
 # short pieces of one colour in line with each other, each within DASH_GAP m of the next, are one dashed line (named
@@ -56,13 +52,12 @@ for r in scan.src.paint():
 DASH_SAME = 0.1  # share a dash's length may differ from the others'
 DASH_GAP, DASH_LAT, DASH_BEND, DASH_ANG, DASH_MIN = 12.0, 0.3, 0.1, 20.0, 3  # (DASH_BEND: m more sideways per m apart, round a ramp's curve)
 short = []
-for r in scan.src.paint():
+for r in scan.src.paint_near(x0 - 20, x1 + 20, y0 - 20, y1 + 20):
   if r["len"] >= MINLEN or r["len"] < 1.0 or r["id"] in lines or r["id"] in hidden | edge:
     continue
   P = np.array(r["pts"], float)
-  if ((P[:, 0] >= x0 - 20) & (P[:, 0] <= x1 + 20) & (P[:, 1] >= y0 - 20) & (P[:, 1] <= y1 + 20)).any():
-    d = P[-1, :2] - P[0, :2]
-    short.append((r, P, d / max(np.linalg.norm(d), 1e-9)))
+  d = P[-1, :2] - P[0, :2]
+  short.append((r, P, d / max(np.linalg.norm(d), 1e-9)))
 nshort = len(short)
 # (a dashed line's own ends, as pieces: dashes carrying on in line past where it stops are part of it)
 for r in list(lines.values()):
@@ -139,12 +134,10 @@ print(len(dash_of), "dashes joined into", len(set(dash_of.values())), "dashed li
 # EDGE_LAT m of it sideways, carries it on, across the gap too
 EDGE_GAP, EDGE_LAT, EDGE_DZ, EDGE_BACK = 13.0, 0.5, 1.0, 10.0
 pool = {}
-for r in scan.src.paint():
-  P = np.array(r["pts"], float)
+for r in scan.src.paint_near(x0 - 20, x1 + 20, y0 - 20, y1 + 20):
   if (r["len"] < MINLEN and r["colour"] == "white" and r.get("src") == "surface" and r["id"] not in lines
-      and r["id"] not in dash_of and not V.get(str(r["id"]), {}).get("drawn")
-      and ((P[:, 0] >= x0 - 20) & (P[:, 0] <= x1 + 20) & (P[:, 1] >= y0 - 20) & (P[:, 1] <= y1 + 20)).any()):
-    pool[r["id"]] = P
+      and r["id"] not in dash_of and not V.get(str(r["id"]), {}).get("drawn")):
+    pool[r["id"]] = np.array(r["pts"], float)
 carried = 0
 for lid in sorted(edge & set(lines)):
   L = np.array(lines[lid]["pts"], float)
@@ -282,9 +275,8 @@ RL_ALONG, RL_MIN, RL_MAX, RL_SOLID = 1.5, 0.08, 0.8, 0.9
 marks = scan.src.features()
 marks = [[f["x"], f["y"], f["z"], max(f.get("len", 0), f.get("wid", 0)) / 2 + 0.5] for f in marks
          if f["kind"] != "crossing" and scan.inbox(f["x"], f["y"], 20)]
-code_, zz_ = arrows.load(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
+code_, zz_, shape_, found = arrows.box(x0 - 20, x1 + 20, y0 - 20, y1 + 20, 0.1)
 zk_ = np.where(np.isnan(zz_), np.inf, zz_)
-shape_, found = arrows.find((code_ >> 3) > 0, zz_, x0 - 20, y1 + 20, 0.1)
 
 
 def arrow_at(X, Y, z):
@@ -498,6 +490,7 @@ def heading(A):
 
 
 joined = True
+heads = [heading(r[1]) for r in runs]
 while joined:
   joined = False
   for i in range(len(runs)):
@@ -505,12 +498,13 @@ while joined:
       if i == j or runs[i] is None or runs[j] is None:
         continue
       (ka, A, ida), (kb, B, idb) = runs[i], runs[j]
-      if heading(A) @ heading(B) < 0:
+      hA = heads[i]
+      if hA @ heads[j] < 0:
         B, idb = B[::-1], idb[::-1]
       shared = sorted((x for x in (ida[0] & idb[0]) | (ida[1] & idb[1]) if x != "e"), key=str)  # sorted: sets of str vary by run
       gap = B[0, :2] - A[-1, :2]
-      along = gap @ heading(A)
-      if not shared or not 0 < along <= JOIN or abs(gap @ np.array([heading(A)[1], -heading(A)[0]])) > A[-1, 3] / 4:
+      along = gap @ hA
+      if not shared or not 0 < along <= JOIN or abs(gap @ np.array([hA[1], -hA[0]])) > A[-1, 3] / 4:
         continue
       # a break is in a line: where the other side goes from the road's edge to a line it's another space (the sliver
       # between a crossing's line and the kerb rounding its corner, then the crossing)
@@ -530,6 +524,7 @@ while joined:
       fill = A[-1] + (B[0] - A[-1]) * (np.arange(1, k)[:, None] / k)
       runs[i] = [ka, np.vstack([A, fill, B]), (ida[0] | idb[0], ida[1] | idb[1])]
       runs[j] = None
+      heads[i] = heading(runs[i][1])
       joined = True
 runs = [r for r in runs if r is not None]
 
@@ -543,9 +538,12 @@ def inside(A, B):
 
 
 keep_run = [True] * len(runs)
+lo_, hi_ = [A[:, :2].min(0) for _, A, _ in runs], [A[:, :2].max(0) for _, A, _ in runs]
+half_ = [A[:, 3].max() / 2 for _, A, _ in runs]
+near_ = lambda i, j: (lo_[i] <= hi_[j] + half_[j]).all() and (lo_[j] <= hi_[i] + half_[j]).all()  # A's box reaches B's band
 for i, (ki, A, _) in enumerate(runs):
   for j, (kj, B, _) in enumerate(runs):
-    if i != j and keep_run[j] and len(B) > len(A) and inside(A, B) >= 0.8:
+    if i != j and keep_run[j] and len(B) > len(A) and near_(i, j) and inside(A, B) >= 0.8:
       keep_run[i] = False
       break
 runs = [r for r, k in zip(runs, keep_run) if k]
