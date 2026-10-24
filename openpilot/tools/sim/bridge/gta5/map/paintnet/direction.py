@@ -14,7 +14,7 @@ is no longer than a road is wide (CROSSING_MAX);
 carried on to that edge, its area cut to the road's surface so its ends follow the kerbs). What its lines bound
 against the road's edge is a kerb corner, not a shoulder: dropped.
 Zebra crossings are where the game's crossing decals are (a strip mostly inside one), bars and all, and take the
-decals' outline.
+decals' outline; the strips between its bars sharing a decal are one crossing.
 Centre spaces: yellow on both sides is the space between opposing traffic, not a lane for either way (US markings):
 a painted median (solid both sides, often opening into back-to-back left-turn bays) or, with a dashed yellow on a side,
 a two-way left-turn lane. Marked "median" / "twltl", given no direction.
@@ -109,13 +109,13 @@ ZEBRA_SHARE = 0.5
 
 
 def zebra(A):
-  """the decals a strip lies mostly inside, or []."""
+  """the decals (indices in zebras) a strip lies mostly inside, or []."""
   A = np.asarray(A)
   inside, hit = np.zeros(len(A), bool), []
-  for poly, z in zebras:
+  for k, (poly, z) in enumerate(zebras):
     m = np.array([abs(p[2] - z) < 2 and cv2.pointPolygonTest(poly, (float(p[0]), float(p[1])), False) >= 0 for p in A])
     if m.any():
-      hit.append(poly)
+      hit.append(k)
     inside |= m
   return hit if inside.mean() >= ZEBRA_SHARE else []
 
@@ -268,12 +268,38 @@ def on_network(A, along, near=FLOW_NEAR):
   return np.mean([flows(A[k, :2], d[k], A[k, 2], near) if along else near_link(A[k, :2], A[k, 2]) for k in ks]) >= 0.5
 
 
+# a zebra holds a strip between each pair of its bars: the strips sharing a decal are one crossing
+hits = [zebra(r["pts"]) if r["kind"] in ("lane", "gore") else [] for r in lanes]
+zp = list(range(len(zebras)))
+
+
+def zroot(k):
+  while zp[k] != k:
+    zp[k] = zp[zp[k]]
+    k = zp[k]
+  return k
+
+
+for h in hits:
+  for k in h[1:]:
+    zp[zroot(k)] = zroot(h[0])
+zgroup = collections.defaultdict(list)  # a zebra's root decal -> its strips (lane indices)
+for i, h in enumerate(hits):
+  if h:
+    zgroup[zroot(h[0])].append(i)
+
 out, stats = [], collections.Counter()
-for r in lanes:
-  polys = zebra(r["pts"]) if r["kind"] in ("lane", "gore") else []
-  if polys:
+for i, r in enumerate(lanes):
+  if hits[i]:
+    grp = zgroup[zroot(hits[i][0])]
+    if i != grp[0]:
+      stats["zebra crossing's other strips"] += 1
+      continue
+    polys = [zebras[k][0] for k in sorted({k for g in grp for k in hits[g]})]
     pts = zebra_strip(r["pts"], polys)  # (the decals reach the kerbs)
-    out.append({**r, "kind": "crossing", "zebra": True, "pts": pts, "paint": np.vstack(polys).astype(float), "decals": polys}); stats["zebra crossing"] += 1
+    sides = {f"{s}_all": sorted({l for g in grp for l in lanes[g].get(f"{s}_all", [lanes[g][s]])}, key=str) for s in ("left", "right")}
+    out.append({**r, **sides, "kind": "crossing", "zebra": True, "pts": pts, "paint": np.vstack(polys).astype(float), "decals": polys})
+    stats["zebra crossing"] += 1
     continue
   if r["kind"] != "lane":  # gores pass through
     out.append(r)

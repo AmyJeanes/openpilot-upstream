@@ -8,7 +8,8 @@ another (a free turn lane round an island bypasses it): the line across a lane's
 (its stop line, or where it starts beyond the junction), so an arm with no crossing still bounds the box. The box is
 the road round its strips on its deck that no other lane, gore, median or shoulder covers (they and the kerbs wall it
 in: an arm's lanes end at its mouth, a slip road's lanes keep its own crossing out), within the hull of the strips and
-the mouths. Its mouths must face two ways at least (lanes heading more than CROSS deg apart, either way along): a
+the mouths (gores, medians and the like lying mostly within its strips' hull are its own and don't wall it: the spaces
+between its guide lines read as them); junctions on one deck whose boxes overlap are one. Its mouths must face two ways at least (lanes heading more than CROSS deg apart, either way along): a
 crossing on a road with no other road meeting it is not a junction. Lanes lying mostly inside it are the junction's own (guide lines and turn paint through it, not lanes).
 Each lane arriving at a mouth gets its turns from its arrows: the listed road arrow in its band, heading its way, nearest
 the junction within ARROW_BACK m (along it and the lane it carries straight on from; not back across a bay's opening:
@@ -195,17 +196,21 @@ def deck_near(A, seed, z):
 
 
 def junction(mem):
-  """the deck's height, its strips' union, and the lanes on its deck: (z, seed, on_deck, own) for strips mem."""
+  """the deck's height, its strips' union, the lanes on its deck, and the lanes and other strips (gores, medians...) that
+  are its own, lying mostly within its strips' hull (spaces between guide lines read as them): (z, seed, on_deck, own,
+  own_dir) for strips mem."""
   z = float(np.median(np.vstack([strips[i][1] for i in mem])[:, 2]))
   seed = unary_union([strips[i][2] for i in mem])
   hull0 = seed.convex_hull
   on_deck = [i for i, A in enumerate(LA) if deck_near(A, seed, z)]
-  own = {i for i in on_deck if np.mean([hull0.contains(Point(p)) for p in LA[i][:, :2]]) >= INSIDE}
-  return z, seed, on_deck, own
+  inside_ = lambda A: np.mean([hull0.contains(Point(p)) for p in A[:, :2]]) >= INSIDE
+  own = {i for i in on_deck if inside_(LA[i])}
+  own_dir = {k for k, (A, _) in enumerate(walls_dir) if abs(np.median(A[:, 2]) - z) < 2 and inside_(A)}
+  return z, seed, on_deck, own, own_dir
 
 
-def walls_of(z, on_deck, own):
-  return [band(LA[i], STOPS.get(i)) for i in on_deck if i not in own] + [band(A, st) for A, st in walls_dir if abs(np.median(A[:, 2]) - z) < 2]
+def walls_of(z, on_deck, own, own_dir):
+  return [band(LA[i], STOPS.get(i)) for i in on_deck if i not in own] +       [band(A, st) for k, (A, st) in enumerate(walls_dir) if abs(np.median(A[:, 2]) - z) < 2 and k not in own_dir]
 
 
 deg = lambda v: float(np.degrees(np.arctan2(v[1], v[0])))
@@ -318,16 +323,14 @@ def paths(mouths, guides):
   return res, unreached, [[round(o, 1), arriving[k], leaving[k]] for k, o in enumerate(out)]
 
 
-out, taken = [], set()
-for s0 in range(len(strips)):
-  if s0 in taken:
-    continue
-  mem = [s0]
-  region = None
-  for _ in range(4):  # strips on the same unwalled road join, their lanes stop walling it, until nothing changes
-    z, seed, on_deck, own = junction(mem)
+def grow(s0, taken):
+  """strip s0's junction's strips (on the same unwalled road, their lanes no longer walling it, until nothing changes)
+  and the road round them."""
+  mem, region = [s0], None
+  for _ in range(4):
+    z, seed, on_deck, own, own_dir = junction(mem)
     area = rect(*seed.bounds).buffer(REACH, join_style=2)
-    ring = cut(area, np.vstack([strips[i][1] for i in mem]), walls_of(z, on_deck, own), seed)
+    ring = cut(area, np.vstack([strips[i][1] for i in mem]), walls_of(z, on_deck, own, own_dir), seed)
     if ring is None:
       break
     region = Polygon(ring).buffer(0)
@@ -336,38 +339,77 @@ for s0 in range(len(strips)):
     if set(grown) <= set(mem):
       break
     mem = sorted(set(mem) | set(grown))
-  taken |= set(mem)
-  z, seed, on_deck, own = junction(mem)
-  mem = [strips[i] for i in mem]
+  return mem, region
+
+
+def build(mem_i, region):
+  """the junction of strips mem_i (indices): its box, mouths and paths, or None (its mouths don't face two ways)."""
+  z, seed, on_deck, own, own_dir = junction(mem_i)
+  mem = [strips[i] for i in mem_i]
   mouths, corners, heads = [], [], []
+  dist = lambda p: (region if region is not None else seed).distance(Point(p))
   for i in on_deck:
     if i in own:
       continue
     A = LA[i]
     d, n = frame(A)
     for k, which in ((-1, "end"), (0, "start")):
-      # (a lane leaving may also be carried on or merged into: a free turn lane round the box joining it)
-      if at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or (region if region is not None else seed).distance(Point(A[k, :2])) > ATTACH:
+      # (a lane leaving may also be carried on or merged into: a free turn lane round the box joining it; a lane meets it
+      # at its nearer end: a stub between a crossing and its stop line has both within ATTACH)
+      if at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or dist(A[k, :2]) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
         continue
       mouths.append([i, which, turns_of(i) if which == "end" else None])
       heads.append(np.arctan2(d[k, 1], d[k, 0]) % np.pi)
       corners += [A[k, :2] - n[k] * A[k, 3] / 2, A[k, :2] + n[k] * A[k, 3] / 2]
   gap = lambda a, b: min(abs(a - b), np.pi - abs(a - b))
   if not any(gap(a, b) > np.radians(CROSS) for a in heads for b in heads):
-    continue
+    return None
   hull = unary_union([seed.convex_hull, MultiPoint(corners).convex_hull] if corners else [seed]).convex_hull
   pts = np.vstack([A for _, A, _ in mem] + [LA[i][[0, -1]] for i, _, _ in mouths])
-  ring = cut(hull, pts, walls_of(z, on_deck, own), seed)
+  ring = cut(hull, pts, walls_of(z, on_deck, own, own_dir), seed)
   if ring is None:
-    continue
+    return None
   box = Polygon(ring).buffer(0)
   inside = [i for i in on_deck if np.mean([box.contains(Point(p)) for p in LA[i][:, :2]]) >= INSIDE]
   ps, unreached, arms = paths(mouths, [i for i in inside if length(LA[i]) >= GUIDE_MIN])
-  out.append({"id": len(out), "z": round(z, 2), "ring": ring, "strips": [k for k, _, _ in mem], "mouths": mouths, "inside": inside,
-              "paths": ps, "unreached": unreached})
+  return {"z": round(z, 2), "ring": ring, "strips": [k for k, _, _ in mem], "mouths": mouths, "inside": inside, "paths": ps,
+          "unreached": unreached, "_box": box, "_arms": arms}
+
+
+found, taken = [], set()
+for s0 in range(len(strips)):
+  if s0 not in taken:
+    mem, region = grow(s0, taken)
+    taken |= set(mem)
+    found.append((mem, region, build(mem, region)))
+# junctions on one deck whose boxes overlap are one: grown apart from strips the spaces between its guide lines kept
+# apart (each first taking the strips it reached), merged and built again
+MERGE = 0.1  # share of the smaller box
+merged = True
+while merged:
+  merged = False
+  live = [f for f in found if f[2]]
+  for a in range(len(live)):
+    for b in range(a + 1, len(live)):
+      (ma, ra, ja), (mb, rb, jb) = live[a], live[b]
+      if abs(ja["z"] - jb["z"]) < 2 and ja["_box"].intersection(jb["_box"]).area >= MERGE * min(ja["_box"].area, jb["_box"].area):
+        mem = sorted(set(ma) | set(mb))
+        region = unary_union([r for r in (ra, rb) if r is not None]) if ra is not None or rb is not None else None
+        found = [f for f in found if f is not live[a] and f is not live[b]] + [(mem, region, build(mem, region))]
+        merged = True
+        break
+    if merged:
+      break
+out = []
+for mem, _, j in sorted(found, key=lambda f: min(f[0])):
+  if not j:
+    continue
+  box, arms = j.pop("_box"), j.pop("_arms")
+  out.append({"id": len(out), **j})
+  mouths, ps, unreached, inside = j["mouths"], j["paths"], j["unreached"], j["inside"]
   print(f"junction {len(out) - 1}: {len(mem)} strips, {len(mouths)} mouths, {box.area:.0f} m2, lanes inside {inside}")
   for o, arr, lv in arms:
-    print(f"  arm leaving {o:6.1f} deg: arriving {arr} ({', '.join(str(tu) for i in arr for j, w, tu in mouths if j == i and w == 'end')}), leaving {lv}")
+    print(f"  arm leaving {o:6.1f} deg: arriving {arr} ({', '.join(str(tu) for i in arr for j_, w, tu in mouths if j_ == i and w == 'end')}), leaving {lv}")
   for p in ps:
     print(f"    {p['from']:3d} -> {p['to']}  {p['turn']:8s} {'guide ' + str(p['guide']) if p['guide'] is not None else ''} {' '.join(p['flags'])}")
   if unreached:
