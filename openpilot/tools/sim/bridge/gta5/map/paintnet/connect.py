@@ -59,14 +59,19 @@ for i, A in enumerate(P):
   da, na = frame(A, len(A) - 1)
   ea = A[-1, :2]
   la, ra = ea - na * A[-1, 3] / 2, ea + na * A[-1, 3] / 2  # left and right edge points at its end
+  # its grade over its last 10 m, carried across the break (a ramp's deck climbing 12% rises 2 m over a 17 m break)
+  k0 = max(len(A) - 11, 0)
+  grade = (A[-1, 2] - A[k0, 2]) / max(np.linalg.norm(A[-1, :2] - A[k0, :2]), 1e-9)
   for j, B in enumerate(P):
-    if j == i or not ok[j] or abs(A[-1, 2] - B[0, 2]) > 1.5:
+    if j == i or not ok[j]:
+      continue
+    eb = B[0, :2]
+    gap = (eb - ea) @ da
+    if abs(A[-1, 2] + grade * max(gap, 0.0) - B[0, 2]) > 1.5:
       continue
     db, nb = frame(B, 0)
     if da @ db < math.cos(math.radians(HEAD)):
       continue
-    eb = B[0, :2]
-    gap = (eb - ea) @ da
     if not -SEAM <= gap <= JOIN or abs(gap) < 1e-9:
       continue
     lb, rb = eb - nb * B[0, 3] / 2, eb + nb * B[0, 3] / 2
