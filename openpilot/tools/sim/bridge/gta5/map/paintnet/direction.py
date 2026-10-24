@@ -9,7 +9,8 @@ Traffic: a lane must run alongside a GTA vehicle link (any direction) on its dec
 deg, over at least half its samples; strips between a stop line and a crossing, or across a junction, run across
 every link and are marked "not_traffic".
 Crossings: a strip between a crossing's two border lines spans the road, so the surface ends just past both its ends
-(within STRIP_END m; measured on the interchange: crossing strips 1.7-2.4 m, every lane 11 m or more at one end);
+(within STRIP_END m; measured on the interchange: crossing strips 1.7-2.4 m, every lane 11 m or more at one end) and
+is no longer than a road is wide (CROSSING_MAX);
 carried on to that edge, its area cut to the road's surface so its ends follow the kerbs). What its lines bound
 against the road's edge is a kerb corner, not a shoulder: dropped.
 Zebra crossings are where the game's crossing decals are (a strip mostly inside one), bars and all, and take the
@@ -31,6 +32,9 @@ import scan
 
 SHOULDER = 4.0
 STRIP_END = 5.0
+# m: a crossing spans its road, so it's no longer than a road is wide (crossing strips measured 4-30 m); a lane between
+# a line and the kerb can end against kerbs at both ends too (a loop ramp's edge lane: 315 m; lanes under a deck: 55, 65)
+CROSSING_MAX = 40.0
 PAINT_PAST = 0.5  # m a crossing reaches past its own paint's end (GTA paints a crossing to the gutter)
 # stop lines and crossings' lines are 0.43-0.52 m wide, lane lines 0.10-0.31; the east junction's gores end 0.05 and
 # 0.66 m past the middle of their crossing's line
@@ -286,7 +290,7 @@ for r in lanes:
     continue
   d = np.gradient(A[:, :2], axis=0)
   d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
-  if len(A) >= 3 and max(end_reach(A)) <= STRIP_END:
+  if len(A) >= 3 and max(end_reach(A)) <= STRIP_END and np.linalg.norm(np.diff(A[:, :2], axis=0), axis=1).sum() <= CROSSING_MAX:
     ids = [i for i in r.get("left_all", [r["left"]]) + r.get("right_all", [r["right"]]) if i in line_xy]
     paint_xy = np.vstack([line_xy[i] for i in ids])
     out.append({**r, "kind": "crossing", "pts": to_kerb(A, paint_xy), "paint": paint_xy}); stats["crossing"] += 1
