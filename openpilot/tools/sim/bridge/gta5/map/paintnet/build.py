@@ -17,7 +17,8 @@ o = lambda n: f"{O}/{n}"
 STEPS = [
   ("area", "area.py", B + [f"{WEB}/pilot_area.geojson", f"{WEB}/checked_area.geojson"] + sum(CHECKED, []), [],
    [f"{WEB}/pilot_area.geojson", f"{WEB}/checked_area.geojson"], []),
-  ("visible", "visible.py", B + [o("ic_visible.json")], [], [o("ic_visible.json")], ["/mnt/e/gta5_webmap/sat.pmtiles", "/mnt/e/gta5_webmap/under.pmtiles"]),
+  ("visible", "visible.py", B + [o("ic_visible.json")], [], [o("ic_visible.json")], ["/mnt/e/gta5_webmap/sat.pmtiles", "/mnt/e/gta5_webmap/under.pmtiles",
+   f"{WEB}/under_bands/bands.json"] + sorted(str(p) for p in pathlib.Path(f"{WEB}/under_bands").glob("*.pmtiles"))),
   ("lanes", "lanes.py", B + [o("ic_lanes.json"), "--hatch=0.1", f"--visible={o('ic_visible.json')}"], [o("ic_visible.json")], [o("ic_lanes.json")], []),
   ("direction", "direction.py", B + [o("ic_lanes.json"), o("ic_dir.json")], [o("ic_lanes.json")], [o("ic_dir.json")], []),
   ("groups", "groups.py", B + [o("ic_dir.json"), o("ic_groups.json")], [o("ic_dir.json")], [o("ic_groups.json")], []),

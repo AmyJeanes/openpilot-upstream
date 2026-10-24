@@ -3,11 +3,12 @@ in the files are never drawn in the game (the top street's wide westbound dashes
 split real lanes.
 
 Per line: along its painted stretches (where the surface raster has paint under it; all along if hardly any), the imagery's brightness on the
-line against the plain road beside it (the brighter side where both are road, just clear of the line). Lines under a deck read the under-deck imagery;
+line against the plain road beside it (the brighter side where both are road, just clear of the line). Lines under a deck read the under-deck imagery
+(from the band holding each point's height, where under_bands/ has been built);
 where no shot covers them they are unknown (see drawn). Out: {id: {"contrast": median of line minus beside, "on": the
 line's own median (0-255 grey), "n": samples, "src": "sat"/"under", "colour", "drawn": true/false/null (unknown), "edge": not paint but a pale deck's panel seam or
 gutter edge (see SURFACE_CONTRAST)}}."""
-import functools, json, math, sys
+import functools, json, math, os, sys
 import numpy as np
 import cv2
 from pmtiles.reader import MmapSource
@@ -17,6 +18,7 @@ import gframe
 import scan
 
 Z = 21
+BANDS_JSON = "/mnt/e/gta5_webmap/under_bands/bands.json"
 
 
 class Reader:
@@ -39,6 +41,21 @@ class Reader:
 
 
 SRC = {"sat": Reader("/mnt/e/gta5_webmap/sat.pmtiles"), "under": Reader("/mnt/e/gta5_webmap/under.pmtiles")}
+# the under-deck imagery by height (undertiles.py --band): under.pmtiles shows the lowest level of a stack, so paint on a
+# middle level is read from the band holding its own height (unknown where no shot shows that level)
+BANDS = json.load(open(BANDS_JSON)) if os.path.exists(BANDS_JSON) else []
+for b in BANDS:
+  SRC[f"z{b['lo']}"] = Reader(f"/mnt/e/gta5_webmap/{b['file']}")
+
+
+def under_grey(x, y, z):
+  """the under-deck imagery's grey at points, each from the band holding its height (or under.pmtiles without bands)."""
+  keys = np.array([next((f"z{b['lo']}" for b in BANDS if b["lo"] <= h < b["hi"]), "none") for h in z]) if BANDS else np.full(len(x), "under")
+  out = np.full(len(x), np.nan)
+  for k in set(keys.tolist()) - {"none"}:
+    m = keys == k
+    out[m] = grey(k, x[m], y[m])
+  return out
 cache = {}
 
 
@@ -116,13 +133,14 @@ for r in scan.src.paint_near(x0, x1, y0, y1):
   # in the open the satellite imagery shows it; under a deck only the under-deck shots can (the satellite shows the
   # deck), and with none there it is unknown
   src = "under" if cov.mean() > 0.5 else "sat"
-  on = grey(src, S[:, 0], S[:, 1])
+  look = (lambda X, Y: under_grey(X, Y, S[:, 2])) if src == "under" else (lambda X, Y: grey("sat", X, Y))
+  on = look(S[:, 0], S[:, 1])
   # beside it: plain road only (not another line, such as a double line's other half, and not a kerb), the brighter
   # side where both are: a line must stand out from the road on both sides, and road stains are dark
   sides = []
   for k in (1, -1):
     X, Y = S[:, 0] + nrm[:, 0] * off * k, S[:, 1] + nrm[:, 1] * off * k
-    g = grey(src, X, Y)
+    g = look(X, Y)
     plain = scan.T.sample(X, Y, S[:, 2], zwin=0.6)[0] == 1
     sides.append(np.where(plain, g, np.nan))
   side = np.nanmax(np.stack(sides), 0)
