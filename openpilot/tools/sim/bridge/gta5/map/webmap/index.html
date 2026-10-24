@@ -209,10 +209,26 @@ for (const s of [zlo, zhi]) s.oninput = () => {
   document.querySelector("input[name=lvl][value=band]").checked = true;
   setLevel("band");
 };
+// under-deck imagery split by height (undertiles.py --band, listed in under_bands/bands.json): in the height band,
+// the bands meeting it stand in for the lowest-level imagery, so a middle level's own road shows
+let bands = [];
+async function loadBands() {
+  try { bands = await (await fetch(base + "under_bands/bands.json?t=" + Date.now())).json(); } catch (e) { bands = []; }
+  for (const b of [...bands].sort((p, q) => q.lo - p.lo)) {  // (the lower bands added last: drawn over the higher)
+    map.addSource("uband" + b.lo, { type: "raster", url: "pmtiles://" + base + b.file, tileSize: 256 });
+    map.addLayer({ id: "uband" + b.lo, type: "raster", source: "uband" + b.lo, paint: { "raster-resampling": "linear" },
+                   layout: { visibility: "none" } }, "under-edge");
+  }
+  showUnder();
+}
 function showUnder() {
   const lvl = document.querySelector("input[name=lvl]:checked").value;
-  const on = view === "hybrid" && (lvl === "under" || lvl === "band");
+  const banded = lvl === "band" && bands.length > 0;
+  const on = view === "hybrid" && (lvl === "under" || lvl === "band" && !banded);
   for (const id of ["under", "under-edge"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  const a = Math.min(+zlo.value, +zhi.value), z = Math.max(+zlo.value, +zhi.value);
+  for (const b of bands)
+    map.setLayoutProperty("uband" + b.lo, "visibility", view === "hybrid" && banded && b.lo < z && b.hi > a ? "visible" : "none");
 }
 document.querySelectorAll("input[name=lvl]").forEach(r => r.onchange = () => setLevel(r.value));
 const checkerOn = () => document.getElementById("checker").checked;
@@ -339,6 +355,7 @@ map.on("click", e => {
 map.on("load", async () => {
   setView(view);
   setLevel(document.querySelector("input[name=lvl]:checked").value);
+  loadBands();
   const h = await new pmtiles.PMTiles(SAT).getHeader();
   if (!location.hash) {
     map.jumpTo({ center: [h.centerLon, h.centerLat], zoom: 17 });

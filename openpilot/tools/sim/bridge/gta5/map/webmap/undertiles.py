@@ -1,5 +1,7 @@
 """Under-deck imagery for the map's "beneath decks" view: every passing under-deck shot (ortho_depth.py under) cut to
 what the top imagery can't show, as transparent WebP tiles z22..zmin over sat.pmtiles, plus their outline.
+With --band, only pixels whose own height lies in [LO, HI) (the map's height band shows a middle level of a stack,
+which the default's lowest-over-higher hides); with --box, only shots meeting that box.
 
 A shot's pixel is kept where its own height is below the top-level height tile's (depth/) by more than --dz m (the deck,
 its parapets and anything else over the camera hide it from above) and it is on or beside road (near_road: no buildings'
@@ -7,6 +9,7 @@ interiors). Lower levels are drawn over higher ones, so the view
 shows the lowest level everywhere (the ground beneath a stack of decks, not the road between two of them). The albedo matches the top tiles' exactly, so no colour matching.
 
   undertiles.py <out dir> [--shots <tiles dir> ...] [--quality 70] [--zmin 10] [--dz 2] [--workers 6] [--names o061_079_L1,...]
+                [--band LO HI] [--box X0 X1 Y0 Y1] [--stem under]
 """
 import argparse
 import functools
@@ -46,6 +49,7 @@ RASTER = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles"
 ROAD_M, ROAD_DZ, LINK_DZ = 1.0, 0.5, 1.5  # m; LINK_DZ: the links' node heights are rougher than the raster's
 PED_SPECIALS = {10, 14, 15, 16}  # path node specials that aren't roads
 QUALITY, DZ = 70, 2.0
+BAND = None  # (lo, hi) m: only pixels whose own height is in it
 FOLDER: dict[str, str] = {}  # shot name -> its tiles dir
 TILES = rp.Tiles(RASTER, cache=16)
 
@@ -132,6 +136,8 @@ def mask(d, folder):
     return None, None
   with np.errstate(invalid="ignore"):
     m = (ht - hu > DZ) & (al != 0).any(axis=2) & near_road(d, hu)
+    if BAND is not None:
+      m &= (hu >= BAND[0]) & (hu < BAND[1])
   m[:EDGE], m[-EDGE:], m[:, :EDGE], m[:, -EDGE:] = False, False, False, False
   m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
   n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
@@ -284,7 +290,7 @@ def write(path, enc):
 
 
 def main():
-  global QUALITY, DZ
+  global QUALITY, DZ, BAND
   ap = argparse.ArgumentParser()
   ap.add_argument("out")
   ap.add_argument("--quality", type=int, default=70)
@@ -293,8 +299,11 @@ def main():
   ap.add_argument("--workers", type=int, default=6)
   ap.add_argument("--names", default="", help="only these shots (a test)")
   ap.add_argument("--shots", nargs="+", default=SHOTS, help="the passing under-deck shots' tiles dirs (missing ones skipped)")
+  ap.add_argument("--band", nargs=2, type=float, help="m: only pixels whose own height is in [LO, HI)")
+  ap.add_argument("--box", nargs=4, type=float, help="x0 x1 y0 y1: only shots meeting this box")
+  ap.add_argument("--stem", default="under", help="the output files' name: <stem>.pmtiles, <stem>_footprint.geojson")
   a = ap.parse_args()
-  QUALITY, DZ = a.quality, a.dz
+  QUALITY, DZ, BAND = a.quality, a.dz, a.band
   sides = {}
   for folder in a.shots:
     for f in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
@@ -302,6 +311,17 @@ def main():
         sides[f[:-5]] = json.load(open(f"{folder}/{f}"))
         FOLDER[f[:-5]] = folder
   names = a.names.split(",") if a.names else [n for n, d in sides.items() if d.get("pass")]
+  if a.box:
+    keep = []
+    for n in names:
+      d = sides[n]
+      M = np.array(d["world_to_px"], np.float64)
+      W, H = d["size"]
+      xa, xb = sorted([(0 - M[0, 2]) / M[0, 0], (W - M[0, 2]) / M[0, 0]])
+      ya, yb = sorted([(0 - M[1, 2]) / M[1, 1], (H - M[1, 2]) / M[1, 1]])
+      if xa <= a.box[1] and xb >= a.box[0] and ya <= a.box[3] and yb >= a.box[2]:
+        keep.append(n)
+    names = keep
   names.sort(key=lambda n: (-sides[n]["camera"]["cam_z"], n))  # the lowest level drawn last, over the others
   print(f"{len(sides)} shots, {sum(not d.get('pass') for d in sides.values())} failed their checks, using {len(names)}", flush=True)
   cv2.setNumThreads(2)
@@ -328,8 +348,11 @@ def main():
     print(f"z{z}: {len(tiles)} tiles", flush=True)
     if z > a.zmin:
       tiles = down(tiles)
-  write(f"{a.out}/under.pmtiles", enc)
-  print(f"wrote {len(enc)} tiles, {sum(map(len, enc.values())) / 1e6:.1f} MB -> {a.out}/under.pmtiles", flush=True)
+  if not enc:
+    print("nothing kept", flush=True)
+    return
+  write(f"{a.out}/{a.stem}.pmtiles", enc)
+  print(f"wrote {len(enc)} tiles, {sum(map(len, enc.values())) / 1e6:.1f} MB -> {a.out}/{a.stem}.pmtiles", flush=True)
   u = unary_union(polys).simplify(0.2)
   geoms = list(getattr(u, "geoms", [u]))
   geoms = [g for g in geoms if g.area >= MIN_M2]
@@ -341,9 +364,9 @@ def main():
   fc = {"type": "FeatureCollection", "features": [
     {"type": "Feature", "properties": {"kind": "under", "area_m2": round(g.area, 1)}, "geometry": mapping(transform(ll, g))}
     for g in geoms]}
-  with open(f"{a.out}/under_footprint.geojson.tmp", "w") as f:
+  with open(f"{a.out}/{a.stem}_footprint.geojson.tmp", "w") as f:
     json.dump(fc, f, separators=(",", ":"))
-  os.replace(f"{a.out}/under_footprint.geojson.tmp", f"{a.out}/under_footprint.geojson")
+  os.replace(f"{a.out}/{a.stem}_footprint.geojson.tmp", f"{a.out}/{a.stem}_footprint.geojson")
   print(f"footprint: {len(geoms)} polygons, {sum(g.area for g in geoms):.0f} m2", flush=True)
 
 
