@@ -50,7 +50,44 @@ def crossed(p, q, z):
   return len(scan.crossings((p + q) / 2, d / L, z, -L / 2, L / 2)) > 0
 
 
-links = []
+# a break longer than JOIN (round a bend too) where the road is wider than a lane can be, so unsampled (a lane either
+# side of it at lanes.py's widest, LANE_MAX: two lanes narrowing into one, the divide unpainted), and a line
+# one side of both lanes runs on unbroken from the one's edge to the other's, links too (a ramp's two lanes merging
+# over 31 m round a 20 deg bend, climbing 2.7 m: its height is the line's, not the lane's grade carried on)
+LINE_JOIN = 60.0  # m along the line at most (EXIT_RUN: the longest taper traced)
+LINE_TURN = 45.0  # deg the road turns across it at most (junctions.py's TURN_ANG: more is a junction's turn)
+LINE_NEAR = 1.0  # m from a lane's edge to its line (EDGE_NEAR)
+LANE_MAX, WIDE_TOL = 9.0, 0.5  # m: lanes.py's widest lane between two lines, and how near it a lane cut by it ends
+line_pts = {r["id"]: np.array(r["pts"], float) for r in scan.src.paint_near(scan.x0 - 60, scan.x1 + 60, scan.y0 - 60, scan.y1 + 60)}
+
+
+def on_line(L, p):
+  """p's distance from polyline L (x, y, z), how far along L it lies (m), and L's height there."""
+  a, b = L[:-1, :2], L[1:, :2]
+  v = b - a
+  t = np.clip(((p - a) * v).sum(1) / np.maximum((v * v).sum(1), 1e-12), 0, 1)
+  d = np.linalg.norm(a + t[:, None] * v - p, axis=1)
+  k = int(d.argmin())
+  return float(d[k]), float(np.r_[0, np.cumsum(np.linalg.norm(v, axis=1))][k] + t[k] * np.linalg.norm(v[k])), float(L[k, 2] + t[k] * (L[k + 1, 2] - L[k, 2]))
+
+
+def along(i, j, A, B, da, na, nb):
+  """the break from A's end to B's start along a line on the same side of both, unbroken, on their decks: (m along it,
+  the line, its side of the lanes (+1 right), where A's and B's edges lie along it), or None."""
+  for key, sg in (("left_all", -1), ("right_all", 1)):
+    for lid in set(lanes[i][key]) & set(lanes[j][key]):
+      L = line_pts.get(lid)
+      if L is None or len(L) < 2:
+        continue
+      (d0, s0, z0), (d1, s1, z1) = on_line(L, A[-1, :2] + sg * na * A[-1, 3] / 2), on_line(L, B[0, :2] + sg * nb * B[0, 3] / 2)
+      k = min(int(np.linalg.norm(L[:, :2] - A[-1, :2], axis=1).argmin()), len(L) - 2)
+      way = 1 if (L[k + 1, :2] - L[k, :2]) @ da > 0 else -1  # (the line stored either way along)
+      if d0 <= LINE_NEAR and d1 <= LINE_NEAR and abs(z0 - A[-1, 2]) < 1.0 and abs(z1 - B[0, 2]) < 1.0 and 0 < (s1 - s0) * way <= LINE_JOIN:
+        return (s1 - s0) * way, lid, sg, s0, s1
+  return None
+
+
+links, along_links = [], []
 ok = [r["dir"] != "?" for r in lanes]
 P = [np.array(r["pts"]) for r in lanes]
 for i, A in enumerate(P):
@@ -67,9 +104,16 @@ for i, A in enumerate(P):
       continue
     eb = B[0, :2]
     gap = (eb - ea) @ da
+    db, nb = frame(B, 0)
+    if gap > JOIN and da @ db >= math.cos(math.radians(LINE_TURN)) and gap <= LINE_JOIN:
+      mid = (ea + eb) / 2
+      run = along(i, j, A, B, da, na, nb)
+      if run is not None and max(A[-1, 3], B[0, 3]) >= LANE_MAX - WIDE_TOL and not crossed(ea, eb, A[-1, 2]) and not any(
+          q not in (i, j) and np.any((np.linalg.norm(C[:, :2] - mid, axis=1) < C[:, 3] / 2) & (np.abs(C[:, 2] - A[-1, 2]) < 2.0)) for q, C in enumerate(P)):
+        along_links.append((i, j, *run))
+      continue
     if abs(A[-1, 2] + grade * max(gap, 0.0) - B[0, 2]) > 1.5:
       continue
-    db, nb = frame(B, 0)
     if da @ db < math.cos(math.radians(HEAD)):
       continue
     if not -SEAM <= gap <= JOIN or abs(gap) < 1e-9:
@@ -95,6 +139,25 @@ for i, A in enumerate(P):
     if crossed(ea, eb, A[-1, 2]):
       continue
     links.append([i, j, round(float(gap), 2)])
+# of lanes carrying on into one along lines, the one about as wide as it does (the others merge into that one, below);
+# its break filled along its line, so a lane merging has its samples to taper beside
+filled = []
+for j in sorted({l[1] for l in along_links}):
+  i, _, run, lid, sg, s0, s1 = min((l for l in along_links if l[1] == j), key=lambda l: abs(P[l[0]][-1, 3] - P[j][0, 3]))
+  L, A, B = line_pts[lid], P[i], P[j]
+  if i in filled:  # (splitting into two: filled towards the first)
+    links.append([i, j, round(float(run), 2)])
+    continue
+  arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(L[:, :2], axis=0), axis=1))]
+  sq = np.arange(1, int(abs(s1 - s0))) * np.sign(s1 - s0) + s0
+  E = np.stack([np.interp(sq, arc, L[:, c]) for c in range(3)], 1)  # the line's points along the break
+  d = np.gradient(E[:, :2], axis=0) if len(E) > 1 else np.zeros((len(E), 2))
+  d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+  w = A[-1, 3] + (B[0, 3] - A[-1, 3]) * (sq - s0) / (s1 - s0)
+  F = np.column_stack([E[:, :2] - sg * np.stack([d[:, 1], -d[:, 0]], 1) * w[:, None] / 2, E[:, 2], w])
+  P[i] = np.vstack([A, F])
+  filled.append(i)
+  links.append([i, j, round(float(np.linalg.norm(B[0, :2] - P[i][-1, :2])), 2)])
 seam_cut = []  # lanes cut back at a seam to where the lane they carry on into starts
 for i, j, gap in links:
   if gap < 0:
@@ -275,7 +338,7 @@ def kerb_fit(C, w0, w1, guide=None):
   return out
 
 
-pts = {i: np.round(P[i], 2).tolist() for i in seam_cut}  # lane index -> reshaped samples
+pts = {i: np.round(P[i], 2).tolist() for i in seam_cut + filled}  # lane index -> reshaped samples
 KERB_REACH = 3.0  # m: a side of a turn lane's unpainted stretch moves out or in to a line or the road's edge within this
 KERB_STEP = 0.8  # m a side moves at most from one metre's sample to the next and still follows the same line or kerb
 turn_fill = {}  # lane index -> samples carrying it on to the lane it turns into
@@ -431,6 +494,34 @@ def merge_taper(A, B):
   return np.vstack([A, F[:n]])
 
 
+def line_taper(i, A, B):
+  """a lane A (index i) merging into B across a break B was filled along a line (two lanes narrowing into one, unpainted:
+  its space closes over the whole break, faster towards its end than side_taper's TAPER_RATE allows at its start): A
+  carried on along its own outer line, narrowing evenly to nothing level with B's end; None if that line isn't found."""
+  k = int(np.linalg.norm(B[:, :2] - A[-1, :2], axis=1).argmin())
+  s = 1.0 if (A[-1, :2] - B[k, :2]) @ frame(B, k)[1] > 0 else -1.0  # A's side of B, so its outer side
+  da, na = frame(A, len(A) - 1)
+  dB, nB = frame(B, len(B) - 1)
+  for lid in lanes[i]["right_all" if s > 0 else "left_all"]:
+    L = line_pts.get(lid)
+    if L is None or len(L) < 2:
+      continue
+    (d0, s0, _), (d1, s1, _) = on_line(L, A[-1, :2] + s * na * A[-1, 3] / 2), on_line(L, B[-1, :2] + s * nB * B[-1, 3] / 2)
+    if d0 > LINE_NEAR or d1 > LINE_NEAR + B[-1, 3] or abs(s1 - s0) < 2:
+      continue
+    arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(L[:, :2], axis=0), axis=1))]
+    sq = np.arange(1, int(abs(s1 - s0))) * np.sign(s1 - s0) + s0
+    E = np.stack([np.interp(sq, arc, L[:, c]) for c in range(3)], 1)
+    d = np.gradient(E[:, :2], axis=0) if len(E) > 1 else np.tile(da, (len(E), 1))
+    d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+    d *= np.sign((d @ da).mean() or 1)  # (along A's travel)
+    w = A[-1, 3] * (1 - (sq - s0) / (s1 - s0))
+    keep = w > OPEN_TOL
+    F = np.column_stack([E[:, :2] - s * np.stack([d[:, 1], -d[:, 0]], 1) * w[:, None] / 2, E[:, 2], w])[keep]
+    return np.vstack([A, F])
+  return None
+
+
 def reshape(i, j):
   """an opening drawn as the lanes are: the lane it opens from keeps its usual width along its edge that runs on
   straight, and the widened part becomes the new lane's start, a taper growing out of its side (filled on across any
@@ -509,7 +600,8 @@ for i, F in turn_fill.items():  # (a turn lane's stretch across its crossing and
     pts[i] = np.round(P[i], 2).tolist()
 for i, j, g, *br in links:
   if br == ["merge"]:
-    P[i] = merge_taper(P[i], P[j])
+    T = line_taper(i, P[i], P[j]) if j in filled else None
+    P[i] = T if T is not None else merge_taper(P[i], P[j])
     pts[i] = np.round(P[i], 2).tolist()
   if br == ["branch"]:
     r = reshape(i, j)
