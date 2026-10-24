@@ -9,7 +9,9 @@ another (a free turn lane round an island bypasses it): the line across a lane's
 the road round its strips on its deck that no other lane, gore, median or shoulder covers (they and the kerbs wall it
 in: an arm's lanes end at its mouth, a slip road's lanes keep its own crossing out), within the hull of the strips and
 the mouths (gores, medians and the like lying mostly within its strips' hull are its own and don't wall it: the spaces
-between its guide lines read as them); junctions on one deck whose boxes overlap are one. Its mouths must face two ways at least (lanes heading more than CROSS deg apart, either way along): a
+between its guide lines read as them); junctions on one deck whose boxes overlap are one. A lane starting or ending
+within ATTACH m past lanes that run straight on past the box (a through road with no stop line: an on-ramp leaving
+across it) is a mouth too of a junction its own mouths make, and the box takes those lanes in there. Its mouths must face two ways at least (lanes heading more than CROSS deg apart, either way along): a
 crossing on a road with no other road meeting it is not a junction. Lanes lying mostly inside it are the junction's own (guide lines and turn paint through it, not lanes).
 Each lane arriving at a mouth gets its turns from its arrows: the listed road arrow in its band, heading its way, nearest
 the junction within ARROW_BACK m (along it and the lane it carries straight on from; not back across a bay's opening:
@@ -364,9 +366,33 @@ def build(mem_i, region):
   gap = lambda a, b: min(abs(a - b), np.pi - abs(a - b))
   if not any(gap(a, b) > np.radians(CROSS) for a in heads for b in heads):
     return None
+  # lanes running straight on past its road (a through road with no stop line here): a lane starting or ending just
+  # beyond them (an on-ramp leaving across them) meets the junction too, and the box takes them in there
+  mouthed = {(i, w) for i, w, _ in mouths}
+  near_ = region if region is not None else seed
+  through = [i for i in on_deck if i not in own and all((i, w) not in mouthed for w in ("start", "end"))
+             and dist(LA[i][0, :2]) > ATTACH and dist(LA[i][-1, :2]) > ATTACH and band(LA[i], STOPS.get(i)).distance(near_) <= SEAL + 1.0]
+  crossed = set()
+  if through:
+    tb = {t: band(LA[t], STOPS.get(t)) for t in through}
+    for i in on_deck:
+      if i in own or i in tb:
+        continue
+      A = LA[i]
+      d, n = frame(A)
+      for k, which in ((-1, "end"), (0, "start")):
+        if (i, which) in mouthed or at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or dist(A[k, :2]) > dist(A[-1 - k, :2]):
+          continue
+        past = [t for t in tb if tb[t].distance(Point(A[k, :2])) <= ATTACH and dist(A[k, :2]) <= ATTACH + LA[t][:, 3].max() + ATTACH]
+        if not past:
+          continue
+        crossed |= set(past)
+        mouths.append([i, which, turns_of(i) if which == "end" else None])
+        heads.append(np.arctan2(d[k, 1], d[k, 0]) % np.pi)
+        corners += [A[k, :2] - n[k] * A[k, 3] / 2, A[k, :2] + n[k] * A[k, 3] / 2]
   hull = unary_union([seed.convex_hull, MultiPoint(corners).convex_hull] if corners else [seed]).convex_hull
   pts = np.vstack([A for _, A, _ in mem] + [LA[i][[0, -1]] for i, _, _ in mouths])
-  ring = cut(hull, pts, walls_of(z, on_deck, own, own_dir), seed)
+  ring = cut(hull, pts, walls_of(z, on_deck, own | crossed, own_dir), seed)
   if ring is None:
     return None
   box = Polygon(ring).buffer(0)
