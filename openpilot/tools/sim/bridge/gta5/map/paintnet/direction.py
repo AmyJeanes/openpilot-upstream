@@ -393,7 +393,22 @@ for r in xs:
   r.pop("decals", None)
 # a crossing's lines run across the road: what they bound to the road's edge is the kerb rounding a corner of it
 xline = {i for r in out if r["kind"] == "crossing" for i in r.get("left_all", [r["left"]]) + r.get("right_all", [r["right"]])} - {"e"}
-drop = [r for r in out if r["kind"] in ("shoulder", "not_traffic") and "e" in (r["left"], r["right"]) and {r["left"], r["right"]} - {"e"} <= xline]
+wide_ = {r["id"] for r in scan.src.paint() if r["width"] >= STOP_WIDE}
+
+
+def corner(r):
+  """a strip between a crossing's line and the road's edge; or a lane-wide wedge, shorter than it is wide, between a
+  stop line or crossing's line (STOP_WIDE) and the edge, where a corner is wide enough to read as a lane."""
+  if "e" not in (r["left"], r["right"]):
+    return False
+  other = {r["left"], r["right"]} - {"e"}
+  if r["kind"] in ("shoulder", "not_traffic"):
+    return other <= xline
+  A = np.asarray(r["pts"], float)
+  return r["kind"] == "lane" and other <= wide_ and np.linalg.norm(np.diff(A[:, :2], axis=0), axis=1).sum() < A[:, 3].max()
+
+
+drop = [r for r in out if corner(r)]
 stats["kerb corner at a crossing (dropped)"] = len(drop)
 out = [r for r in out if not any(r is d for d in drop)]
 # paint off the road network (a car park's or loading yard's bay lines, read as medians, turn lanes, gores): nothing
