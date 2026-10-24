@@ -5,6 +5,9 @@ going the same way and the right edge. A lane's direction is the one that puts i
 across its own road surface (kerb to kerb) at each sample, on its left. Lanes with no yellow in reach get no direction from paint ("?").
 Checks, independent of the rule: road arrows inside the lane (their heading), and GTA links on the same deck within
 half a lane of its centre (one-way links' direction; two-way links can't say).
+Where its road surface has yellow only at both edges (GTA paints some one-way ramps so: yellow-on-the-left then gives
+its lanes opposite ways), a lane with no one-way GTA link within half its width takes the links across that road
+surface, if they all run one way (a wide ramp's one link runs down its middle; groups.py puts links before yellow).
 Traffic: a lane must run alongside a GTA vehicle link (any direction) on its deck within FLOW_NEAR m, within FLOW_ANG
 deg, over at least half its samples; strips between a stop line and a crossing, or across a junction, run across
 every link and are marked "not_traffic".
@@ -15,7 +18,8 @@ carried on to that edge, its area cut to the road's surface so its ends follow t
 against the road's edge is a kerb corner, not a shoulder: dropped.
 Zebra crossings are where the game's crossing decals are (a strip mostly inside one), bars and all, and take the
 decals' outline; the strips between its bars sharing a decal are one crossing.
-Centre spaces: yellow on both sides is the space between opposing traffic, not a lane for either way (US markings):
+Centre spaces: yellow on both sides is the space between opposing traffic, not a lane for either way (US markings),
+unless the road ends within SHOULDER m past both lines (a one-way ramp GTA paints yellow at both edges: a lane):
 a painted median (solid both sides, often opening into back-to-back left-turn bays) or, with a dashed yellow on a side,
 a two-way left-turn lane. Marked "median" / "twltl", given no direction.
 Medians, two-way turn lanes, gores and shoulders must run alongside a GTA link as lanes must (no-traffic strips, across
@@ -99,6 +103,16 @@ def link_votes(p, d, z, w):
   """+1 / -1 per one-way link on this deck passing within w/2 of p, running along d / against it."""
   c = near_segs(one_way, p, z, w / 2) @ d
   return int((c > 0.9).sum() - (c < -0.9).sum())
+
+
+def road_votes(p, d, z):
+  """link_votes across p's whole road surface (kerb to kerb, square to d), where every one-way link there runs the same
+  way (a two-way road's links running both ways say nothing)."""
+  n = np.array([d[1], -d[0]])
+  lo, hi = scan.extent(p, n, z, -1)[0], scan.extent(p, n, z, 1)[0]
+  c = near_segs(one_way, p + n * (hi - lo) / 2, z, (lo + hi) / 2) @ d
+  c = c[np.abs(c) > 0.9]
+  return int(np.sign(c[0]) * len(c)) if len(c) and (np.all(c > 0) or np.all(c < 0)) else 0
 
 
 # zebra crossings: the game's crossing decals (their outlines); a strip lying mostly inside one is that crossing, its
@@ -288,6 +302,19 @@ for i, h in enumerate(hits):
   if h:
     zgroup[zroot(h[0])].append(i)
 
+def edge_bound(A):
+  """the road ends within SHOULDER m past both its lines over most of its length: yellow both sides is then a one-way
+  road's edges (GTA paints some ramps' both edges yellow), not the space between opposing traffic."""
+  A = np.asarray(A, float)
+  d = np.gradient(A[:, :2], axis=0)
+  d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+  past = []
+  for k in range(0, len(A), 3):
+    n = np.array([d[k, 1], -d[k, 0]])
+    past.append(max(scan.extent(A[k, :2], n * s, A[k, 2], 1)[0] for s in (1, -1)) - A[k, 3] / 2)
+  return np.mean(np.array(past) < SHOULDER) > 0.5
+
+
 out, stats = [], collections.Counter()
 for i, r in enumerate(lanes):
   if hits[i]:
@@ -307,7 +334,7 @@ for i, r in enumerate(lanes):
   A = np.array(r["pts"])
   W = np.median(A[:, 3])
   sides = [r.get("left_all", [r["left"]]), r.get("right_all", [r["right"]])]
-  if all(any(paint.get(i) == "yellow" for i in ids) for ids in sides):
+  if all(any(paint.get(i) == "yellow" for i in ids) for ids in sides) and not edge_bound(A):
     kind = "twltl" if any(style.get(i) == "dashed" for ids in sides for i in ids) else "median"
     out.append({**r, "kind": kind}); stats[kind] += 1
     continue
@@ -326,15 +353,18 @@ for i, r in enumerate(lanes):
     out.append({**r, "kind": "not_traffic"}); stats["not_traffic"] += 1
     continue
   yl = 0  # +1: yellow on the left as seen along pts
+  edges = []  # per sample: yellow only at both edges of its road surface (a one-way road GTA paints yellow both sides)
   for k in range(0, len(A), 3):
     n = np.array([d[k, 1], -d[k, 0]])
     lo, _ = scan.extent(A[k, :2], n, A[k, 2], -1)  # this road surface only: not across a median or kerb
     hi, _ = scan.extent(A[k, :2], n, A[k, 2], 1)
     xs = scan.crossings(A[k, :2], n, A[k, 2], -lo - 0.3, hi + 0.3)
     ys = [o for o, lid, col, sty, z in xs if col == "yellow"]
+    edges.append(bool(ys) and all(o < -lo + SHOULDER or o > hi - SHOULDER for o in ys) and min(ys) < 0 < max(ys))
     if ys:
       o = min(ys, key=abs)
       yl += 1 if o < 0 else -1
+  yellow_edges = bool(edges) and np.mean(edges) > 0.5
   sense = "+" if yl > 0 else "-" if yl < 0 else "?"
   # arrows inside the lane: heading (deg from east, counter-clockwise: the eastbound motorway's arrows read 0) vs the lane's direction
   av = 0
@@ -349,6 +379,8 @@ for i, r in enumerate(lanes):
     if abs(c) > 0.7:
       av += 1 if c > 0 else -1
   lv = sum(link_votes(A[k, :2], d[k], A[k, 2], A[k, 3]) for k in range(0, len(A), 5))
+  if not lv and yellow_edges:  # (a wide one-way ramp: its one link runs down the middle, not along each lane)
+    lv = sum(road_votes(A[k, :2], d[k], A[k, 2]) for k in range(0, len(A), 5))
   check = lambda v: "agree" if v and (v > 0) == (sense == "+") else "disagree" if v else "none"
   stats[(sense, "arrows " + check(av), "links " + check(lv))] += 1
   out.append({**r, "sense": sense, "yellow_votes": yl, "arrow_votes": av, "link_votes": lv})
