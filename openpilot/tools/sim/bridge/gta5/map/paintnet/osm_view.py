@@ -169,19 +169,23 @@ def emit(geom, **p):
 
 def offset(line, d):
   """the line moved d m to its right; d (start, end): moving evenly from one to the other along it."""
+  def along(d0, d1):
+    n_ = max(int(line.length), 2)
+    pts = []
+    for s_ in np.linspace(0, line.length, n_ + 1):
+      c, _, nrm = frame_at(line, s_)
+      pts.append(tuple(c + nrm * (d0 + (d1 - d0) * s_ / max(line.length, 1e-9))))
+    return LineString(pts)
+
   if isinstance(d, tuple):
     if abs(d[1] - d[0]) > 1e-3:
-      n_ = max(int(line.length), 2)
-      pts = []
-      for s_ in np.linspace(0, line.length, n_ + 1):
-        c, _, nrm = frame_at(line, s_)
-        pts.append(tuple(c + nrm * (d[0] + (d[1] - d[0]) * s_ / max(line.length, 1e-9))))
-      return LineString(pts)
+      return along(*d)
     d = d[0]
   if abs(d) < 1e-6:
     return line
   g = line.offset_curve(-d, join_style=2, mitre_limit=3.0)
-  return g if g.geom_type == "LineString" else max(g.geoms, key=lambda q: q.length)
+  g = g if g.geom_type == "LineString" else max(g.geoms, key=lambda q: q.length, default=g)
+  return g if not g.is_empty and len(g.coords) >= 2 else along(d, d)  # (none on a way shorter than its bend is sharp)
 
 
 def plus(a, b):

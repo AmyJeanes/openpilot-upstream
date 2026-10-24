@@ -153,6 +153,9 @@ at_edge = lambda p: min(p[0] - x0, x1 - p[0], p[1] - y0, y1 - p[1]) < EDGE_BOX
 dir_at = {k: (kind, A) for kind, L_ in strips.items() for k, A in L_}
 junctions = []
 for r in json.load(open(junj)):
+  for k, p in r.get("trim", {}).items():  # mouths cut back to where they run smoothly (junctions.py)
+    lanes[int(k)]["pts"] = p
+    LA[int(k)] = np.array(p, float)
   junctions.append({"hull": Polygon(r["ring"]).buffer(0), "z": r["z"], "strips": [(dir_at[k][0], k) for k in r["strips"]],
                     "crossings": [dir_at[k][1] for k in r["strips"] if dir_at[k][0] == "crossing"], "mouths": r["mouths"],
                     "inside": set(r["inside"]), "paths": r.get("paths", []), "ends": [], "issues": []})
@@ -168,7 +171,7 @@ for i, A in enumerate(LA):
   if len(A) < MINLEN:
     continue  # stubs between a stop line and a crossing
   if any(i in J["inside"] for J in junctions):
-    continue  # a guide line through a junction
+    continue  # lane paint carried through a junction: not a lane
   keep.append(i)
 
 # --- tracks: lanes chained by their links (a break filled in), and by an end meeting a start within GAP m in line

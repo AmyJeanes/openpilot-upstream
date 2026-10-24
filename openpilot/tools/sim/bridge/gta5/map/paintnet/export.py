@@ -5,8 +5,8 @@ known or not),
 centre (a lane's centre line in its travel direction, for arrows); lanes and areas are cut into pieces in the open
 or under a deck ("covered", for the page's level switch), gore, shoulder, crossing (its outline, where it has one),
 not_traffic (areas; not those in a junction's box, between a stop line and its crossing), and
-flag (a point per flagged group, with why), junction (junctions.py's box, its lanes inside named), guide (a lane inside
-a junction's box: its lines carried through it, guiding traffic, not a lane), turns (a lane arriving at a junction: its
+flag (a point per flagged group, with why), junction (junctions.py's box, its lanes inside named: lane paint carried
+through it, not lanes, so neither they nor their links are drawn), turns (a lane arriving at a junction: its
 arrows' turns, at its stop line), path (junctions.py's: an arriving lane's way across the box to a leaving lane, by
 its turn); from connect.py's links: connector (the strip filling a break between a
 lane and the one it carries on into) and link (a line from a lane's end to its successor's start; "type" split when a
@@ -157,8 +157,11 @@ for k, p in LK.get("pts", {}).items():  # openings reshaped by connect.py
   G["lanes"][int(k)]["pts"] = p
 STOPS = LK.get("stops", {})
 JUNCTIONS = json.load(open(sys.argv[5])) if len(sys.argv) > 5 else []
-guide = {i: J["id"] for J in JUNCTIONS for i in J["inside"]}  # lane paint carried through a junction's box
-GUIDE_MIN = 6.0  # m: shorter pieces (beside a corner's arc) guide nothing (lanes.py's MINLEN)
+for J in JUNCTIONS:  # mouths cut back to where they run smoothly (junctions.py)
+  for k, p in J.get("trim", {}).items():
+    G["lanes"][int(k)]["pts"] = p
+inside = {i for J in JUNCTIONS for i in J["inside"]}  # lane paint carried through a junction's box: not lanes
+LK["links"] = [l for l in LK["links"] if l[0] not in inside and l[1] not in inside]
 lid = lambda k: f"{G['lanes'][k]['left']}|{G['lanes'][k]['right']}|{k}"
 nsucc, npred = {}, {}
 for i, j, g, *br in LK["links"]:
@@ -191,10 +194,7 @@ for k in heads:
   while chain[-1] in nxt:
     chain.append(nxt[chain[-1]])
   A = np.array(G["lanes"][k]["pts"])
-  if all(q in guide for q in chain):  # (a guide: where traffic through the junction drives, not a lane)
-    if len(A) >= GUIDE_MIN:
-      feats.append({"type": "Feature", "properties": {"kind": "guide", "id": lid(k), "junction": guide[k], "z": round(float(np.median(A[:, 2])), 1),
-                                                      "covered": False, "deck": False, "on_deck": False}, "geometry": {"type": "Polygon", "coordinates": area(A)}})
+  if k in inside:
     continue
   for q in chain[1:]:
     B = np.array(G["lanes"][q]["pts"])
@@ -310,7 +310,7 @@ if JUNCTIONS:
         continue
       P = np.array(p["pts"])
       feats.append({"type": "Feature", "properties": {"kind": "path", "id": f"{lid(p['from'])} > {lid(p['to'])}", "turn": p["turn"],
-                                                      "guide": lid(p["guide"]) if p["guide"] is not None else "", "flags": ", ".join(p["flags"]),
+                                                      "flags": ", ".join(p["flags"]),
                                                       "junction": J["id"], "z": round(float(np.median(P[:, 2])), 1), **flat},
                     "geometry": {"type": "LineString", "coordinates": lonlat(P[:, :2])}})
     for j in J.get("unreached", []):
