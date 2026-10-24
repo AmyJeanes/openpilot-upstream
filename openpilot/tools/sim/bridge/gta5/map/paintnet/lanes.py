@@ -9,6 +9,7 @@ Out: [{"left": id, "right": id, "left_all"/"right_all": every boundary id along 
 "pts": [[x, y, z, width], ...]}] with left/right as seen along pts."""
 import json, math, multiprocessing, os, sys, collections
 import numpy as np
+import cv2
 from scipy import ndimage as ndi
 import scan
 import arrows
@@ -386,9 +387,42 @@ print("raster-only lines used:", raster_found[False], "before a line,", raster_f
 EDGE_IN, EDGE_OUT, ALONG = 0.5, 1.3, 1.5  # outer bands of a lane, 0.5-1.3 m in from each boundary, +-1.5 m along
 
 
-def hatch_share(m, e, z, w):
+# a line crossing a strip steeply is a line of its own (a lane line GTA paints on through a crossing, a crossing's line
+# across the lanes running through it), not hatching: chevrons cross at 37-58 deg on the interchange, lines 60-90
+CROSS_ANG = 60.0
+segs_of = lambda rs: [(r["id"], P[:-1], P[1:], r["width"] / 2) for r in rs for P in [np.array(r["pts"], float)[:, :3]] if len(P) >= 2]
+SEG = segs_of(lines.values())
+# stop lines and crossings' lines (0.43-0.52 m wide; lane lines 0.10-0.31), whatever their length
+WIDE_SEG = segs_of(r for r in scan.src.paint_near(x0 - 20, x1 + 20, y0 - 20, y1 + 20) if r["width"] >= 0.4 and r["id"] not in hidden)
+
+
+def steep(A, segs, own):
+  """[(line id, k, its segments near A)]: the lines in segs (not own) crossing run A's middle between its samples k and
+  k + 1 at CROSS_ANG deg or more."""
+  lo, hi, z = A[:, :2].min(0) - 1, A[:, :2].max(0) + 1, np.median(A[:, 2])
+  out = []
+  for lid, Pa, Pb, hw in segs:
+    if find(lid) in own or abs(np.median(Pa[:, 2]) - z) > 2:
+      continue
+    near = ((np.minimum(Pa[:, :2], Pb[:, :2]) <= hi) & (np.maximum(Pa[:, :2], Pb[:, :2]) >= lo)).all(1)
+    if not near.any():
+      continue
+    a, b = Pa[near, :2], Pb[near, :2]
+    r = (A[1:, :2] - A[:-1, :2])[:, None]
+    s, q = (b - a)[None], a[None] - A[:-1, None, :2]
+    den = r[..., 0] * s[..., 1] - r[..., 1] * s[..., 0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+      t = (q[..., 0] * s[..., 1] - q[..., 1] * s[..., 0]) / den
+      u = (q[..., 0] * r[..., 1] - q[..., 1] * r[..., 0]) / den
+      sin = np.abs(den) / (np.linalg.norm(r, axis=-1) * np.linalg.norm(s, axis=-1))
+    hit = (t >= 0) & (t < 1) & (u >= 0) & (u <= 1) & (sin >= math.sin(math.radians(CROSS_ANG)))
+    out += [(lid, int(k), [(a[j], b[j], hw) for j in range(len(a))]) for k in np.flatnonzero(hit.any(1))]
+  return out
+
+
+def hatch_share(m, e, z, w, through=()):
   """share of painted raster in the lane's two outer bands around m: chevrons reach a lane's sides, arrows and text
-  sit in its middle."""
+  sit in its middle. Paint on the lines through (steep ones) does not count."""
   n = np.array([e[1], -e[0]])
   if w / 2 - EDGE_OUT < 0.3:  # too narrow for an arrow: the whole space between the lines
     t = np.arange(-w / 2 + EDGE_IN, w / 2 - EDGE_IN, 0.1)
@@ -400,7 +434,15 @@ def hatch_share(m, e, z, w):
   T, A = np.meshgrid(t, a)
   X, Y = m[0] + T * n[0] + A * e[0], m[1] + T * n[1] + A * e[1]
   code, h = scan.T.sample(X.ravel(), Y.ravel(), z, zwin=1.0)
-  return float(((code >> 3) > 0).mean())
+  paint = (code >> 3) > 0
+  P = np.stack([X.ravel(), Y.ravel()], 1)
+  for a, b, hw in through:
+    v = b - a
+    if np.linalg.norm((a + b) / 2 - m) > ALONG + w + np.linalg.norm(v):
+      continue
+    f = np.clip((P - a) @ v / max(v @ v, 1e-12), 0, 1)
+    paint &= np.linalg.norm(P - a - f[:, None] * v, axis=1) > hw + 0.15
+  return float(paint.mean())
 
 
 # both lines of a lane see it: keep the line that saw more of it, its samples in order along it
@@ -527,6 +569,33 @@ while joined:
       heads[i] = heading(runs[i][1])
       joined = True
 runs = [r for r in runs if r is not None]
+# a stop line or crossing's line across a run, or a zebra crossing's edge (its decal's outline), ends it there (where
+# both sides are a run): the lane stops at it, and what carries on past (lane lines GTA paints on through a crossing
+# and into the junction) is other space: the crossing's (the piece between a crossing's lines lies inside its strip's
+# band: dropped below; one inside a zebra's decal is part of it, direction.py), a junction's strip beyond
+zebras = [(np.array(f["poly"], np.float32), f["z"]) for f in scan.src.features()
+          if f["kind"] == "crossing" and "road_crossing" in f["tex"] and len(f["poly"]) >= 3 and scan.inbox(f["x"], f["y"], 20)]
+
+
+def in_zebra(A):
+  """per sample: inside a zebra crossing's decal on its deck."""
+  m = np.zeros(len(A), bool)
+  for poly, z in zebras:
+    if (A[:, :2].max(0) < poly.min(0)).any() or (A[:, :2].min(0) > poly.max(0)).any():
+      continue
+    m |= [abs(p[2] - z) < 2 and cv2.pointPolygonTest(poly, (float(p[0]), float(p[1])), False) >= 0 for p in A]
+  return m
+
+
+cut = []
+for key, A, ids in runs:
+  k0, zin = 0, in_zebra(A)
+  for k in sorted({k for _, k, _ in steep(A, WIDE_SEG, {find(i) for i in ids[0] | ids[1]})} | set(np.flatnonzero(zin[1:] != zin[:-1]).tolist())):
+    if k + 1 - k0 >= 3 and len(A) - (k + 1) >= 3:
+      cut.append([key, A[k0:k + 1], ids])
+      k0 = k + 1
+  cut.append([key, A[k0:], ids])
+runs = cut
 
 # a run lying almost wholly inside a longer run's band on its deck is a leftover of a break the longer one already
 # spans (found again out to the road's edge where a line was missing): drop it
@@ -782,7 +851,8 @@ out = []
 for key, A, ids in runs:
   d = np.gradient(A[:, :2], axis=0)
   d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
-  share = np.array([hatch_share(A[k, :2], d[k], A[k, 2], A[k, 3]) for k in range(len(A))])
+  through = [g for _, _, sg in steep(A, SEG, {find(i) for i in ids[0] | ids[1]}) for g in sg]
+  share = np.array([hatch_share(A[k, :2], d[k], A[k, 2], A[k, 3], through) for k in range(len(A))])
   # chevrons repeat about every 5 m (measured on the interchange's gores): bridge the gaps between them, and drop
   # stretches shorter than a gore (an arrow's tip reaching a band)
   # (closing pads with the run's own end values: padding with "not hatched" erodes 3 samples off a gore at a run's
