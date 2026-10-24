@@ -261,7 +261,7 @@ for i, j, g, *br in LK["links"]:
   if not br and g > 0.5:  # (a merge's or branch's lanes touch)
     # the break before a split or merge filled with samples running from the lane's end to its successor's start
     F = fill(A, B)
-    if len(F):
+    if len(F) >= 2:  # (one sample: a gap the lanes' own half-sample ends already close)
       to = G["lanes"][j]
       mid = F[len(F) // 2][None, :3]
       cov, deck = bool(covered(mid)[0]), bool(covered(mid, -1)[0])

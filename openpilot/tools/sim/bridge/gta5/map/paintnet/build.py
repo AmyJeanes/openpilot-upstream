@@ -6,7 +6,8 @@ don't each pay for loading them; steps whose inputs are ready run side by side. 
 import hashlib, json, os, pathlib, re, runpy, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
-B = ["-346", "-9", "-1333", "-1046"]  # x0 x1 y0 y1: round the interchange, 50 m past the west junction's west arm
+B = ["-550", "-9", "-1490", "-1046"]  # x0 x1 y0 y1: the interchange, and the Innocence Blvd ramps west and south-west
+CHECKED = [["-346", "-9", "-1333", "-1046"]]  # boxes in it Amy has checked (the map draws them apart from the rest)
 O = os.path.expanduser("~/.cache/paintnet/pilot")  # the steps' own files, on WSL's disk (/mnt/e is slow to read and write)
 WEB = "/mnt/e/gta5_webmap"
 RP = "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"
@@ -14,7 +15,8 @@ WEBMAP = "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap"
 o = lambda n: f"{O}/{n}"
 # name, script, args, inputs (other steps' outputs), outputs, other files it reads
 STEPS = [
-  ("area", "area.py", B + [f"{WEB}/pilot_area.geojson"], [], [f"{WEB}/pilot_area.geojson"], []),
+  ("area", "area.py", B + [f"{WEB}/pilot_area.geojson", f"{WEB}/checked_area.geojson"] + sum(CHECKED, []), [],
+   [f"{WEB}/pilot_area.geojson", f"{WEB}/checked_area.geojson"], []),
   ("visible", "visible.py", B + [o("ic_visible.json")], [], [o("ic_visible.json")], ["/mnt/e/gta5_webmap/sat.pmtiles", "/mnt/e/gta5_webmap/under.pmtiles"]),
   ("lanes", "lanes.py", B + [o("ic_lanes.json"), "--hatch=0.1", f"--visible={o('ic_visible.json')}"], [o("ic_visible.json")], [o("ic_lanes.json")], []),
   ("direction", "direction.py", B + [o("ic_lanes.json"), o("ic_dir.json")], [o("ic_lanes.json")], [o("ic_dir.json")], []),

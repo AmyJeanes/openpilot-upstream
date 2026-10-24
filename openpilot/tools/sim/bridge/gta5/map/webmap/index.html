@@ -51,7 +51,8 @@
   <div><i class="ring" style="border-color:#ffea00"></i>Split: one lane carries on into two</div>
   <div><i class="ring" style="border-color:#00e5ff"></i>Merge: two lanes carry on into one</div>
   <div><i class="ring"></i>Flag: needs a look</div>
-  <div><i style="background:none; border-top: 2px dashed #888; height: 0; vertical-align: 3px"></i>Pilot area (nothing built outside it)</div>
+  <div><i style="background:none; border-top: 2px dashed #888; height: 0; vertical-align: 3px"></i>Pilot area, generated (nothing built outside it)</div>
+  <div><i style="background:none; border-top: 3px solid #00e676; height: 0; vertical-align: 3px"></i>Checked by Amy</div>
   <div class="note">Click a band or marker for its id and evidence.</div>
   <label style="display:block;margin-top:6px"><input type="checkbox" id="osmview"> <b>OSM export only: ways and tags (click one)</b> (hides the lanes)</label>
   <label style="display:block;margin-left:18px"><input type="checkbox" id="s2view" checked> drawn by osm2streets (third party; else ours, osm_view.py)</label>
@@ -168,13 +169,16 @@ roadLayers.push(...osmLayers);
 // the pilot's box (what the pilot covers; outside it nothing is built)
 roadLayers.unshift({ id: "pi-area", type: "line", source: "area",
   paint: { "line-color": "#ffffff", "line-width": 2, "line-dasharray": [2, 2], "line-opacity": 0.9 } });
+// the boxes within it Amy has checked
+roadLayers.unshift({ id: "pi-checked", type: "line", source: "checked",
+  paint: { "line-color": "#00e676", "line-width": 3, "line-opacity": 0.9 } });
 for (const l of roadLayers) l.metadata = { views: ["street", "hybrid"], filter: l.filter };
 
 // level switch: everything, only what has nothing above it, or the lowest level everywhere (a lane on a deck anywhere
 // hidden whole: a motorway shown only where it runs on the ground reads as broken)
 function setLevel(lv) {
   for (const l of roadLayers) {
-    if (l.id.startsWith("ck-") || l.id.startsWith("osm-") || l.id === "pi-area") continue;
+    if (l.id.startsWith("ck-") || l.id.startsWith("osm-") || l.id === "pi-area" || l.id === "pi-checked") continue;
     const own = l.metadata.filter;
     // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
     const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "on_deck"]] : null;
@@ -230,6 +234,7 @@ const style = {
     s2lanes: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
     s2marks: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
     area: { type: "geojson", data: base + "pilot_area.geojson?t=" + Date.now() },
+    checked: { type: "geojson", data: base + "checked_area.geojson?t=" + Date.now() },
     under: { type: "raster", url: "pmtiles://" + base + "under.pmtiles", tileSize: 256 },
     underEdge: { type: "geojson", data: base + "under_footprint.geojson" },
   },
@@ -261,7 +266,7 @@ function setView(v) {
   for (const l of roadLayers) {
     // the OSM export shows alone (with the pilot's outline): the lanes under it read as part of it
     const own = l.id.startsWith("osm-s2-") ? s2On() : l.id.startsWith("osm-v-") ? !s2On() : true;  // whose rebuilt road
-    const on = l.metadata.views.includes(v) && (l.id.startsWith("osm-") ? osmOn() && own : !osmOn() || l.id === "pi-area" || !/^(pi|ck)-/.test(l.id)) &&
+    const on = l.metadata.views.includes(v) && (l.id.startsWith("osm-") ? osmOn() && own : !osmOn() || l.id === "pi-area" || l.id === "pi-checked" || !/^(pi|ck)-/.test(l.id)) &&
       (!l.id.startsWith("ck-") || checkerOn());
     map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
   }
