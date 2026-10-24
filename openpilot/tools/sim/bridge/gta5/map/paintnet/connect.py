@@ -90,6 +90,44 @@ def along(i, j, A, B, da, na, nb):
 links, along_links = [], []
 ok = [r["dir"] != "?" for r in lanes]
 P = [np.array(r["pts"]) for r in lanes]
+# across a level crossing (scan.past_gap) a lane carries on into the lane beyond, whatever paint the gap holds (the
+# crossing's stop line) and wherever its lines go: the lanes ending at it and those starting beyond, each in order
+# across the road, pair off from the kerb (their ends' headings wobble too much to read offsets across 20 m by); a lane
+# whose way to it runs over another lane isn't at it
+rail = collections.defaultdict(set)  # lane ending at a crossing -> lanes starting beyond it
+for i, A in enumerate(P):
+  if not ok[i]:
+    continue
+  da, na = frame(A, len(A) - 1)
+  gap = scan.past_gap(A[-1, :2], da, A[-1, 2])
+  if gap is None:
+    continue
+  near, far, da = gap
+  na = np.array([da[1], -da[0]])
+  run = A[-1, :2] + da * np.arange(1.0, max(near, 1.5), 1.0)[:, None]
+  if any(q != i and np.any(np.linalg.norm(C[:, None, :2] - run[None], axis=2).min(0) < C[:, 3].max() / 2) for q, C in enumerate(P)
+         if abs(C[0, 2] - A[-1, 2]) < 1.5 and np.linalg.norm(C[:, :2] - A[-1, :2], axis=1).min() < far):
+    continue
+  for j, B in enumerate(P):
+    v = B[0, :2] - A[-1, :2]
+    if j != i and ok[j] and far - 1.0 <= v @ da <= far + JOIN / 2 and abs(v @ na) <= A[-1, 3] + B[0, 3]        and da @ frame(B, 0)[0] >= math.cos(math.radians(HEAD)) and abs(A[-1, 2] - B[0, 2]) < 1.5:
+      rail[i].add(j)
+used_i, used_j = set(), set()
+while rail:  # (each crossing's lanes: those reached from one another through shared successors)
+  grp_i, grp_j = {next(iter(rail))}, set()
+  while True:
+    grp_j |= set().union(*(rail[i] for i in grp_i))
+    more = {i for i in rail if rail[i] & grp_j} - grp_i
+    if not more:
+      break
+    grp_i |= more
+  m = np.sum([frame(P[i], len(P[i]) - 1)[0] for i in grp_i] + [frame(P[j], 0)[0] for j in grp_j], 0)
+  n = np.array([m[1], -m[0]]) / max(np.linalg.norm(m), 1e-9)  # right of travel
+  for i, j in zip(sorted(grp_i, key=lambda i: -P[i][-1, :2] @ n), sorted(grp_j, key=lambda j: -P[j][0, :2] @ n)):
+    links.append([i, j, round(float(np.linalg.norm(P[j][0, :2] - P[i][-1, :2])), 2)])
+    used_i.add(i); used_j.add(j)
+  for i in grp_i:
+    del rail[i]
 for i, A in enumerate(P):
   if not ok[i]:
     continue
@@ -100,7 +138,7 @@ for i, A in enumerate(P):
   k0 = max(len(A) - 11, 0)
   grade = (A[-1, 2] - A[k0, 2]) / max(np.linalg.norm(A[-1, :2] - A[k0, :2]), 1e-9)
   for j, B in enumerate(P):
-    if j == i or not ok[j]:
+    if j == i or not ok[j] or i in used_i or j in used_j:
       continue
     eb = B[0, :2]
     gap = (eb - ea) @ da

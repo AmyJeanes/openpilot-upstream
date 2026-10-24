@@ -49,6 +49,8 @@ ARM_RUN = 5  # samples (m) a mouth's way is read over, from the box
 ARROW_ALIGN, ARROW_DZ, ARROW_SPILL = 30.0, 2.5, 0.5  # deg, m, m outside a lane: an arrow is in it (osm.py's)
 ARROW_STACK = 1.5  # m between stacked decals of one arrow (twice-placed decals on the map: 0.0-0.6 m)
 ARROW_BACK = 60.0  # m back from a lane's end its arrows are looked for (GTA paints them 5-40 m before a stop line)
+LANE_MIN = 1.5  # m: lanes.py's narrowest lane
+ARROW_PAST = 6.0  # m past a lane's end (lines stopping 5 m short of the stop line at Alta St) an arrow is still its
 INSIDE = 0.5  # share of a lane's samples inside a box for it to be the junction's own
 EDGE_BOX = 6.0  # m: lane ends this near the pilot box's edge are cut by it, not a junction's (osm.py's)
 RES = 0.1  # m: raster step of the cut to the road
@@ -186,7 +188,8 @@ def turns_of(i):
   for x, y, z, h, tu in marks:
     k = int(np.argmin(np.hypot(X[:, 0] - x, X[:, 1] - y)))
     off = np.array([x, y]) - X[k, :2]
-    if abs(off @ n[k]) > X[k, 3] / 2 + ARROW_SPILL or abs(off @ d[k]) > 1.0 or abs(X[k, 2] - z) > ARROW_DZ or togo[k] > ARROW_BACK:
+    past = ARROW_PAST if k == len(X) - 1 else 1.0  # (its lines can stop short of the stop line, the arrow between)
+    if abs(off @ n[k]) > X[k, 3] / 2 + ARROW_SPILL or not -1.0 <= off @ d[k] <= past or abs(X[k, 2] - z) > ARROW_DZ or togo[k] > ARROW_BACK:
       continue
     if h is not None and np.array([np.cos(np.radians(h)), np.sin(np.radians(h))]) @ d[k] < np.cos(np.radians(ARROW_ALIGN)):
       continue
@@ -285,7 +288,7 @@ def paths(mouths):
     for b in range(len(arms)):
       th = wrap(out[b] - out[a] - 180)
       t = "through" if abs(th) <= TURN_ANG else "left" if TURN_ANG < th <= UTURN else "right" if -UTURN <= th < -TURN_ANG else None
-      if b != a and t and (t not in ways or abs(th - {"left": 90, "through": 0, "right": -90}[t]) < ways[t][1]):
+      if b != a and t and leaving[b] and (t not in ways or abs(th - {"left": 90, "through": 0, "right": -90}[t]) < ways[t][1]):  # (an arm no lane leaves by takes no turn)
         ways[t] = (b, abs(th - {"left": 90, "through": 0, "right": -90}[t]))
     for t, (b, _) in ways.items():
       for j in leaving[b]:
@@ -375,9 +378,15 @@ def build_(mem_i, region):
   mem = [strips[i] for i in mem_i]
   mouths, corners, heads = [], [], []
   dist = lambda p: (region if region is not None else seed).distance(Point(p))
+  narrow = lambda i: np.median(LA[i][:, 3]) < LANE_MIN  # (a sliver between two lines no car fits in isn't a lane)
   # (a lane carried on into from one leaving the same way from nearer the box, a stub, isn't where traffic leaves it)
   fed = lambda i: any(p in on_deck and p not in own and dist(LA[p][0, :2]) < dist(LA[i][0, :2])
                       and abs(wrap(leaves(p, "start") - leaves(i, "start"))) < CROSS for p in pred.get(i, []))
+  def reach(A, k, d):
+    """how far lane A's end k is from the box: across a level crossing (scan.past_gap), from the road beyond it."""
+    out = d[k] if k == -1 else -d[k]
+    gap = scan.past_gap(A[k, :2], out, A[k, 2])
+    return min(dist(A[k, :2]), dist(A[k, :2] + gap[2] * gap[1]) if gap is not None else np.inf)
   for i in on_deck:
     if i in own:
       continue
@@ -386,7 +395,7 @@ def build_(mem_i, region):
     for k, which in ((-1, "end"), (0, "start")):
       # (a lane leaving may also be carried on or merged into: a free turn lane round the box joining it; a lane meets it
       # at its nearer end: a stub between a crossing and its stop line has both within ATTACH)
-      if at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or which == "start" and fed(i) or dist(A[k, :2]) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
+      if at_edge(A[k]) or narrow(i) or which == "end" and (succ.get(i) or i in merging) or which == "start" and fed(i) or reach(A, k, d) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
         continue
       mouths.append([i, which, turns_of(i) if which == "end" else None])
       heads.append(np.arctan2(d[k, 1], d[k, 0]) % np.pi)

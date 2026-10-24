@@ -142,6 +142,36 @@ def extent(c, n, z, sign, drive=DRIVEABLE):
       zc = zf = float(h)
   return REACH, "far"
 
+# a level crossing: the surface raster holds nothing over the rails (no road, kerb or walk: Innocence Blvd's tram
+# crossing, 12-16 m), road either side; lanes carry on across it
+RAIL_GAP, RAIL_MIN = 25.0, 3.0  # m: from a lane's end to the road beyond, at most; the gap itself at least
+
+
+RAIL_FAN = 15.0  # deg either side of a lane's end heading the way across is looked for (an end's heading wobbles: 18 deg)
+
+
+def past_gap(c, d, z):
+  """a level crossing's gap ahead of c along about d (road, then RAIL_MIN m or more of nothing, then road again, within
+  RAIL_GAP m; the way across it within RAIL_FAN deg where the road resumes soonest): (m to the gap, m to the road
+  beyond, the way), or None."""
+  t = np.arange(0.5, RAIL_GAP + 0.25, 0.5)
+  best = None
+  for a in np.radians(np.arange(-RAIL_FAN, RAIL_FAN + 1e-6, 5.0)):
+    e = np.array([d[0] * np.cos(a) - d[1] * np.sin(a), d[0] * np.sin(a) + d[1] * np.cos(a)])
+    P = c + e * t[:, None]
+    code, h = T.sample(P[:, 0], P[:, 1], z, zwin=1.0)
+    cl = np.where(np.isfinite(h), np.asarray(code) & 7, 0)
+    k = 0
+    while k < len(cl) and cl[k] in DRIVEABLE:
+      k += 1
+    g = k
+    while g < len(cl) and cl[g] == 0:
+      g += 1
+    if g < len(cl) and cl[g] in DRIVEABLE and (g - k) * 0.5 >= RAIL_MIN and (best is None or t[g] < best[1]):
+      best = (float(t[k]), float(t[g]), e)
+  return best
+
+
 def crossings(c, n, z, lo, hi):
   """paint lines crossing the section from c + lo*n to c + hi*n on this deck, as (offset, id, yellow, dashed, z)."""
   a, b = c + lo * n, c + hi * n
