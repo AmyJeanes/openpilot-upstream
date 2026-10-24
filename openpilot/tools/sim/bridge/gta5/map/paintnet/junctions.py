@@ -375,6 +375,9 @@ def build_(mem_i, region):
   mem = [strips[i] for i in mem_i]
   mouths, corners, heads = [], [], []
   dist = lambda p: (region if region is not None else seed).distance(Point(p))
+  # (a lane carried on into from one leaving the same way from nearer the box, a stub, isn't where traffic leaves it)
+  fed = lambda i: any(p in on_deck and p not in own and dist(LA[p][0, :2]) < dist(LA[i][0, :2])
+                      and abs(wrap(leaves(p, "start") - leaves(i, "start"))) < CROSS for p in pred.get(i, []))
   for i in on_deck:
     if i in own:
       continue
@@ -383,7 +386,7 @@ def build_(mem_i, region):
     for k, which in ((-1, "end"), (0, "start")):
       # (a lane leaving may also be carried on or merged into: a free turn lane round the box joining it; a lane meets it
       # at its nearer end: a stub between a crossing and its stop line has both within ATTACH)
-      if at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or dist(A[k, :2]) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
+      if at_edge(A[k]) or which == "end" and (succ.get(i) or i in merging) or which == "start" and fed(i) or dist(A[k, :2]) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
         continue
       mouths.append([i, which, turns_of(i) if which == "end" else None])
       heads.append(np.arctan2(d[k, 1], d[k, 0]) % np.pi)

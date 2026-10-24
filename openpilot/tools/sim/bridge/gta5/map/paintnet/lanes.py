@@ -422,7 +422,7 @@ def steep(A, segs, own):
 
 def hatch_share(m, e, z, w, through=()):
   """share of painted raster in the lane's two outer bands around m: chevrons reach a lane's sides, arrows and text
-  sit in its middle. Paint on the lines through (steep ones) does not count."""
+  sit in its middle. Paint on the lines through (steep ones), and on arrows and text (marks), does not count."""
   n = np.array([e[1], -e[0]])
   if w / 2 - EDGE_OUT < 0.3:  # too narrow for an arrow: the whole space between the lines
     t = np.arange(-w / 2 + EDGE_IN, w / 2 - EDGE_IN, 0.1)
@@ -436,6 +436,10 @@ def hatch_share(m, e, z, w, through=()):
   code, h = scan.T.sample(X.ravel(), Y.ravel(), z, zwin=1.0)
   paint = (code >> 3) > 0
   P = np.stack([X.ravel(), Y.ravel()], 1)
+  if len(marks):  # (arrows and text: a turn arrow's sides reach a narrow lane's outer bands)
+    near = marks[(np.abs(marks[:, 2] - z) < 2) & (np.linalg.norm(marks[:, :2] - m, axis=1) < w + ALONG + 5)]
+    for mx, my, mz, r in near:
+      paint &= np.hypot(P[:, 0] - mx, P[:, 1] - my) > r
   for a, b, hw in through:
     v = b - a
     if np.linalg.norm((a + b) / 2 - m) > ALONG + w + np.linalg.norm(v):
