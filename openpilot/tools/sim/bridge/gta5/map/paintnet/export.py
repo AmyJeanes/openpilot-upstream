@@ -216,8 +216,9 @@ for k in heads:
   stop1 = STOPS.get(str(chain[-1]), {}).get("end") if i1 == n_all else None
   for a, b, cov, deck in pcs:  # one piece per stretch under a deck, on one, or neither (the level switch, arrows)
     cut = (stop0 if a == 0 else None, stop1 if b == len(A) else None)
-    feats.append({"type": "Feature", "properties": {**props, "covered": cov, "deck": deck}, "geometry": {"type": "Polygon", "coordinates": area(A[a:b], *cut)}})
-    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": name, "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
+    zp = round(float(np.median(A[a:b, 2])), 1)  # (the piece's own height: the map's height band)
+    feats.append({"type": "Feature", "properties": {**props, "covered": cov, "deck": deck, "z": zp}, "geometry": {"type": "Polygon", "coordinates": area(A[a:b], *cut)}})
+    feats.append({"type": "Feature", "properties": {"kind": "edge", "id": name, "covered": cov, "deck": deck, "on_deck": props["on_deck"], "z": zp},
                   "geometry": {"type": "MultiLineString", "coordinates": edges(A[a:b], a == 0, b == len(A), *cut)}})
     if r["dir"] != "?":
       feats.append({"type": "Feature", "properties": {**props, "kind": "centre", "covered": cov, "deck": deck},
@@ -269,10 +270,10 @@ for i, j, g, *br in LK["links"]:
       props = {"kind": "lane", "connector": True, "id": f"{lid(i)} > {lid(j)}", "group": to["group"], "heading": hd, "col": HEADING[hd],
                "dir": to["dir"], "z": round(float(mid[0, 2]), 1), "covered": cov, "deck": deck, "on_deck": lane_deck.get(i, False) or lane_deck.get(j, False)}
       feats.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": area(F)}})
-      feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"]},
+      feats.append({"type": "Feature", "properties": {"kind": "edge", "id": props["id"], "covered": cov, "deck": deck, "on_deck": props["on_deck"], "z": props["z"]},
                     "geometry": {"type": "MultiLineString", "coordinates": edges(F, False, False)[:2]}})
   m = (a[:2] + b0[:2]) / 2
-  feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "on_deck": lane_deck.get(i, False) or lane_deck.get(j, False),
+  feats.append({"type": "Feature", "properties": {"kind": "linkpt", "type": kind, "from": lid(i), "to": lid(j), "gap": g, "z": round(float(a[2]), 1), "on_deck": lane_deck.get(i, False) or lane_deck.get(j, False),
                                                   "covered": bool(covered(np.array([a[:3]]))[0]), "deck": bool(covered(np.array([a[:3]]), -1)[0])},
                 "geometry": {"type": "Point", "coordinates": lonlat(m[None])[0]}})
 # each lane arriving at a junction: its turns from its arrows, drawn just before its stop line as arrows pointing the
@@ -303,9 +304,9 @@ if JUNCTIONS:
     flat = {"covered": False, "deck": False, "on_deck": False}
     for p in J.get("paths", []):
       if p["to"] is None:
-        e = np.array(G["lanes"][p["from"]]["pts"])[-1, :2]
-        feats.append({"type": "Feature", "properties": {"kind": "flag", "group": None, "why": f"{lid(p['from'])}: turns {p['turn']}, no road leaves that way", **flat},
-                      "geometry": {"type": "Point", "coordinates": lonlat(e[None])[0]}})
+        e = np.array(G["lanes"][p["from"]]["pts"])[-1]
+        feats.append({"type": "Feature", "properties": {"kind": "flag", "group": None, "why": f"{lid(p['from'])}: turns {p['turn']}, no road leaves that way", "z": round(float(e[2]), 1), **flat},
+                      "geometry": {"type": "Point", "coordinates": lonlat(e[None, :2])[0]}})
         continue
       P = np.array(p["pts"])
       feats.append({"type": "Feature", "properties": {"kind": "path", "id": f"{lid(p['from'])} > {lid(p['to'])}", "turn": p["turn"],
@@ -313,16 +314,16 @@ if JUNCTIONS:
                                                       "junction": J["id"], "z": round(float(np.median(P[:, 2])), 1), **flat},
                     "geometry": {"type": "LineString", "coordinates": lonlat(P[:, :2])}})
     for j in J.get("unreached", []):
-      s = np.array(G["lanes"][j]["pts"])[0, :2]
-      feats.append({"type": "Feature", "properties": {"kind": "flag", "group": None, "why": f"{lid(j)}: leaves junction {J['id']}, no path reaches it", **flat},
-                    "geometry": {"type": "Point", "coordinates": lonlat(s[None])[0]}})
+      s = np.array(G["lanes"][j]["pts"])[0]
+      feats.append({"type": "Feature", "properties": {"kind": "flag", "group": None, "why": f"{lid(j)}: leaves junction {J['id']}, no path reaches it", "z": round(float(s[2]), 1), **flat},
+                    "geometry": {"type": "Point", "coordinates": lonlat(s[None, :2])[0]}})
 lanes_by = {}
 for r in G["lanes"]:
   lanes_by.setdefault(r["group"], []).append(np.array(r["pts"]))
 for f in G["flags"]:
   P = np.vstack(lanes_by.get(f["group"], [np.zeros((1, 4))]))
   m = P[len(P) // 2]
-  feats.append({"type": "Feature", "properties": {"kind": "flag", "group": f["group"], "why": "; ".join(f["why"]), "covered": False, "deck": False, "on_deck": False},
+  feats.append({"type": "Feature", "properties": {"kind": "flag", "group": f["group"], "why": "; ".join(f["why"]), "z": round(float(m[2]), 1), "covered": False, "deck": False, "on_deck": False},
                 "geometry": {"type": "Point", "coordinates": lonlat(m[None, :2])[0]}})
 json.dump({"type": "FeatureCollection", "features": feats}, open(out, "w"))
 print(len(feats), "features ->", out)

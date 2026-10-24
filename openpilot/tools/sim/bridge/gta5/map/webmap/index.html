@@ -60,7 +60,9 @@
   <b style="margin-top:6px">Levels</b>
   <label><input type="radio" name="lvl" value="all" checked> All (beneath decks: faint, dashed edge)</label><br>
   <label><input type="radio" name="lvl" value="top"> Top level only</label><br>
-  <label><input type="radio" name="lvl" value="under"> Lowest level only (decks hidden)</label>
+  <label><input type="radio" name="lvl" value="under"> Lowest level only (decks hidden)</label><br>
+  <label><input type="radio" name="lvl" value="band"> Height band: <span id="bandtxt"></span></label>
+  <div style="margin-left:18px"><input type="range" id="zlo" step="0.5" style="width:100px"> <input type="range" id="zhi" step="0.5" style="width:100px"></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
@@ -181,16 +183,35 @@ function setLevel(lv) {
     if (l.id.startsWith("ck-") || l.id.startsWith("osm-") || l.id === "pi-area" || l.id === "pi-checked") continue;
     const own = l.metadata.filter;
     // with all levels showing, arrows only on the top level: a road beneath a deck shows none through it
-    const cond = lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "on_deck"]] : null;
+    const cond = lv === "band" ? zBand() : lv === "top" || (lv === "all" && l.id === "pi-dir") ? ["!", ["get", "covered"]] : lv === "under" ? ["!", ["get", "on_deck"]] : null;
     map.setFilter(l.id, cond ? (own ? ["all", own, cond] : cond) : own || null);
   }
   // beneath decks on their own: drawn as strongly as the top level
-  map.setPaintProperty("pi-lane", "fill-opacity", lv === "under" ? 0.42 : ["case", ["get", "covered"], 0.18, 0.42]);
+  map.setPaintProperty("pi-lane", "fill-opacity", lv === "under" || lv === "band" ? 0.42 : ["case", ["get", "covered"], 0.18, 0.42]);
   showUnder();
 }
 // beneath decks on the hybrid view: the under-deck shots (undertiles.py) replace the decks in the imagery
+// a height band (a middle level, which neither the top nor the lowest shows): what lies between the two sliders' heights
+const zlo = document.getElementById("zlo"), zhi = document.getElementById("zhi");
+function zBand() {
+  const a = Math.min(+zlo.value, +zhi.value), b = Math.max(+zlo.value, +zhi.value);
+  document.getElementById("bandtxt").textContent = `${a.toFixed(1)}-${b.toFixed(1)} m`;
+  return ["all", [">=", ["to-number", ["get", "z"], -1e9], a], ["<=", ["to-number", ["get", "z"], 1e9], b]];
+}
+fetch(base + "pilot.geojson?t=" + Date.now()).then(r => r.json()).then(d => {
+  const zs = d.features.map(f => f.properties.z).filter(z => typeof z === "number");
+  const lo = Math.floor(Math.min(...zs)), hi = Math.ceil(Math.max(...zs));
+  for (const s of [zlo, zhi]) { s.min = lo; s.max = hi; }
+  zlo.value = lo; zhi.value = hi;
+  zBand();
+});
+for (const s of [zlo, zhi]) s.oninput = () => {
+  document.querySelector("input[name=lvl][value=band]").checked = true;
+  setLevel("band");
+};
 function showUnder() {
-  const on = view === "hybrid" && document.querySelector("input[name=lvl]:checked").value === "under";
+  const lvl = document.querySelector("input[name=lvl]:checked").value;
+  const on = view === "hybrid" && (lvl === "under" || lvl === "band");
   for (const id of ["under", "under-edge"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 document.querySelectorAll("input[name=lvl]").forEach(r => r.onchange = () => setLevel(r.value));
