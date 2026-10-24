@@ -18,7 +18,7 @@ node where the arms' lines (through their mouth lanes' ends) best cross. Crossin
 noded where they cross a road. Signals (GTA's traffic light nodes in the box) go on each arm at its stop line with
 traffic_signals:direction (stop_paint.py's tags, as on the live map); the crossings there are crossing=traffic_signals.
 Restriction relations at the junction's node: no_u_turn back into a two-way arm, and no_left_turn / no_right_turn /
-no_straight_on for a move between arms no lane makes (junctions.py's paths).
+no_straight_on for a move between arms no lane makes (junctions.py's paths); likewise where roads fork or merge.
 Tags: lanes (+:forward/:backward/:both_ways); turn:lanes from junctions.py's turns at the mouths ("none": no arrow),
 merge_to_left/right on a lane merging into another, elsewhere listed arrows (a lane whose arrow is unknown leaves the
 tag off and is flagged); change:lanes from the paint between lanes, width:lanes (:start / :end on a taper), width (kerb to kerb, gutter in; none on a taper),
@@ -409,6 +409,7 @@ sec_of_run = {i: s for s, S in enumerate(sections) for i in S["runs"]}
 # --- section ends that meet: a track carrying on from one section into the next, or a link between tracks
 port = {}
 pparent = {}
+made = set()  # (section end traffic leaves by, section end it carries on into): the moves lanes make where sections meet
 
 
 def pfind(p):
@@ -436,6 +437,7 @@ for t in live:
     if s0 != s1:
       q = X[k, :2]
       meet(end_near(s0, q), end_near(s1, q))
+      made.add((end_near(s0, q), end_near(s1, q)))
 for i, j in other_links + branch_links:
   ti, a_, b_ = lane_track[i]
   tj, aj, _ = lane_track[j]
@@ -452,11 +454,13 @@ for i, j in other_links + branch_links:
     si, sj = sec_of_run[run_of[ti, b_]], sec_of_run[run_of[tj, kj]]
     if si != sj:
       meet(end_near(si, p), end_near(sj, p))
+      made.add((end_near(si, p), end_near(sj, p)))
     continue
   ki = int(np.linalg.norm(X[:, :2] - tracks[tj]["X"][aj, :2], axis=1).argmin()) if (i, j) in branch_links else b_
   si, sj = sec_of_run[run_of[ti, ki]], sec_of_run[run_of[tj, aj]]
   if si != sj:
     meet(end_near(si, tracks[tj]["X"][aj, :2]), end_near(sj, tracks[tj]["X"][aj, :2]))
+    made.add((end_near(si, tracks[tj]["X"][aj, :2]), end_near(sj, tracks[tj]["X"][aj, :2])))
 clusters = collections.defaultdict(list)
 for s in range(len(sections)):
   for e in (0, 1):
@@ -1034,7 +1038,7 @@ for s, S in enumerate(sections):
         tg2["bridge"], tg2["layer"] = "yes", "1"
       tg2["paintnet:lanes"] = ";".join("+".join(map(str, tracks[t]["lanes"])) for t, _ in S2["order"])
       ways.append({"nodes": [port_node[(s, 1)], ext[(s, 1)]] if e else [ext[(s, 0)], port_node[(s, 0)]], "tags": tg2,
-                   "issues": S["issues"] + iss2, "section": s})
+                   "issues": S["issues"] + iss2, "section": s, "stub": True})
 
 # --- crossings: a footway along each crossing strip, noded where it crosses a way on its deck
 def node_xy(i):
@@ -1137,6 +1141,37 @@ for J in junctions:
       th = (ob - oa) % 360 - 180  # the turn from arriving (heading -oa) to leaving (heading ob), left positive
       kind = "no_u_turn" if wa is wb or abs(th) > UTURN else "no_straight_on" if abs(th) <= TURN_ANG else "no_left_turn" if th > 0 else "no_right_turn"
       restrictions.append((kind, wa, J["node"], wb))
+
+# and where sections meet away from a junction (a fork or merge), none of the moves no lane makes (into the other
+# direction of a two-way road, from one carriageway back into the other); an arm's run-on stub carries only its own
+# section's lanes on to the mouth, so trades no traffic with the other ways there
+end_at = collections.defaultdict(list)  # node -> [(way, the node is its last, its section's end there)]
+for w in ways:
+  s = w["section"]
+  if s is None:
+    continue
+  for last in (False, True):
+    n = w["nodes"][-1 if last else 0]
+    e = next((e for e in (0, 1) if port_node.get((s, e)) == n), None)
+    if e is not None:
+      end_at[n].append((w, last, e))
+junction_nodes = {J["node"] for J in junctions if "node" in J}
+for n, E in end_at.items():
+  if n in junction_nodes or len({w["section"] for w, *_ in E}) < 2:
+    continue
+  for wa, la, ea in E:
+    if "oneway" in wa["tags"] and not la:
+      continue
+    for wb, lb, eb in E:
+      if wb["section"] == wa["section"] or ("oneway" in wb["tags"] and lb):
+        continue
+      if not (wa.get("stub") or wb.get("stub")) and ((wa["section"], ea), (wb["section"], eb)) in made:
+        continue
+      ha = node_xy(wa["nodes"][-1 if la else 0]) - node_xy(wa["nodes"][-2 if la else 1])
+      hb = node_xy(wb["nodes"][-2 if lb else 1]) - node_xy(wb["nodes"][-1 if lb else 0])
+      th = math.degrees(math.atan2(ha[0] * hb[1] - ha[1] * hb[0], ha @ hb))
+      restrictions.append(("no_u_turn" if abs(th) > UTURN else "no_straight_on" if abs(th) <= TURN_ANG else
+                           "no_left_turn" if th > 0 else "no_right_turn", wa, n, wb))
 
 for J in junctions:
   if "node" in J:

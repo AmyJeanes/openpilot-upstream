@@ -32,6 +32,8 @@ STEPS = [
    [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json")],[f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"], []),
   ("osmview", "osm_view.py", [f"{WEB}/osm_ic.osm", f"{WEB}/osm_view.geojson"], [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_view.geojson"], []),
   ("osmcheck", "osm_check.py", B + [f"{WEB}/osm_ic.osm", f"{WEB}/osm_check.geojson"], [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_check.geojson"], []),
+  ("osmroute", "osm_route.py", B + [f"{WEB}/osm_ic.osm", "/home/amy/.cache/paintnet/valhalla", f"{WEB}/osm_route.geojson"],
+   [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_route.geojson"], []),
 ]
 STATE, LOGS = pathlib.Path(o(".build_state.json")), pathlib.Path(o("logs"))
 
