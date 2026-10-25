@@ -168,7 +168,13 @@ def past_gap(c, d, z):
     while g < len(cl) and cl[g] == 0:
       g += 1
     if g < len(cl) and cl[g] in DRIVEABLE and (g - k) * 0.5 >= RAIL_MIN and (best is None or t[g] < best[1]):
-      best = (float(t[k]), float(t[g]), e)
+      # (nothing RAIL_MIN across round the gap's middle either: a seam in the raster crossed at a slant isn't one)
+      m = c + e * (t[k] + t[g - 1]) / 2
+      a = np.radians(np.arange(0, 360, 45))
+      ring = m + RAIL_MIN / 2 * np.stack([np.cos(a), np.sin(a)], 1)
+      rc, rh = T.sample(ring[:, 0], ring[:, 1], z, zwin=1.0)
+      if not np.any(np.isfinite(rh) & np.isin(np.asarray(rc) & 7, DRIVEABLE)):
+        best = (float(t[k]), float(t[g]), e)
   return best
 
 

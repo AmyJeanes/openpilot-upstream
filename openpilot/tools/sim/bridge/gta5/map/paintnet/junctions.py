@@ -105,9 +105,42 @@ strips = [(k, np.array(r["pts"], float), Polygon(r["outline"]).buffer(0) if r.ge
 walls_dir = [(np.array(r["pts"], float), r.get("stops")) for r in D if r["kind"] in ("gore", "median", "twltl", "shoulder", "island")]
 
 
-def cut(hull, pts, walls, seed):
-  """the driveable surface within hull on the deck of pts (x, y, z: each place takes its nearest one's height), less
-  walls (areas, grown SEAL m), the part overlapping seed most, as a ring."""
+def gap_at(A, k):
+  """the level crossing's gap lane A's end k stops at (scan.past_gap): (the way across it, the way from the lane's end to
+  where the road resumes beyond the gap, the lane's width wide, that place), or None."""
+  d = frame(A)[0][k] * (1 if k == -1 else -1)
+  g = scan.past_gap(A[k, :2], d, A[k, 2])
+  if g is None:
+    return None
+  near, far, e = g
+  n = np.array([e[1], -e[0]]) * A[k, 3] / 2
+  a, b = A[k, :2], A[k, :2] + e * far
+  return e, Polygon([a - n, b - n, b + n, a + n]), b
+
+
+# a level crossing is a strip too (kind "rail", no dir.json index): the gaps lanes stop at, where a lane arriving and one
+# leaving the same way meet across one (their gaps overlapping: lanes ending at a deck's edge or under a deck over them
+# don't), with the other lanes' gaps within ATTACH m of those. Where one of those meets no lane beyond, the road
+# resuming in another junction's box (the rails running through it), that junction is the crossing's too (beyond: the
+# crossing's strip index -> those places)
+gaps = {(i, w): (g, float(A[k, 2])) for i, A in enumerate(LA) if len(A) >= 2 for k, w in ((-1, "end"), (0, "start"))
+        if not at_edge(A[k]) for g in [gap_at(A, k)] if g is not None}
+met = {(i, w) for (i, w), (g, z) in gaps.items() if any(
+  v != w and j != i and g[0] @ f[0] < -np.cos(np.radians(CROSS)) and abs(z - zz) < 2 and g[1].intersects(f[1]) for (j, v), (f, zz) in gaps.items())}
+beyond = {}
+for part in getattr(unary_union([gaps[e][0][1] for e in met]), "geoms", [unary_union([gaps[e][0][1] for e in met])]) if met else []:
+  on = [e for e, (g, z) in gaps.items() if g[1].distance(part) <= ATTACH]
+  poly = unary_union([part] + [gaps[e][0][1] for e in on])
+  z = float(np.median([gaps[e][1] for e in on]))
+  C = np.array(poly.convex_hull.exterior.coords)
+  beyond[len(strips)] = [gaps[e][0][2] for e in on if e not in met]
+  strips.append((None, np.column_stack([C, np.full(len(C), z), np.zeros(len(C))]), poly))
+rail = lambda mem: unary_union([strips[i][2] for i in mem if strips[i][0] is None]).convex_hull  # (empty if none)
+
+
+def cut(hull, pts, walls, seed, fill=None):
+  """the driveable surface within hull on the deck of pts (x, y, z: each place takes its nearest one's height), and the
+  rails' gap within fill (an area), less walls (areas, grown SEAL m), the part overlapping seed most, as a ring."""
   lo, hi = np.array(hull.bounds[:2]) - 1, np.array(hull.bounds[2:]) + 1
   W, H = np.ceil((hi - lo) / RES).astype(int)
   px = lambda P: np.round(np.stack([(P[:, 0] - lo[0]) / RES - 0.5, (hi[1] - P[:, 1]) / RES - 0.5], 1)).astype(np.int32)
@@ -119,6 +152,11 @@ def cut(hull, pts, walls, seed):
   code, _ = scan.T.sample(X, Y, pts[near, 2], zwin=1.0)
   road = np.zeros_like(mask)
   road[r, c] = np.isin(code & 7, scan.DRIVEABLE)
+  if fill is not None and not fill.is_empty:
+    gap = np.zeros_like(mask)
+    for poly in getattr(fill, "geoms", [fill]):
+      cv2.fillPoly(gap, [px(np.array(poly.exterior.coords))], 1)
+    road[r, c] |= (gap[r, c] > 0) & (code & 7 == 0)
   wall = np.zeros_like(mask)
   for g in walls:
     g = g.buffer(SEAL)
@@ -284,10 +322,19 @@ def paths(mouths):
   bypass = set()  # (arm, turn) a free turn lane round the box takes: a lane carrying on into a leaving lane from that arm's road
   res = []
   for a in range(len(arms)):
-    ways = {}
+    ways, cast = {}, {}
+    # two roads on ahead (a level crossing's roads either side of its rails): where the arm's arrows turn right and no
+    # road beyond does, the further right is the right turn; left likewise
+    th_ = {b: wrap(out[b] - out[a] - 180) for b in range(len(arms)) if b != a and leaving[b]}
+    ahead = sorted((b for b in th_ if abs(th_[b]) <= TURN_ANG), key=th_.get)
+    marked = set().union(*[set(turns[i].split(";")) for i in arriving[a] if turns[i] and turns[i] != "?"])
+    if len(ahead) > 1 and "right" in marked and not any(th < -TURN_ANG for th in th_.values()):
+      cast[ahead[0]] = "right"
+    elif len(ahead) > 1 and "left" in marked and not any(th > TURN_ANG for th in th_.values()):
+      cast[ahead[-1]] = "left"
     for b in range(len(arms)):
       th = wrap(out[b] - out[a] - 180)
-      t = "through" if abs(th) <= TURN_ANG else "left" if TURN_ANG < th <= UTURN else "right" if -UTURN <= th < -TURN_ANG else None
+      t = cast.get(b) or ("through" if abs(th) <= TURN_ANG else "left" if TURN_ANG < th <= UTURN else "right" if -UTURN <= th < -TURN_ANG else None)
       if b != a and t and leaving[b] and (t not in ways or abs(th - {"left": 90, "through": 0, "right": -90}[t]) < ways[t][1]):  # (an arm no lane leaves by takes no turn)
         ways[t] = (b, abs(th - {"left": 90, "through": 0, "right": -90}[t]))
     for t, (b, _) in ways.items():
@@ -323,7 +370,9 @@ def paths(mouths):
             break
           want.remove(i)
           sets[i].discard("through")
-      rest, free = (want, T) if t == "left" else (want[::-1], T[::-1])  # (paired from the kerb)
+      # (paired from the kerb; a left turn, or a way on bending left more than half a turn does, from the inside)
+      inside = t == "left" or t == "through" and wrap(out[ways[t][0]] - out[a] - 180) > TURN_ANG / 2
+      rest, free = (want, T) if inside else (want[::-1], T[::-1])
       pairs = [(i, free[min(k, len(free) - 1)]) for k, i in enumerate(rest)]
       for i, y in pairs:
         flags = (["inferred"] if i in guessed else []) + (["merge"] if [v for _, v in pairs].count(y) > 1 else [])
@@ -336,7 +385,7 @@ def paths(mouths):
 def road_of(mem):
   """the road round strips mem on their deck, their own lanes not walling it, or None."""
   z, seed, on_deck, own, own_dir = junction(mem)
-  ring = cut(rect(*seed.bounds).buffer(REACH, join_style=2), np.vstack([strips[i][1] for i in mem]), walls_of(z, on_deck, own, own_dir), seed)
+  ring = cut(rect(*seed.bounds).buffer(REACH, join_style=2), np.vstack([strips[i][1] for i in mem]), walls_of(z, on_deck, own, own_dir), seed, rail(mem))
   return None if ring is None else Polygon(ring).buffer(0)
 
 
@@ -377,16 +426,13 @@ def build_(mem_i, region):
   z, seed, on_deck, own, own_dir = junction(mem_i)
   mem = [strips[i] for i in mem_i]
   mouths, corners, heads = [], [], []
-  dist = lambda p: (region if region is not None else seed).distance(Point(p))
+  # (a level crossing alone: its lanes meet its gap; the road round it runs on to the next junction's)
+  near_ = seed if not mem or all(k is None for k, _, _ in mem) else region if region is not None else seed
+  dist = lambda p: near_.distance(Point(p))
   narrow = lambda i: np.median(LA[i][:, 3]) < LANE_MIN  # (a sliver between two lines no car fits in isn't a lane)
   # (a lane carried on into from one leaving the same way from nearer the box, a stub, isn't where traffic leaves it)
   fed = lambda i: any(p in on_deck and p not in own and dist(LA[p][0, :2]) < dist(LA[i][0, :2])
                       and abs(wrap(leaves(p, "start") - leaves(i, "start"))) < CROSS for p in pred.get(i, []))
-  def reach(A, k, d):
-    """how far lane A's end k is from the box: across a level crossing (scan.past_gap), from the road beyond it."""
-    out = d[k] if k == -1 else -d[k]
-    gap = scan.past_gap(A[k, :2], out, A[k, 2])
-    return min(dist(A[k, :2]), dist(A[k, :2] + gap[2] * gap[1]) if gap is not None else np.inf)
   for i in on_deck:
     if i in own:
       continue
@@ -395,18 +441,17 @@ def build_(mem_i, region):
     for k, which in ((-1, "end"), (0, "start")):
       # (a lane leaving may also be carried on or merged into: a free turn lane round the box joining it; a lane meets it
       # at its nearer end: a stub between a crossing and its stop line has both within ATTACH)
-      if at_edge(A[k]) or narrow(i) or which == "end" and (succ.get(i) or i in merging) or which == "start" and fed(i) or reach(A, k, d) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
+      if at_edge(A[k]) or narrow(i) or which == "end" and (succ.get(i) or i in merging) or which == "start" and fed(i) or dist(A[k, :2]) > ATTACH or dist(A[k, :2]) > dist(A[-1 - k, :2]):
         continue
       mouths.append([i, which, turns_of(i) if which == "end" else None])
       heads.append(np.arctan2(d[k, 1], d[k, 0]) % np.pi)
       corners += [A[k, :2] - n[k] * A[k, 3] / 2, A[k, :2] + n[k] * A[k, 3] / 2]
   gap = lambda a, b: min(abs(a - b), np.pi - abs(a - b))
-  if not any(gap(a, b) > np.radians(CROSS) for a in heads for b in heads):
+  if not any(gap(a, b) > np.radians(CROSS) for a in heads for b in heads) and rail(mem_i).is_empty:
     return None
   # lanes running straight on past its road (a through road with no stop line here): a lane starting or ending just
   # beyond them (an on-ramp leaving across them) meets the junction too, and the box takes them in there
   mouthed = {(i, w) for i, w, _ in mouths}
-  near_ = region if region is not None else seed
   through = [i for i in on_deck if i not in own and all((i, w) not in mouthed for w in ("start", "end"))
              and dist(LA[i][0, :2]) > ATTACH and dist(LA[i][-1, :2]) > ATTACH and band(LA[i], STOPS.get(i)).distance(near_) <= SEAL + 1.0]
   crossed = set()
@@ -447,19 +492,19 @@ def build_(mem_i, region):
       corners += [A[k, :2] - n[k] * A[k, 3] / 2, A[k, :2] + n[k] * A[k, 3] / 2]
   hull = unary_union([seed.convex_hull, MultiPoint(corners).convex_hull] if corners else [seed]).convex_hull
   pts = np.vstack([A for _, A, _ in mem] + [LA[i][[0, -1]] for i, _, _ in mouths])
-  ring = cut(hull, pts, walls_of(z, on_deck, own | crossed, own_dir), seed)
+  ring = cut(hull, pts, walls_of(z, on_deck, own | crossed, own_dir), seed, rail(mem_i))
   if ring is None:
     return None
   box = Polygon(ring).buffer(0)
   inside = [i for i in on_deck if np.mean([box.contains(Point(p)) for p in LA[i][:, :2]]) >= INSIDE]
   ps, unreached, arms = paths(mouths)
-  return {"z": round(z, 2), "ring": ring, "strips": [k for k, _, _ in mem], "mouths": mouths, "inside": inside, "paths": ps,
+  return {"z": round(z, 2), "ring": ring, "strips": [k for k, _, _ in mem if k is not None], "rail": not rail(mem_i).is_empty, "mouths": mouths, "inside": inside, "paths": ps,
           "trim": {str(i): np.round(LA[i], 2).tolist() for i in TRIMMED},
           "unreached": unreached, "_box": box, "_arms": arms}
 
 
 found, taken = [], set()
-for s0 in range(len(strips)):
+for s0 in sorted(range(len(strips)), key=lambda i: strips[i][0] is not None):  # (a level crossing takes the strips on its road first)
   if s0 not in taken:
     mem, region = grow(s0, taken)
     taken |= set(mem)
@@ -474,7 +519,10 @@ while merged:
   for a in range(len(live)):
     for b in range(a + 1, len(live)):
       (ma, ra, ja), (mb, rb, jb) = live[a], live[b]
-      if abs(ja["z"] - jb["z"]) < 2 and ja["_box"].intersection(jb["_box"]).area >= MERGE * min(ja["_box"].area, jb["_box"].area):
+      reached = lambda m, box: any(box.distance(Point(p)) <= ATTACH for s in m for p in beyond.get(s, []))
+      if abs(ja["z"] - jb["z"]) < 2 and (ja["_box"].intersection(jb["_box"]).area >= MERGE * min(ja["_box"].area, jb["_box"].area)
+                                         or reached(ma, jb["_box"]) or reached(mb, ja["_box"])
+                                         or {m[0] for m in ja["mouths"]} & set(jb["inside"]) or {m[0] for m in jb["mouths"]} & set(ja["inside"])):
         mem = sorted(set(ma) | set(mb))
         region = road_of(mem)  # (its lanes walling either part may be the merged junction's own)
         found = [f for f in found if f is not live[a] and f is not live[b]] + [(mem, region, build(mem, region))]

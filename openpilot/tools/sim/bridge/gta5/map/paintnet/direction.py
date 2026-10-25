@@ -18,7 +18,7 @@ carried on to that edge, its area cut to the road's surface so its ends follow t
 against the road's edge is a kerb corner, not a shoulder: dropped.
 Zebra crossings are where the game's crossing decals are (a strip mostly inside one), bars and all, and take the
 decals' outline; the strips between its bars sharing a decal are one crossing.
-Centre spaces: yellow on both sides is the space between opposing traffic, not a lane for either way (US markings),
+Centre spaces: yellow on both sides (each side's own line) is the space between opposing traffic, not a lane for either way (US markings),
 unless the road ends within SHOULDER m past both lines (a one-way ramp GTA paints yellow at both edges: a lane):
 a painted median (solid both sides, often opening into back-to-back left-turn bays) or, with a dashed yellow on a side,
 a two-way left-turn lane. Marked "median" / "twltl", given no direction.
@@ -334,8 +334,9 @@ for i, r in enumerate(lanes):
   A = np.array(r["pts"])
   W = np.median(A[:, 3])
   sides = [r.get("left_all", [r["left"]]), r.get("right_all", [r["right"]])]
-  if all(any(paint.get(i) == "yellow" for i in ids) for ids in sides) and not edge_bound(A):
-    kind = "twltl" if any(style.get(i) == "dashed" for ids in sides for i in ids) else "median"
+  # (each side's own line: a lane beside a gore or median touches its yellow paint in places)
+  if all(paint.get(r[s]) == "yellow" for s in ("left", "right")) and not edge_bound(A):
+    kind = "twltl" if any(paint.get(i) == "yellow" and style.get(i) == "dashed" for ids in sides for i in ids) else "median"
     out.append({**r, "kind": kind}); stats[kind] += 1
     continue
   if "e" in (r["left"], r["right"]) and W < SHOULDER:

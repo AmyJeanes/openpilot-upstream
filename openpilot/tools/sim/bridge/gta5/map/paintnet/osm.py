@@ -1126,10 +1126,17 @@ for J in junctions:
 # lane round the box makes it instead, or no arrow turns that way)
 TURN_ANG, UTURN = 45.0, 150.0  # deg: junctions.py's
 restrictions = []  # (kind, from way, via node, to way)
+on_into, on_from = collections.defaultdict(list), collections.defaultdict(list)  # connect.py's carry-on links, kept lanes or not
+for i, j, g, *br in LK["links"]:
+  if not br:
+    on_into[i].append(j)
+    on_from[j].append(i)
 for J in junctions:
   if "node" not in J:
     continue
   moves = {(p_["from"], p_["to"]) for p_ in J["paths"]}
+  for _ in range(3):  # (a stub too short to be kept, MINLEN: the move is into the lane it carries on into, or from the one into it)
+    moves |= {(i, k) for i, j in moves if j not in lane_track for k in on_into.get(j, [])} | {(k, j) for i, j in moves if i not in lane_track for k in on_from.get(i, [])}
   arms = []
   for (s, e), ml in J.get("arm_lanes", {}).items():
     w = [w for w in ways if w["section"] == s and J["node"] in (w["nodes"][0], w["nodes"][-1])]
@@ -1138,7 +1145,7 @@ for J in junctions:
       arms.append((w[0], {i for i, which in ml if which == "end"}, {i for i, which in ml if which == "start"}, math.degrees(math.atan2(o[1], o[0]))))
   for wa, arr, _, oa in arms:
     for wb, _, lea, ob in arms:
-      if not arr or not lea or (wa is not wb and any((i, j) in moves for i in arr for j in lea)):
+      if not arr or not lea or (wa is not wb and any(i in arr and j in lane_track and lane_track[j][0] in sections[wb["section"]]["tracks"] for i, j in moves)):
         continue
       th = (ob - oa) % 360 - 180  # the turn from arriving (heading -oa) to leaving (heading ob), left positive
       kind = "no_u_turn" if wa is wb or abs(th) > UTURN else "no_straight_on" if abs(th) <= TURN_ANG else "no_left_turn" if th > 0 else "no_right_turn"
