@@ -243,6 +243,7 @@ class GuiApplication:
     self._target_fps: int = _DEFAULT_FPS
     self._fps_limit: int = _DEFAULT_FPS
     self._frame_clock: Callable[[], bool] | None = None
+    self._frame_start: Callable[[], None] | None = None
     self._frame_clocked = False
     self._last_fps_log_time: float = time.monotonic()
     self._frame = 0
@@ -472,9 +473,15 @@ class GuiApplication:
     if tick_function in self._nav_stack_ticks:
       self._nav_stack_ticks.remove(tick_function)
 
-  def set_frame_clock(self, clock: Callable[[], bool] | None):
-    """clock is called before each swap; block until present time and return True, or return False to use the fixed rate."""
+  def set_frame_clock(self, clock: Callable[[], bool] | None, frame_start: Callable[[], None] | None = None):
+    """clock is called before each swap; block until present time and return True, or return False to use the fixed rate.
+    While clocked, frame_start is called before drawing each frame."""
     self._frame_clock = clock
+    self._frame_start = frame_start
+
+  @property
+  def frame_clocked(self) -> bool:
+    return self._frame_clocked
 
   def set_should_render(self, should_render: bool):
     self._should_render = should_render
@@ -637,6 +644,9 @@ class GuiApplication:
           time.sleep(1 / self._target_fps)
           yield False, 0.0, 0.0
           continue
+
+        if self._frame_clocked and self._frame_start is not None:
+          self._frame_start()
 
         if self._render_texture:
           rl.begin_texture_mode(self._render_texture)
