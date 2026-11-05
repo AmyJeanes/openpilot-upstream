@@ -33,6 +33,7 @@ INF_POINT = np.array([1000.0, 0.0, 0.0])
 class AugmentedRoadView(CameraView):
   def __init__(self, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_NARROW_ROAD):
     super().__init__("camerad", stream_type)
+    self.match_model = True
     self._set_placeholder_color(BORDER_COLORS[UIStatus.DISENGAGED])
 
     self.device_camera: DeviceCameraConfig | None = None

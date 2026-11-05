@@ -1,4 +1,5 @@
 import platform
+from collections import deque
 import numpy as np
 import raylib_nb as rl
 
@@ -12,6 +13,7 @@ from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.ui_state import ui_state
 
 CONNECTION_RETRY_INTERVAL = 0.2  # seconds between connection attempts
+FRAME_HISTORY = 4  # recent buffers to find the model's frame in, well within camerad's 18
 USE_EGL = COMMA_HARDWARE and not CPU_RENDERER
 
 VERSION = """
@@ -84,7 +86,7 @@ class CameraView(Widget):
     super().__init__()
     self._name = name
     # Reuse subscribers: destroying a VisionIpcClient doesn't reclaim its msgq reader slot.
-    self._clients = {stream: VisionIpcClient(name, stream, conflate=True) for stream in VisionStreamType}
+    self._clients = {stream: VisionIpcClient(name, stream, conflate=False) for stream in VisionStreamType}
     self.client = self._clients[stream_type]
     self._stream_type: VisionStreamType = stream_type
     self.available_streams: set[VisionStreamType] = set()
@@ -100,6 +102,9 @@ class CameraView(Widget):
     self._texture1_loc: int = rl.get_shader_location(self.shader, "texture1") if not COMMA_HARDWARE else -1
 
     self.frame: VisionBuf | None = None
+    self._frames: deque[VisionBuf] = deque(maxlen=FRAME_HISTORY)
+    # draw the frame the model output came from, for views that draw that output on top
+    self.match_model = False
     self.texture_y: rl.Texture | None = None
     self.texture_uv: rl.Texture | None = None
 
@@ -125,8 +130,9 @@ class CameraView(Widget):
     # Discard queued frames from the previous drive without recreating subscribers.
     if ui_state.is_onroad() and self.frame is not None:
       self.frame = None
+      self._frames.clear()
       for client in self._clients.values():
-        client.recv(timeout_ms=0)
+        self._recv_all(client)
       self._target_client = None
       self._target_stream_type = None
       self._switching = False
@@ -166,6 +172,7 @@ class CameraView(Widget):
       self.shader.id = 0
 
     self.frame = None
+    self._frames.clear()
     self.available_streams.clear()
     self.client = None
     self._target_client = None
@@ -200,14 +207,15 @@ class CameraView(Widget):
       self._draw_placeholder(rect)
       return
 
-    # Try to get a new buffer without blocking
-    buffer = self.client.recv(timeout_ms=0)
-    if buffer:
-      self._texture_needs_update = True
-      self.frame = buffer
+    if frames := self._recv_all(self.client):
+      self._frames.extend(frames)
     elif not self.client.is_connected():
       # ensure we clear the displayed frame when the connection is lost
       self.frame = None
+      self._frames.clear()
+    if self._frames and (frame := self._frame_to_draw()) is not self.frame:
+      self._texture_needs_update = True
+      self.frame = frame
 
     if not self.frame:
       self._draw_placeholder(rect)
@@ -241,6 +249,23 @@ class CameraView(Widget):
       self._render_egl(src_rect, dst_rect)
     else:
       self._render_textures(src_rect, dst_rect)
+
+  @staticmethod
+  def _recv_all(client: VisionIpcClient) -> list[VisionBuf]:
+    frames = []
+    while buffer := client.recv(timeout_ms=0):
+      frames.append(buffer)
+    return frames
+
+  def _frame_to_draw(self) -> VisionBuf:
+    if self.match_model:
+      model = ui_state.sm['modelV2']
+      frame_id = model.frameIdExtra if self._stream_type == VisionStreamType.VISION_STREAM_WIDE_ROAD else model.frameId
+      # the frame id lives in the buffer, so a buffer camerad has reused since can't match
+      for frame in reversed(self._frames):
+        if frame.frame_id == frame_id:
+          return frame
+    return self._frames[-1]
 
   def _draw_placeholder(self, rect: rl.Rectangle):
     if self._placeholder_color:
@@ -336,9 +361,10 @@ class CameraView(Widget):
       cloudlog.debug(f"Target stream connected: {self._target_stream_type}")
 
     # Check if target has frames ready
-    target_frame = self._target_client.recv(timeout_ms=0)
-    if target_frame:
-      self.frame = target_frame  # Update current frame to target frame
+    if frames := self._recv_all(self._target_client):
+      self._frames.clear()
+      self._frames.extend(frames)
+      self.frame = frames[-1]
       self._complete_switch()
 
   def _complete_switch(self) -> None:

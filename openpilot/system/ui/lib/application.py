@@ -251,6 +251,9 @@ class GuiApplication:
     self._window_close_requested = False
     self._nav_stack: list[object] = []
     self._nav_stack_ticks: list[Callable[[], None]] = []
+    self._frame_start: Callable[[], bool] | None = None
+    self._paced = False
+    self._raylib_fps = 0
     self._nav_stack_widgets_to_render = 1 if self.big_ui() else 2
 
     self._mouse = MouseState(self._scale)
@@ -344,7 +347,8 @@ class GuiApplication:
 
       # four display runs slightly faster than 60 FPS, let it dictate rate so we don't drift and drop frames
       vblank_control = HARDWARE.get_device_type() == 'mici'
-      rl.set_target_fps(0 if OFFSCREEN or vblank_control else fps)
+      self._raylib_fps = 0 if OFFSCREEN or vblank_control else fps
+      rl.set_target_fps(self._raylib_fps)
 
       self._target_fps = fps
       self._load_fonts()
@@ -472,6 +476,11 @@ class GuiApplication:
   def remove_nav_stack_tick(self, tick_function: Callable[[], None]):
     if tick_function in self._nav_stack_ticks:
       self._nav_stack_ticks.remove(tick_function)
+
+  def set_frame_start(self, frame_start: Callable[[], bool] | None):
+    """frame_start runs before each frame, outside its time. It can block to pace the frames, and returns True when it
+    did: that frame then skips the fixed rate's wait."""
+    self._frame_start = frame_start
 
   def set_should_render(self, should_render: bool):
     self._should_render = should_render
@@ -614,6 +623,9 @@ class GuiApplication:
         self._render_profiler.enable()
 
       while not (self._window_close_requested or rl.window_should_close()):
+        if self._frame_start is not None and (paced := self._frame_start()) != self._paced:
+          self._paced = paced
+          rl.set_target_fps(0 if paced else self._raylib_fps)
         frame_start = time.monotonic()
 
         if PC:
