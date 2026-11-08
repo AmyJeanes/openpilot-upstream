@@ -374,7 +374,7 @@ def look(item):
 
 
 samples = collections.defaultdict(list)  # (a, b) with a left of b -> [(x, y, z, w, line id, s)]
-with multiprocessing.get_context("fork").Pool(min(16, os.cpu_count())) as pool:  # (samples are independent)
+with multiprocessing.get_context("fork").Pool(int(os.environ.get("PAINTNET_WORKERS", min(16, os.cpu_count())))) as pool:  # (samples are independent)
   for got in pool.imap(look, seen, chunksize=64):
     for key, q, raster in got:
       if raster is not None:

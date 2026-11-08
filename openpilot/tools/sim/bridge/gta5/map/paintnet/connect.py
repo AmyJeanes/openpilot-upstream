@@ -682,7 +682,8 @@ for i in range(len(lanes)):
     p = A[-1] if at_end else A[0]
     if not scan.inbox(p[0], p[1], -6.0):  # (cut by the pilot's edge)
       continue
-    e = (A[-1, :2] - A[-5, :2]) if at_end else (A[0, :2] - A[4, :2])
+    n = min(4, len(A) - 1)  # (a stop line's trim can leave under 5 samples)
+    e = (A[-1, :2] - A[-1 - n, :2]) if at_end else (A[0, :2] - A[n, :2])
     e /= max(np.linalg.norm(e), 1e-9)
     xs = [x for x in scan.crossings(p[:2], e, p[2], 0.0, STOP_REACH + 0.5) if x[0] > 0 and width.get(x[1], 0) >= STOP_WIDE]
     if not xs:

@@ -1,22 +1,29 @@
-"""build.py [--force | --from=step] [--only=step,...]: the pilot's whole chain (lanes for the map, the regions checker, the
+"""build.py [--force | --from=step] [--only=step,...] [--box=x0,x1,y0,y1 --out=DIR [--core=x0,x1,y0,y1]]: the pilot's whole chain (lanes for the map, the regions checker, the
 OSM export), each step rerun only when its code or inputs changed.
 
 One process loads what every step shares (libraries, the game-file sources) and forks a child per step, so the steps
-don't each pay for loading them; steps whose inputs are ready run side by side. Logs: $O/logs/<step>.log."""
+don't each pay for loading them; steps whose inputs are ready run side by side. Logs: $O/logs/<step>.log.
+--box runs another box (tiles.py runs the map as boxes), --core cuts the export to the part of it away from its edges."""
 import hashlib, json, os, pathlib, re, runpy, sys, time, traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
+ARGS = dict(a[2:].split("=", 1) for a in sys.argv[1:] if a.startswith("--") and "=" in a)
 B = ["-550", "-9", "-1490", "-1046"]  # x0 x1 y0 y1: the interchange, and the Innocence Blvd ramps west and south-west
 CHECKED = [["-346", "-9", "-1333", "-1046"]]  # boxes in it Amy has checked (the map draws them apart from the rest)
 O = os.path.expanduser("~/.cache/paintnet/pilot")  # the steps' own files, on WSL's disk (/mnt/e is slow to read and write)
-WEB = "/mnt/e/gta5_webmap"
+WEB = "/mnt/e/gta5_webmap"  # the map page's imagery (read) and, for the pilot, its layers (written)
+W = WEB
+if "box" in ARGS:  # another box: its own files and layers all in --out, the map page left alone
+  B, CHECKED, O = ARGS["box"].split(","), [], ARGS["out"]
+  W = O
+CORE = ARGS["core"].split(",") if "core" in ARGS else B  # what export keeps: the box less the margin read around it
 RP = "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"
 WEBMAP = "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap"
 o = lambda n: f"{O}/{n}"
 # name, script, args, inputs (other steps' outputs), outputs, other files it reads
 STEPS = [
-  ("area", "area.py", B + [f"{WEB}/pilot_area.geojson", f"{WEB}/checked_area.geojson"] + sum(CHECKED, []), [],
-   [f"{WEB}/pilot_area.geojson", f"{WEB}/checked_area.geojson"], []),
+  ("area", "area.py", B + [f"{W}/pilot_area.geojson", f"{W}/checked_area.geojson"] + sum(CHECKED, []), [],
+   [f"{W}/pilot_area.geojson", f"{W}/checked_area.geojson"], []),
   ("visible", "visible.py", B + [o("ic_visible.json")], [], [o("ic_visible.json")], ["/mnt/e/gta5_webmap/sat.pmtiles", "/mnt/e/gta5_webmap/under.pmtiles",
    f"{WEB}/under_bands/bands.json"] + sorted(str(p) for p in pathlib.Path(f"{WEB}/under_bands").glob("*.pmtiles"))),
   ("lanes", "lanes.py", B + [o("ic_lanes.json"), "--hatch=0.1", f"--visible={o('ic_visible.json')}"], [o("ic_visible.json")], [o("ic_lanes.json")], []),
@@ -25,18 +32,18 @@ STEPS = [
   ("connect", "connect.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json")], [o("ic_groups.json"), o("ic_dir.json")], [o("ic_links.json")], []),
   ("junctions", "junctions.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json")],
    [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json")], [o("ic_junctions.json")], []),
-  ("export", "export.py", [o("ic_dir.json"), o("ic_groups.json"), f"{WEB}/pilot.geojson", o("ic_links.json"), o("ic_junctions.json"), "--box=" + ",".join(B)],
-   [o("ic_dir.json"), o("ic_groups.json"), o("ic_links.json"), o("ic_junctions.json")], [f"{WEB}/pilot.geojson"], []),
+  ("export", "export.py", [o("ic_dir.json"), o("ic_groups.json"), f"{W}/pilot.geojson", o("ic_links.json"), o("ic_junctions.json"), "--box=" + ",".join(CORE)],
+   [o("ic_dir.json"), o("ic_groups.json"), o("ic_links.json"), o("ic_junctions.json")], [f"{W}/pilot.geojson"], []),
   ("regions", "regions.py", B + [o("ic_regions.npz")], [], [o("ic_regions.npz")], []),
   ("rstats", "regionstats.py", [o("ic_regions.npz"), o("ic_rstats.json")], [o("ic_regions.npz")], [o("ic_rstats.json")], []),
-  ("check", "check.py", [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json"), f"{WEB}/check.geojson"],
-   [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json")], [f"{WEB}/check.geojson"], [str(HERE / "axes.py")]),
-  ("osm", "osm.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json"), f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"],
-   [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json")],[f"{WEB}/osm_ic.osm", f"{WEB}/osm.geojson"], []),
-  ("osmview", "osm_view.py", [f"{WEB}/osm_ic.osm", f"{WEB}/osm_view.geojson"], [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_view.geojson"], []),
-  ("osmcheck", "osm_check.py", B + [f"{WEB}/osm_ic.osm", f"{WEB}/osm_check.geojson"], [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_check.geojson"], []),
-  ("osmroute", "osm_route.py", B + [f"{WEB}/osm_ic.osm", "/home/amy/.cache/paintnet/valhalla", f"{WEB}/osm_route.geojson"],
-   [f"{WEB}/osm_ic.osm"], [f"{WEB}/osm_route.geojson"], []),
+  ("check", "check.py", [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json"), f"{W}/check.geojson"],
+   [o("ic_regions.npz"), o("ic_rstats.json"), o("ic_groups.json"), o("ic_dir.json")], [f"{W}/check.geojson"], [str(HERE / "axes.py")]),
+  ("osm", "osm.py", B + [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json"), f"{W}/osm_ic.osm", f"{W}/osm.geojson"],
+   [o("ic_groups.json"), o("ic_links.json"), o("ic_dir.json"), o("ic_junctions.json")],[f"{W}/osm_ic.osm", f"{W}/osm.geojson"], []),
+  ("osmview", "osm_view.py", [f"{W}/osm_ic.osm", f"{W}/osm_view.geojson"], [f"{W}/osm_ic.osm"], [f"{W}/osm_view.geojson"], []),
+  ("osmcheck", "osm_check.py", B + [f"{W}/osm_ic.osm", f"{W}/osm_check.geojson"], [f"{W}/osm_ic.osm"], [f"{W}/osm_check.geojson"], []),
+  ("osmroute", "osm_route.py", B + [f"{W}/osm_ic.osm", "/home/amy/.cache/paintnet/valhalla", f"{W}/osm_route.geojson"],
+   [f"{W}/osm_ic.osm"], [f"{W}/osm_route.geojson"], []),
 ]
 CV_THREADS = None
 STATE, LOGS = pathlib.Path(o(".build_state.json")), pathlib.Path(o("logs"))
