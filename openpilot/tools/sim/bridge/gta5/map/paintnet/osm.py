@@ -244,6 +244,11 @@ gores = [(prep(band(A).buffer(0.3)), atj, np.median(A[:, 2])) for (k, A), atj in
 # (a raised island in a median keeps the road one way: it is the median carried on, kerbed)
 centres = [(prep(band(A).buffer(0.3)), "median" if kind == "island" else kind, np.median(A[:, 2])) for kind in ("median", "twltl", "island") for k, A in strips[kind]]
 live = [t for t in range(len(tracks)) if t not in narrow_tracks]
+if not live:  # no lanes in the box
+  open(out_osm, "w").write("<?xml version='1.0' encoding='UTF-8'?>\n<osm version='0.6' generator='paintnet osm.py' upload='never'>\n</osm>\n")
+  json.dump({"type": "FeatureCollection", "features": []}, open(out_geo, "w"))
+  print("no tracks ->", out_osm, out_geo)
+  sys.exit(0)
 S_xy = np.vstack([tracks[t]["X"][:, :2] for t in live])
 S_id = np.concatenate([np.stack([np.full(len(tracks[t]["X"]), t), np.arange(len(tracks[t]["X"]))], 1) for t in live])
 tree = cKDTree(S_xy)

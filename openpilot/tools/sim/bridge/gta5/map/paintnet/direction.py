@@ -201,7 +201,7 @@ def to_kerb(A, paint):
 
 OUTLINE_RES, OUTLINE_PAST = 0.1, 0.5  # m: raster step; carried past each end beyond half its width
 OUTLINE_SLIVER = 9  # raster steps: narrower slivers dropped
-line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint() if scan.inbox(r["pts"][0][0], r["pts"][0][1], 60)}
+line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint_near(scan.x0 - 60, scan.x1 + 60, scan.y0 - 60, scan.y1 + 60)}
 
 
 def band(A, past=0.0):
@@ -345,9 +345,10 @@ for i, r in enumerate(lanes):
   d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
   if len(A) >= 3 and max(end_reach(A)) <= STRIP_END and np.linalg.norm(np.diff(A[:, :2], axis=0), axis=1).sum() <= CROSSING_MAX:
     ids = [i for i in r.get("left_all", [r["left"]]) + r.get("right_all", [r["right"]]) if i in line_xy]
-    paint_xy = np.vstack([line_xy[i] for i in ids])
-    out.append({**r, "kind": "crossing", "pts": to_kerb(A, paint_xy), "paint": paint_xy}); stats["crossing"] += 1
-    continue
+    if ids:  # (not a strip between raster-only lines or the road's edges)
+      paint_xy = np.vstack([line_xy[i] for i in ids])
+      out.append({**r, "kind": "crossing", "pts": to_kerb(A, paint_xy), "paint": paint_xy}); stats["crossing"] += 1
+      continue
   ks = range(0, len(A), 2)
   if np.mean([flows(A[k, :2], d[k], A[k, 2]) for k in ks]) < 0.5:
     out.append({**r, "kind": "not_traffic"}); stats["not_traffic"] += 1
@@ -419,7 +420,7 @@ stats["off the road network (dropped)"] = len(off)
 out = [r for r in out if not any(r is o for o in off)]
 # a gore's or median's paint runs on into the crossing or stop line at its end: cut back to that line's near edge
 width = {r["id"]: r["width"] for r in scan.src.paint()}
-line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint() if scan.inbox(r["pts"][0][0], r["pts"][0][1], 60)}
+line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint_near(scan.x0 - 60, scan.x1 + 60, scan.y0 - 60, scan.y1 + 60)}
 for r in out:
   if r["kind"] not in ("gore", "median", "twltl", "shoulder"):
     continue

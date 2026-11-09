@@ -121,7 +121,7 @@ def merge(work, dest):
   runs = {}
   for r in map(json.loads, (work / "runs.jsonl").read_text().splitlines()):
     runs[r["name"]] = r  # the last run of each box
-  ok = {n: r for n, r in runs.items() if r["ok"]}
+  ok = {n: r for n, r in runs.items() if r["ok"] or "export" in r.get("steps", {})}  # (a later step failing keeps its lanes)
   size = ok[next(iter(ok))]["core"][1] - ok[next(iter(ok))]["core"][0] if ok else 512
 
   def xy(c):
@@ -230,14 +230,15 @@ def merge(work, dest):
         osm[f["properties"].get("check", "?")] += 1
         feats.append(f)
   json.dump({"type": "FeatureCollection", "features": feats}, open(dest / "osm_check.geojson", "w"))
-  failed = {n: {"failed": r["failed"], "why": r["why"], "seconds": r["seconds"], "peak_gb": r["peak_gb"]} for n, r in runs.items() if not r["ok"]}
+  failed = {n: {"failed": r["failed"], "why": r["why"], "lanes_merged": n in ok, "seconds": r["seconds"], "peak_gb": r["peak_gb"]}
+            for n, r in runs.items() if not r["ok"]}
   secs = [r["seconds"] for r in ok.values()]
   step_s = collections.Counter()
   for r in ok.values():
     for s, v in r.get("steps", {}).items():
       step_s[s] += float(v)
   summary = {
-    "boxes": {"run": len(runs), "ok": len(ok), "failed": len(failed), "cell_m": size,
+    "boxes": {"run": len(runs), "ok": sum(r["ok"] for r in runs.values()), "lanes_merged": len(ok), "failed": len(failed), "cell_m": size,
               "margin_m": (ok[next(iter(ok))]["core"][0] - ok[next(iter(ok))]["box"][0]) if ok else None,
               "box_seconds": {"total": round(sum(secs)), "median": float(np.median(secs)) if secs else None, "max": max(secs, default=None)},
               "step_seconds_total": {s: round(v) for s, v in step_s.most_common()},
