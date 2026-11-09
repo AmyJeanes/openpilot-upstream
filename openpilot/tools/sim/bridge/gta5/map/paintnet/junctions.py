@@ -33,7 +33,7 @@ Out: [{"id", "z", "ring": [[x, y], ...], "strips": [dir.json index], "mouths": [
 "inside": [lane], "paths": [{"from", "to", "turn", "flags", "pts": [[x, y, z, w], ...]}], "unreached": [lane],
 "trim": {lane: [[x, y, z, w], ...]}}];
 turns like "left", "through;right", "left;right" (OSM turn:lanes values), only at "end" mouths."""
-import json, os, sys
+import collections, json, os, sys
 import numpy as np
 import cv2
 from scipy.spatial import cKDTree
@@ -482,8 +482,83 @@ while merged:
         break
     if merged:
       break
+
+
+def node_junction(seeds):
+  """the junction at GTA nodes where roads' lanes end with no paint to find it by (nodes.py's seeds, overlapping ones
+  together): its mouths are the lane ends within NODE_ATTACH m of a seed's reach on its deck, facing it; lanes passing
+  over a seed without ending there run "through" it (an unpainted side street meeting a painted road). Two arms in line
+  are a junction too (a road whose lane count changes, or which a driveway with no lanes of its own joins). Or None."""
+  mouths, corners, through = [], [], []
+  for i, A in enumerate(LA):
+    if len(A) < 3 or narrow_(i):
+      continue
+    best = None
+    for sd in seeds:
+      c = np.array([sd["x"], sd["y"]])
+      de = [float(np.linalg.norm(A[k, :2] - c)) for k in (0, -1)]
+      k = 0 if de[0] <= de[1] else -1
+      if de[k] <= sd["r"] + NODE_ATTACH and abs(A[k, 2] - sd["z"]) < 2.5 and not at_edge(A[k]) and (best is None or de[k] < best[1]):
+        best = (k, de[k])
+    if best:
+      k = best[0]
+      mouths.append([i, "start" if k == 0 else "end", None])
+      n = frame(A)[1]
+      corners += [A[k, :2] - n[k] * A[k, 3] / 2, A[k, :2] + n[k] * A[k, 3] / 2]
+    elif any((m := np.linalg.norm(A[:, :2] - [sd["x"], sd["y"]], axis=1)).min() <= A[:, 3].max() / 2 + 1.0
+             and abs(A[m.argmin(), 2] - sd["z"]) < 2.5 for sd in seeds):
+      through.append(i)
+  if any((i, w) in taken_mouths for i, w, _ in mouths):  # a painted junction's already
+    return None
+  for mo in mouths:
+    if mo[1] == "end":
+      mo[2] = turns_of(mo[0])
+  arms, _ = arms_of([leaves(i, w) for i, w, _ in mouths]) if mouths else ([], None)
+  if not mouths or (len(arms) < 2 and not through):
+    return None
+  disk = unary_union([Point(sd["x"], sd["y"]).buffer(sd["r"]) for sd in seeds])
+  box = unary_union([disk, MultiPoint(corners).convex_hull]).convex_hull
+  inside = [i for i in range(len(LA)) if np.mean([box.contains(Point(p)) for p in LA[i][:, :2]]) >= INSIDE and i not in through]
+  ps, unreached, arms_ = paths(mouths)
+  # with no arrows every turn is inferred, into the kerb lane: an arm some path reaches is reached, and a road running
+  # through reaches them all
+  hit = {p["to"] for p in ps}
+  unreached = [] if through else [j for j in unreached if not any(j in lv and hit & set(lv) for _, _, lv in arms_)]
+  ring = [[round(float(x), 2), round(float(y), 2)] for x, y in box.exterior.coords[:-1]]
+  return {"z": round(float(np.median([sd["z"] for sd in seeds])), 2), "ring": ring, "strips": [], "mouths": mouths, "inside": inside,
+          "paths": ps, "trim": {}, "unreached": unreached, "through": through, "nodes": [sd["node"] for sd in seeds],
+          "centre": [round(float(np.mean([sd["x"] for sd in seeds])), 2), round(float(np.mean([sd["y"] for sd in seeds])), 2)], "_box": box, "_arms": []}
+
+
+# junctions at GTA's nodes where node lanes end (nodes.py): seeds whose reaches overlap are one
+NODE_ATTACH = 4.0  # m beyond a seed's reach (the widest road there, half across) a lane end still meets it
+NODE_LINK = 6.0  # m: seeds with less road than this between their reaches are one junction (nodes.py's LINK_MIN)
+narrow_ = lambda i: np.median(LA[i][:, 3]) < LANE_MIN
+taken_mouths = {(i, w) for _, _, j in found if j for i, w, _ in j["mouths"]}
+SD = G.get("node_junctions", [])
+par = list(range(len(SD)))
+def root(a):
+  while par[a] != a:
+    a = par[a]
+  return a
+for a in range(len(SD)):
+  for b in range(a + 1, len(SD)):
+    if np.hypot(SD[a]["x"] - SD[b]["x"], SD[a]["y"] - SD[b]["y"]) < SD[a]["r"] + SD[b]["r"] + NODE_LINK and abs(SD[a]["z"] - SD[b]["z"]) < 2.5:
+      par[root(b)] = root(a)
+groups_ = collections.defaultdict(list)
+for a in range(len(SD)):
+  groups_[root(a)].append(SD[a])
+n_node = 0
+for g in groups_.values():
+  j = node_junction(g)
+  if j:
+    found.append(([], None, j))
+    taken_mouths |= {(i, w) for i, w, _ in j["mouths"]}
+    n_node += 1
+print(n_node, "junctions at GTA nodes where node lanes end, of", len(groups_), "seeds")
+
 out = []
-for mem, _, j in sorted(found, key=lambda f: min(f[0])):
+for mem, _, j in sorted(found, key=lambda f: min(f[0], default=1e9)):
   if not j:
     continue
   box, arms = j.pop("_box"), j.pop("_arms")

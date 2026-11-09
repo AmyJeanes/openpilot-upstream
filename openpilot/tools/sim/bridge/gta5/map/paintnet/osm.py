@@ -47,6 +47,8 @@ PARALLEL, DZ = 30.0, 1.5  # deg, m: a neighbour runs alongside on this deck (dir
 MINLEN, GAP = 6.0, 3.0  # m: lanes.py's shortest line, and its longest break inside one lane
 NARROW = 3.5  # m: no lane is narrower (measured 4.1 m up), no shoulder wider than 3.2 (direction.py: none in 3.5-4.5)
 SHOULDER = 4.0  # m: direction.py's widest shoulder; a kerb further out than this is not this carriageway's
+DEAD_NEAR = 8.0  # m from a way's end to a lane end at a dead end of GTA's links (its lanes' middle: half a road across)
+THROUGH_SNAP = 6.0  # m from a junction's node to the way node of a road running through it that becomes it
 ATTACH = 8.0  # m from a way's end to its junction's strips (0-1.8 m on the interchange; the nearest other ends 24 m)
 # m along per m sideways a way's centre moves into a shared node: lanes open and close at 0.20-0.46 m of width per m
 # on the interchange (motorway 0.2, city bays 0.3-0.46; median 0.34), moving the carriageway's centre half that
@@ -158,7 +160,7 @@ for r in json.load(open(junj)):
     LA[int(k)] = np.array(p, float)
   junctions.append({"hull": Polygon(r["ring"]).buffer(0), "z": r["z"], "strips": [(dir_at[k][0], k) for k in r["strips"]],
                     "crossings": [dir_at[k][1] for k in r["strips"] if dir_at[k][0] == "crossing"], "mouths": r["mouths"],
-                    "inside": set(r["inside"]), "paths": r.get("paths", []), "ends": [], "issues": []})
+                    "inside": set(r["inside"]), "paths": r.get("paths", []), "through": r.get("through", []), "centre": r.get("centre"), "ends": [], "issues": []})
 end_turns = {i: tu for J in junctions for i, which, tu in J["mouths"] if which == "end"}
 merge_into = {i: j for i, j, g, *br in LK["links"] if br == ["merge"]}
 
@@ -699,7 +701,10 @@ for s, e in dead:
   else:
     sections[s]["issues"].append(f"dead end at its {'end' if e else 'start'}: no link and no junction near")
 for J in junctions:
-  if len({s for s, *_ in J["ends"]}) < 2:
+  # the sections of the roads running straight through it (junctions.py's "through" lanes)
+  J["through_secs"] = sorted({s for i in J["through"] if i in lane_track for s, S in enumerate(sections)
+                              if lane_track[i][0] in S["tracks"] and not S.get("drop") and LineString(S["C"][:, :2]).distance(J["hull"]) <= 3})
+  if len({s for s, *_ in J["ends"]}) < 2 and not (J["ends"] and J["through_secs"]):
     if J["ends"]:
       for s, e, p, _ in J["ends"]:
         sections[s]["issues"].append(f"ends at a junction with only this arm in the box: not connected")
@@ -709,10 +714,13 @@ for J in junctions:
     Q = np.eye(2) - np.outer(u, u)
     M += Q
     bb += Q @ p[:2]
-  if np.linalg.eigvalsh(M)[0] > 0.3 and J["hull"].buffer(5).contains(Point(np.linalg.solve(M, bb))):
+  if J["through_secs"]:  # on the road running through, nearest its arms' ends
+    C = sections[J["through_secs"][0]]["C"]
+    xy = C[int(np.linalg.norm(C[:, :2] - np.mean([p[:2] for _, _, p, _ in J["ends"]], 0), axis=1).argmin()), :2]
+  elif np.linalg.eigvalsh(M)[0] > 0.3 and J["hull"].buffer(5).contains(Point(np.linalg.solve(M, bb))):
     xy = np.linalg.solve(M, bb)
   else:
-    xy = np.array(J["hull"].centroid.coords[0])
+    xy = np.array(J["centre"]) if J["centre"] else np.array(J["hull"].centroid.coords[0])  # (GTA's nodes, at a node junction)
     J["issues"].append("arms' lines don't cross inside it: node at the strips' centre")
   sig = [n for n in gta_nodes if (n["f"][1] >> 3) == TRAFFIC_LIGHT and J["hull"].buffer(5).contains(Point(n["x"], n["y"]))]
   gn = min(gta_nodes, key=lambda n: math.hypot(n["x"] - xy[0], n["y"] - xy[1]) if abs(n["z"] - J["z"]) < 3 else 1e9)
@@ -1036,6 +1044,9 @@ for s, S in enumerate(sections):
         tg["shoulder:width"] = f"{np.mean(list(sh.values())):.1f}"
     lanes_src = [tracks[t]["lanes"] for t, _ in S["order"]]
     tg["paintnet:lanes"] = ";".join("+".join(map(str, l)) for l in lanes_src)
+    src_ = sorted({lanes[i].get("source", "paint") for l in lanes_src for i in l})
+    if src_ != ["paint"]:  # lanes laid from GTA's links where the paint gives none (nodes.py)
+      tg["paintnet:source"] = ";".join(src_)
     ways.append({"nodes": nd, "tags": tg, "issues": S["issues"] + iss, "section": s})
     for e, keep in stubs:
       S2 = {**S, "order": [(t, d) for t, d in S["order"] if t in keep]}
@@ -1046,6 +1057,22 @@ for s, S in enumerate(sections):
       tg2["paintnet:lanes"] = ";".join("+".join(map(str, tracks[t]["lanes"])) for t, _ in S2["order"])
       ways.append({"nodes": [port_node[(s, 1)], ext[(s, 1)]] if e else [ext[(s, 0)], port_node[(s, 0)]], "tags": tg2,
                    "issues": S["issues"] + iss2, "section": s, "stub": True})
+
+# a junction a road runs straight through (an unpainted side street meeting a painted road with no stop line) shares its
+# node with that road's ways: the way node nearest it becomes the junction's
+for J in junctions:
+  if "node" not in J or not J["through_secs"]:
+    continue
+  xy = np.array(nodes[J["node"]][:2])
+  for w in ways:
+    if w["section"] not in J["through_secs"] or w.get("stub") or J["node"] in w["nodes"]:
+      continue
+    P = np.array([nodes[i][:2] for i in w["nodes"]])
+    q = int(np.linalg.norm(P - xy, axis=1).argmin())
+    if 0 < q < len(P) - 1 and np.linalg.norm(P[q] - xy) <= THROUGH_SNAP:
+      old, w["nodes"][q] = w["nodes"][q], J["node"]
+      if not nodes[old][3] and not any(old in w2["nodes"] for w2 in ways):
+        del nodes[old]
 
 # --- crossings: a footway along each crossing strip, noded where it crosses a way on its deck
 def node_xy(i):
@@ -1185,6 +1212,15 @@ for J in junctions:
     nodes[J["node"]][3]["paintnet:junction"] = f"{len(J['ends'])} ends; GTA's node {J['gta_offset']} m away"
     if J["issues"]:
       nodes[J["node"]][3]["fixme"] = "; ".join(J["issues"])
+
+# a way ending where GTA's links end too (nodes.py's "dead" lane ends): noexit
+dead_ends = np.array([LA[i][0 if k == 0 else -1, :2] for i in range(len(LA)) for k in (0, 1) if lanes[i].get("dead", (False, False))[k]]).reshape(-1, 2)
+use = collections.Counter(i for w in ways for i in w["nodes"])
+if len(dead_ends):
+  for w in ways:
+    for i in (w["nodes"][0], w["nodes"][-1]):
+      if use[i] == 1 and np.linalg.norm(dead_ends - nodes[i][:2], axis=1).min() <= DEAD_NEAR:
+        nodes[i][3]["noexit"] = "yes"
 
 # --- drop way nodes the line passes within SIMPLIFY m of (in height too), keeping shared and tagged ones
 use = collections.Counter(i for w in ways for i in w["nodes"])

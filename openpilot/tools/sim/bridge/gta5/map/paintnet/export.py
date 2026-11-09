@@ -205,7 +205,7 @@ for k in heads:
     continue
   r = G["lanes"][k]
   name = " > ".join(lid(q) for q in chain)
-  props = {"kind": "lane", "id": name, "group": r["group"], "heading": heading(A), "col": HEADING[heading(A)], "dir": r["dir"],
+  props = {"kind": "lane", "id": name, "group": r["group"], "heading": heading(A), "col": HEADING[heading(A)], "dir": r["dir"], "source": r.get("source", "paint"),
            "width": round(float(np.median(A[:, 3])), 2), "z": round(float(np.median(A[:, 2])), 1),
            "arrows": sum(G["lanes"][q].get("arrow_votes", 0) for q in chain), "links": sum(G["lanes"][q].get("link_votes", 0) for q in chain)}
   pcs = pieces(A)

@@ -17,7 +17,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 PY = sys.executable
 MIN_FREE = 10.0  # GB of WSL memory a box needs free to start (a 712 m box peaks at ~4-6 GB)
 SEAM_NEAR, SEAM_MATCH = 1.5, 2.5  # m
-STEPS = "visible,lanes,direction,groups,connect,junctions,export,osm,osmcheck"
+STEPS = "visible,lanes,direction,groups,nodes,connect,junctions,export,osm,osmcheck"
 
 
 def opts(argv):

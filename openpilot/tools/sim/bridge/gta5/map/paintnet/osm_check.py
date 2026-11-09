@@ -175,7 +175,7 @@ for n in touch:
   if near_edge(p):
     continue
   E = ends_at(n)
-  if len(E) == 1:
+  if len(E) == 1 and node_tags[n].get("noexit") != "yes":  # (noexit: a dead end on purpose)
     flag("ends", p, "a road ends here, away from the box's edge, joining nothing", E[0][0])
   if can_in[n] and not can_out[n]:
     flag("flow", p, "traffic arrives here and can't leave", E[0][0])

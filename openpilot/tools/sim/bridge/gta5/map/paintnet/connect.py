@@ -649,7 +649,7 @@ for i, j, g, *br in links:
       pts[j] = np.round(r[1], 2).tolist()
 # a lane's lines stop short of the stop line or crossing it ends at (or starts beyond): an end carrying on into nothing
 # runs on at its width to the near edge of the first wide line across it within STOP_REACH m
-line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint() if scan.inbox(r["pts"][0][0], r["pts"][0][1], 60)}
+line_xy = {r["id"]: np.array(r["pts"], float)[:, :2] for r in scan.src.paint_near(scan.x0 - 60, scan.x1 + 60, scan.y0 - 60, scan.y1 + 60)}
 stops = {}  # lane -> {"end"|"start": [x, y, ux, uy]}: where it meets its stop line or crossing, and that line's way
 # (a branch leaves from beside its lane; a lane merging joins another beside it)
 linked_out, linked_in = {l[0] for l in links if l[3:] != ["branch"]}, {l[1] for l in links if l[3:] != ["merge"]}
@@ -703,6 +703,10 @@ for i in range(len(lanes)):
       pts[i] = np.round(A, 2).tolist()
     stopped += 1
 print(trimmed, "lane ends cut back to a stop line across them;", stopped, "run on to their stop line or crossing")
+# a lane nodes.py cut back at a junction meets the junction, not the lane beyond it
+cut_end = {i for i, r in enumerate(lanes) if r.get("cut", (False, False))[1]}
+cut_start = {i for i, r in enumerate(lanes) if r.get("cut", (False, False))[0]}
+links = [l for l in links if l[0] not in cut_end and l[1] not in cut_start]
 json.dump({"links": links, "pts": pts, "stops": stops}, open(sys.argv[6], "w"))
 succ, pred = {}, {}
 for i, j, g, *_ in links:
