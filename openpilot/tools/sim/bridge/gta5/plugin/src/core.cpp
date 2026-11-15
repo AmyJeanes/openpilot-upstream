@@ -1793,7 +1793,9 @@ void DrawDebug(double now) {
   {
     std::stringstream entries(d.legend);
     std::string entry;
-    for (float y = 0.565f; std::getline(entries, entry, ';'); y += 0.026f) {
+    // the last entry sits just over the status line, however many there are
+    float y0 = 0.672f - 0.026f * (1 + static_cast<float>(std::count(d.legend.begin(), d.legend.end(), ';')));
+    for (float y = y0; std::getline(entries, entry, ';'); y += 0.026f) {
       if (entry.size() < 3 || entry[1] != ':') continue;
       const KindStyle &k = StyleOf(entry[0]);
       DrawText(entry.substr(2, 60), 0.985f, y, 0.33f, k.r, k.g, k.b);
