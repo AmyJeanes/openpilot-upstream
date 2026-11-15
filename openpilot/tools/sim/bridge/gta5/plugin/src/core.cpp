@@ -1263,6 +1263,7 @@ struct DebugOverlay {
   bool casing = true;   // white and yellow strips edged dark
   std::string layers = "edsjrnmaxptqz";  // layer letters (DebugLayer); f fills junction areas
   std::string fullLayers = layers;       // the debug key's full level; its path level is the route alone
+  std::string legend;                    // "k:what;k:what": a line of text for each, in kind k's colour, above the status line
   int level = 0;                         // the debug key's: 0 off, 1 the route ahead, 2 every layer
   float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
@@ -1693,6 +1694,15 @@ void DrawDebug(double now) {
   if (stale || held) {
     d.polys = g_debugPolys = 0;
     return;
+  }
+  {
+    std::stringstream entries(d.legend);
+    std::string entry;
+    for (float y = 0.565f; std::getline(entries, entry, ';'); y += 0.026f) {
+      if (entry.size() < 3 || entry[1] != ':') continue;
+      const KindStyle &k = StyleOf(entry[0]);
+      DrawText(entry.substr(2, 60), 0.985f, y, 0.33f, k.r, k.g, k.b);
+    }
   }
   auto has = [&](char layer) { return d.layers.find(layer) != std::string::npos; };
   bool fill = has('f');
@@ -3245,6 +3255,7 @@ void HandleMessage(const Message &m, double now) {
     g_debug.maxPolys = std::clamp(static_cast<int>(MsgNum(m, "max", g_debug.maxPolys)), 0, 200000);
     g_debug.probes = std::clamp(static_cast<int>(MsgNum(m, "probes", g_debug.probes)), 0, 10000);
     if (m.count("widths")) ParseLayerWidths(MsgStr(m, "widths"));
+    if (m.count("legend")) g_debug.legend = MsgStr(m, "legend").substr(0, 600);
     if (!g_debug.on) g_debug.lines.clear(), g_debug.vertices = 0;
     Log("debug " + std::string(g_debug.on ? "on" : "off") + ", layers " + g_debug.layers + (g_debug.force ? ", forced" : "") +
         (g_debug.thin ? ", thin" : ", width " + Num(g_debug.width) + (g_debug.ground ? " on the ground" : " at the map's heights")) +
