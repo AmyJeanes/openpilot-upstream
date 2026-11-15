@@ -1239,6 +1239,71 @@ void DrawMarked(double now) {
   if (now < until) DrawText("Bookmarked " + std::to_string(n), 0.985f, 0.69f, 0.55f, 255, 210, 80);
 }
 
+// The mark key asks for a note in the game's own text box: Enter keeps the mark (the note may be empty), Esc drops it
+std::atomic<int> g_markAsk{0};
+std::atomic<bool> g_typing{false};  // the text box is up: keys are the note's, not the plugin's
+std::string g_markNote;
+
+void MarkNote() {
+  if (!g_typing) {
+    if (!g_markAsk.exchange(0)) return;
+    DISPLAY_ONSCREEN_KEYBOARD(0, "FMMC_KEY_TIP8", "", "", "", "", "", 120);
+    g_typing = true;
+    return;
+  }
+  int state = UPDATE_ONSCREEN_KEYBOARD();
+  if (state == 0) return;
+  if (state == 1) {
+    const char *text = GET_ONSCREEN_KEYBOARD_RESULT();
+    g_markNote = text ? text : "";
+    g_markPresses++;
+  }
+  g_typing = false;
+  g_markAsk = 0;
+}
+
+std::string MarkState() {
+  std::string note;
+  for (char c : g_markNote)
+    if (c >= 32 && c < 127) note += c == '"' ? '\'' : c == '\\' ? '/' : c;
+  return std::string(",\"marking\":") + (g_typing ? "true" : "false") + ",\"markNote\":\"" + note + "\"";
+}
+
+// The map page's flags (flags command), each a pillar in its state's colour with its number and note above it
+struct Flag {
+  float x, y, z;
+  char kind;
+  std::string label;
+};
+std::vector<Flag> g_flags;
+
+void DrawFlags() {
+  for (Flag &f : g_flags) {
+    if (std::isnan(f.z)) {
+      float z = 0;
+      if (!GET_GROUND_Z_FOR_3D_COORD(f.x, f.y, 1000.0f, &z, FALSE, FALSE)) continue;
+      f.z = z;
+    }
+    int r = 255, g = 59, b = 59;  // n: waiting
+    if (f.kind == 'c') r = 31, g = 174, b = 69;  // maybe fixed
+    else if (f.kind == 'o') r = 217, g = 138, b = 0;  // looked at, not fixed
+    else if (f.kind == 'i') r = 138, g = 63, b = 224;  // saved for in-game testing
+    DRAW_MARKER(1, f.x, f.y, f.z, 0, 0, 0, 0, 0, 0, 0.5f, 0.5f, 9.0f, r, g, b, 190, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+    DRAW_MARKER(0, f.x, f.y, f.z + 10.5f, 0, 0, 0, 0, 0, 0, 2.0f, 2.0f, 2.0f, r, g, b, 230, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+    SET_DRAW_ORIGIN(f.x, f.y, f.z + 13.0f, 0);
+    SET_TEXT_FONT(4);
+    SET_TEXT_SCALE(0.42f, 0.42f);
+    SET_TEXT_COLOUR(255, 255, 255, 255);
+    SET_TEXT_OUTLINE();
+    SET_TEXT_WRAP(0.0f, 1.0f);
+    SET_TEXT_JUSTIFICATION(0);
+    BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING");
+    ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(f.label.c_str());
+    END_TEXT_COMMAND_DISPLAY_TEXT(0.0f, 0.0f, 0);
+    CLEAR_DRAW_ORIGIN();
+  }
+}
+
 // *** map debug overlay, GPS route, GTA's directions ***
 
 struct P3 {
@@ -2491,7 +2556,7 @@ void UpdateFreeCam(double now, float dt) {
   ENABLE_CONTROL_ACTION(0, INPUT_FRONTEND_PAUSE, TRUE);
   ENABLE_CONTROL_ACTION(0, INPUT_FRONTEND_PAUSE_ALTERNATE, TRUE);
   bool test = now < g_free.inputUntil;
-  if (!IS_PAUSE_MENU_ACTIVE()) {
+  if (!IS_PAUSE_MENU_ACTIVE() && !g_typing) {
     // the mouse's value is its movement this frame; a stick's is a rate
     float look = IS_USING_KEYBOARD_AND_MOUSE(0) ? g_free.sens : 120.0f * dt;
     g_free.heading -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_LR) * look;
@@ -2639,7 +2704,7 @@ void UpdateCalmWater() {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"leftPresses\":" << g_leftCount.load()
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << MarkState() << ",\"leftPresses\":" << g_leftCount.load()
     << ",\"rightPresses\":" << g_rightCount.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
@@ -3470,6 +3535,21 @@ void HandleMessage(const Message &m, double now) {
       if (sscanf_s(item.c_str(), "%f,%f", &x, &y) == 2) g_pins.push_back({x, y, NAN});
     }
     Log("pins: " + std::to_string(g_pins.size()) + ", " + Num(g_pinHeight) + " m tall");
+  } else if (type == "flags") {
+    // f: "x,y,z,kind,label;..." (empty clears): z "nan" for the ground's, kind n | c | o | i (the page's flag states)
+    g_flags.clear();
+    std::stringstream ss(MsgStr(m, "f"));
+    std::string item;
+    while (std::getline(ss, item, ';')) {
+      Flag f{0, 0, NAN, 'n', ""};
+      char z[32] = "", kind = 'n';
+      int used = 0;
+      if (sscanf_s(item.c_str(), "%f,%f,%31[^,],%c,%n", &f.x, &f.y, z, 32, &kind, 1, &used) < 4) continue;
+      if (sscanf_s(z, "%f", &f.z) != 1) f.z = NAN;
+      f.kind = kind;
+      if (used > 0) f.label = item.substr(used, 70);
+      g_flags.push_back(f);
+    }
   } else if (type == "topcam") {
     g_top.on = MsgBool(m, "on", true);
     g_top.abs = MsgBool(m, "abs", false);
@@ -3908,6 +3988,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (connected && v && view < 0 && (g_top.hud || !g_top.on) && !g_free.on) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
   if (view < 0) DrawPins();
+  if (view < 0) DrawFlags(), MarkNote();
   if (int presses = g_debugPresses.exchange(0)) {
     static const char *const LEVELS[] = {"off", "route ahead", "full"};
     g_debug.level = (g_debug.level + presses) % 3;
@@ -3981,11 +4062,12 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
 }
 
 extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
+  if (g_typing) return;
   if (static_cast<int>(key) == g_cfg.keyEngage) (g_aiOn ? g_aiAbortPresses : g_engagePresses)++;
   else if (static_cast<int>(key) == g_cfg.keyLeft) PressArrow(false);
   else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
   else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
-  else if (static_cast<int>(key) == g_cfg.keyMark) g_markPresses++;
+  else if (static_cast<int>(key) == g_cfg.keyMark) g_markAsk++;
   else if (key == VK_F6) g_freeToggles++;
   else if (key == VK_BACK) g_freeOffs++;  // these three count only while the free camera is on
   else if (key == VK_OEM_PLUS || key == VK_ADD) g_freeSpeedSteps++;

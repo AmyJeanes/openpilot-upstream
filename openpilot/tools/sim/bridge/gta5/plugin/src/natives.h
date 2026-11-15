@@ -320,6 +320,13 @@ inline void SET_TEXT_COLOUR(int r, int g, int b, int a) { Invoke(0xBE6B23FFA53FB
 inline void SET_TEXT_OUTLINE() { Invoke(0x2513DFB0FB8400FE); }
 inline void SET_TEXT_JUSTIFICATION(int justify) { Invoke(0x4E096588B13FFECA, justify); }  // 0 centre, 1 left, 2 right
 inline void SET_TEXT_WRAP(float start, float end) { Invoke(0x63145D9C883A1A70, start, end); }
+inline void SET_DRAW_ORIGIN(float x, float y, float z, BOOL is2d) { Invoke(0xAA0008F3BBB8F416, x, y, z, is2d); }  // text after it is placed from this point on screen
+inline void CLEAR_DRAW_ORIGIN() { Invoke(0xFF0B610F6BE0D7AF); }
+inline void DISPLAY_ONSCREEN_KEYBOARD(int type, const char *title, const char *p2, const char *text, const char *c1, const char *c2, const char *c3, int maxLen) {
+  Invoke(0x00DC833F2568DBF6, type, title, p2, text, c1, c2, c3, maxLen);
+}
+inline int UPDATE_ONSCREEN_KEYBOARD() { return Invoke<int>(0x0CF2B696BBF945AE); }  // 0 typing, 1 entered, 2 cancelled
+inline const char *GET_ONSCREEN_KEYBOARD_RESULT() { return Invoke<const char *>(0x8362B09B91893647); }
 inline void BEGIN_TEXT_COMMAND_DISPLAY_TEXT(const char *fmt) { Invoke(0x25FBB336DF1804CB, fmt); }
 inline void ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(const char *s) { Invoke(0x6C188BE134E074AA, s); }
 inline void END_TEXT_COMMAND_DISPLAY_TEXT(float x, float y, int p2) { Invoke(0xCD015E5BB0D96A57, x, y, p2); }
