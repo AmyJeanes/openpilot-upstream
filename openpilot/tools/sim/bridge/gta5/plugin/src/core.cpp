@@ -1272,12 +1272,15 @@ std::string MarkState() {
 // The map page's flags (flags command), each a pillar in its state's colour with its number and note above it
 struct Flag {
   float x, y, z;
+  float heading, pitch;  // the way it was looked at from (deg), NAN for none: drawn as an arrow
   char kind;
   std::string label;
 };
 std::vector<Flag> g_flags;
 
 void DrawFlags() {
+  constexpr float TEXT_M = 150.0f;  // a flag's note is drawn this near the camera
+  Vector3 cam = GET_FINAL_RENDERED_CAM_COORD();
   for (Flag &f : g_flags) {
     if (std::isnan(f.z)) {
       float z = 0;
@@ -1288,18 +1291,39 @@ void DrawFlags() {
     if (f.kind == 'c') r = 31, g = 174, b = 69;  // maybe fixed
     else if (f.kind == 'o') r = 217, g = 138, b = 0;  // looked at, not fixed
     else if (f.kind == 'i') r = 138, g = 63, b = 224;  // saved for in-game testing
-    DRAW_MARKER(1, f.x, f.y, f.z, 0, 0, 0, 0, 0, 0, 0.5f, 0.5f, 9.0f, r, g, b, 190, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+    bool aimed = !std::isnan(f.heading);
+    float wide = aimed ? 0.15f : 0.5f;
+    DRAW_MARKER(1, f.x, f.y, f.z, 0, 0, 0, 0, 0, 0, wide, wide, 9.0f, r, g, b, 190, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
     DRAW_MARKER(0, f.x, f.y, f.z + 10.5f, 0, 0, 0, 0, 0, 0, 2.0f, 2.0f, 2.0f, r, g, b, 230, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+    if (aimed) {  // a ball where it was seen from, and an arrow the way it was looked at
+      float h = f.heading * 3.14159265f / 180, p = (std::isnan(f.pitch) ? 0.0f : f.pitch) * 3.14159265f / 180;
+      float dx = -std::sin(h) * std::cos(p), dy = std::cos(h) * std::cos(p), dz = std::sin(p);
+      constexpr float LEN = 6.0f, BARB = 1.4f;
+      float ex = f.x + dx * LEN, ey = f.y + dy * LEN, ez = f.z + dz * LEN;
+      DRAW_MARKER(28, f.x, f.y, f.z, 0, 0, 0, 0, 0, 0, 0.45f, 0.45f, 0.45f, r, g, b, 230, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+      for (float o : {-0.04f, 0.0f, 0.04f}) {
+        DRAW_LINE(f.x, f.y, f.z + o, ex, ey, ez + o, r, g, b, 255);
+        for (float side : {-0.45f, 0.45f}) {  // the head's two barbs, swung about the vertical
+          float bh = h + 3.14159265f + side;
+          DRAW_LINE(ex, ey, ez + o, ex - std::sin(bh) * BARB, ey + std::cos(bh) * BARB, ez - dz * BARB + o, r, g, b, 255);
+        }
+      }
+    }
+    if (std::hypot(f.x - cam.x, f.y - cam.y, f.z - cam.z) > TEXT_M) continue;
     SET_DRAW_ORIGIN(f.x, f.y, f.z + 13.0f, 0);
-    SET_TEXT_FONT(4);
-    SET_TEXT_SCALE(0.42f, 0.42f);
-    SET_TEXT_COLOUR(255, 255, 255, 255);
-    SET_TEXT_OUTLINE();
-    SET_TEXT_WRAP(0.0f, 1.0f);
-    SET_TEXT_JUSTIFICATION(0);
-    BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING");
-    ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(f.label.c_str());
-    END_TEXT_COMMAND_DISPLAY_TEXT(0.0f, 0.0f, 0);
+    std::stringstream lines(f.label);  // '|' between the label's lines
+    std::string line;
+    for (float y = 0; std::getline(lines, line, '|'); y += 0.027f) {
+      SET_TEXT_FONT(4);
+      SET_TEXT_SCALE(0.40f, 0.40f);
+      SET_TEXT_COLOUR(255, 255, 255, 255);
+      SET_TEXT_OUTLINE();
+      SET_TEXT_WRAP(0.0f, 1.0f);
+      SET_TEXT_JUSTIFICATION(0);
+      BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING");
+      ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(line.substr(0, 90).c_str());
+      END_TEXT_COMMAND_DISPLAY_TEXT(0.0f, y, 0);
+    }
     CLEAR_DRAW_ORIGIN();
   }
 }
@@ -1380,6 +1404,11 @@ struct KindStyle {
 constexpr KindStyle STYLES[] = {
     {'e', 40, 230, 90, 235, 0.35f, 0, 0, 0.060f},       // kerb
     {'U', 31, 154, 69, 235, 0.35f, 0, 0, 0.060f},       // the patch map's lane under a deck: its darker green
+    {'P', 255, 46, 136, 235, 0.55f, 0, 0, 0.200f},      // the route made on the map page, its pink
+    {'S', 53, 224, 255, 240, 0.35f, 0, 0, 0.180f},      // the patch map's split: a lane opening off another
+    {'M', 255, 95, 210, 240, 0.35f, 0, 0, 0.180f},      // and its merge
+    {'o', 53, 224, 255, 240, 0.35f, 0, 0, 0.180f},      // a ball where a split starts
+    {'O', 255, 95, 210, 240, 0.35f, 0, 0, 0.180f},      // and where a merge has merged
     {'d', 245, 245, 245, 235, 0.20f, 3, 6, 0.090f},     // lane line, dashed
     {'w', 245, 245, 245, 235, 0.20f, 0, 0, 0.090f},     // lane line, solid
     {'y', 242, 194, 0, 235, 0.20f, 3, 6, 0.105f},       // centre line, dashed
@@ -1796,6 +1825,13 @@ void DrawDebug(double now) {
       if (!has('q') || dist > view.dist) continue;
       DRAW_MARKER(1, p0.x, p0.y, p0.z, 0, 0, 0, 0, 0, 0, 0.8f, 0.8f, 3.5f, r, g, b, 170, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
       DRAW_MARKER(0, p0.x, p0.y, p0.z + 4.5f, 0, 0, 0, 0, 0, 0, 1.2f, 1.2f, 1.2f, r, g, b, 220, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
+      continue;
+    }
+    if (l.kind == 'o' || l.kind == 'O') {
+      float dist = 0;
+      Grow(view, p0, dist);
+      if (!has(l.kind) || dist > view.dist) continue;
+      DRAW_MARKER(28, p0.x, p0.y, p0.z + lift + 0.3f, 0, 0, 0, 0, 0, 0, 0.55f, 0.55f, 0.55f, r, g, b, 230, FALSE, FALSE, 2, FALSE, nullptr, nullptr, FALSE);
       continue;
     }
     if (l.kind == 'j' && fill && l.pts.size() >= 4) {
@@ -2463,6 +2499,7 @@ struct FreeCam {
   double inputUntil = 0;
   Entity restoring = 0;  // put back, held frozen until the game has its collision there
   double restoreUntil = 0;
+  double lockUntil = 0;  // held by a script (freecam lock=secs): the keys and mouse neither move it nor end it
 } g_free;
 std::atomic<int> g_freeToggles{0}, g_freeOffs{0}, g_freeSpeedSteps{0};
 bool g_parked = false;  // the park command's state
@@ -2547,6 +2584,8 @@ void UpdateFreeCam(double now, float dt) {
     }
   }
   int toggles = g_freeToggles.exchange(0), offs = g_freeOffs.exchange(0), steps = g_freeSpeedSteps.exchange(0);
+  bool locked = g_free.on && now < g_free.lockUntil;
+  if (locked) toggles = offs = steps = 0;
   if (g_free.on && (offs || toggles % 2)) return FreeCamOff(now, false);
   if (!g_free.on && toggles % 2) FreeCamOn(), Log("freecam on (key) at " + Num(g_free.x) + "," + Num(g_free.y) + "," + Num(g_free.z));
   if (!g_free.on) return;
@@ -2559,16 +2598,18 @@ void UpdateFreeCam(double now, float dt) {
   if (!IS_PAUSE_MENU_ACTIVE() && !g_typing) {
     // the mouse's value is its movement this frame; a stick's is a rate
     float look = IS_USING_KEYBOARD_AND_MOUSE(0) ? g_free.sens : 120.0f * dt;
-    g_free.heading -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_LR) * look;
-    g_free.pitch -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_UD) * look;
+    if (!locked) {
+      g_free.heading -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_LR) * look;
+      g_free.pitch -= GET_DISABLED_CONTROL_NORMAL(0, INPUT_LOOK_UD) * look;
+    }
     if (test) g_free.heading += g_free.inYaw * dt, g_free.pitch += g_free.inPitch * dt;
     g_free.heading = WrapDeg(g_free.heading);
     g_free.pitch = std::clamp(g_free.pitch, -89.0f, 89.0f);
 
-    steps += IS_DISABLED_CONTROL_JUST_PRESSED(0, INPUT_CURSOR_SCROLL_UP) - IS_DISABLED_CONTROL_JUST_PRESSED(0, INPUT_CURSOR_SCROLL_DOWN);
+    if (!locked) steps += IS_DISABLED_CONTROL_JUST_PRESSED(0, INPUT_CURSOR_SCROLL_UP) - IS_DISABLED_CONTROL_JUST_PRESSED(0, INPUT_CURSOR_SCROLL_DOWN);
     if (steps) g_free.speed = std::clamp(g_free.speed * std::pow(1.25f, static_cast<float>(steps)), 0.5f, 500.0f);
     float f = 0, r = 0, u = 0, mult = 1;
-    if (GameFocused()) {
+    if (GameFocused() && !locked) {
       auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
       f = static_cast<float>(down('W') - down('S'));
       r = static_cast<float>(down('D') - down('A'));
@@ -2585,6 +2626,7 @@ void UpdateFreeCam(double now, float dt) {
     g_free.x += vx, g_free.y += vy, g_free.z += vz;
     SET_FOCUS_POS_AND_VEL(g_free.x, g_free.y, g_free.z, dt > 0 ? vx / dt : 0, dt > 0 ? vy / dt : 0, dt > 0 ? vz / dt : 0);
   }
+  if (locked) DrawText("Claude is using the camera (" + std::to_string(static_cast<int>(g_free.lockUntil - now) + 1) + " s)", 0.985f, 0.05f, 0.5f, 255, 210, 80);
   SET_CAM_FOV(g_free.cam, g_free.fov);
   SET_CAM_COORD(g_free.cam, g_free.x, g_free.y, g_free.z);
   SET_CAM_ROT(g_free.cam, g_free.pitch, 0.0f, g_free.heading, 2);
@@ -3500,7 +3542,10 @@ void HandleMessage(const Message &m, double now) {
     // on=1 [x y z (m) heading pitch (deg): the pose, else the gameplay camera's or where it is] [fov] [speed (m/s)]
     // [sens (deg per mouse unit)] [hud=0|1] [day=1: midday, clear, the clock stopped; day=0 gives the old back]
     // [fly=f,r,u look=yaw,pitch secs=s: synthetic input (-1..1, deg/s) as the keys and mouse give it, for tests]; on=0 off
+    // [lock=secs (up to 120; 0 gives it back): the keys and mouse leave it alone, for a script's looks]
+    if (m.count("lock")) g_free.lockUntil = now + std::clamp(MsgNum(m, "lock", 0), 0.0, 120.0);
     if (!MsgBool(m, "on", true)) {
+      g_free.lockUntil = 0;
       FreeCamOff(now, false);
     } else {
       FreeCamOn();
@@ -3536,18 +3581,21 @@ void HandleMessage(const Message &m, double now) {
     }
     Log("pins: " + std::to_string(g_pins.size()) + ", " + Num(g_pinHeight) + " m tall");
   } else if (type == "flags") {
-    // f: "x,y,z,kind,label;..." (empty clears): z "nan" for the ground's, kind n | c | o | i (the page's flag states)
+    // f: "x,y,z,kind,heading,pitch,label;..." (empty clears): z "nan" for the ground's, kind n | c | o | i (the page's
+    // flag states), heading and pitch (deg) "nan" for a flag with no view of its own
     g_flags.clear();
     std::stringstream ss(MsgStr(m, "f"));
     std::string item;
     while (std::getline(ss, item, ';')) {
-      Flag f{0, 0, NAN, 'n', ""};
-      char z[32] = "", kind = 'n';
+      Flag f{0, 0, NAN, NAN, NAN, 'n', ""};
+      char z[32] = "", hd[32] = "", pt[32] = "", kind = 'n';
       int used = 0;
-      if (sscanf_s(item.c_str(), "%f,%f,%31[^,],%c,%n", &f.x, &f.y, z, 32, &kind, 1, &used) < 4) continue;
-      if (sscanf_s(z, "%f", &f.z) != 1) f.z = NAN;
+      if (sscanf_s(item.c_str(), "%f,%f,%31[^,],%c,%31[^,],%31[^,],%n", &f.x, &f.y, z, 32, &kind, 1, hd, 32, pt, 32, &used) < 6) continue;
+      if (sscanf_s(z, "%f", &f.z) != 1 || z[0] == 'n') f.z = NAN;
+      if (sscanf_s(hd, "%f", &f.heading) != 1 || hd[0] == 'n') f.heading = NAN;
+      if (sscanf_s(pt, "%f", &f.pitch) != 1 || pt[0] == 'n') f.pitch = NAN;
       f.kind = kind;
-      if (used > 0) f.label = item.substr(used, 70);
+      if (used > 0) f.label = item.substr(used, 400);
       g_flags.push_back(f);
     }
   } else if (type == "topcam") {
