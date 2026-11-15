@@ -2752,6 +2752,10 @@ void Publish(double now, bool inVehicle) {
     << ",\"rightPresses\":" << g_rightCount.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
+  if (!inVehicle) {  // on foot: where the player stands, so the map overlay and flags work without a car
+    Ped ped = PLAYER_PED_ID();
+    s << ",\"heading\":" << Num(GET_ENTITY_HEADING(ped)) << ",\"pos\":" << Vec(GET_ENTITY_COORDS(ped, TRUE));
+  }
   if (inVehicle) {
     s << ",\"vEgo\":" << Num(g_m.v) << ",\"aMeas\":" << Num(g_m.aMeas) << ",\"yawRate\":" << Num(g_m.yawRate)
       << ",\"heading\":" << Num(g_m.heading) << ",\"pitch\":" << Num(g_m.pitch) << ",\"roll\":" << Num(g_m.roll) << ",\"grade\":" << Num(g_m.grade) << ",\"bank\":" << Num(g_m.bank)
@@ -4083,7 +4087,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (v && !g_ai.on) ApplyControls(dt, now);
   Publish(now, v != 0);
   // only the relay reads a message without frames; it also covers the capture starting up or stalled
-  if (connected && v && g_framesCmd >= 0 && now - g_lastFrameAt.load() > 2 * STATE_EVERY && now >= g_nextState) {
+  if (connected && g_framesCmd >= 0 && now - g_lastFrameAt.load() > 2 * STATE_EVERY && now >= g_nextState) {
     g_nextState = std::max(g_nextState + STATE_EVERY, now);
     SendState(now);
   }
