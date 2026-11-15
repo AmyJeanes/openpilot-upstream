@@ -1314,6 +1314,7 @@ struct KindStyle {
 };
 constexpr KindStyle STYLES[] = {
     {'e', 40, 230, 90, 235, 0.35f, 0, 0, 0.060f},       // kerb
+    {'U', 31, 154, 69, 235, 0.35f, 0, 0, 0.060f},       // the patch map's lane under a deck: its darker green
     {'d', 245, 245, 245, 235, 0.20f, 3, 6, 0.090f},     // lane line, dashed
     {'w', 245, 245, 245, 235, 0.20f, 0, 0, 0.090f},     // lane line, solid
     {'y', 242, 194, 0, 235, 0.20f, 3, 6, 0.105f},       // centre line, dashed
