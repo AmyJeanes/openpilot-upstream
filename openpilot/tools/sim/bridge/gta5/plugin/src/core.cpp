@@ -1404,7 +1404,7 @@ struct KindStyle {
 constexpr KindStyle STYLES[] = {
     {'e', 40, 230, 90, 235, 0.35f, 0, 0, 0.060f},       // kerb
     {'U', 31, 154, 69, 235, 0.35f, 0, 0, 0.060f},       // the patch map's lane under a deck: its darker green
-    {'P', 255, 46, 136, 235, 0.55f, 0, 0, 0.200f},      // the route made on the map page, its pink
+    {'P', 255, 46, 136, 255, 1.10f, 0, 0, 0.200f},      // the route made on the map page, its pink
     {'S', 53, 224, 255, 240, 0.35f, 0, 0, 0.180f},      // the patch map's split: a lane opening off another
     {'M', 255, 95, 210, 240, 0.35f, 0, 0, 0.180f},      // and its merge
     {'o', 53, 224, 255, 240, 0.35f, 0, 0, 0.180f},      // a ball where a split starts
