@@ -1015,24 +1015,47 @@ void UpdateCurvGain(float dt, double now) {
 
 // While a control command steers the car the player's hands come off the wheel: an upper-body animation played beside
 // the driving, so the car is still the player's. The `hands` command picks the clip, to try others in the game.
+// One priority slot of TASK_SCRIPTED_ANIMATION, as the game's scripts lay it out: 22 script slots of 8 bytes.
+union AnimSlot { int64_t raw; int i; float f; const char *s; };
+struct ScriptedAnim {
+  AnimSlot type, dict0, anim0, phase0, rate0, weight0, dict1, anim1, phase1, rate1, weight1, dict2, anim2, phase2, rate2, weight2,
+      filter, blendIn, blendOut, timeToPlay, flags, ikFlags;
+  ScriptedAnim() {
+    std::memset(this, 0, sizeof *this);
+    dict0.s = anim0.s = dict1.s = anim1.s = dict2.s = anim2.s = "";
+    rate0.f = weight0.f = rate1.f = weight1.f = rate2.f = weight2.f = 1.0f;
+    blendIn.f = blendOut.f = 0.125f;
+    timeToPlay.i = -1;
+  }
+};
+static_assert(sizeof(ScriptedAnim) == 22 * 8, "TASK_SCRIPTED_ANIMATION reads 22 script slots");
+
 struct HandsOff {
   bool want = true, playing = false, armIk = true;
+  // scripted: played through a bone mask, so only the arms are posed and the head and the lean in the seat stay the
+  // game's own; otherwise the whole upper body by TASK_PLAY_ANIM, which has no mask
+  bool scripted = true;
   std::string dict = "veh@std@ps@base", clip = "sit";
+  // aimFilter: the mask while aiming or firing (the weapon is in the right hand); empty stops the pose for that long
+  std::string filter = "BONEMASK_ARMS", aimFilter = "BONEMASK_ARMONLY_L";
   int flag = 49;
-  std::string onDict, onClip;  // what is playing, to stop that one when the clip is changed
+  std::string onDict, onClip, onFilter;  // what is playing, to stop or change that one
   Ped ped = 0;
-  double armsBusyUntil = 0;
+  double armsBusyUntil = 0, nextPlay = 0;
 } g_hands;
 
 void StepHandsOff(Ped ped, Vehicle v, bool driven, double now) {
-  // aiming or firing from the car needs the arms: the pose would hide the weapon's own animation
-  if (v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK) || IS_PED_DOING_DRIVEBY(ped))) g_hands.armsBusyUntil = now + 1.5;
-  bool on = g_hands.want && driven && v && now >= g_hands.armsBusyUntil && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
+  // aiming or firing from the car needs the right arm: the pose would hide the weapon's own animation
+  if (v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK))) g_hands.armsBusyUntil = now + 0.2;
+  bool aiming = now < g_hands.armsBusyUntil;
+  std::string filter = !g_hands.scripted ? "" : aiming ? g_hands.aimFilter : g_hands.filter;
+  bool on = g_hands.want && driven && v && !(aiming && filter.empty()) && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
   if (on) {
     Hash model = GET_ENTITY_MODEL(v);
     on = !IS_THIS_MODEL_A_BIKE(model) && !IS_THIS_MODEL_A_QUADBIKE(model);
   }
-  if (g_hands.playing && (!on || g_hands.onDict != g_hands.dict || g_hands.onClip != g_hands.clip || g_hands.ped != ped)) {
+  bool changed = g_hands.onDict != g_hands.dict || g_hands.onClip != g_hands.clip || g_hands.ped != ped;
+  if (g_hands.playing && (!on || changed)) {
     STOP_ANIM_TASK(g_hands.ped, g_hands.onDict.c_str(), g_hands.onClip.c_str(), on ? -2.0f : -8.0f);
     SET_PED_CAN_ARM_IK(g_hands.ped, TRUE);
     g_hands.playing = false;
@@ -1040,11 +1063,24 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now) {
   if (!on) return;
   REQUEST_ANIM_DICT(g_hands.dict.c_str());
   if (!HAS_ANIM_DICT_LOADED(g_hands.dict.c_str())) return;
-  // played again whenever the game drops it (a horn, a shunt)
-  if (!IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3))
-    TASK_PLAY_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 2.0f, 2.0f, -1, g_hands.flag, 0.0f, FALSE, FALSE, FALSE);
+  // played again when the mask changes, and whenever the game drops it (a horn, a shunt): no more than twice a second,
+  // as a scripted animation may not answer IS_ENTITY_PLAYING_ANIM
+  bool refilter = g_hands.playing && filter != g_hands.onFilter;
+  if (!g_hands.playing || refilter || (now >= g_hands.nextPlay && !IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3))) {
+    if (g_hands.scripted) {
+      ScriptedAnim a, none;
+      a.type.i = 1;
+      a.dict0.s = g_hands.dict.c_str(), a.anim0.s = g_hands.clip.c_str();
+      a.filter.i = static_cast<int>(GET_HASH_KEY(filter.c_str()));
+      a.flags.i = g_hands.flag & ~16;  // the mask says which bones, not the upper-body flag
+      TASK_SCRIPTED_ANIMATION(ped, &a, &none, &none, refilter ? 8.0f : 4.0f, 2.0f);
+    } else {
+      TASK_PLAY_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 4.0f, 2.0f, -1, g_hands.flag, 0.0f, FALSE, FALSE, FALSE);
+    }
+    g_hands.nextPlay = now + 0.5;
+  }
   SET_PED_CAN_ARM_IK(ped, g_hands.armIk);
-  g_hands.playing = true, g_hands.ped = ped, g_hands.onDict = g_hands.dict, g_hands.onClip = g_hands.clip;
+  g_hands.playing = true, g_hands.ped = ped, g_hands.onDict = g_hands.dict, g_hands.onClip = g_hands.clip, g_hands.onFilter = filter;
 }
 
 void ApplyControls(float dt, double now) {
@@ -3802,14 +3838,17 @@ void HandleMessage(const Message &m, double now) {
       SetIndicator(side == "left" ? 1 : side == "right" ? 2 : 0);
     }
   } else if (type == "hands") {
-    // {"type": "hands", "on": 0|1, "dict": .., "clip": .., "flag": n, "ik": 0|1}: the driver's pose while the car is driven for them
+    // {"type": "hands", "on": 0|1, "dict": .., "clip": .., "flag": n, "ik": 0|1, "scripted": 0|1, "filter": .., "aimFilter": ..}: the driver's pose while the car is driven for them
     g_hands.want = MsgBool(m, "on", g_hands.want);
     if (m.count("dict")) g_hands.dict = MsgStr(m, "dict");
     if (m.count("clip")) g_hands.clip = MsgStr(m, "clip");
     g_hands.flag = static_cast<int>(MsgNum(m, "flag", g_hands.flag));
     g_hands.armIk = MsgBool(m, "ik", g_hands.armIk);
+    g_hands.scripted = MsgBool(m, "scripted", g_hands.scripted);
+    if (m.count("filter")) g_hands.filter = MsgStr(m, "filter");
+    if (m.count("aimFilter")) g_hands.aimFilter = MsgStr(m, "aimFilter");
     Log("hands " + std::string(g_hands.want ? "off the wheel: " : "left alone: ") + g_hands.dict + " / " + g_hands.clip + ", flag " + std::to_string(g_hands.flag) +
-        ", arm ik " + (g_hands.armIk ? "on" : "off"));
+        ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " / aiming " + g_hands.aimFilter : std::string(", whole upper body")));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {

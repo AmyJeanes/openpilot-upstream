@@ -55,6 +55,8 @@ inline BOOL HAS_ANIM_DICT_LOADED(const char *dict) { return Invoke<BOOL>(0xD031A
 inline void TASK_PLAY_ANIM(Ped p, const char *dict, const char *clip, float blendIn, float blendOut, int ms, int flag, float rate, BOOL lockX, BOOL lockY, BOOL lockZ) {
   Invoke(0xEA47FE3719165B94, p, dict, clip, blendIn, blendOut, ms, flag, rate, lockX, lockY, lockZ);
 }
+// low/mid/high: three ScriptedAnim priority slots (22 script slots of 8 bytes each), see HandsOff in core.cpp
+inline void TASK_SCRIPTED_ANIMATION(Ped p, void *low, void *mid, void *high, float blendIn, float blendOut) { Invoke(0x126EF75F1E17ABE5, p, low, mid, high, blendIn, blendOut); }
 inline void STOP_ANIM_TASK(Entity e, const char *dict, const char *clip, float blendDelta) { Invoke(0x97FF36A1D40EA00A, e, dict, clip, blendDelta); }
 inline BOOL IS_ENTITY_PLAYING_ANIM(Entity e, const char *dict, const char *clip, int taskFlag) { return Invoke<BOOL>(0x1F0B79228E461EC9, e, dict, clip, taskFlag); }
 inline void SET_PED_CAN_ARM_IK(Ped p, BOOL on) { Invoke(0x6C3B4D6D13B4C841, p, on); }
