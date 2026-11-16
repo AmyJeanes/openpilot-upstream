@@ -261,7 +261,7 @@ bool g_engaged = false;
 
 // openpilot's set speed, from the bridge, for the speed readout
 struct Hud {
-  float setKph = 0;
+  float setKph = 0, limitKph = 0;
   bool metric = false, engaged = false;
   double t = -1e9;
 } g_hud;
@@ -1032,29 +1032,34 @@ static_assert(sizeof(ScriptedAnim) == 22 * 8, "TASK_SCRIPTED_ANIMATION reads 22 
 
 struct HandsOff {
   bool want = true, playing = false, armIk = true;
-  // scripted: played through a bone mask, so only the arms are posed and the head and the lean in the seat stay the
-  // game's own; otherwise the whole upper body by TASK_PLAY_ANIM, which has no mask
+  // scripted: played through bone masks, so only the arms are posed and the head and the lean in the seat stay the
+  // game's own; otherwise the whole upper body by TASK_PLAY_ANIM, which has no mask and is stopped while aiming
   bool scripted = true;
   std::string dict = "veh@std@ps@base", clip = "sit";
-  // aimFilter: the mask while aiming or firing (the weapon is in the right hand); empty stops the pose for that long
-  std::string filter = "BONEMASK_ARMS", aimFilter = "BONEMASK_ARMONLY_L";
+  // one animation in two slots: the left arm's stays, the right arm's is weighted out while aiming or firing (the
+  // weapon is in the right hand). Starting the animation anew for that would send the left arm to the wheel and back.
+  std::string filter = "BONEMASK_ARMONLY_L", aimFilter = "BONEMASK_ARMONLY_R";
   int flag = 49;
   std::string onDict, onClip, onFilter;  // what is playing, to stop or change that one
   Ped ped = 0;
   double armsBusyUntil = 0, nextPlay = 0;
+  float right = 1;  // the right arm's weight in the pose
+  // Under the pose the right hand is on the wheel until the game has blended its aim in: the pose holds for aimDelay
+  // and fades over aimOut (s), so what shows through is the aim, not the hand leaving the wheel. aimIn: back again.
+  float aimDelay = 0.1f, aimOut = 0.2f, aimIn = 0.25f;
+  double aimSince = -1;
 } g_hands;
 
-void StepHandsOff(Ped ped, Vehicle v, bool driven, double now) {
-  // aiming or firing from the car needs the right arm: the pose would hide the weapon's own animation
+void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
   if (v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK))) g_hands.armsBusyUntil = now + 0.2;
   bool aiming = now < g_hands.armsBusyUntil;
-  std::string filter = !g_hands.scripted ? "" : aiming ? g_hands.aimFilter : g_hands.filter;
-  bool on = g_hands.want && driven && v && !(aiming && filter.empty()) && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
+  bool on = g_hands.want && driven && v && !(aiming && !g_hands.scripted) && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
   if (on) {
     Hash model = GET_ENTITY_MODEL(v);
     on = !IS_THIS_MODEL_A_BIKE(model) && !IS_THIS_MODEL_A_QUADBIKE(model);
   }
-  bool changed = g_hands.onDict != g_hands.dict || g_hands.onClip != g_hands.clip || g_hands.ped != ped;
+  std::string filter = g_hands.scripted ? g_hands.filter + "+" + g_hands.aimFilter : "";
+  bool changed = g_hands.onDict != g_hands.dict || g_hands.onClip != g_hands.clip || g_hands.onFilter != filter || g_hands.ped != ped;
   if (g_hands.playing && (!on || changed)) {
     STOP_ANIM_TASK(g_hands.ped, g_hands.onDict.c_str(), g_hands.onClip.c_str(), on ? -2.0f : -8.0f);
     SET_PED_CAN_ARM_IK(g_hands.ped, TRUE);
@@ -1063,21 +1068,31 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now) {
   if (!on) return;
   REQUEST_ANIM_DICT(g_hands.dict.c_str());
   if (!HAS_ANIM_DICT_LOADED(g_hands.dict.c_str())) return;
-  // played again when the mask changes, and whenever the game drops it (a horn, a shunt): no more than twice a second,
-  // as a scripted animation may not answer IS_ENTITY_PLAYING_ANIM
-  bool refilter = g_hands.playing && filter != g_hands.onFilter;
-  if (!g_hands.playing || refilter || (now >= g_hands.nextPlay && !IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3))) {
+  // played again whenever the game drops it (a horn, a shunt): no more than twice a second, as a scripted animation
+  // may not answer IS_ENTITY_PLAYING_ANIM
+  if (!g_hands.playing || (now >= g_hands.nextPlay && !IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3))) {
     if (g_hands.scripted) {
-      ScriptedAnim a, none;
-      a.type.i = 1;
-      a.dict0.s = g_hands.dict.c_str(), a.anim0.s = g_hands.clip.c_str();
-      a.filter.i = static_cast<int>(GET_HASH_KEY(filter.c_str()));
-      a.flags.i = g_hands.flag & ~16;  // the mask says which bones, not the upper-body flag
-      TASK_SCRIPTED_ANIMATION(ped, &a, &none, &none, refilter ? 8.0f : 4.0f, 2.0f);
+      ScriptedAnim left, right, none;
+      for (ScriptedAnim *a : {&left, &right}) {
+        a->type.i = 1;
+        a->dict0.s = g_hands.dict.c_str(), a->anim0.s = g_hands.clip.c_str();
+        a->flags.i = g_hands.flag & ~16;  // the mask says which bones, not the upper-body flag
+      }
+      left.filter.i = static_cast<int>(GET_HASH_KEY(g_hands.filter.c_str()));
+      right.filter.i = static_cast<int>(GET_HASH_KEY(g_hands.aimFilter.c_str()));
+      TASK_SCRIPTED_ANIMATION(ped, &left, &right, &none, 0.4f, 0.25f);  // blends in seconds here, not TASK_PLAY_ANIM's speeds
     } else {
       TASK_PLAY_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 4.0f, 2.0f, -1, g_hands.flag, 0.0f, FALSE, FALSE, FALSE);
     }
     g_hands.nextPlay = now + 0.5;
+  }
+  if (g_hands.scripted) {
+    if (!aiming) g_hands.aimSince = -1;
+    else if (g_hands.aimSince < 0) g_hands.aimSince = now;
+    bool letGo = aiming && now - g_hands.aimSince >= g_hands.aimDelay;
+    float to = letGo ? 0.0f : 1.0f, step = dt / std::max(letGo ? g_hands.aimOut : g_hands.aimIn, 0.01f);
+    g_hands.right = std::clamp(to, g_hands.right - step, g_hands.right + step);
+    SET_ANIM_WEIGHT(ped, g_hands.right, 1, 0, TRUE);
   }
   SET_PED_CAN_ARM_IK(ped, g_hands.armIk);
   g_hands.playing = true, g_hands.ped = ped, g_hands.onDict = g_hands.dict, g_hands.onClip = g_hands.clip, g_hands.onFilter = filter;
@@ -1240,7 +1255,9 @@ void DrawSpeed(double now) {
   if (fresh && g_hud.engaged) r = 80, g = 220, b = 100;
   DrawText(std::to_string(static_cast<int>(std::lround(g_m.v * toUnit))) + (g_hud.metric ? " km/h" : " mph"), 0.985f, 0.74f, 0.9f, r, g, b);
   std::string set = fresh && g_hud.setKph > 0 ? std::to_string(static_cast<int>(std::lround(g_hud.setKph * (g_hud.metric ? 1.0f : 0.621371f)))) : "-";
-  DrawText("SET " + set, 0.985f, 0.795f, 0.55f, 200, 200, 200);
+  // the road's posted limit, where whoever drives gives one (the map driver)
+  std::string limit = fresh && g_hud.limitKph > 0 ? "LIMIT " + std::to_string(static_cast<int>(std::lround(g_hud.limitKph * (g_hud.metric ? 1.0f : 0.621371f)))) + "   " : "";
+  DrawText(limit + "SET " + set, 0.985f, 0.795f, 0.55f, 200, 200, 200);
   if (now < g_event.until) {
     double fade = std::min(1.0, (g_event.until - now) / EVENT_FADE);
     DrawText(g_event.text, 0.985f, 0.835f, 0.45f, 200, 200, 200, static_cast<int>(255 * fade));
@@ -1418,6 +1435,7 @@ struct DebugLine {
 // The map around the car from the bridge, drawn into the world every player frame while on (debug command, key_debug)
 struct DebugOverlay {
   bool on = false, force = false;
+  bool keyOff = false;  // turned off by the key, not by a command
   bool ground = true;   // strips on the game's ground under each point (else at the map's heights)
   bool thin = false;    // 1-px lines as before the strips
   bool casing = true;   // white and yellow strips edged dark
@@ -3334,6 +3352,7 @@ void HandleMessage(const Message &m, double now) {
     g_ctl.t = now;
   } else if (type == "hud") {
     g_hud.setKph = static_cast<float>(MsgNum(m, "setSpeed"));
+    g_hud.limitKph = static_cast<float>(MsgNum(m, "limit", 0.0));
     g_hud.metric = MsgBool(m, "metric");
     g_hud.engaged = MsgBool(m, "engaged");
     g_hud.t = now;
@@ -3847,8 +3866,11 @@ void HandleMessage(const Message &m, double now) {
     g_hands.scripted = MsgBool(m, "scripted", g_hands.scripted);
     if (m.count("filter")) g_hands.filter = MsgStr(m, "filter");
     if (m.count("aimFilter")) g_hands.aimFilter = MsgStr(m, "aimFilter");
+    g_hands.aimDelay = static_cast<float>(MsgNum(m, "aimDelay", g_hands.aimDelay));
+    g_hands.aimOut = static_cast<float>(MsgNum(m, "aimOut", g_hands.aimOut));
+    g_hands.aimIn = static_cast<float>(MsgNum(m, "aimIn", g_hands.aimIn));
     Log("hands " + std::string(g_hands.want ? "off the wheel: " : "left alone: ") + g_hands.dict + " / " + g_hands.clip + ", flag " + std::to_string(g_hands.flag) +
-        ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " / aiming " + g_hands.aimFilter : std::string(", whole upper body")));
+        ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " kept, " + g_hands.aimFilter + " let go while aiming after " + Num(g_hands.aimDelay) + " s over " + Num(g_hands.aimOut) + " s, back over " + Num(g_hands.aimIn) + " s" : std::string(", whole upper body")));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {
@@ -4124,13 +4146,17 @@ extern "C" __declspec(dllexport) void CoreTick() {
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0 && (g_top.hud || !g_top.on) && !g_free.on) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
-  if (view < 0) DrawPins();
-  if (view < 0) DrawFlags(), MarkNote();
+  // the overlay key's "off" is for watching the drive: the flags and pins go too, until the key or a debug command
+  bool clear = g_debug.keyOff && !g_debug.on;
+  if (view < 0 && !clear) DrawPins();
+  if (view < 0 && !clear) DrawFlags();
+  if (view < 0) MarkNote();
   if (int presses = g_debugPresses.exchange(0)) {
     static const char *const LEVELS[] = {"off", "route ahead", "full"};
     g_debug.level = (g_debug.level + presses) % 3;
     g_debug.on = g_debug.level > 0;
-    g_debug.layers = g_debug.level == 1 ? "r" : g_debug.fullLayers;
+    g_debug.keyOff = g_debug.level == 0;
+    g_debug.layers = g_debug.level == 1 ? "rP" : g_debug.fullLayers;  // P: the route made on the map page
     g_debug.lines.clear(), g_debug.vertices = 0;  // the bridge sends the new level's lines
     Log(std::string("debug ") + LEVELS[g_debug.level] + " (key)");
   }
@@ -4168,7 +4194,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   StepAi(ped, v, now);
   // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
   if (v && !g_ai.on) ApplyControls(dt, now);
-  StepHandsOff(ped, v, g_ctl.wasLive && !g_ai.on, now);
+  StepHandsOff(ped, v, g_ctl.wasLive && !g_ai.on, now, dt);
   Publish(now, v != 0);
   // only the relay reads a message without frames; it also covers the capture starting up or stalled
   if (connected && g_framesCmd >= 0 && now - g_lastFrameAt.load() > 2 * STATE_EVERY && now >= g_nextState) {
@@ -4179,7 +4205,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
 
 extern "C" __declspec(dllexport) void CoreShutdown() {
   AiOff(PLAYER_PED_ID(), "shutdown");  // a task left running would keep driving under the reloaded core
-  StepHandsOff(PLAYER_PED_ID(), 0, false, QpcSeconds());
+  StepHandsOff(PLAYER_PED_ID(), 0, false, QpcSeconds(), 0.0f);
   ReleaseControls();
   FreeCamOff(QpcSeconds(), true);
   if (g_free.restoring) FREEZE_ENTITY_POSITION(g_free.restoring, FALSE);

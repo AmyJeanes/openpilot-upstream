@@ -57,6 +57,8 @@ inline void TASK_PLAY_ANIM(Ped p, const char *dict, const char *clip, float blen
 }
 // low/mid/high: three ScriptedAnim priority slots (22 script slots of 8 bytes each), see HandsOff in core.cpp
 inline void TASK_SCRIPTED_ANIMATION(Ped p, void *low, void *mid, void *high, float blendIn, float blendOut) { Invoke(0x126EF75F1E17ABE5, p, low, mid, high, blendIn, blendOut); }
+// priority: which of a scripted animation's three slots (0 low, 1 mid, 2 high); secondary: one played beside the ped's task
+inline void SET_ANIM_WEIGHT(Entity e, float weight, int priority, int index, BOOL secondary) { Invoke(0x207F1A47C0342F48, e, weight, priority, index, secondary); }
 inline void STOP_ANIM_TASK(Entity e, const char *dict, const char *clip, float blendDelta) { Invoke(0x97FF36A1D40EA00A, e, dict, clip, blendDelta); }
 inline BOOL IS_ENTITY_PLAYING_ANIM(Entity e, const char *dict, const char *clip, int taskFlag) { return Invoke<BOOL>(0x1F0B79228E461EC9, e, dict, clip, taskFlag); }
 inline void SET_PED_CAN_ARM_IK(Ped p, BOOL on) { Invoke(0x6C3B4D6D13B4C841, p, on); }
