@@ -49,6 +49,17 @@ inline void SET_DRIVER_ABILITY(Ped p, float ability) { Invoke(0xB195FFA8042FC5C3
 inline void SET_DRIVER_AGGRESSIVENESS(Ped p, float aggressiveness) { Invoke(0xA731F608CA104E3C, p, aggressiveness); }
 inline void SET_PED_KEEP_TASK(Ped p, BOOL on) { Invoke(0x971D38760FBC02EF, p, on); }
 inline void CLEAR_PED_TASKS(Ped p) { Invoke(0xE1EF3C1216AFF2CD, p); }
+inline void REQUEST_ANIM_DICT(const char *dict) { Invoke(0xD3BD40951412FEF6, dict); }
+inline BOOL HAS_ANIM_DICT_LOADED(const char *dict) { return Invoke<BOOL>(0xD031A9162D01088C, dict); }
+// flag: 1 looping + 16 upper body only + 32 secondary (beside the ped's task, not in place of it)
+inline void TASK_PLAY_ANIM(Ped p, const char *dict, const char *clip, float blendIn, float blendOut, int ms, int flag, float rate, BOOL lockX, BOOL lockY, BOOL lockZ) {
+  Invoke(0xEA47FE3719165B94, p, dict, clip, blendIn, blendOut, ms, flag, rate, lockX, lockY, lockZ);
+}
+inline void STOP_ANIM_TASK(Entity e, const char *dict, const char *clip, float blendDelta) { Invoke(0x97FF36A1D40EA00A, e, dict, clip, blendDelta); }
+inline BOOL IS_ENTITY_PLAYING_ANIM(Entity e, const char *dict, const char *clip, int taskFlag) { return Invoke<BOOL>(0x1F0B79228E461EC9, e, dict, clip, taskFlag); }
+inline void SET_PED_CAN_ARM_IK(Ped p, BOOL on) { Invoke(0x6C3B4D6D13B4C841, p, on); }
+inline BOOL IS_THIS_MODEL_A_BIKE(Hash m) { return Invoke<BOOL>(0xB50C0B0CEDC6CE84, m); }
+inline BOOL IS_THIS_MODEL_A_QUADBIKE(Hash m) { return Invoke<BOOL>(0x39DAC362EE65FA28, m); }
 // taskHash: GET_HASH_KEY("SCRIPT_TASK_<name>"); 0 waiting to start, 1 running, 7 finished or never given
 inline int GET_SCRIPT_TASK_STATUS(Ped p, Hash taskHash) { return Invoke<int>(0x77F1BEB8863288D5, p, taskHash); }
 inline Ped GET_PED_IN_VEHICLE_SEAT(Vehicle v, int seat, BOOL p2) { return Invoke<Ped>(0xBB40DD2270B65366, v, seat, p2); }

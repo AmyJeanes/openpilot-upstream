@@ -1013,6 +1013,37 @@ void UpdateCurvGain(float dt, double now) {
   }
 }
 
+// While a control command steers the car the player's hands come off the wheel: an upper-body animation played beside
+// the driving, so the car is still the player's. The `hands` command picks the clip, to try others in the game.
+struct HandsOff {
+  bool want = true, playing = false, armIk = true;
+  std::string dict = "veh@std@ps@base", clip = "sit";
+  int flag = 49;
+  std::string onDict, onClip;  // what is playing, to stop that one when the clip is changed
+  Ped ped = 0;
+} g_hands;
+
+void StepHandsOff(Ped ped, Vehicle v, bool driven) {
+  bool on = g_hands.want && driven && v && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
+  if (on) {
+    Hash model = GET_ENTITY_MODEL(v);
+    on = !IS_THIS_MODEL_A_BIKE(model) && !IS_THIS_MODEL_A_QUADBIKE(model);
+  }
+  if (g_hands.playing && (!on || g_hands.onDict != g_hands.dict || g_hands.onClip != g_hands.clip || g_hands.ped != ped)) {
+    STOP_ANIM_TASK(g_hands.ped, g_hands.onDict.c_str(), g_hands.onClip.c_str(), -2.0f);
+    SET_PED_CAN_ARM_IK(g_hands.ped, TRUE);
+    g_hands.playing = false;
+  }
+  if (!on) return;
+  REQUEST_ANIM_DICT(g_hands.dict.c_str());
+  if (!HAS_ANIM_DICT_LOADED(g_hands.dict.c_str())) return;
+  // played again whenever the game drops it (a horn, a shunt)
+  if (!IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3))
+    TASK_PLAY_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 2.0f, 2.0f, -1, g_hands.flag, 0.0f, FALSE, FALSE, FALSE);
+  SET_PED_CAN_ARM_IK(ped, g_hands.armIk);
+  g_hands.playing = true, g_hands.ped = ped, g_hands.onDict = g_hands.dict, g_hands.onClip = g_hands.clip;
+}
+
 void ApplyControls(float dt, double now) {
   Vehicle veh = g_veh.handle;
   if (now < g_test.until) {
@@ -3767,6 +3798,15 @@ void HandleMessage(const Message &m, double now) {
       std::string side = MsgStr(m, "indicator");
       SetIndicator(side == "left" ? 1 : side == "right" ? 2 : 0);
     }
+  } else if (type == "hands") {
+    // {"type": "hands", "on": 0|1, "dict": .., "clip": .., "flag": n, "ik": 0|1}: the driver's pose while the car is driven for them
+    g_hands.want = MsgBool(m, "on", g_hands.want);
+    if (m.count("dict")) g_hands.dict = MsgStr(m, "dict");
+    if (m.count("clip")) g_hands.clip = MsgStr(m, "clip");
+    g_hands.flag = static_cast<int>(MsgNum(m, "flag", g_hands.flag));
+    g_hands.armIk = MsgBool(m, "ik", g_hands.armIk);
+    Log("hands " + std::string(g_hands.want ? "off the wheel: " : "left alone: ") + g_hands.dict + " / " + g_hands.clip + ", flag " + std::to_string(g_hands.flag) +
+        ", arm ik " + (g_hands.armIk ? "on" : "off"));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {
@@ -4086,6 +4126,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   StepAi(ped, v, now);
   // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
   if (v && !g_ai.on) ApplyControls(dt, now);
+  StepHandsOff(ped, v, g_ctl.wasLive && !g_ai.on);
   Publish(now, v != 0);
   // only the relay reads a message without frames; it also covers the capture starting up or stalled
   if (connected && g_framesCmd >= 0 && now - g_lastFrameAt.load() > 2 * STATE_EVERY && now >= g_nextState) {
@@ -4096,6 +4137,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
 
 extern "C" __declspec(dllexport) void CoreShutdown() {
   AiOff(PLAYER_PED_ID(), "shutdown");  // a task left running would keep driving under the reloaded core
+  StepHandsOff(PLAYER_PED_ID(), 0, false);
   ReleaseControls();
   FreeCamOff(QpcSeconds(), true);
   if (g_free.restoring) FREEZE_ENTITY_POSITION(g_free.restoring, FALSE);
