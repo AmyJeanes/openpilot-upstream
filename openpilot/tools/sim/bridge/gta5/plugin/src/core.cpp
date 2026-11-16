@@ -61,6 +61,7 @@ struct Config {
   int keySpeedDown = VK_DOWN;
   int keyDebug = VK_DELETE;  // the map debug overlay: off, the route ahead alone, every layer, in turn
   int keyMark = VK_END;  // a bookmark: the bridge logs where and when, for review
+  int keyRules = VK_NEXT;  // Page Down: the map driver heeds stop signs and lights, or does not (Home freezes the game until Esc)
   bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
@@ -104,6 +105,7 @@ double g_nextState = 0;
 
 std::atomic<int> g_engagePresses{0}, g_leftPresses{0}, g_rightPresses{0};
 std::atomic<int> g_markPresses{0};  // a running count; the bridge logs each new one
+std::atomic<int> g_rulesPresses{0};  // a running count; the map driver switches its stop handling at each new one
 std::atomic<int> g_leftCount{0}, g_rightCount{0};  // the arrow keys' running counts, for the bridge
 // the bridge takes the arrow keys as its own (the map driver's prompts) and sets the indicator itself
 std::atomic<bool> g_bridgeArrows{false};
@@ -370,6 +372,7 @@ void ReadConfig() {
   c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
   c.keyDebug = key("key_debug", c.keyDebug);
   c.keyMark = key("key_mark", c.keyMark);
+  c.keyRules = key("key_rules", c.keyRules);
   c.gpsRoute = num("gps_route", 0) != 0;
   c.interleave = num("interleave", 0) != 0;
   c.interleaveLag = std::clamp(key("interleave_lag", 0), 0, 8);
@@ -2851,7 +2854,7 @@ void UpdateCalmWater() {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << MarkState() << ",\"leftPresses\":" << g_leftCount.load()
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"rulesPresses\":" << g_rulesPresses.load() << MarkState() << ",\"leftPresses\":" << g_leftCount.load()
     << ",\"rightPresses\":" << g_rightCount.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
@@ -4246,6 +4249,7 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
   else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
   else if (static_cast<int>(key) == g_cfg.keyMark) g_markAsk++;
+  else if (static_cast<int>(key) == g_cfg.keyRules) g_rulesPresses++;
   else if (key == VK_F6) g_freeToggles++;
   else if (key == VK_BACK) g_freeOffs++;  // these three count only while the free camera is on
   else if (key == VK_OEM_PLUS || key == VK_ADD) g_freeSpeedSteps++;
