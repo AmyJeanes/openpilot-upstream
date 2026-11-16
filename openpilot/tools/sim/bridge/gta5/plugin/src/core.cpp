@@ -1021,16 +1021,19 @@ struct HandsOff {
   int flag = 49;
   std::string onDict, onClip;  // what is playing, to stop that one when the clip is changed
   Ped ped = 0;
+  double armsBusyUntil = 0;
 } g_hands;
 
-void StepHandsOff(Ped ped, Vehicle v, bool driven) {
-  bool on = g_hands.want && driven && v && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
+void StepHandsOff(Ped ped, Vehicle v, bool driven, double now) {
+  // aiming or firing from the car needs the arms: the pose would hide the weapon's own animation
+  if (v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK) || IS_PED_DOING_DRIVEBY(ped))) g_hands.armsBusyUntil = now + 1.5;
+  bool on = g_hands.want && driven && v && now >= g_hands.armsBusyUntil && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
   if (on) {
     Hash model = GET_ENTITY_MODEL(v);
     on = !IS_THIS_MODEL_A_BIKE(model) && !IS_THIS_MODEL_A_QUADBIKE(model);
   }
   if (g_hands.playing && (!on || g_hands.onDict != g_hands.dict || g_hands.onClip != g_hands.clip || g_hands.ped != ped)) {
-    STOP_ANIM_TASK(g_hands.ped, g_hands.onDict.c_str(), g_hands.onClip.c_str(), -2.0f);
+    STOP_ANIM_TASK(g_hands.ped, g_hands.onDict.c_str(), g_hands.onClip.c_str(), on ? -2.0f : -8.0f);
     SET_PED_CAN_ARM_IK(g_hands.ped, TRUE);
     g_hands.playing = false;
   }
@@ -4126,7 +4129,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   StepAi(ped, v, now);
   // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
   if (v && !g_ai.on) ApplyControls(dt, now);
-  StepHandsOff(ped, v, g_ctl.wasLive && !g_ai.on);
+  StepHandsOff(ped, v, g_ctl.wasLive && !g_ai.on, now);
   Publish(now, v != 0);
   // only the relay reads a message without frames; it also covers the capture starting up or stalled
   if (connected && g_framesCmd >= 0 && now - g_lastFrameAt.load() > 2 * STATE_EVERY && now >= g_nextState) {
@@ -4137,7 +4140,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
 
 extern "C" __declspec(dllexport) void CoreShutdown() {
   AiOff(PLAYER_PED_ID(), "shutdown");  // a task left running would keep driving under the reloaded core
-  StepHandsOff(PLAYER_PED_ID(), 0, false);
+  StepHandsOff(PLAYER_PED_ID(), 0, false, QpcSeconds());
   ReleaseControls();
   FreeCamOff(QpcSeconds(), true);
   if (g_free.restoring) FREEZE_ENTITY_POSITION(g_free.restoring, FALSE);

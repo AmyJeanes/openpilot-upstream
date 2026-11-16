@@ -58,6 +58,8 @@ inline void TASK_PLAY_ANIM(Ped p, const char *dict, const char *clip, float blen
 inline void STOP_ANIM_TASK(Entity e, const char *dict, const char *clip, float blendDelta) { Invoke(0x97FF36A1D40EA00A, e, dict, clip, blendDelta); }
 inline BOOL IS_ENTITY_PLAYING_ANIM(Entity e, const char *dict, const char *clip, int taskFlag) { return Invoke<BOOL>(0x1F0B79228E461EC9, e, dict, clip, taskFlag); }
 inline void SET_PED_CAN_ARM_IK(Ped p, BOOL on) { Invoke(0x6C3B4D6D13B4C841, p, on); }
+inline BOOL IS_CONTROL_PRESSED(int pad, int control) { return Invoke<BOOL>(0xF3A21BCD95725A4A, pad, control); }
+inline BOOL IS_PED_DOING_DRIVEBY(Ped p) { return Invoke<BOOL>(0xB2C086CC1BF8F2BF, p); }
 inline BOOL IS_THIS_MODEL_A_BIKE(Hash m) { return Invoke<BOOL>(0xB50C0B0CEDC6CE84, m); }
 inline BOOL IS_THIS_MODEL_A_QUADBIKE(Hash m) { return Invoke<BOOL>(0x39DAC362EE65FA28, m); }
 // taskHash: GET_HASH_KEY("SCRIPT_TASK_<name>"); 0 waiting to start, 1 running, 7 finished or never given
@@ -366,6 +368,8 @@ enum Input {
   INPUT_LOOK_UD = 2,
   INPUT_PHONE = 27,
   INPUT_VEH_MOVE_LR = 59,
+  INPUT_VEH_AIM = 68,
+  INPUT_VEH_ATTACK = 69,
   INPUT_VEH_ACCELERATE = 71,
   INPUT_VEH_BRAKE = 72,
   INPUT_VEH_EXIT = 75,
