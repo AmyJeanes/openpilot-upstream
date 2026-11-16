@@ -1044,14 +1044,15 @@ struct HandsOff {
   Ped ped = 0;
   double armsBusyUntil = 0, nextPlay = 0;
   float right = 1;  // the right arm's weight in the pose
-  // Under the pose the right hand is on the wheel until the game has blended its aim in: the pose holds for aimDelay
-  // and fades over aimOut (s), so what shows through is the aim, not the hand leaving the wheel. aimIn: back again.
-  float aimDelay = 0.1f, aimOut = 0.2f, aimIn = 0.25f;
-  double aimSince = -1;
+  bool say = false;  // log what the pose does as aiming comes and goes
+  int seen = -1;  // whether IS_ENTITY_PLAYING_ANIM answers for the pose: not known, no, yes
+  float aimHold = 0.3f;
+  double letGoAt = -10;
 } g_hands;
 
 void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
-  if (v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK))) g_hands.armsBusyUntil = now + 0.2;
+  bool held = v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK));
+  if (held) g_hands.armsBusyUntil = now + 0.2, g_hands.letGoAt = now;
   bool aiming = now < g_hands.armsBusyUntil;
   bool on = g_hands.want && driven && v && !(aiming && !g_hands.scripted) && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
   if (on) {
@@ -1063,14 +1064,27 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
   if (g_hands.playing && (!on || changed)) {
     STOP_ANIM_TASK(g_hands.ped, g_hands.onDict.c_str(), g_hands.onClip.c_str(), on ? -2.0f : -8.0f);
     SET_PED_CAN_ARM_IK(g_hands.ped, TRUE);
-    g_hands.playing = false;
+    g_hands.playing = false, g_hands.seen = -1;
   }
   if (!on) return;
   REQUEST_ANIM_DICT(g_hands.dict.c_str());
   if (!HAS_ANIM_DICT_LOADED(g_hands.dict.c_str())) return;
   // played again whenever the game drops it (a horn, a shunt): no more than twice a second, as a scripted animation
   // may not answer IS_ENTITY_PLAYING_ANIM
-  if (!g_hands.playing || (now >= g_hands.nextPlay && !IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3))) {
+  bool there = IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3);
+  if (g_hands.playing && g_hands.seen < 0 && now >= g_hands.nextPlay) {
+    // whether the game answers for this animation at all: if not, asking again would start it anew twice a second,
+    // each time with both arms at full weight (the right arm snapping back to the pose after aiming)
+    g_hands.seen = there ? 1 : 0;
+    Log(std::string("hands: the game ") + (there ? "reports" : "does not report") + " the pose as playing" + (there ? "" : "; it is not started again when dropped"));
+  }
+  if (g_hands.say) {
+    static bool wasThere = false, wasAiming = false;
+    if (there != wasThere || aiming != wasAiming) Log(std::string("hands: ") + (aiming ? "aiming" : "not aiming") + ", pose " + (there ? "playing" : "not playing") + ", right arm weight " + Num(g_hands.right));
+    wasThere = there, wasAiming = aiming;
+  }
+  if (!g_hands.playing || (g_hands.seen == 1 && now >= g_hands.nextPlay && !there)) {
+    if (g_hands.say) Log("hands: pose started" + std::string(g_hands.playing ? " again" : ""));
     if (g_hands.scripted) {
       ScriptedAnim left, right, none;
       for (ScriptedAnim *a : {&left, &right}) {
@@ -1084,14 +1098,14 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
     } else {
       TASK_PLAY_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 4.0f, 2.0f, -1, g_hands.flag, 0.0f, FALSE, FALSE, FALSE);
     }
-    g_hands.nextPlay = now + 0.5;
+    g_hands.nextPlay = now + (g_hands.seen < 0 ? 1.0 : 0.5);
   }
   if (g_hands.scripted) {
-    if (!aiming) g_hands.aimSince = -1;
-    else if (g_hands.aimSince < 0) g_hands.aimSince = now;
-    bool letGo = aiming && now - g_hands.aimSince >= g_hands.aimDelay;
-    float to = letGo ? 0.0f : 1.0f, step = dt / std::max(letGo ? g_hands.aimOut : g_hands.aimIn, 0.01f);
-    g_hands.right = std::clamp(to, g_hands.right - step, g_hands.right + step);
+    // A slot's weight is a share of that slot, not of the arm: any at all shows the pose in full and none lets the
+    // game's own arm through, so there is no fading it. The right arm is let go while aim or attack is held and for
+    // aimHold after (the game putting the weapon away), then takes the pose again.
+    bool free = held || now - g_hands.letGoAt < g_hands.aimHold;
+    g_hands.right = free ? 0.0f : 1.0f;
     SET_ANIM_WEIGHT(ped, g_hands.right, 1, 0, TRUE);
   }
   SET_PED_CAN_ARM_IK(ped, g_hands.armIk);
@@ -3866,11 +3880,10 @@ void HandleMessage(const Message &m, double now) {
     g_hands.scripted = MsgBool(m, "scripted", g_hands.scripted);
     if (m.count("filter")) g_hands.filter = MsgStr(m, "filter");
     if (m.count("aimFilter")) g_hands.aimFilter = MsgStr(m, "aimFilter");
-    g_hands.aimDelay = static_cast<float>(MsgNum(m, "aimDelay", g_hands.aimDelay));
-    g_hands.aimOut = static_cast<float>(MsgNum(m, "aimOut", g_hands.aimOut));
-    g_hands.aimIn = static_cast<float>(MsgNum(m, "aimIn", g_hands.aimIn));
+    g_hands.aimHold = static_cast<float>(MsgNum(m, "aimHold", g_hands.aimHold));
+    g_hands.say = MsgBool(m, "say", g_hands.say);
     Log("hands " + std::string(g_hands.want ? "off the wheel: " : "left alone: ") + g_hands.dict + " / " + g_hands.clip + ", flag " + std::to_string(g_hands.flag) +
-        ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " kept, " + g_hands.aimFilter + " let go while aiming after " + Num(g_hands.aimDelay) + " s over " + Num(g_hands.aimOut) + " s, back over " + Num(g_hands.aimIn) + " s" : std::string(", whole upper body")));
+        ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " kept, " + g_hands.aimFilter + " let go while aiming and " + Num(g_hands.aimHold) + " s after" : std::string(", whole upper body")));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "traffic") {
