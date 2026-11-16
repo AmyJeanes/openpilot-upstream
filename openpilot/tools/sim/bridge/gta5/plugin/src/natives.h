@@ -217,6 +217,10 @@ inline void SET_TIMECYCLE_MODIFIER_STRENGTH(float s) { Invoke(0x82E7FFCD5B2326B3
 inline void CLEAR_TIMECYCLE_MODIFIER() { Invoke(0x0F07E7745A236711); }
 inline int GET_CLOCK_HOURS() { return Invoke<int>(0x25223CA6B4D20B7F); }
 inline int GET_CLOCK_MINUTES() { return Invoke<int>(0x13D2B8ADD79640F2); }
+inline int GET_CLOCK_SECONDS() { return Invoke<int>(0x494E97C2EF27C470); }
+inline int GET_CLOCK_DAY_OF_MONTH() { return Invoke<int>(0x3D10BC92A4DB1D35); }
+inline int GET_CLOCK_MONTH() { return Invoke<int>(0xBBC72712E80257A1); }
+inline int GET_CLOCK_YEAR() { return Invoke<int>(0x961777E64BDAF717); }
 inline void SET_WEATHER_TYPE_OVERTIME_PERSIST(const char *w, float secs) { Invoke(0xFB5045B7C42B75BF, w, secs); }
 inline void CLEAR_OVERRIDE_WEATHER() { Invoke(0x338D2E3477711050); }
 inline void CLEAR_WEATHER_TYPE_PERSIST() { Invoke(0xCCC39339BEF76CF5); }
@@ -229,6 +233,8 @@ inline void SET_MAX_WANTED_LEVEL(int lvl) { Invoke(0xAA5F02DB48D704B9, lvl); }
 inline void CLEAR_PLAYER_WANTED_LEVEL(int player) { Invoke(0xB302540597885499, player); }
 inline BOOL IS_PAUSE_MENU_ACTIVE() { return Invoke<BOOL>(0xB0034A223497FFCB); }
 inline float GET_FRAME_TIME() { return Invoke<float>(0x15C40837039FFAF7); }
+inline int GET_GAME_TIMER() { return Invoke<int>(0x9CD27B0045628463); }
+inline int GET_FRAME_COUNT() { return Invoke<int>(0xFC8202EFC642E6F2); }
 
 // GPS
 inline BOOL IS_WAYPOINT_ACTIVE() { return Invoke<BOOL>(0x1DD1F58F493F1DA5); }

@@ -2506,6 +2506,55 @@ std::string Nearby(double now) {
   return out;
 }
 
+// The clocks a traffic light's cycle could run on, read each tick, as "clock":{t (this tick's `now`, to the ms),
+// gameTimer (GET_GAME_TIMER, ms), frame (GET_FRAME_COUNT), sim (s of GET_FRAME_TIME added up since `since`, the `now`
+// this core first ticked at: it starts again when the core reloads), date [year, month, day] and time [hour, minute,
+// second] of the game's own clock}
+std::string ClockState(double now) {
+  static double since = now, sim = 0;
+  sim += GET_FRAME_TIME();
+  char buf[224];
+  snprintf(buf, sizeof(buf), "\"clock\":{\"t\":%.3f,\"gameTimer\":%d,\"frame\":%d,\"sim\":%.3f,\"since\":%.3f,\"date\":[%d,%d,%d],\"time\":[%d,%d,%d]}",
+           now, GET_GAME_TIMER(), GET_FRAME_COUNT(), sim, since, GET_CLOCK_YEAR(), GET_CLOCK_MONTH(), GET_CLOCK_DAY_OF_MONTH(),
+           GET_CLOCK_HOURS(), GET_CLOCK_MINUTES(), GET_CLOCK_SECONDS());
+  return buf;
+}
+
+// The driven vehicles within WITNESS_M of the player, on foot or in a car, as the light logger (lightlog.py) follows
+// them: "witness":{t, gameTimer (when they were read), "v":[[handle, x, y, z, heading, speed, waits at a red light], ...]}
+// in world coordinates. The light a car waits at turns green as its flag clears.
+constexpr float WITNESS_M = 150.0f;
+
+std::string Witness(double now) {
+  static std::string out;
+  static double next = 0;
+  if (now < next) return out;
+  next = now + 0.1;
+  Ped player = PLAYER_PED_ID();
+  Vehicle own = IS_PED_IN_ANY_VEHICLE(player, FALSE) ? GET_VEHICLE_PED_IS_IN(player, FALSE) : 0;
+  Vector3 p = GET_ENTITY_COORDS(player, TRUE);
+  static VehicleHandles handles;
+  int count = AllVehicles(handles);
+  std::string list;
+  for (int i = 0; i < count; i++) {
+    Vehicle v = handles[i];
+    if (v == own || !DOES_ENTITY_EXIST(v)) continue;
+    Vector3 q = GET_ENTITY_COORDS(v, TRUE);
+    float dx = q.x - p.x, dy = q.y - p.y;
+    if (dx * dx + dy * dy > WITNESS_M * WITNESS_M) continue;
+    Ped driver = GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE);
+    if (!driver || !DOES_ENTITY_EXIST(driver) || IS_PED_DEAD_OR_DYING(driver, TRUE)) continue;
+    char buf[112];
+    snprintf(buf, sizeof(buf), "%s[%d,%.1f,%.1f,%.1f,%.1f,%.1f,%d]", list.empty() ? "" : ",", v, q.x, q.y, q.z, GET_ENTITY_HEADING(v),
+             GET_ENTITY_SPEED(v), IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS(v) ? 1 : 0);
+    list += buf;
+  }
+  char head[80];
+  snprintf(head, sizeof(head), "\"witness\":{\"t\":%.3f,\"gameTimer\":%d,\"v\":[", now, GET_GAME_TIMER());
+  out = head + list + "]}";
+  return out;
+}
+
 std::string WeatherName(Hash h) {
   static const char *NAMES[] = {"EXTRASUNNY", "CLEAR", "CLOUDS", "SMOG", "FOGGY", "OVERCAST", "RAIN", "THUNDER", "CLEARING", "NEUTRAL",
                                 "SNOW", "BLIZZARD", "SNOWLIGHT", "XMAS", "HALLOWEEN", "RAIN_HALLOWEEN", "SNOW_HALLOWEEN"};
@@ -2881,7 +2930,7 @@ void Publish(double now, bool inVehicle) {
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
   if (g_free.on) s << "," << FreeCamState();
-  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "}";
+  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << Witness(now) << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
 }
