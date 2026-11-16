@@ -1349,7 +1349,7 @@ std::string g_markNote;
 void MarkNote() {
   if (!g_typing) {
     if (!g_markAsk.exchange(0)) return;
-    DISPLAY_ONSCREEN_KEYBOARD(0, "FMMC_KEY_TIP8", "", "", "", "", "", 120);
+    DISPLAY_ONSCREEN_KEYBOARD(0, "", "", "", "", "", "", 250);  // no stock title: they name a length that is not this one
     g_typing = true;
     return;
   }
