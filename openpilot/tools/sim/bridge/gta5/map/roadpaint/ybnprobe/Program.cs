@@ -1,4 +1,5 @@
-// ybnprobe <game> <out.jsonl> <x> <y> <radius>: static collision triangles near (x,y) with their material names, one JSON
+// ybnprobe <game> <out.jsonl> <x> <y> <radius> [materials regex]: static collision triangles near (x,y) with their material names
+// (only those whose material matches the regex, if one is given: the whole map's dirt tracks fit in one file), one JSON
 // line each: {"m": name, "p": [x1,y1,z1,x2,y2,z2,x3,y3,z3]}. Only reads the game's files.
 using System;
 using System.Collections.Generic;
@@ -10,6 +11,7 @@ using SharpDX;
 var game = args[0]; var outPath = args[1];
 float qx = float.Parse(args[2]), qy = float.Parse(args[3]), qr = float.Parse(args[4]);
 var inv = System.Globalization.CultureInfo.InvariantCulture;
+var keep = args.Length > 5 ? new System.Text.RegularExpressions.Regex(args[5]) : null;
 GTA5Keys.LoadFromPath(game, true, null);
 var rpf = new RpfManager();
 rpf.Init(game, true, s => { }, e => Console.Error.WriteLine(e));
@@ -59,6 +61,7 @@ foreach (var (name, fe) in ybns)
       var mi = g.GetMaterial(i).Type.Index;
       var mn = mi < mats.Count ? mats[mi] : $"#{mi}";
       counts[mn] = counts.GetValueOrDefault(mn) + 1;
+      if (keep != null && !keep.IsMatch(mn)) continue;
       w.WriteLine(string.Format(inv, "{{\"f\":\"{0}\",\"m\":\"{1}\",\"p\":[{2:F3},{3:F3},{4:F3},{5:F3},{6:F3},{7:F3},{8:F3},{9:F3},{10:F3}]}}", name, mn, p1.X, p1.Y, p1.Z, p2.X, p2.Y, p2.Z, p3.X, p3.Y, p3.Z));
     }
   }
