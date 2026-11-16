@@ -1061,14 +1061,15 @@ void ApplyControls(float dt, double now) {
   if (stopped && accel <= 0) {
     g_ctl.lonI = 0;  // holding at a stop can't decelerate further; integrating that would block pulling away
   } else {
-    g_ctl.lonI = std::clamp(g_ctl.lonI + 2.0f * (accel - g_m.aMeas) * dt, -1.5f, 1.5f);
+    // upward the integral may reach full throttle: at speed the game's drive falls well short of the flat throttle table
+    g_ctl.lonI = std::clamp(g_ctl.lonI + 2.0f * (accel - g_m.aMeas) * dt, -1.5f, 6.0f);
     if (stopped) g_ctl.lonI = std::max(0.0f, g_ctl.lonI);
   }
   if (g_user.gas) g_ctl.lonI = 0;
   // a real Model 3 delivers the requested acceleration on any grade (openpilot sends it open loop), so add what gravity
   // takes away; the coasting model and throttle table are flat-road ones
   float grade = 9.81f * std::sin(g_m.grade);
-  float u = std::clamp(accel + g_ctl.lonI, -4.0f, 2.5f) + grade;
+  float u = std::clamp(std::clamp(accel, -4.0f, 2.5f) + g_ctl.lonI, -4.0f, 8.5f) + grade;
   if (g_ctl.reverse > 0 && !g_user.gas) {
     // backing up (the map driver clearing a deadlock): the game's brake reverses the car, and its throttle brakes it
     // while it goes backwards; a proportional hold on the speed asked for
