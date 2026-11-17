@@ -2513,10 +2513,13 @@ std::string Nearby(double now) {
 std::string ClockState(double now) {
   static double since = now, sim = 0;
   sim += GET_FRAME_TIME();
-  char buf[224];
-  snprintf(buf, sizeof(buf), "\"clock\":{\"t\":%.3f,\"gameTimer\":%d,\"frame\":%d,\"sim\":%.3f,\"since\":%.3f,\"date\":[%d,%d,%d],\"time\":[%d,%d,%d]}",
+  char buf[320];
+  snprintf(buf, sizeof(buf),
+           "\"clock\":{\"t\":%.3f,\"gameTimer\":%d,\"frame\":%d,\"sim\":%.3f,\"since\":%.3f,\"date\":[%d,%d,%d],\"time\":[%d,%d,%d],"
+           "\"net\":%d,\"netAcc\":%d,\"netStarted\":%d,\"real\":%d}",
            now, GET_GAME_TIMER(), GET_FRAME_COUNT(), sim, since, GET_CLOCK_YEAR(), GET_CLOCK_MONTH(), GET_CLOCK_DAY_OF_MONTH(),
-           GET_CLOCK_HOURS(), GET_CLOCK_MINUTES(), GET_CLOCK_SECONDS());
+           GET_CLOCK_HOURS(), GET_CLOCK_MINUTES(), GET_CLOCK_SECONDS(), GET_NETWORK_TIME(), GET_NETWORK_TIME_ACCURATE(),
+           HAS_NETWORK_TIME_STARTED() ? 1 : 0, GET_REAL_WORLD_TIME());
   return buf;
 }
 
@@ -2553,6 +2556,329 @@ std::string Witness(double now) {
   snprintf(head, sizeof(head), "\"witness\":{\"t\":%.3f,\"gameTimer\":%d,\"v\":[", now, GET_GAME_TIMER());
   out = head + list + "]}";
   return out;
+}
+
+// *** the traffic lights' state, read from the game's own junction objects ***
+//
+// The game keeps no colour per light. It has up to LIGHT_SLOTS junction objects, for the junctions near the player or
+// near traffic, and its drawing and its traffic work each light out from them every frame. A junction with a light
+// template has a phase and the seconds left in it, and each entrance the phase it is green in; a plain one runs on the
+// game's clock, its two crossing directions taking the halves of a 25 s cycle (42.5 s with a pedestrian phase). The
+// junction array, the clock and the path regions (for a plain entrance's direction) are found by the code that uses
+// them, so a game update only needs these bytes to still match.
+
+constexpr int LIGHT_SLOTS = 128, LIGHT_ENTRANCES = 16, LIGHT_PHASES = 40, LIGHT_REGIONS = 0x400;
+constexpr size_t JUNCTION_SIZE = 0x890, ENTRANCE_SIZE = 0x30, PATH_NODE_SIZE = 0x28;
+constexpr float LIGHT_AMBER_S = 2.5f;  // a green is shown amber for the last of its phase
+enum { LIGHT_NONE = 0, LIGHT_RED = 1, LIGHT_AMBER = 2, LIGHT_GREEN = 3 };  // as the game's own light function numbers them
+
+struct LightGlobals {
+  bool looked = false;
+  std::string why;  // why nothing is read; empty when all three were found
+  const uint8_t *junctions = nullptr;  // CJunction[LIGHT_SLOTS]
+  const uint32_t *clock = nullptr;     // ms
+  const uintptr_t *regions = nullptr;  // CPathRegion*[LIGHT_REGIONS]
+} g_lightGlobals;
+
+// the one place every match of a pattern ("48 8B ? ?") in the game's image points at, through the rip-relative offset
+// `at` bytes into the match; 0 with no match, or with matches that point at different places
+uintptr_t LightSigTarget(const char *pattern, size_t at) {
+  std::vector<int> bytes;
+  for (const char *p = pattern; *p;) {
+    if (*p == ' ') { p++; continue; }
+    if (*p == '?') { bytes.push_back(-1); p++; continue; }
+    bytes.push_back(static_cast<int>(std::strtoul(p, const_cast<char **>(&p), 16)));
+  }
+  auto base = reinterpret_cast<uint8_t *>(GetModuleHandleW(nullptr));
+  auto nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + reinterpret_cast<IMAGE_DOS_HEADER *>(base)->e_lfanew);
+  uint8_t *end = base + nt->OptionalHeader.SizeOfImage;
+  uintptr_t found = 0;
+  for (uint8_t *region = base; region < end;) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(region, &mbi, sizeof(mbi))) break;
+    uint8_t *next = static_cast<uint8_t *>(mbi.BaseAddress) + mbi.RegionSize;
+    if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+      size_t n = static_cast<size_t>(std::min(next, end) - region);
+      for (size_t i = 0; i + bytes.size() <= n && i + at + 4 <= n; i++) {
+        if (region[i] != bytes[0]) continue;
+        size_t j = 1;
+        while (j < bytes.size() && (bytes[j] < 0 || region[i + j] == bytes[j])) j++;
+        if (j < bytes.size()) continue;
+        int32_t rel;
+        std::memcpy(&rel, region + i + at, 4);
+        uintptr_t target = reinterpret_cast<uintptr_t>(region + i + at + 4) + rel;
+        if (found && target != found) return 0;
+        found = target;
+      }
+    }
+    region = next;
+  }
+  return found;
+}
+
+// whether n bytes at p are data of the game's exe: in one of its writable sections that isn't code, and readable (the
+// game's whole image is mapped executable and writable, so the pages' own protection doesn't tell data from code)
+bool LightExeData(uintptr_t p, size_t n) {
+  auto base = reinterpret_cast<uint8_t *>(GetModuleHandleW(nullptr));
+  auto nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + reinterpret_cast<IMAGE_DOS_HEADER *>(base)->e_lfanew);
+  uintptr_t lo = reinterpret_cast<uintptr_t>(base);
+  const IMAGE_SECTION_HEADER *s = IMAGE_FIRST_SECTION(nt);
+  bool in = false;
+  for (int i = 0; i < nt->FileHeader.NumberOfSections && !in; i++, s++) {
+    uintptr_t a = lo + s->VirtualAddress, b = a + s->Misc.VirtualSize;
+    in = p >= a && p <= b && n <= b - p && (s->Characteristics & IMAGE_SCN_MEM_WRITE) &&
+         !(s->Characteristics & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE));
+  }
+  if (!in) return false;
+  for (uintptr_t a = p; a < p + n;) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(reinterpret_cast<void *>(a), &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    a = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+  }
+  return true;
+}
+
+void FindLightGlobals() {
+  LightGlobals &g = g_lightGlobals;
+  g.looked = true;
+  // the junction of an index: cmp ecx, 7F; ja; mov eax, ecx; imul rcx, rax, 890; lea r8, [the array]
+  uintptr_t junctions = LightSigTarget("83 F9 7F 77 24 89 C8 48 69 C8 90 08 00 00 4C 8D 05", 17);
+  // the plain junctions' light function: add edi, [the clock], then the scale and the 42500 and 25000 ms cycles
+  uintptr_t clock = LightSigTarget("03 3D ? ? ? ? 0F 2E 35 ? ? ? ? F3 48 0F 2A C7 F3 0F 59 C6 F3 0F 2C C0 0F 45 F8 0F 4A F8 84 DB B8 04 A6 00 00 B9 A8 61 00 00", 2);
+  // the function that gives a node's light group: lea r8, [the path store] 0x4c into it; the regions are 0x1640 into the store
+  uintptr_t store = LightSigTarget("41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 48 0F 29 7C 24 30 0F 29 74 24 20 44 8B 51 24 "
+                                   "? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? 4C 8D 05", 79);
+  uintptr_t regions = store ? store + 0x1640 : 0;
+  if (!junctions) g.why = "junction array not found";
+  else if (!clock) g.why = "clock not found";
+  else if (!store) g.why = "path store not found";
+  else if (!LightExeData(junctions, LIGHT_SLOTS * JUNCTION_SIZE)) g.why = "junction array outside the exe's data";
+  else if (!LightExeData(clock, 4) || clock % 4) g.why = "clock outside the exe's data";
+  else if (!LightExeData(regions, LIGHT_REGIONS * sizeof(uintptr_t)) || regions % 8) g.why = "path regions outside the exe's data";
+  else {
+    g.junctions = reinterpret_cast<const uint8_t *>(junctions);
+    g.clock = reinterpret_cast<const uint32_t *>(clock);
+    g.regions = reinterpret_cast<const uintptr_t *>(regions);
+  }
+  uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+  char buf[200];
+  snprintf(buf, sizeof(buf), "lights: junctions exe+%llx, clock exe+%llx, path regions exe+%llx: %s", junctions ? junctions - base : 0ull,
+           clock ? clock - base : 0ull, regions ? regions - base : 0ull, g.why.empty() ? "ok" : g.why.c_str());
+  Log(buf);
+}
+
+// a touched guard page is put back (a stack grows through it)
+int LightReadFault(EXCEPTION_POINTERS *e) {
+  DWORD code = e->ExceptionRecord->ExceptionCode;
+  if (code == STATUS_GUARD_PAGE_VIOLATION && e->ExceptionRecord->NumberParameters >= 2) {
+    void *page = reinterpret_cast<void *>(e->ExceptionRecord->ExceptionInformation[1]);
+    MEMORY_BASIC_INFORMATION mbi;
+    DWORD old;
+    if (VirtualQuery(page, &mbi, sizeof(mbi))) VirtualProtect(page, 1, mbi.Protect | PAGE_GUARD, &old);
+  }
+  return code == EXCEPTION_ACCESS_VIOLATION || code == STATUS_GUARD_PAGE_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+}
+
+// n bytes of the game's heap (path regions come and go as the map streams): false where they can't be read
+bool LightCopy(void *dst, uintptr_t src, size_t n) {
+  if (src < 0x10000 || src >= 0x7FFFFFFF0000ull - n) return false;
+  __try {
+    std::memcpy(dst, reinterpret_cast<const void *>(src), n);
+    return true;
+  } __except (LightReadFault(GetExceptionInformation())) {
+    return false;
+  }
+}
+
+template <typename T>
+T LightAt(const uint8_t *p, size_t off) {
+  T v;
+  std::memcpy(&v, p + off, sizeof(T));
+  return v;
+}
+
+// a path node: +0x10 its own address (u16 region, u16 index), +0x1a s16 first link, +0x1c s16 x * 4, +0x1e s16 y * 4,
+// +0x20 flags (bits 11..15 its special function: 15 is a traffic light stop), +0x24 flags (bits 11..15 its number of
+// links, bit 8 a junction node); its region's links are 8 bytes each: the linked node's address, then flags
+struct LightNode {
+  uint32_t addr, f20, f24;
+  int link0;
+  float x, y;
+  uintptr_t links;
+};
+
+bool ReadLightNode(uint32_t addr, LightNode &n) {
+  uint32_t r = addr & 0xffff, i = addr >> 16;
+  if (r >= LIGHT_REGIONS) return false;
+  uint8_t region[0x30], b[PATH_NODE_SIZE];
+  if (!LightCopy(region, g_lightGlobals.regions[r], sizeof(region))) return false;
+  uintptr_t nodes = LightAt<uintptr_t>(region, 0x10);
+  if (!nodes || i >= LightAt<uint32_t>(region, 0x18) || !LightCopy(b, nodes + size_t(i) * PATH_NODE_SIZE, sizeof(b))) return false;
+  if (LightAt<uint16_t>(b, 0x10) != r) return false;
+  n.addr = LightAt<uint32_t>(b, 0x10), n.link0 = LightAt<int16_t>(b, 0x1a);
+  n.x = LightAt<int16_t>(b, 0x1c) * 0.25f, n.y = LightAt<int16_t>(b, 0x1e) * 0.25f;
+  n.f20 = LightAt<uint32_t>(b, 0x20), n.f24 = LightAt<uint32_t>(b, 0x24), n.links = LightAt<uintptr_t>(region, 0x28);
+  return true;
+}
+
+// which of a plain junction's two crossing directions an entrance node is in, as the game works it out: 1 when its road
+// runs into the junction more east-west, 2 more north-south; 0 when its links can't be read
+int LightGroup(const LightNode &n) {
+  uint32_t count = (n.f24 >> 11) & 0x1f;
+  if (!count) return 1;
+  uint32_t links[32][2];
+  if (n.link0 < 0 || !LightCopy(links, n.links + size_t(n.link0) * 8, count * 8)) return 0;
+  for (uint32_t k = 0; k < count; k++) {
+    LightNode t;
+    if (links[k][1] & 0x20000 || !ReadLightNode(links[k][0], t) || !((t.f24 >> 8) & 1)) continue;
+    float dx = t.x - n.x, dy = t.y - n.y;
+    if (links[k][1] & 0x10000 && !(n.f24 & 4)) {  // then along the road the node came by: its first other link
+      uint32_t other = links[count - 1][0];
+      for (uint32_t q = 0; q < count; q++)
+        if (links[q][0] != t.addr && !(links[q][1] & 0x20000)) {
+          other = links[q][0];
+          break;
+        }
+      LightNode o;
+      if (ReadLightNode(other, o)) dx = n.x - o.x, dy = n.y - o.y;
+    }
+    return std::fabs(dx) > std::fabs(dy) ? 1 : 2;
+  }
+  return 1;
+}
+
+// a plain junction's light for a group at cycle time t (ms), and the ms until it changes (-1 not known)
+int PlainLight(int group, uint32_t t, bool ped, int &ms) {
+  int cycle = ped ? 42500 : 25000, p = static_cast<int>(t % cycle);
+  ms = -1;
+  if (group == 1) {
+    if (p < 10000) return ms = 10000 - p, LIGHT_GREEN;
+    if (p < 12500) return ms = 12500 - p, LIGHT_AMBER;
+    return ms = cycle - p, LIGHT_RED;
+  }
+  if (group == 2) {
+    if (p < 12500) return ms = 12500 - p, LIGHT_RED;
+    if (p < 22500) return ms = 22500 - p, LIGHT_GREEN;
+    if (p < 25000) return ms = 25000 - p, LIGHT_AMBER;
+    return ms = cycle - p + 12500, LIGHT_RED;  // the pedestrian phase: red runs on through the cycle's start
+  }
+  return LIGHT_GREEN;
+}
+
+// The lights of every junction the game has an object for, about ten times a second:
+// "lights":{ok: 1, t (the game's clock, ms, they were worked out at), "j":[[slot (of the game's junction array), x, y, z
+// (the junction's centre), template (its light template's index, -1 a plain junction), phase, left (a template's phase
+// now and the s left in it), [[x, y, z, region, index (the entrance's path node: lightlog.py's a and i), colour, change,
+// exact, filter], ...]], ...]}
+//   colour  0 no light stop here, or not known; 1 red; 2 amber; 3 green
+//   change  s until this entrance's colour next changes; null when not known
+//   exact   1: change is from the junction's own timer or the clock. 0: an estimate, the phases before this entrance's
+//           at their set lengths; the game halves or stretches each by the traffic waiting as it starts. Even an exact
+//           green can come back for a moment: a phase is given 3 s more, once, where cars still cross as it ends
+//   filter  the colour for the leftmost lane of a road with two or more (the left turn lane), whose phase can be
+//           another: colour's own where the entrance has no filter phase
+// or {ok: 0, why} with nothing read: the game's code was not found (an update changed it), or its data looks wrong.
+std::string LightsState(double now) {
+  static std::string out = "\"lights\":{\"ok\":0,\"why\":\"not read yet\"}";
+  static double next = 0;
+  if (now < next) return out;
+  next = now + 0.1;
+  const LightGlobals &g = g_lightGlobals;
+  if (!g.looked) FindLightGlobals();
+  auto fail = [&](const std::string &why) { return out = "\"lights\":{\"ok\":0,\"why\":\"" + why + "\"}"; };
+  if (!g.why.empty()) return fail(g.why);
+  uint32_t clock = *g.clock;
+  std::string list;
+  char buf[160];
+  for (int slot = 0; slot < LIGHT_SLOTS; slot++) {
+    const uint8_t *j = g.junctions + slot * JUNCTION_SIZE;
+    if (LightAt<int32_t>(j, 0x7d4) <= 0) continue;  // its number of junction nodes: none in a free slot
+    int entrances = LightAt<int32_t>(j, 0x7f8), phases = LightAt<int32_t>(j, 0x800), phase = LightAt<int32_t>(j, 0x804);
+    int tmpl = LightAt<int32_t>(j, 0x81c), offset = LightAt<int32_t>(j, 0x80c);
+    float left = LightAt<float>(j, 0x808), scale = LightAt<float>(j, 0x810);
+    float cx = LightAt<float>(j, 0x7a0), cy = LightAt<float>(j, 0x7a4), cz = LightAt<float>(j, 0x7a8);
+    if (LightAt<int32_t>(j, 0x7d4) > 8 || entrances < 0 || entrances > LIGHT_ENTRANCES)
+      return fail("junction " + std::to_string(slot) + ": " + std::to_string(LightAt<int32_t>(j, 0x7d4)) + " nodes, " + std::to_string(entrances) + " entrances");
+    if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz) || std::fabs(cx) > 20000 || std::fabs(cy) > 20000 || std::fabs(cz) > 5000)
+      return fail("junction " + std::to_string(slot) + ": centre out of range");
+    if (tmpl >= 0 && (phases < 0 || phases > LIGHT_PHASES || !std::isfinite(left)))
+      return fail("junction " + std::to_string(slot) + ": " + std::to_string(phases) + " phases");
+    if (tmpl < 0 && (!std::isfinite(scale) || std::fabs(scale) > 1000)) return fail("junction " + std::to_string(slot) + ": time scale out of range");
+    bool allRed = j[0x884] && (j[0x886] || !j[0x887]), ped = j[0x888] != 0;
+    // a plain junction's time in its cycle, in the game's own arithmetic
+    uint32_t t = static_cast<uint32_t>(offset) + clock;
+    if (scale != 1.0f) t = static_cast<uint32_t>(static_cast<int64_t>(static_cast<float>(t) * scale));
+    snprintf(buf, sizeof(buf), "%s[%d,%.1f,%.1f,%.1f,%d,%d,%.2f,[", list.empty() ? "" : ",", slot, cx, cy, cz, tmpl, tmpl >= 0 ? phase : 0,
+             tmpl >= 0 ? left : 0.0f);
+    list += buf;
+    for (int e = 0; e < entrances; e++) {
+      const uint8_t *en = j + e * ENTRANCE_SIZE;
+      uint32_t addr = LightAt<uint32_t>(en, 0x18), flags = LightAt<uint32_t>(en, 0x20);
+      int a = (flags >> 8) & 0xf, lt = (flags >> 12) & 0xf;  // the phases it is green in: its own, its left filter's (0xf none)
+      int colour = LIGHT_NONE, filter = LIGHT_NONE, exact = 0;
+      float change = -1;  // s; < 0 not known
+      // only a node whose special function is 15 is a light stop: the game's drivers stop at no other, and a template
+      // junction's other entrances have no phase set (their bits change at random)
+      LightNode n;
+      bool stop = ReadLightNode(addr, n) && ((n.f20 >> 11) & 0x1f) == 15;
+      if (stop && allRed) {
+        colour = filter = LIGHT_RED;
+      } else if (stop && tmpl >= 0) {
+        auto in = [&](int ph) { return ph == phase ? (left < LIGHT_AMBER_S ? LIGHT_AMBER : LIGHT_GREEN) : LIGHT_RED; };
+        colour = in(a), filter = in(lt == 0xf ? a : lt);
+        if (colour == LIGHT_GREEN) {
+          change = left - LIGHT_AMBER_S, exact = 1;
+        } else if (colour == LIGHT_AMBER) {
+          change = left, exact = 1;
+        } else if (phases > 0 && a < phases) {  // the phases between now and its own, at their set lengths
+          change = left;
+          int p = phase;
+          for (int k = 0; k < phases; k++) {
+            p = ((p + 1) % phases + phases) % phases;
+            if (p == a) break;
+            if (p < std::min(phases, 16)) change += LightAt<float>(j, 0x700 + 4 * p);
+          }
+        }
+      } else if (stop) {
+        int group = LightGroup(n), ms = -1;
+        if (group) {
+          colour = filter = PlainLight(group, t, ped, ms);
+          if (ms >= 0) change = ms / 1000.0f / (scale != 0 ? scale : 1.0f), exact = 1;
+        }
+      }
+      float x = LightAt<float>(en, 0), y = LightAt<float>(en, 4), z = LightAt<float>(en, 8);
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(change))
+        return fail("junction " + std::to_string(slot) + " entrance " + std::to_string(e) + ": not a number");
+      char ch[24] = "null";
+      if (change > -0.5f) snprintf(ch, sizeof(ch), "%.2f", std::max(change, 0.0f));  // a timer just run out is a little under 0
+      snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.1f,%u,%u,%d,%s,%d,%d]", e ? "," : "", x, y, z, addr & 0xffff, addr >> 16, colour, ch, exact, filter);
+      list += buf;
+    }
+    list += "]]";
+  }
+  return out = "\"lights\":{\"ok\":1,\"t\":" + std::to_string(clock) + ",\"j\":[" + list + "]}";
+}
+
+// The lights command's rec=path secs=s: each new lights block with the witness block of the same tick, a line each
+// {wall (s, the system's clock), lights, witness}, added to the file for that long: to check the lights against a
+// reading of the game's memory from outside, and against the cars.
+struct LightsRec {
+  std::string path, last;
+  double until = 0;
+} g_lightsRec;
+
+void RecordLights(double now, const std::string &lights, const std::string &witness) {
+  LightsRec &r = g_lightsRec;
+  if (now >= r.until || lights == r.last) return;
+  r.last = lights;
+  FILE *f = nullptr;
+  if (fopen_s(&f, r.path.c_str(), "ab") || !f) return;
+  FILETIME ft;
+  GetSystemTimePreciseAsFileTime(&ft);
+  double wall = ((static_cast<uint64_t>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime) - 116444736000000000ull) / 1e7;
+  fprintf(f, "{\"wall\":%.3f,%s,%s}\n", wall, lights.c_str(), witness.c_str());
+  fclose(f);
 }
 
 std::string WeatherName(Hash h) {
@@ -2930,7 +3256,9 @@ void Publish(double now, bool inVehicle) {
     if (LeadTruth(ahead, left, speed)) s << ",\"lead\":{\"ahead\":" << Num(ahead) << ",\"left\":" << Num(left) << ",\"v\":" << Num(speed) << "}";
   }
   if (g_free.on) s << "," << FreeCamState();
-  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << Witness(now) << "}";
+  std::string witness = Witness(now), lights = LightsState(now);
+  RecordLights(now, lights, witness);
+  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << witness << "," << lights << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
 }
@@ -3938,6 +4266,12 @@ void HandleMessage(const Message &m, double now) {
         ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " kept, " + g_hands.aimFilter + " let go while aiming and " + Num(g_hands.aimHold) + " s after" : std::string(", whole upper body")));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
+  } else if (type == "lights") {
+    // rec=path secs=s (up to 3600; 0 stops): the lights and witness blocks added to the file as they change (RecordLights)
+    g_lightsRec.path = MsgStr(m, "rec");
+    g_lightsRec.last.clear();
+    g_lightsRec.until = g_lightsRec.path.empty() ? 0 : now + std::clamp(MsgNum(m, "secs", 60), 0.0, 3600.0);
+    Log("lights recorded to " + g_lightsRec.path + " for " + Num(g_lightsRec.until > now ? g_lightsRec.until - now : 0) + " s");
   } else if (type == "traffic") {
     // on=0 clears and stops traffic; density multipliers, held each frame until changed: vehicles (random= follows it
     // unless given), parked, peds (scenario= follows it unless given); reset=1 lets the game choose again

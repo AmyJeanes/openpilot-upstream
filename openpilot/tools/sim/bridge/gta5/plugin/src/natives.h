@@ -234,6 +234,10 @@ inline void CLEAR_PLAYER_WANTED_LEVEL(int player) { Invoke(0xB302540597885499, p
 inline BOOL IS_PAUSE_MENU_ACTIVE() { return Invoke<BOOL>(0xB0034A223497FFCB); }
 inline float GET_FRAME_TIME() { return Invoke<float>(0x15C40837039FFAF7); }
 inline int GET_GAME_TIMER() { return Invoke<int>(0x9CD27B0045628463); }
+inline int GET_NETWORK_TIME() { return Invoke<int>(0x7A5487FE9FAA6B48); }
+inline int GET_NETWORK_TIME_ACCURATE() { return Invoke<int>(0x89023FBBF9200E9F); }
+inline BOOL HAS_NETWORK_TIME_STARTED() { return Invoke<BOOL>(0x46718ACEEDEAFC84); }
+inline int GET_REAL_WORLD_TIME() { return Invoke<int>(0x3F60413F5DF65748); }
 inline int GET_FRAME_COUNT() { return Invoke<int>(0xFC8202EFC642E6F2); }
 
 // GPS
