@@ -2815,7 +2815,7 @@ struct LightPhases {
 // "lights":{ok: 1, t (the game's clock, ms, they were worked out at), "j":[[slot (of the game's junction array), x, y, z
 // (the junction's centre), template (its light template's index, -1 a plain junction), phase, left (a template's phase
 // now and the s left in it), [[x, y, z, region, index (the entrance's path node: lightlog.py's a and i), colour, change,
-// exact, filter, next, lo, hi], ...], cars, amber], ...]}
+// exact, filter, next, lo, hi, fchange, flo, fhi], ...], cars, amber], ...]}
 //   cars    the vehicles registered with the junction (with none, the game frees it once it is 125 m from the player)
 //   amber   s of amber before red there: 2.5, or at a plain junction with a time scale 2.5 / scale
 //   colour  0 no light stop here, or not known; 1 red; 2 amber; 3 green
@@ -2830,6 +2830,9 @@ struct LightPhases {
 //   lo, hi  a template junction's red: the soonest and the latest s to its green by that rule (nobody waiting and
 //           unused phases skipped; every phase stretched all the way and extended); null elsewhere. They hold while the
 //           junction is not made again, which the game does not do within 125 m of the player
+//   fchange, flo, fhi  the same three for the left filter, while it is red and the entrance has a filter phase of its
+//           own: the likely, the soonest and the latest s to the filter's green; null elsewhere (a red filter with
+//           these null has no phase of its own: it goes with the light)
 // or {ok: 0, why} with nothing read: the game's code was not found (an update changed it), or its data looks wrong.
 std::string LightsState(double now) {
   static std::string out = "\"lights\":{\"ok\":0,\"why\":\"not read yet\"}";
@@ -2886,7 +2889,7 @@ std::string LightsState(double now) {
       uint32_t addr = LightAt<uint32_t>(en, 0x18);
       int a = ph.own[e], lt = ph.lt[e];  // the phases it is green in: its own, its left filter's (-1 none)
       int colour = LIGHT_NONE, filter = LIGHT_NONE, exact = 0, after = LIGHT_NONE;
-      float change = -1, lo = -1, hi = -1;  // s; < 0 not known
+      float change = -1, lo = -1, hi = -1, fchange = -1, flo = -1, fhi = -1;  // s; < 0 not known
       // only a node whose special function is 15 is a light stop: the game's drivers stop at no other, and a template
       // junction's other entrances have no phase set (their bits change at random)
       LightNode n;
@@ -2906,6 +2909,12 @@ std::string LightsState(double now) {
           if (soon >= 0) lo = (extended ? 0.0f : now0) + soon;
           if (late >= 0) hi = now0 + (extended ? 0.0f : LIGHT_EXTEND_S) + late;
         }
+        if (filter == LIGHT_RED && lt >= 0 && lt != a && lt < ph.phases) {  // the left filter's own phase, likewise
+          float now0 = std::max(left, 0.0f), est = ph.Until(lt, 0), soon = ph.Until(lt, 1), late = ph.Until(lt, 2);
+          if (est >= 0) fchange = now0 + est;
+          if (soon >= 0) flo = (extended ? 0.0f : now0) + soon;
+          if (late >= 0) fhi = now0 + (extended ? 0.0f : LIGHT_EXTEND_S) + late;
+        }
       } else if (stop) {
         int group = LightGroup(n), ms = -1;
         if (group) {
@@ -2919,12 +2928,15 @@ std::string LightsState(double now) {
         return fail("junction " + std::to_string(slot) + " entrance " + std::to_string(e) + ": not a number");
       char ch[24] = "null";
       if (change > -0.5f) snprintf(ch, sizeof(ch), "%.2f", std::max(change, 0.0f));  // a timer just run out is a little under 0
-      char nx[8] = "null", cl[24] = "null", chi[24] = "null";
+      char nx[8] = "null", cl[24] = "null", chi[24] = "null", fc[24] = "null", fl[24] = "null", fh[24] = "null";
       if (after) snprintf(nx, sizeof(nx), "%d", after);
       if (lo >= 0) snprintf(cl, sizeof(cl), "%.2f", lo);
       if (hi >= 0) snprintf(chi, sizeof(chi), "%.2f", hi);
-      snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.1f,%u,%u,%d,%s,%d,%d,%s,%s,%s]", e ? "," : "", x, y, z, addr & 0xffff, addr >> 16, colour, ch, exact,
-               filter, nx, cl, chi);
+      if (fchange >= 0) snprintf(fc, sizeof(fc), "%.2f", fchange);
+      if (flo >= 0) snprintf(fl, sizeof(fl), "%.2f", flo);
+      if (fhi >= 0) snprintf(fh, sizeof(fh), "%.2f", fhi);
+      snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.1f,%u,%u,%d,%s,%d,%d,%s,%s,%s,%s,%s,%s]", e ? "," : "", x, y, z, addr & 0xffff, addr >> 16, colour, ch,
+               exact, filter, nx, cl, chi, fc, fl, fh);
       list += buf;
     }
     snprintf(buf, sizeof(buf), "],%d,%.2f]", cars, LIGHT_AMBER_S / (tmpl < 0 && scale > 0.01f ? scale : 1.0f));
