@@ -2372,7 +2372,7 @@ int AllPeds(VehicleHandles &handles) {
 // the car (its normal within asin(OBST_FACE) of level): a road rising ahead, a ramp or a speed bump faces up.
 // Asynchronous probes, a batch at most every OBST_EVERY s, read once all are done: "x,y" m right and forward of the
 // car's origin for each hit, comma separated pairs in brackets.
-constexpr float OBST_AHEAD = 35.0f, OBST_SEG = 5.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
+constexpr float OBST_AHEAD = 36.0f, OBST_SEG = 12.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
 constexpr double OBST_EVERY = 0.15;
 constexpr int OBST_FLAGS = 1 | 16;
 
