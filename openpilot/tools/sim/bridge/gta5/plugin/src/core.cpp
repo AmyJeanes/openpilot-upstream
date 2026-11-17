@@ -2571,6 +2571,7 @@ std::string Witness(double now) {
 constexpr int LIGHT_SLOTS = 128, LIGHT_ENTRANCES = 16, LIGHT_PHASES = 40, LIGHT_REGIONS = 0x400;
 constexpr size_t JUNCTION_SIZE = 0x890, ENTRANCE_SIZE = 0x30, PATH_NODE_SIZE = 0x28;
 constexpr float LIGHT_AMBER_S = 2.5f;  // a green is shown amber for the last of its phase
+constexpr float LIGHT_EXTEND_S = 3.0f;  // a phase nobody waited for is run on this long, once, while a pedestrian crosses
 enum { LIGHT_NONE = 0, LIGHT_RED = 1, LIGHT_AMBER = 2, LIGHT_GREEN = 3 };  // as the game's own light function numbers them
 
 struct LightGlobals {
@@ -2767,18 +2768,68 @@ int PlainLight(int group, uint32_t t, bool ped, int &ms) {
   return LIGHT_GREEN;
 }
 
+// A template junction's phases from now on, by the rule the game's own update uses as each phase ends: the phase after
+// q is q + 1, or q + 2 where no entrance has q + 1 for its own (the skipping; not while a pedestrian crosses or waits),
+// and its length is its set length with all but the amber's 2.5 s halved when nobody waits at the entrances that use
+// it, doubled for 8 to 13 cars waiting there, times 2.5 for more.
+struct LightPhases {
+  int phases = 0, phase = 0, entrances = 0;
+  bool canSkip = false, skips = false;            // the junction skips unused phases; and does so now (nobody on foot there)
+  int own[LIGHT_ENTRANCES], lt[LIGHT_ENTRANCES];  // each entrance's phase and its left filter's (negative: none)
+  int waiting[LIGHT_ENTRANCES];                   // cars waiting at it
+  float length[LIGHT_PHASES];
+
+  // the phase after q (how: 0 as things stand, 1 the soonest, 2 the latest), and through len its length
+  int After(int q, int how, float &len) const {
+    for (int from = q, guard = 0; guard <= phases; guard++) {
+      q = (q + 1) % phases;
+      bool used = false;
+      for (int e = 0; e < entrances; e++) used = used || own[e] == q;
+      if ((how == 1 ? canSkip : how == 0 && skips) && entrances > 0 && !used) q = (q + 1) % phases;
+      len = length[q];
+      int w = -1;
+      for (int e = 0; e < entrances; e++)
+        if (own[e] == q || lt[e] == q) w = std::max(w, waiting[e]);
+      if (w >= 0) {
+        float f = how == 1 ? 0.5f : how == 2 ? 2.5f : w == 0 ? 0.5f : w < 8 ? 1.0f : w <= 13 ? 2.0f : 2.5f;
+        len = (len - LIGHT_AMBER_S) * f + LIGHT_AMBER_S;
+      }
+      if (len != 0 || q == from) break;  // a phase of no length is passed over
+    }
+    return q;
+  }
+
+  // s from the end of the present phase to the start of phase `target`; < 0 if it never comes
+  float Until(int target, int how) const {
+    float t = 0, len = 0;
+    for (int q = phase, k = 0; k < 3 * phases; k++) {
+      q = After(q, how, len);
+      if (q == target) return t;
+      t += std::max(len, 0.0f) + (how == 2 ? LIGHT_EXTEND_S : 0.0f);  // at the latest every phase is given the pedestrians' 3 s as well
+    }
+    return -1;
+  }
+};
+
 // The lights of every junction the game has an object for, about ten times a second:
 // "lights":{ok: 1, t (the game's clock, ms, they were worked out at), "j":[[slot (of the game's junction array), x, y, z
 // (the junction's centre), template (its light template's index, -1 a plain junction), phase, left (a template's phase
 // now and the s left in it), [[x, y, z, region, index (the entrance's path node: lightlog.py's a and i), colour, change,
-// exact, filter], ...]], ...]}
+// exact, filter, next, lo, hi], ...], cars, amber], ...]}
+//   cars    the vehicles registered with the junction (with none, the game frees it once it is 125 m from the player)
+//   amber   s of amber before red there: 2.5, or at a plain junction with a time scale 2.5 / scale
 //   colour  0 no light stop here, or not known; 1 red; 2 amber; 3 green
 //   change  s until this entrance's colour next changes; null when not known
-//   exact   1: change is from the junction's own timer or the clock. 0: an estimate, the phases before this entrance's
-//           at their set lengths; the game halves or stretches each by the traffic waiting as it starts. Even an exact
-//           green can come back for a moment: a phase is given 3 s more, once, where cars still cross as it ends
+//   exact   1: change is from the junction's own timer or the clock. 0: an estimate. A template junction's red: the
+//           phases before this entrance's by the game's rule (LightPhases) with the cars waiting now. Its green or amber
+//           while the phase has been given its 3 s more: it then ends as soon as no pedestrian is crossing
 //   filter  the colour for the leftmost lane of a road with two or more (the left turn lane), whose phase can be
 //           another: colour's own where the entrance has no filter phase
+//   next    the colour after this green or amber: 1 red; 3 green again (the junction's next phase is this one too: a
+//           level crossing with no train); null for a red, or where not known
+//   lo, hi  a template junction's red: the soonest and the latest s to its green by that rule (nobody waiting and
+//           unused phases skipped; every phase stretched all the way and extended); null elsewhere. They hold while the
+//           junction is not made again, which the game does not do within 125 m of the player
 // or {ok: 0, why} with nothing read: the game's code was not found (an update changed it), or its data looks wrong.
 std::string LightsState(double now) {
   static std::string out = "\"lights\":{\"ok\":0,\"why\":\"not read yet\"}";
@@ -2791,7 +2842,7 @@ std::string LightsState(double now) {
   if (!g.why.empty()) return fail(g.why);
   uint32_t clock = *g.clock;
   std::string list;
-  char buf[160];
+  char buf[240];
   for (int slot = 0; slot < LIGHT_SLOTS; slot++) {
     const uint8_t *j = g.junctions + slot * JUNCTION_SIZE;
     if (LightAt<int32_t>(j, 0x7d4) <= 0) continue;  // its number of junction nodes: none in a free slot
@@ -2806,7 +2857,24 @@ std::string LightsState(double now) {
     if (tmpl >= 0 && (phases < 0 || phases > LIGHT_PHASES || !std::isfinite(left)))
       return fail("junction " + std::to_string(slot) + ": " + std::to_string(phases) + " phases");
     if (tmpl < 0 && (!std::isfinite(scale) || std::fabs(scale) > 1000)) return fail("junction " + std::to_string(slot) + ": time scale out of range");
-    bool allRed = j[0x884] && (j[0x886] || !j[0x887]), ped = j[0x888] != 0;
+    bool allRed = j[0x884] && (j[0x886] || !j[0x887]), ped = j[0x888] != 0, extended = j[0x889] != 0;
+    int cars = 0;
+    for (int k = 0; k < 128; k++) cars += LightAt<uintptr_t>(j, 0x300 + 8 * k) != 0;
+    LightPhases ph;
+    ph.phases = tmpl >= 0 ? phases : 0, ph.phase = phase, ph.entrances = entrances;
+    ph.canSkip = j[0x885] != 0, ph.skips = ph.canSkip && !LightAt<int32_t>(j, 0x830) && !LightAt<int32_t>(j, 0x834);  // nobody crossing on foot, or waiting to
+    for (int e = 0; e < entrances; e++) {
+      uint32_t flags = LightAt<uint32_t>(j + e * ENTRANCE_SIZE, 0x20);
+      // the phase numbers are signed nibbles, as the game reads them: 8 to 15 match no phase
+      ph.own[e] = static_cast<int>((flags >> 8) & 0xf), ph.lt[e] = static_cast<int>((flags >> 12) & 0xf), ph.waiting[e] = flags & 0xff;
+      if (ph.own[e] > 7) ph.own[e] -= 16;
+      if (ph.lt[e] > 7) ph.lt[e] -= 16;
+    }
+    for (int p = 0; p < ph.phases; p++) {
+      ph.length[p] = LightAt<float>(j, 0x700 + 4 * p);
+      if (!std::isfinite(ph.length[p]) || ph.length[p] < 0 || ph.length[p] > 1000) ph.phases = 0;
+    }
+    if (phase < 0 || phase >= ph.phases) ph.phases = 0;  // nothing to walk: the colours are given, the times to green are not
     // a plain junction's time in its cycle, in the game's own arithmetic
     uint32_t t = static_cast<uint32_t>(offset) + clock;
     if (scale != 1.0f) t = static_cast<uint32_t>(static_cast<int64_t>(static_cast<float>(t) * scale));
@@ -2815,10 +2883,10 @@ std::string LightsState(double now) {
     list += buf;
     for (int e = 0; e < entrances; e++) {
       const uint8_t *en = j + e * ENTRANCE_SIZE;
-      uint32_t addr = LightAt<uint32_t>(en, 0x18), flags = LightAt<uint32_t>(en, 0x20);
-      int a = (flags >> 8) & 0xf, lt = (flags >> 12) & 0xf;  // the phases it is green in: its own, its left filter's (0xf none)
-      int colour = LIGHT_NONE, filter = LIGHT_NONE, exact = 0;
-      float change = -1;  // s; < 0 not known
+      uint32_t addr = LightAt<uint32_t>(en, 0x18);
+      int a = ph.own[e], lt = ph.lt[e];  // the phases it is green in: its own, its left filter's (-1 none)
+      int colour = LIGHT_NONE, filter = LIGHT_NONE, exact = 0, after = LIGHT_NONE;
+      float change = -1, lo = -1, hi = -1;  // s; < 0 not known
       // only a node whose special function is 15 is a light stop: the game's drivers stop at no other, and a template
       // junction's other entrances have no phase set (their bits change at random)
       LightNode n;
@@ -2827,25 +2895,23 @@ std::string LightsState(double now) {
         colour = filter = LIGHT_RED;
       } else if (stop && tmpl >= 0) {
         auto in = [&](int ph) { return ph == phase ? (left < LIGHT_AMBER_S ? LIGHT_AMBER : LIGHT_GREEN) : LIGHT_RED; };
-        colour = in(a), filter = in(lt == 0xf ? a : lt);
-        if (colour == LIGHT_GREEN) {
-          change = left - LIGHT_AMBER_S, exact = 1;
-        } else if (colour == LIGHT_AMBER) {
-          change = left, exact = 1;
-        } else if (phases > 0 && a < phases) {  // the phases between now and its own, at their set lengths
-          change = left;
-          int p = phase;
-          for (int k = 0; k < phases; k++) {
-            p = ((p + 1) % phases + phases) % phases;
-            if (p == a) break;
-            if (p < std::min(phases, 16)) change += LightAt<float>(j, 0x700 + 4 * p);
-          }
+        colour = in(a), filter = in(lt == -1 ? a : lt);
+        if (colour != LIGHT_RED) {
+          change = colour == LIGHT_GREEN ? left - LIGHT_AMBER_S : left, exact = !extended;
+          float len;
+          if (ph.phases > 0) after = ph.After(phase, 0, len) == a ? LIGHT_GREEN : LIGHT_RED;
+        } else if (a >= 0 && a < ph.phases) {  // the phases between now and its own
+          float now0 = std::max(left, 0.0f), est = ph.Until(a, 0), soon = ph.Until(a, 1), late = ph.Until(a, 2);
+          if (est >= 0) change = now0 + est;
+          if (soon >= 0) lo = (extended ? 0.0f : now0) + soon;
+          if (late >= 0) hi = now0 + (extended ? 0.0f : LIGHT_EXTEND_S) + late;
         }
       } else if (stop) {
         int group = LightGroup(n), ms = -1;
         if (group) {
           colour = filter = PlainLight(group, t, ped, ms);
           if (ms >= 0) change = ms / 1000.0f / (scale != 0 ? scale : 1.0f), exact = 1;
+          if (colour != LIGHT_RED) after = LIGHT_RED;
         }
       }
       float x = LightAt<float>(en, 0), y = LightAt<float>(en, 4), z = LightAt<float>(en, 8);
@@ -2853,10 +2919,16 @@ std::string LightsState(double now) {
         return fail("junction " + std::to_string(slot) + " entrance " + std::to_string(e) + ": not a number");
       char ch[24] = "null";
       if (change > -0.5f) snprintf(ch, sizeof(ch), "%.2f", std::max(change, 0.0f));  // a timer just run out is a little under 0
-      snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.1f,%u,%u,%d,%s,%d,%d]", e ? "," : "", x, y, z, addr & 0xffff, addr >> 16, colour, ch, exact, filter);
+      char nx[8] = "null", cl[24] = "null", chi[24] = "null";
+      if (after) snprintf(nx, sizeof(nx), "%d", after);
+      if (lo >= 0) snprintf(cl, sizeof(cl), "%.2f", lo);
+      if (hi >= 0) snprintf(chi, sizeof(chi), "%.2f", hi);
+      snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.1f,%u,%u,%d,%s,%d,%d,%s,%s,%s]", e ? "," : "", x, y, z, addr & 0xffff, addr >> 16, colour, ch, exact,
+               filter, nx, cl, chi);
       list += buf;
     }
-    list += "]]";
+    snprintf(buf, sizeof(buf), "],%d,%.2f]", cars, LIGHT_AMBER_S / (tmpl < 0 && scale > 0.01f ? scale : 1.0f));
+    list += buf;
   }
   return out = "\"lights\":{\"ok\":1,\"t\":" + std::to_string(clock) + ",\"j\":[" + list + "]}";
 }
