@@ -1048,7 +1048,7 @@ struct HandsOff {
   int flag = 49;
   std::string onDict, onClip, onFilter;  // what is playing, to stop or change that one
   Ped ped = 0;
-  double armsBusyUntil = 0, nextPlay = 0;
+  double armsBusyUntil = 0, nextPlay = 0, hornUntil = 0;
   float right = 1;  // the right arm's weight in the pose
   bool say = false;  // log what the pose does as aiming comes and goes
   int seen = -1;  // whether IS_ENTITY_PLAYING_ANIM answers for the pose: not known, no, yes
@@ -1060,7 +1060,9 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
   bool held = v && (IS_CONTROL_PRESSED(0, INPUT_VEH_AIM) || IS_CONTROL_PRESSED(0, INPUT_VEH_ATTACK));
   if (held) g_hands.armsBusyUntil = now + 0.2, g_hands.letGoAt = now;
   bool aiming = now < g_hands.armsBusyUntil;
-  bool on = g_hands.want && driven && v && !(aiming && !g_hands.scripted) && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
+  // the pose is let go for the game's own horn animation, and a little after so that tapping does not flap it
+  if (v && IS_CONTROL_PRESSED(0, INPUT_VEH_HORN)) g_hands.hornUntil = now + 0.3;
+  bool on = g_hands.want && driven && v && now >= g_hands.hornUntil && !(aiming && !g_hands.scripted) && GET_PED_IN_VEHICLE_SEAT(v, -1, FALSE) == ped;
   if (on) {
     Hash model = GET_ENTITY_MODEL(v);
     on = !IS_THIS_MODEL_A_BIKE(model) && !IS_THIS_MODEL_A_QUADBIKE(model);
@@ -1075,7 +1077,7 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
   if (!on) return;
   REQUEST_ANIM_DICT(g_hands.dict.c_str());
   if (!HAS_ANIM_DICT_LOADED(g_hands.dict.c_str())) return;
-  // played again whenever the game drops it (a horn, a shunt): no more than twice a second, as a scripted animation
+  // played again whenever the game drops it (a shunt): no more than twice a second, as a scripted animation
   // may not answer IS_ENTITY_PLAYING_ANIM
   bool there = IS_ENTITY_PLAYING_ANIM(ped, g_hands.dict.c_str(), g_hands.clip.c_str(), 3);
   if (g_hands.playing && g_hands.seen < 0 && now >= g_hands.nextPlay) {
