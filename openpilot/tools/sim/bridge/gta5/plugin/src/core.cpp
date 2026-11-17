@@ -4589,6 +4589,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (v) {
     UpdateIndicator();
     Measure(dt);
+    Obstacles(now);  // each frame: a probe's result is only there to read for a frame or two, and the state is built less often
   }
   StepAi(ped, v, now);
   // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
