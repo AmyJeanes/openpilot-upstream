@@ -2364,14 +2364,15 @@ int AllPeds(VehicleHandles &handles) {
   return count;
 }
 
-// Static things in the way of the car's next OBST_AHEAD m, for the map driver (gta5_mapdrive.py), whose plan can lead
+// Static things in the way of the car's next OBST_AHEAD m (a stop's length from 12 m/s, with the time it takes to
+// begin one), for the map driver (gta5_mapdrive.py, and drive.py's avoid), whose plan can lead
 // into what its map doesn't show: rays from the front bumper along the arc the car is turning on, at either side of its
 // body (OBST_WIDEN out) and its middle, OBST_LOW m above its bottom (a kerb taller than about 0.2 m) and OBST_HIGH,
 // against the map's collision and objects (props, posts), not vehicles or peds. A hit counts only on a surface facing
 // the car (its normal within asin(OBST_FACE) of level): a road rising ahead, a ramp or a speed bump faces up.
 // Asynchronous probes, a batch at most every OBST_EVERY s, read once all are done: "x,y" m right and forward of the
 // car's origin for each hit, comma separated pairs in brackets.
-constexpr float OBST_AHEAD = 15.0f, OBST_SEG = 5.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
+constexpr float OBST_AHEAD = 35.0f, OBST_SEG = 5.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
 constexpr double OBST_EVERY = 0.15;
 constexpr int OBST_FLAGS = 1 | 16;
 
