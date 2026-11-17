@@ -2367,21 +2367,30 @@ int AllPeds(VehicleHandles &handles) {
 // Static things in the way of the car's next OBST_AHEAD m (a stop's length from 12 m/s, with the time it takes to
 // begin one), for the map driver (gta5_mapdrive.py, and drive.py's avoid), whose plan can lead
 // into what its map doesn't show: rays from the front bumper along the arc the car is turning on, at either side of its
-// body (OBST_WIDEN out) and its middle, OBST_LOW m above its bottom (a kerb taller than about 0.2 m) and OBST_HIGH,
-// against the map's collision and objects (props, posts), not vehicles or peds. A hit counts only on a surface facing
+// body (OBST_WIDEN out) and its middle, OBST_LOW m above its bottom (a kerb taller than about 0.2 m), OBST_HIGH and
+// OBST_TOP (just under its roof: a trailer's bed, a barrier's arm, which the lower two pass under), against the map's
+// collision and objects (props, posts), not vehicles or peds. The game starts no more than ten such probes at once
+// (the eleventh and on come back with no handle, silently), so the nine lines are sent as their first OBST_SEG m and
+// as the rest of the way to OBST_AHEAD, turn about. A hit counts only on a surface facing
 // the car (its normal within asin(OBST_FACE) of level): a road rising ahead, a ramp or a speed bump faces up.
 // Asynchronous probes, a batch at most every OBST_EVERY s, read once all are done: "x,y" m right and forward of the
-// car's origin for each hit, comma separated pairs in brackets.
-constexpr float OBST_AHEAD = 36.0f, OBST_SEG = 12.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
-constexpr double OBST_EVERY = 0.15;
+// car's origin for each hit, comma separated pairs in brackets. The hits on ground that faces up are kept beside them
+// (g_obstRise: "x,y,h", h m above the ground under the car): the road rising ahead as a rule, but a trailer's loading
+// ramp or a bank too, which only the map's heights tell from it (the driver has those).
+constexpr float OBST_AHEAD = 36.0f, OBST_SEG = 12.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_TOP = 0.15f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
+constexpr double OBST_EVERY = 0.07;  // a round is one half of the lines' length: each half every other round
 constexpr int OBST_FLAGS = 1 | 16;
 
+std::string g_obstRise;
+
 std::string Obstacles(double now) {
-  constexpr int SIDES = 3, HEIGHTS = 2, SEGS = static_cast<int>(OBST_AHEAD / OBST_SEG);
-  static std::array<int, SIDES * HEIGHTS * SEGS> tests{};
+  constexpr int SIDES = 3, HEIGHTS = 3;
+  static std::array<int, SIDES * HEIGHTS> tests{};  // nine: under the game's ten at once
   static bool pending = false;
   static double next = 0;
-  static std::string list, fresh;
+  static bool farHalf = false;  // the round in hand is the lines' far part
+  static std::string list, fresh, freshRise, nearHits, nearRise;
+  static float bottom = 0;  // of the car's model, under its origin
   Vehicle v = g_veh.handle;
   if (pending) {
     bool waiting = false;
@@ -2396,33 +2405,51 @@ std::string Obstacles(double now) {
         continue;
       }
       test = 0;
-      if (result != 2 || !hit || std::fabs(normal.z) > OBST_FACE || !v) continue;
+      if (result != 2 || !hit || normal.z < -OBST_FACE || !v) continue;  // not a thing's underside
       Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, end.x, end.y, end.z);
-      char buf[48];
+      char buf[64];
+      if (normal.z > OBST_FACE) {
+        snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.2f]", freshRise.empty() ? "" : ",", rel.x, rel.y, end.z - (GET_ENTITY_COORDS(v, TRUE).z + bottom));
+        freshRise += buf;
+        continue;
+      }
       snprintf(buf, sizeof(buf), "%s[%.1f,%.1f]", fresh.empty() ? "" : ",", rel.x, rel.y);
       fresh += buf;
     }
     if (waiting) return list;
-    list.swap(fresh);
+    // the list is the last near round's hits and the last far round's
+    auto join = [](const std::string &a, const std::string &b) { return a.empty() || b.empty() ? a + b : a + "," + b; };
+    if (farHalf) {
+      list = join(nearHits, fresh), g_obstRise = join(nearRise, freshRise);
+    } else {
+      nearHits.swap(fresh), nearRise.swap(freshRise);
+    }
     fresh.clear();
+    freshRise.clear();
     pending = false;
   }
   if (now < next || !v || !DOES_ENTITY_EXIST(v)) return list;
   next = now + OBST_EVERY;
   Vector3 mn{}, mx{};
   GET_MODEL_DIMENSIONS(g_veh.model, &mn, &mx);
+  bottom = mn.z;
   float k = g_m.v > 1.0f ? std::clamp(g_m.yawRate / g_m.v, -0.2f, 0.2f) : 0.0f;  // 1/m, left positive
   auto at = [&](float d, float side, float z) {  // d m along the arc from the front bumper, side m right of it
     float th = k * d, x = std::fabs(k) > 1e-4f ? -(1.0f - std::cos(th)) / k : 0.0f, y = std::fabs(k) > 1e-4f ? std::sin(th) / k : d;
     return GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(v, x + side * std::cos(th), mx.y + y + side * std::sin(th), z);
   };
   int n = 0;
+  farHalf = !farHalf;
+  static bool told = false;
   for (float side : {mn.x - OBST_WIDEN, 0.0f, mx.x + OBST_WIDEN})
-    for (float z : {mn.z + OBST_LOW, mn.z + OBST_HIGH})
-      for (int i = 0; i < SEGS; i++) {
-        Vector3 a = at(i * OBST_SEG, side, z), b = at((i + 1) * OBST_SEG, side, z);
-        tests[n++] = START_SHAPE_TEST_LOS_PROBE(a.x, a.y, a.z, b.x, b.y, b.z, OBST_FLAGS, v, 7);
+    for (float z : {mn.z + OBST_LOW, mn.z + OBST_HIGH, mx.z - OBST_TOP}) {
+      Vector3 a = at(farHalf ? OBST_SEG : 0.0f, side, z), b = at(farHalf ? OBST_AHEAD : OBST_SEG, side, z);
+      tests[n] = START_SHAPE_TEST_LOS_PROBE(a.x, a.y, a.z, b.x, b.y, b.z, OBST_FLAGS, v, 7);
+      if (!tests[n++] && !told) {
+        told = true;
+        Log("obstacle rays: a probe did not start (too many at once?): that line is blind");
       }
+    }
   pending = true;
   return list;
 }
@@ -2433,7 +2460,8 @@ std::string Obstacles(double now) {
 // in our frame), its model's bounds (m, in its own frame), whether anyone is in its driver's seat, its entity handle (the
 // same while it exists, for the bridge's tracking) and whether it waits at a red light (or queues behind one, as the AI
 // counts it: IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS); each pedestrian on
-// foot's place and velocity, within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits
+// foot's place and velocity, within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits;
+// "rise":[[x, y, h], ...]: its hits on ground that faces up
 std::string Nearby(double now) {
   static std::string out;
   static double next = 0;
@@ -2503,7 +2531,7 @@ std::string Nearby(double now) {
   }
   out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
         num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "],\"p\":[" + pedList + "],\"obst\":[" +
-        Obstacles(now) + "],\"obstAhead\":" + num(OBST_AHEAD) + "}";
+        Obstacles(now) + "],\"obstAhead\":" + num(OBST_AHEAD) + ",\"rise\":[" + g_obstRise + "]}";
   return out;
 }
 
