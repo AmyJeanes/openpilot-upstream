@@ -54,9 +54,10 @@
                                                 lines; off while recording unless force=1; debug off
   gta5_cmd.py mark                              a bookmark where the car is, as the mark key (End) makes: the bridge
                                                 logs it to GTA5_MARKS for review, and sends openpilot's userBookmark
-  gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16 take=1]
+  gta5_cmd.py gpsroute on [colour=21 max=100 radar=16 map=16 take=1 dist=0]
                                                 our route on the minimap and map as a custom GPS route, the map's waypoint held
-                                                off it meanwhile (take=0 leaves it); gpsroute off
+                                                off it meanwhile (take=0 leaves it) and GTA's sat-nav by the minimap hidden (dist=1
+                                                leaves it); gpsroute off
                                                 the bridge keeps the last debug and gpsroute settings and sets them again each
                                                 time the game connects (a core reload, a GTA restart); GTA5_DEBUG_OVERLAY and
                                                 GTA5_GPSROUTE (e.g. "on layers=all") give them from the bridge's start

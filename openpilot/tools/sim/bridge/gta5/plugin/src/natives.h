@@ -262,6 +262,11 @@ inline void CLEAR_GPS_CUSTOM_ROUTE() { Invoke(0xE6DE0561D9232A64); }
 inline void START_GPS_CUSTOM_ROUTE(int hudColour, BOOL displayOnFoot, BOOL followPlayer) { Invoke(0xDB34E8D56FC13B08, hudColour, displayOnFoot, followPlayer); }
 inline void ADD_POINT_TO_GPS_CUSTOM_ROUTE(float x, float y, float z) { Invoke(0x311438A071DD9B1A, x, y, z); }
 inline void SET_GPS_CUSTOM_ROUTE_RENDER(BOOL on, int radarThickness, int mapThickness) { Invoke(0x900086F371220B6F, on, radarThickness, mapThickness); }
+// a movie the game has loaded already ("minimap") gives a handle to that same movie
+inline int REQUEST_SCALEFORM_MOVIE(const char *name) { return Invoke<int>(0x11FE353CF9733E6F, name); }
+inline BOOL HAS_SCALEFORM_MOVIE_LOADED(int movie) { return Invoke<BOOL>(0x85F01B8D5B90570E, movie); }
+inline BOOL BEGIN_SCALEFORM_MOVIE_METHOD(int movie, const char *method) { return Invoke<BOOL>(0xF6E48914C7A8694E, movie, method); }
+inline void END_SCALEFORM_MOVIE_METHOD() { Invoke(0xC6796A8FFA375E53); }
 // GTA's own GPS directions from the player to a point: direction (3 left, 4 right, 5 straight, 6/7 sharp left/right; 1
 // still working it out) and the distance to the next junction in decimetres, written to 8-byte slots
 inline int GENERATE_DIRECTIONS_TO_COORD(float x, float y, float z, BOOL p3, uint64_t *direction, uint64_t *p5, uint64_t *dist) {

@@ -2009,6 +2009,10 @@ struct GpsRoute {
   bool take = true;  // the map's waypoint off the map meanwhile (TakeWaypoint)
   std::vector<P3> pts;
   int shown = 0;  // points given to the game
+  // GTA's sat-nav by the minimap left on: the distance to the route's next point, which it shows for any custom route
+  bool dist = false;
+  int minimap = 0;  // the minimap movie's handle
+  int gap = 0;      // frames the route stays off the map, for the game to start its sat-nav afresh
 } g_gps;
 
 void ShowGpsRoute() {
@@ -2017,12 +2021,25 @@ void ShowGpsRoute() {
     SET_GPS_CUSTOM_ROUTE_RENDER(FALSE, g_gps.radar, g_gps.map);
     g_gps.shown = 0;
   }
-  if (!g_gps.on || g_gps.pts.size() < 2) return;
+  if (!g_gps.on || g_gps.gap || g_gps.pts.size() < 2) return;
   START_GPS_CUSTOM_ROUTE(g_gps.colour, FALSE, TRUE);
   int n = std::min(static_cast<int>(g_gps.pts.size()), g_gps.max);
   for (int i = 0; i < n; i++) ADD_POINT_TO_GPS_CUSTOM_ROUTE(g_gps.pts[i].x, g_gps.pts[i].y, g_gps.pts[i].z);
   SET_GPS_CUSTOM_ROUTE_RENDER(TRUE, g_gps.radar, g_gps.map);
   g_gps.shown = n;
+}
+
+// The game has no switch for the sat-nav of a custom route, and a route that doesn't follow the player has it too. It
+// gives the minimap movie the distance anew at each metre, which shows it, so the movie is told to hide it every frame.
+void HideGpsDistance() {
+  if (g_gps.gap && --g_gps.gap == 0) ShowGpsRoute();
+  if (!g_gps.shown || g_gps.dist) return;
+  if (!g_gps.minimap) {
+    g_gps.minimap = REQUEST_SCALEFORM_MOVIE("minimap");
+    Log("minimap movie " + std::to_string(g_gps.minimap) + ", for the sat-nav");
+  }
+  if (!g_gps.minimap || !HAS_SCALEFORM_MOVIE_LOADED(g_gps.minimap)) return;
+  if (BEGIN_SCALEFORM_MOVIE_METHOD(g_gps.minimap, "HIDE_SATNAV")) END_SCALEFORM_MOVIE_METHOD();
 }
 
 // "x,y,z;x,y,z;..." in metres
@@ -2170,7 +2187,8 @@ std::string MissionState() {
 
 std::string GpsState() {
   return "\"gpsRoute\":{\"on\":" + std::string(g_gps.on ? "true" : "false") + ",\"points\":" + std::to_string(g_gps.shown) + ",\"max\":" +
-         std::to_string(g_gps.max) + ",\"waypointHeld\":" + (g_waypoint.held ? "true" : "false") + "}";
+         std::to_string(g_gps.max) + ",\"dist\":" + (g_gps.dist ? "true" : "false") +
+         ",\"waypointHeld\":" + (g_waypoint.held ? "true" : "false") + "}";
 }
 
 // GTA's own GPS directions to a point, while asked for (gtadirs command), to compare with our router's
@@ -4227,7 +4245,11 @@ void HandleMessage(const Message &m, double now) {
         Num(g_top.height) + ", heading " + Num(g_top.heading) + ", fov " + Num(g_top.fov));
   } else if (type == "gpsroute") {
     // our route on the game's map: on, colour (HUD colour), max (points), radar and map (line widths), take (the map's
-    // waypoint held off the map meanwhile, as GTA's own route line to it can't be hidden; take=0 leaves both lines)
+    // waypoint held off the map meanwhile, as GTA's own route line to it can't be hidden; take=0 leaves both lines),
+    // dist (GTA's sat-nav by the minimap left on)
+    bool dist = MsgBool(m, "dist", g_gps.dist);
+    if (g_gps.shown && dist != g_gps.dist) g_gps.gap = 3;
+    g_gps.dist = dist;
     g_gps.on = MsgBool(m, "on", g_gps.on);
     g_gps.colour = static_cast<int>(MsgNum(m, "colour", g_gps.colour));
     g_gps.max = std::clamp(static_cast<int>(MsgNum(m, "max", g_gps.max)), 2, 2000);
@@ -4236,7 +4258,8 @@ void HandleMessage(const Message &m, double now) {
     g_gps.map = static_cast<int>(MsgNum(m, "map", g_gps.map));
     if (!g_gps.on) g_gps.pts.clear();
     ShowGpsRoute();
-    Log("gps route " + std::string(g_gps.on ? "on" : "off") + ", colour " + std::to_string(g_gps.colour) + ", max " + std::to_string(g_gps.max));
+    Log("gps route " + std::string(g_gps.on ? "on" : "off") + ", colour " + std::to_string(g_gps.colour) + ", max " + std::to_string(g_gps.max) +
+        ", sat-nav " + (g_gps.dist ? "left on" : "hidden"));
   } else if (type == "gpsPoints") {
     if (!g_gps.on) return;
     g_gps.pts = ParsePoints(MsgStr(m, "p"));
@@ -4685,6 +4708,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
     g_drawSum += took, g_drawMax = std::max(g_drawMax, took);
   }
   TakeWaypoint(now);
+  HideGpsDistance();
   UpdateMission(now);
   // a parked capture stops getting state once the player is out of the car: say why, once
   static bool parkLost = false;
