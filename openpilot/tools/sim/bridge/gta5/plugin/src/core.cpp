@@ -3129,6 +3129,7 @@ struct FreeCam {
   double lockUntil = 0;  // held by a script (freecam lock=secs): the keys and mouse neither move it nor end it
 } g_free;
 std::atomic<int> g_freeToggles{0}, g_freeOffs{0}, g_freeSpeedSteps{0};
+bool g_safe = false;  // the "safe" message: the player left be and not to be killed
 bool g_parked = false;  // the park command's state
 
 void FreeCamDay(bool on) {
@@ -4115,6 +4116,15 @@ void HandleMessage(const Message &m, double now) {
     SET_ENTITY_VISIBLE(e, !on, FALSE);
     SET_ENTITY_VISIBLE(ped, !on, FALSE);
     Log("park " + std::string(on ? "at " + Num(MsgNum(m, "x")) + "," + Num(MsgNum(m, "y")) + "," + Num(MsgNum(m, "z", 1000)) : "off"));
+  } else if (type == "safe") {
+    // the map driver testing on its own: peds and police leave the player be and it can't be killed, so a pedestrian
+    // the car touches doesn't end the test with the player shot and taken out of the car; on=0 gives that back
+    bool on = MsgBool(m, "on", true);
+    if (!g_free.on) SET_ENTITY_INVINCIBLE(PLAYER_PED_ID(), on), SET_PLAYER_INVINCIBLE(PLAYER_ID(), on);
+    SET_EVERYONE_IGNORE_PLAYER(PLAYER_ID(), on);
+    SET_POLICE_IGNORE_PLAYER(PLAYER_ID(), on);
+    if (on != g_safe) Log(std::string("safe ") + (on ? "on" : "off"));
+    g_safe = on;
   } else if (type == "probe") {
     // the game's highest surface under points ("x,y;x,y;..."), as GET_GROUND_Z_FOR_3D_COORD from 1500 m finds it
     std::stringstream ss(MsgStr(m, "p"));
