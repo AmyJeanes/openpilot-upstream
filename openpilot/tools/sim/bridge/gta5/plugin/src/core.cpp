@@ -54,6 +54,16 @@ struct Config {
   float coastAccel = 3.1f;     // m/s^2
   float coastPerSpeed = 0.04f;  // m/s^2 per m/s
   float brakeGain = 8.0f;      // m/s^2 at full brake beyond coasting, roughly
+  // The game takes up a pedal only from about a quarter of its travel, and there gives a lot at once: a throttle under
+  // throttleEdge does nothing (the car coasts), at it gives about throttleEdgeDrive m/s^2 over coasting, which about
+  // holds the speed; the brake likewise. What lies between nothing and the edge is given by pulsing the pedal, at its
+  // edge for a share of the frames (pedalPulse: the frames a pulse lasts; 0: no pulsing, the pedals as they were)
+  float throttleEdge = 0.27f, throttleEdgeDrive = 3.2f;
+  float brakeEdge = 0.28f, brakeEdgeGain = 3.0f;
+  int pedalPulse = 1;
+  float holdSpeed = 0.1f;   // m/s: a stop is held (the handbrake) once the car is this slow
+  float reverseGain = 0.4f;  // backing up: pedal over its edge per m/s short of the speed asked
+  bool brakeLights = true;  // the brake lights lit while the car is slowed or held, whichever pedal does it
   int keyEngage = VK_INSERT;  // F5-F8 are GTA's character switch
   int keyLeft = VK_LEFT;
   int keyRight = VK_RIGHT;
@@ -206,6 +216,12 @@ struct Control {
   double t = -1e9;
   float latI = 0, lonI = 0;
   bool braking = false, wasLive = false, holding = false;
+  int gear = 1;          // 1 forwards, -1 reverse: changed only once the car has stood a moment
+  double restFrom = -1;  // since when the car has stood, or -1 while it moves
+  bool tooFast = false;  // backing well over the speed asked for
+  float pulse = 0;       // Pulse: the share of a frame's pedal owed so far
+  bool pulseOn = false;
+  int pulseLeft = 0;
   float steerOut = 0, throttleOut = 0, brakeOut = 0;
 } g_ctl;
 
@@ -247,7 +263,9 @@ double g_latLogUntil = 0;  // logs the steering loop each frame until then
 // open-loop steering check: holds a steer bias and logs the motion it produces
 struct SteerTest {
   double until = 0, nextLog = 0;
-  float bias = 0, throttle = 0;
+  float bias = 0, throttle = 0, brake = 0;
+  float share = 1;  // of the frames the pedals are on (Pulse), 1: all
+  int frames = 1;   // a pulse's length
 } g_test;
 
 Cam g_cam = 0;  // the openpilot camera for both views, also standing for the set while it exists
@@ -370,6 +388,14 @@ void ReadConfig() {
   c.coastAccel = num("coast_accel", c.coastAccel);
   c.coastPerSpeed = num("coast_per_speed", c.coastPerSpeed);
   c.brakeGain = num("brake_gain", c.brakeGain);
+  c.throttleEdge = num("throttle_edge", c.throttleEdge);
+  c.throttleEdgeDrive = num("throttle_edge_drive", c.throttleEdgeDrive);
+  c.brakeEdge = num("brake_edge", c.brakeEdge);
+  c.brakeEdgeGain = num("brake_edge_gain", c.brakeEdgeGain);
+  c.pedalPulse = static_cast<int>(num("pedal_pulse", static_cast<float>(c.pedalPulse)));
+  c.holdSpeed = num("hold_speed", c.holdSpeed);
+  c.reverseGain = num("reverse_gain", c.reverseGain);
+  c.brakeLights = num("brake_lights", c.brakeLights ? 1.0f : 0.0f) != 0;
   c.keyEngage = key("key_engage", c.keyEngage);
   c.keyLeft = key("key_left", c.keyLeft);
   c.keyRight = key("key_right", c.keyRight);
@@ -716,10 +742,13 @@ std::string ModelKey(Vehicle v) { return HashKey(GET_ENTITY_MODEL(v)); }
 void ReleaseControls() {
   if (g_veh.handle && DOES_ENTITY_EXIST(g_veh.handle)) {
     if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(g_veh.handle, FALSE);
+    if (g_ctl.braking) SET_VEHICLE_BRAKE_LIGHTS(g_veh.handle, FALSE);
     SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 0, FALSE);
     SET_VEHICLE_INDICATOR_LIGHTS(g_veh.handle, 1, FALSE);
   }
-  g_ctl.holding = false;
+  g_ctl.holding = g_ctl.braking = g_ctl.tooFast = false;
+  g_ctl.gear = 1;
+  g_ctl.restFrom = -1;
 }
 
 // A comma device's place: behind the windscreen, from the car's windscreen bone, else a quarter of the way to its front
@@ -976,15 +1005,57 @@ void Measure(float dt) {
   g_m.valid = true;
 }
 
-// The throttle that adds this much acceleration over coasting. The game ignores throttle below about 0.15 and gives most
-// of its drive by 0.5 (measured with steertest on a sedan: 0.3 adds about 3.5 m/s^2, full throttle about 8).
-float ThrottleFor(float drive) {
-  static const float THROTTLE[] = {0.15f, 0.3f, 0.5f, 0.75f, 1.0f};
-  static const float DRIVE[] = {0.0f, 3.5f, 6.3f, 7.5f, 8.1f};
+// A pedal the game takes only from its edge up, asked for a share of what it gives there: whether it is on this frame.
+// On for that share of the frames (a first-order sigma-delta, each choice kept `frames` frames), which the car answers
+// as their mean: its speed and body show nothing of pulses a frame or two long.
+bool Pulse(float share, int frames) {
+  if (g_ctl.pulseLeft > 0) {
+    g_ctl.pulseLeft--;
+    return g_ctl.pulseOn;
+  }
+  g_ctl.pulse += std::clamp(share, 0.0f, 1.0f);
+  g_ctl.pulseOn = g_ctl.pulse >= 1.0f;
+  if (g_ctl.pulseOn) g_ctl.pulse -= 1.0f;
+  g_ctl.pulseLeft = std::max(frames, 1) - 1;
+  return g_ctl.pulseOn;
+}
+
+// The throttle that adds this much acceleration over coasting, this frame, and as `mean` what it comes to over the
+// frames. The game ignores a throttle under its edge and gives most of its drive by 0.5 (measured with steertest: 0.3
+// adds about 3.5 m/s^2, full throttle about 8).
+float ThrottleFor(float drive, float &mean) {
+  mean = 0;
   if (drive <= 0) return 0;
+  bool pulsed = g_cfg.pedalPulse > 0;
+  float edge = pulsed ? std::clamp(g_cfg.throttleEdge, 0.05f, 0.29f) : 0.15f;
+  float least = pulsed ? std::clamp(g_cfg.throttleEdgeDrive, 0.1f, 3.4f) : 0.0f;
+  if (drive < least) {
+    mean = edge * drive / least;
+    return Pulse(drive / least, g_cfg.pedalPulse) ? edge : 0.0f;
+  }
+  const float THROTTLE[] = {edge, 0.3f, 0.5f, 0.75f, 1.0f};
+  const float DRIVE[] = {least, 3.5f, 6.3f, 7.5f, 8.1f};
+  mean = 1.0f;
   for (int i = 1; i < 5; i++)
-    if (drive < DRIVE[i]) return THROTTLE[i - 1] + (THROTTLE[i] - THROTTLE[i - 1]) * (drive - DRIVE[i - 1]) / (DRIVE[i] - DRIVE[i - 1]);
-  return 1.0f;
+    if (drive < DRIVE[i]) {
+      mean = THROTTLE[i - 1] + (THROTTLE[i] - THROTTLE[i - 1]) * (drive - DRIVE[i - 1]) / (DRIVE[i] - DRIVE[i - 1]);
+      break;
+    }
+  return mean;
+}
+
+// The brake that slows the car this much more than coasting does, likewise.
+float BrakeFor(float beyond, float &mean) {
+  mean = 0;
+  if (beyond <= 0) return 0;
+  if (g_cfg.pedalPulse <= 0) return mean = std::clamp(beyond / g_cfg.brakeGain, 0.0f, 1.0f);
+  float edge = std::clamp(g_cfg.brakeEdge, 0.05f, 0.9f);
+  float least = std::clamp(g_cfg.brakeEdgeGain, 0.1f, g_cfg.brakeGain - 0.5f);
+  if (beyond < least) {
+    mean = edge * beyond / least;
+    return Pulse(beyond / least, g_cfg.pedalPulse) ? edge : 0.0f;
+  }
+  return mean = std::clamp(edge + (1.0f - edge) * (beyond - least) / (g_cfg.brakeGain - least), 0.0f, 1.0f);
 }
 
 void UpdateCurvGain(float dt, double now) {
@@ -1131,12 +1202,20 @@ void StepHandsOff(Ped ped, Vehicle v, bool driven, double now, float dt) {
 void ApplyControls(float dt, double now) {
   Vehicle veh = g_veh.handle;
   if (now < g_test.until) {
+    // the pedals held (or pulsed: `share` of the frames) with nothing else in the loop, to measure what the car does
+    // with them; the brake only when one is asked for
     SET_VEHICLE_STEER_BIAS(veh, g_test.bias);
-    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, g_test.throttle);
+    bool on = g_test.share >= 1.0f || Pulse(g_test.share, g_test.frames);
+    if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, FALSE);
+    g_ctl.holding = false;
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, on ? g_test.throttle : 0.0f);
+    if (g_test.brake > 0) SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, on ? g_test.brake : 0.0f);
+    g_ctl.steerOut = g_test.bias, g_ctl.throttleOut = g_test.throttle * std::min(g_test.share, 1.0f), g_ctl.brakeOut = g_test.brake * std::min(g_test.share, 1.0f);
     if (now >= g_test.nextLog) {
       g_test.nextLog = now + 0.1;
       float curv = std::fabs(g_m.v) > 1 ? g_m.yawRate / g_m.v : 0;
-      Log("steertest bias " + Num(g_test.bias) + " v " + Num(g_m.v) + " yawRate " + Num(g_m.yawRate) + " curvature " + Num(curv) +
+      Log("steertest bias " + Num(g_test.bias) + " throttle " + Num(g_test.throttle) + " brake " + Num(g_test.brake) + " share " + Num(g_test.share) +
+          " v " + Num(g_m.v) + " accel " + Num(g_m.aMeas) + " yawRate " + Num(g_m.yawRate) + " curvature " + Num(curv) +
           " wheel angle " + Num(std::atan(curv * g_veh.wheelBase) / DEG) + " deg, bone " + Vec(g_m.steerBone));
     }
     return;
@@ -1172,6 +1251,58 @@ void ApplyControls(float dt, double now) {
 
   // longitudinal, as the Slow Roads bridge: requested acceleration plus a bounded integral on the measured one
   float accel = g_ctl.accel;
+  auto pedals = [&](float throttle, float brake, float throttleMean, float brakeMean, bool lights) {
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
+    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, brake);
+    // the game lights the brake lights with its brake pedal alone, and most slowing here is done without it (coasting,
+    // the handbrake); set each frame they are wanted, as the native asks
+    if (g_cfg.brakeLights && lights) SET_VEHICLE_BRAKE_LIGHTS(veh, TRUE);
+    else if (g_ctl.braking) SET_VEHICLE_BRAKE_LIGHTS(veh, FALSE);
+    g_ctl.braking = g_cfg.brakeLights && lights;
+    g_ctl.steerOut = steer;
+    g_ctl.throttleOut = throttleMean;
+    g_ctl.brakeOut = brakeMean;
+  };
+  auto handbrake = [&](bool on) {
+    if (on != g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, on);
+    g_ctl.holding = on;
+  };
+  // One gear at a time, as a driver does it: the car is brought to a stand and held there SHIFT_S before the other gear
+  // is taken. The game has no gear lever: its brake pedal backs a standing car up and its throttle drives it on, so
+  // going from one pedal straight to the other is a gear change on the move, with the reverse lights on and off.
+  constexpr float REST_MPS = 0.15f;
+  constexpr double SHIFT_S = 0.4;
+  if (std::fabs(speed) >= REST_MPS) g_ctl.restFrom = -1;
+  else if (g_ctl.restFrom < 0) g_ctl.restFrom = now;
+  int want = g_ctl.reverse > 0 && !g_user.gas ? -1 : 1;
+  if (want != g_ctl.gear) {
+    if (g_user.gas || (g_ctl.restFrom >= 0 && now - g_ctl.restFrom >= SHIFT_S)) {
+      g_ctl.gear = want;
+      g_ctl.tooFast = false;
+    } else if (g_ctl.gear < 0 || speed < 0.5f) {
+      // to a stand with the handbrake (neither pedal brakes a car both ways), and held
+      g_ctl.lonI = 0;
+      handbrake(true);
+      pedals(0, 0, 0, 0, true);
+      return;
+    } else {
+      accel = std::min(accel, -2.0f);  // still going forwards: braked for as any stop is, below
+    }
+  }
+  if (g_ctl.gear < 0) {
+    // backing up (the map driver clearing a deadlock, or turning round): the game's brake pedal is the reverse gear's
+    // throttle, and is taken only from its edge up like the other. It is kept at its edge or over for as long as the car
+    // backs: let go and taken up again, the game goes out of reverse and back, and the reverse lights flicker. At its
+    // edge it about holds the speed.
+    g_ctl.lonI = 0;
+    float err = speed + g_ctl.reverse;  // > 0: not going back fast enough
+    g_ctl.tooFast = err < (g_ctl.tooFast ? -0.2f : -0.8f);  // backing down a slope: the handbrake, and no pedal
+    float edge = g_cfg.pedalPulse > 0 ? g_cfg.brakeEdge : 0.15f;
+    float brake = g_ctl.tooFast ? 0.0f : std::clamp(edge + g_cfg.reverseGain * err, edge, 0.6f);
+    handbrake(g_ctl.tooFast);
+    pedals(0, brake, 0, brake, false);
+    return;
+  }
   bool stopped = std::fabs(speed) < 0.3f;
   if (stopped && accel <= 0) {
     g_ctl.lonI = 0;  // holding at a stop can't decelerate further; integrating that would block pulling away
@@ -1184,55 +1315,36 @@ void ApplyControls(float dt, double now) {
   // a real Model 3 delivers the requested acceleration on any grade (openpilot sends it open loop), so add what gravity
   // takes away; the coasting model and throttle table are flat-road ones
   float grade = 9.81f * std::sin(g_m.grade);
-  float u = std::clamp(std::clamp(accel, -4.0f, 2.5f) + g_ctl.lonI, -4.0f, 8.5f) + grade;
-  if (g_ctl.reverse > 0 && !g_user.gas) {
-    // backing up (the map driver clearing a deadlock): the game's brake reverses the car, and its throttle brakes it
-    // while it goes backwards; a proportional hold on the speed asked for
-    if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, false);
-    g_ctl.holding = g_ctl.braking = false;
-    g_ctl.lonI = 0;
-    float err = speed + g_ctl.reverse;  // > 0: not going back fast enough
-    float brake = err > 0 ? std::clamp(0.15f + 0.4f * err, 0.0f, 0.6f) : 0.0f;
-    float throttle = err < -0.3f ? std::clamp(-0.5f * err, 0.0f, 0.5f) : 0.0f;
-    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
-    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, brake);
-    g_ctl.steerOut = steer;
-    g_ctl.throttleOut = throttle;
-    g_ctl.brakeOut = brake;
-    return;
-  }
+  // all the braking asked for goes through, down to what full brake gives
+  float u = std::clamp(std::clamp(accel, -12.0f, 2.5f) + g_ctl.lonI, -12.0f, 8.5f) + grade;
   if (speed < -0.5f && !g_user.gas) {
-    // still going backwards with no reverse asked for: the throttle stops it (the brake would back it up more)
-    if (g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, false);
-    g_ctl.holding = g_ctl.braking = false;
-    float throttle = std::clamp(-0.4f * speed, 0.2f, 0.6f);
-    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
-    SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, 0.0f);
-    g_ctl.steerOut = steer;
-    g_ctl.throttleOut = throttle;
-    g_ctl.brakeOut = 0;
+    // rolling backwards with no reverse asked for (a hill): the throttle stops it (the brake would back it up more)
+    handbrake(false);
+    float throttle = std::clamp(-0.4f * speed, std::max(0.2f, g_cfg.pedalPulse > 0 ? g_cfg.throttleEdge : 0.0f), 0.6f);
+    pedals(throttle, 0, throttle, 0, false);
     return;
   }
-  // the game's brake reverses a stopped car, so hold a stop with the handbrake like a car's brake hold
-  bool hold = std::fabs(speed) < 0.5f && accel < 0 && !g_user.gas;
-  if (hold != g_ctl.holding) SET_VEHICLE_HANDBRAKE(veh, hold);
-  g_ctl.holding = hold;
   // throttle gives anything above coasting, including most slowing down; the brake only what's beyond it
   float coast = -(g_cfg.coastAccel + g_cfg.coastPerSpeed * std::fabs(speed));
-  g_ctl.braking = !hold && u < coast + (g_ctl.braking ? 0.2f : 0.0f) && !g_user.gas;
-  float throttle = 0, brake = 0;
+  bool hard = u < coast;
+  // The game's brake reverses a stopped car, so a stop is held with the handbrake like a car's brake hold. It bites at
+  // once, so it comes on only when the car all but stands (holdSpeed): the slowing asked for is what brings the car
+  // there, and the stop ends as gently as it was asked to. Braked harder than coasting, it comes on at 0.5 m/s, before
+  // the brake pedal can back the car up. Kept until the command is clearly to go.
+  bool hold = !g_user.gas && (g_ctl.holding ? accel < 0.1f && std::fabs(speed) < 0.5f
+                                             : accel < 0 && speed > -0.5f && speed < (hard ? 0.5f : std::min(g_cfg.holdSpeed, 0.5f)));
+  handbrake(hold);
+  float throttle = 0, brake = 0, throttleMean = 0, brakeMean = 0;
   if (hold) {
-  } else if (g_ctl.braking) {
-    brake = std::clamp((coast - u) / g_cfg.brakeGain, 0.0f, 1.0f);
+  } else if (hard) {
+    brake = BrakeFor(coast - u, brakeMean);
   } else {
-    throttle = ThrottleFor(u - coast);
+    throttle = ThrottleFor(u - coast, throttleMean);
   }
-  if (g_user.gas) throttle = 1.0f;
-  SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_ACCELERATE, throttle);
-  SET_CONTROL_VALUE_NEXT_FRAME(0, INPUT_VEH_BRAKE, brake);
-  g_ctl.steerOut = steer;
-  g_ctl.throttleOut = throttle;
-  g_ctl.brakeOut = brake;
+  if (g_user.gas) throttle = throttleMean = 1.0f;
+  // the lights as a car's own show them: braking, held, or slowed about as hard as its brake lights come on for
+  bool lights = !g_user.gas && (hold || hard || accel < (g_ctl.braking ? -0.3f : -0.8f));
+  pedals(throttle, brake, throttleMean, brakeMean, lights);
 }
 
 // what a steering angle sensor would show, as the curvature the car follows: the yaw rate's, which the bridge turns into
@@ -3391,7 +3503,8 @@ void Publish(double now, bool inVehicle) {
       << ",\"user\":{\"steer\":" << Num(g_user.steer) << ",\"gas\":" << (g_user.gas ? "true" : "false") << ",\"brake\":" << (g_user.brake ? "true" : "false") << "}"
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
       << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.At(g_m.v)) << ",\"curvGainLow\":" << Num(g_curvGain.low)
-      << ",\"gainSchedule\":" << (g_curvGain.schedule ? "true" : "false") << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false") << "}"
+      << ",\"gainSchedule\":" << (g_curvGain.schedule ? "true" : "false") << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false")
+      << ",\"gear\":" << g_ctl.gear << ",\"brakeLights\":" << (g_ctl.braking ? "true" : "false") << "}"
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;
@@ -4354,9 +4467,28 @@ void HandleMessage(const Message &m, double now) {
     // schedule=0 goes back to one gain for all speeds (for A/B tests); either way the fit starts over
     ResetCurvGain(MsgBool(m, "schedule", true));
     Log(std::string("steering gain ") + (g_curvGain.schedule ? "scheduled by speed" : "unscheduled") + ", from " + Num(g_curvGain.low));
+  } else if (type == "lon") {
+    // the pedals' settings (gta5op.ini's keys of the same names), live: for measuring a car, and A/B tests
+    g_cfg.coastAccel = static_cast<float>(MsgNum(m, "coast_accel", g_cfg.coastAccel));
+    g_cfg.coastPerSpeed = static_cast<float>(MsgNum(m, "coast_per_speed", g_cfg.coastPerSpeed));
+    g_cfg.brakeGain = static_cast<float>(MsgNum(m, "brake_gain", g_cfg.brakeGain));
+    g_cfg.throttleEdge = static_cast<float>(MsgNum(m, "throttle_edge", g_cfg.throttleEdge));
+    g_cfg.throttleEdgeDrive = static_cast<float>(MsgNum(m, "throttle_edge_drive", g_cfg.throttleEdgeDrive));
+    g_cfg.brakeEdge = static_cast<float>(MsgNum(m, "brake_edge", g_cfg.brakeEdge));
+    g_cfg.brakeEdgeGain = static_cast<float>(MsgNum(m, "brake_edge_gain", g_cfg.brakeEdgeGain));
+    g_cfg.pedalPulse = static_cast<int>(MsgNum(m, "pedal_pulse", g_cfg.pedalPulse));
+    g_cfg.holdSpeed = static_cast<float>(MsgNum(m, "hold_speed", g_cfg.holdSpeed));
+    g_cfg.reverseGain = static_cast<float>(MsgNum(m, "reverse_gain", g_cfg.reverseGain));
+    g_cfg.brakeLights = MsgBool(m, "brake_lights", g_cfg.brakeLights);
+    Log("lon: coast " + Num(g_cfg.coastAccel) + " + " + Num(g_cfg.coastPerSpeed) + " v, brake gain " + Num(g_cfg.brakeGain) + ", throttle edge " + Num(g_cfg.throttleEdge) +
+        " giving " + Num(g_cfg.throttleEdgeDrive) + ", brake edge " + Num(g_cfg.brakeEdge) + " giving " + Num(g_cfg.brakeEdgeGain) + ", pulse " + std::to_string(g_cfg.pedalPulse) +
+        ", hold under " + Num(g_cfg.holdSpeed) + ", reverse gain " + Num(g_cfg.reverseGain) + ", brake lights " + (g_cfg.brakeLights ? "on" : "off"));
   } else if (type == "steertest") {
     g_test.bias = static_cast<float>(MsgNum(m, "bias", 0.1));
     g_test.throttle = static_cast<float>(MsgNum(m, "throttle", 0.3));
+    g_test.brake = static_cast<float>(MsgNum(m, "brake", 0.0));
+    g_test.share = static_cast<float>(MsgNum(m, "share", 1.0));
+    g_test.frames = static_cast<int>(MsgNum(m, "frames", 1));
     g_test.until = now + MsgNum(m, "secs", 2.0);
     g_test.nextLog = now;
   } else if (type == "lead") {

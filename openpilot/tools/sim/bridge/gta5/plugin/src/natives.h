@@ -110,6 +110,8 @@ inline void SET_PED_INTO_VEHICLE(Ped p, Vehicle v, int seat) { Invoke(0xF75B0D62
 inline BOOL SET_VEHICLE_ON_GROUND_PROPERLY(Vehicle v, float p1) { return Invoke<BOOL>(0x49733E92263139D1, v, p1); }
 inline void SET_VEHICLE_ENGINE_ON(Vehicle v, BOOL on, BOOL instantly, BOOL noAutoStart) { Invoke(0x2497C4717C8B881E, v, on, instantly, noAutoStart); }
 inline void SET_VEHICLE_HANDBRAKE(Vehicle v, BOOL on) { Invoke(0x684785568EF26A22, v, on); }
+// for one frame: called each frame the lights are to be lit
+inline void SET_VEHICLE_BRAKE_LIGHTS(Vehicle v, BOOL on) { Invoke(0x92B35082E0B42F66, v, on); }
 inline void SET_VEHICLE_INDICATOR_LIGHTS(Vehicle v, int turnSignal, BOOL on) { Invoke(0xB5D45264751B7DF0, v, turnSignal, on); }
 // holds the steering at a fraction of full lock (left positive) for this frame
 inline void SET_VEHICLE_STEER_BIAS(Vehicle v, float bias) { Invoke(0x42A8EC77D5150CBE, v, bias); }
