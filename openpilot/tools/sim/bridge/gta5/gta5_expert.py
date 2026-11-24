@@ -324,7 +324,7 @@ class Expert:
       return False
     if "ai" not in state:
       if not self.warned:
-        print("gta5: expert mode needs the plugin's ai command (an older gta5op_core.dll is loaded)", flush=True)
+        print("gta5: expert mode needs the plugin's ai command (an older core is loaded)", flush=True)
         self.warned = True
       return False
     if engaged and now >= self.next_cancel:

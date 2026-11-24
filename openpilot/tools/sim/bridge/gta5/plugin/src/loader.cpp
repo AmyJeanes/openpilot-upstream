@@ -1,9 +1,11 @@
-// gta5op.asi: a thin script that runs gta5op\gta5op_core.dll and reloads it whenever the file changes, so a rebuilt core
-// takes effect without restarting the game. The core runs inside this script's fiber, where natives may be called.
+// gta5op.asi: a thin script that runs the newest core in gta5op\core (gta5op_core_<build time>.dll) and swaps to a newer
+// one as soon as it appears there, so a rebuilt core takes effect without restarting the game. The core runs inside this
+// script's fiber, where natives may be called. The loader itself only changes at a game start: keep it small.
 #include <windows.h>
-#include <share.h>
+#include <algorithm>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "core_api.h"
 #include "shv.h"
@@ -14,34 +16,46 @@ shv::Api shv::api;
 
 namespace {
 
-HMODULE g_self = nullptr;
+constexpr size_t KEEP_CORES = 3, KEEP_LOGS = 20;
+constexpr int LOAD_TRIES = 10;  // of a core that will not load, 0.5 s apart: it may still be being copied in
+
 fs::path g_dir;  // <game>\gta5op
 
 struct Core {
   HMODULE module = nullptr;
-  fs::path loadedPath;
-  fs::file_time_type stamp{};
+  std::wstring name;
   CoreInitFn init = nullptr;
   CoreTickFn tick = nullptr;
   CoreShutdownFn shutdown = nullptr;
   CoreKeyFn key = nullptr;
 } g_core;
 
-int g_loadCount = 0;
+std::vector<std::wstring> g_bad;  // cores given up on
+int g_tries = 0;
 SRWLOCK g_keyLock = SRWLOCK_INIT;  // OnKey runs on the window thread while the script fiber may swap the core
 
 void Log(const std::string &msg) {
   OutputDebugStringA(("gta5op: " + msg + "\n").c_str());
-  // shared, so the log can be followed while the game runs
-  FILE *f = _wfsopen((g_dir / L"gta5op.log").c_str(), L"a", _SH_DENYNO);
-  // (held against writing by the game itself, as above: a log of this run's own, which is a new file)
-  if (!f) f = _wfsopen((g_dir / (L"gta5op." + std::to_wstring(GetCurrentProcessId()) + L".log")).c_str(), L"a", _SH_DENYNO);
-  if (f) {
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    fprintf(f, "[%02d:%02d:%02d.%03d] loader: %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, msg.c_str());
-    fclose(f);
+  WriteLog(g_dir.wstring(), "loader", msg);
+}
+
+// The files of dir named <prefix>*<ext>, newest first: the names carry a time, so name order is age order.
+std::vector<std::wstring> Newest(const fs::path &dir, const wchar_t *prefix, const wchar_t *ext) {
+  std::vector<std::wstring> names;
+  std::error_code ec;
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    std::wstring name = it->path().filename().wstring();
+    if (name.rfind(prefix, 0) == 0 && it->path().extension() == ext) names.push_back(name);
   }
+  std::sort(names.rbegin(), names.rend());
+  return names;
+}
+
+// Removes all but the newest few. A file in use (the loaded core, or one the game holds) stays until a later try.
+void Prune(const fs::path &dir, const wchar_t *prefix, const wchar_t *ext, size_t keep) {
+  std::vector<std::wstring> names = Newest(dir, prefix, ext);
+  std::error_code ec;
+  for (size_t i = keep; i < names.size(); i++) fs::remove(dir / names[i], ec);
 }
 
 void UnloadCore() {
@@ -49,85 +63,68 @@ void UnloadCore() {
   AcquireSRWLockExclusive(&g_keyLock);
   g_core.key = nullptr;
   ReleaseSRWLockExclusive(&g_keyLock);
-  if (g_core.shutdown) g_core.shutdown();
+  g_core.shutdown();
   FreeLibrary(g_core.module);
-  std::error_code ec;
-  fs::remove(g_core.loadedPath, ec);
   g_core = Core{};
 }
 
-void LoadCore(const fs::path &src, fs::file_time_type stamp) {
-  UnloadCore();
-  // load a copy, so the build can overwrite the original while it is in use. A copy left by a game that was killed may
-  // not be writable (the game has been seen to hold every file that was in its folder when it started): the next name
-  // then, or nothing would be loaded at all
-  fs::path copy;
-  std::error_code ec;
-  for (int tries = 0; tries < 100; tries++) {
-    copy = g_dir / (L"gta5op_core.loaded" + std::to_wstring(++g_loadCount) + L".dll");
-    fs::copy_file(src, copy, fs::copy_options::overwrite_existing, ec);
-    if (!ec) break;
-  }
-  if (ec) {
-    Log("copying the core failed: " + ec.message());
-    return;
-  }
-  HMODULE m = LoadLibraryW(copy.c_str());
+// Loads the new core before the running one is shut down, so a file that will not load leaves the old core running.
+bool LoadCore(const std::wstring &name) {
+  std::string shown = fs::path(name).string();
+  DWORD mode = 0;
+  SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mode);
+  HMODULE m = LoadLibraryW((g_dir / L"core" / name).c_str());
+  DWORD error = GetLastError();
+  SetThreadErrorMode(mode, nullptr);
   if (!m) {
-    Log("loading the core failed: error " + std::to_string(GetLastError()));
-    fs::remove(copy, ec);
-    return;
+    if (!g_tries) Log("loading " + shown + " failed: error " + std::to_string(error));
+    return false;
   }
-  g_core.module = m;
-  g_core.loadedPath = copy;
-  g_core.stamp = stamp;
-  g_core.init = reinterpret_cast<CoreInitFn>(GetProcAddress(m, "CoreInit"));
-  g_core.tick = reinterpret_cast<CoreTickFn>(GetProcAddress(m, "CoreTick"));
-  g_core.shutdown = reinterpret_cast<CoreShutdownFn>(GetProcAddress(m, "CoreShutdown"));
-  if (!g_core.init || !g_core.tick || !g_core.shutdown) {
-    Log("the core lacks its exports");
+  Core next;
+  next.module = m;
+  next.name = name;
+  next.init = reinterpret_cast<CoreInitFn>(GetProcAddress(m, "CoreInit"));
+  next.tick = reinterpret_cast<CoreTickFn>(GetProcAddress(m, "CoreTick"));
+  next.shutdown = reinterpret_cast<CoreShutdownFn>(GetProcAddress(m, "CoreShutdown"));
+  if (!next.init || !next.tick || !next.shutdown) {
+    if (!g_tries) Log(shown + " lacks the core's exports");
     FreeLibrary(m);
-    fs::remove(copy, ec);
-    g_core = Core{};
-    return;
+    return false;
   }
+  UnloadCore();
+  g_core = next;
   CoreHost host{CORE_API_VERSION, &shv::api, g_dir.c_str()};
   g_core.init(&host);
   AcquireSRWLockExclusive(&g_keyLock);
   g_core.key = reinterpret_cast<CoreKeyFn>(GetProcAddress(m, "CoreKey"));
   ReleaseSRWLockExclusive(&g_keyLock);
-  Log("core loaded (" + std::to_string(g_loadCount) + ")");
+  Log("core loaded: " + shown);
+  return true;
 }
 
 void CheckCore() {
   static DWORD lastCheck = 0;
-  static fs::file_time_type pending{};
-  static DWORD pendingSince = 0;
-  DWORD now = GetTickCount();
-  if (g_core.module && now - lastCheck < 500) return;
+  DWORD now = GetTickCount() | 1;
+  if (lastCheck && now - lastCheck < 500) return;
   lastCheck = now;
-  fs::path src = g_dir / L"gta5op_core.dll";
-  std::error_code ec;
-  auto stamp = fs::last_write_time(src, ec);
-  if (ec || stamp == g_core.stamp) return;
-  // wait for the build to finish writing it
-  if (stamp != pending) {
-    pending = stamp;
-    pendingSince = now;
+  for (const std::wstring &name : Newest(g_dir / L"core", L"gta5op_core_", L".dll")) {
+    if (name == g_core.name) return;  // the newest that loads is running
+    if (std::find(g_bad.begin(), g_bad.end(), name) != g_bad.end()) continue;
+    if (LoadCore(name)) {
+      g_tries = 0;
+      Prune(g_dir / L"core", L"gta5op_core_", L".dll", KEEP_CORES);
+    } else if (++g_tries >= LOAD_TRIES) {
+      g_tries = 0;
+      g_bad.push_back(name);
+      Log("giving up on " + fs::path(name).string());
+    }
     return;
   }
-  if (now - pendingSince < 1000) return;
-  LoadCore(src, stamp);
-  if (!g_core.module) g_core.stamp = stamp;  // don't retry a broken file until it changes again
+  static bool said = false;
+  if (!g_core.module && !said) said = (Log("no core to load in gta5op\\core"), true);
 }
 
 void ScriptMain() {
-  // remove copies left by a crash
-  std::error_code ec;
-  for (auto &e : fs::directory_iterator(g_dir, ec)) {
-    auto name = e.path().filename().wstring();
-    if (name.rfind(L"gta5op_core.loaded", 0) == 0) fs::remove(e.path(), ec);
-  }
   for (;;) {
     CheckCore();
     if (g_core.tick) g_core.tick();
@@ -146,10 +143,13 @@ void OnKey(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUpNow) 
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {
-    g_self = module;
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(module, path, MAX_PATH);
     g_dir = fs::path(path).parent_path() / L"gta5op";
+    // as early as this, because the game has been seen to take every file that is in its folder as it starts and hold
+    // it against writing and deleting until it exits
+    Prune(g_dir / L"core", L"gta5op_core_", L".dll", KEEP_CORES);
+    Prune(g_dir / L"logs", L"gta5op_", L".log", KEEP_LOGS);
     shv::api = shv::Imports();
     shv::api.scriptRegister(module, ScriptMain);
     shv::api.keyboardHandlerRegister(OnKey);

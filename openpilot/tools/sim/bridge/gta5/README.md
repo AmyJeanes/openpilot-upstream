@@ -12,8 +12,12 @@ It's developed with the Steam version on Windows and openpilot in WSL.
 - [ScriptHookV](http://www.dev-c.com/gtav/scripthookv/) for the installed game build, in the game folder. It disables
   BattlEye, so the game runs story mode only while it's installed.
 - The plugin: `plugin/build.ps1 -Install` (Visual Studio with the C++ workload) puts `gta5op.asi` and `gta5op\` in the
-  game folder. `gta5op.asi` loads at game start; `gta5op\gta5op_core.dll` reloads whenever it changes, so later builds
-  apply to a running game. `gta5op\gta5op.ini` holds the settings, and `gta5op\gta5op.log` the plugin's log.
+  game folder. `gta5op.asi`, a small loader, loads at game start and only changes with the game closed. Each build's core
+  goes into `gta5op\core\` as a new file, `gta5op_core_<build time>.dll`; the loader runs the newest by name and swaps to
+  a newer one within a second of it appearing, so later builds apply to a running game (the newest three are kept; never
+  write over a core, the game may hold it). `gta5op\gta5op.ini` holds the settings. The plugin's log is the newest file
+  in `gta5op\logs\` (`gta5op_<game start>.log`, one for each run of the game; the newest twenty are kept), and the
+  state's `plugin` gives the running core, its build and the log's name.
 - In the game's settings: Pause Game On Focus Loss off (openpilot's UI takes focus), and a windowed or borderless display
   mode. The plugin captures the game's window, so keep it uncovered and not minimized.
 

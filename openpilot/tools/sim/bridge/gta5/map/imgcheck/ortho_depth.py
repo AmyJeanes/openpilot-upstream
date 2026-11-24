@@ -33,6 +33,7 @@ at most a few tiles in memory (the writer's queue is bounded).
 import argparse
 import collections
 import functools
+import glob
 import json
 import math
 import os
@@ -45,7 +46,7 @@ from PIL import Image, ImageDraw
 from openpilot.tools.sim.bridge.gta5.map.imgcheck import ortho
 from openpilot.tools.sim.bridge.gta5.map.imgcheck.ortho import FAR, FOV, H_M, H_PX, HEIGHT, NEAR, PARK_ABOVE, W_M, W_PX
 
-PLUGIN_LOG = "/mnt/d/SteamLibrary/steamapps/common/Grand Theft Auto V Enhanced/gta5op/gta5op.log"
+PLUGIN_LOGS = "/mnt/d/SteamLibrary/steamapps/common/Grand Theft Auto V Enhanced/gta5op/logs/gta5op_*.log"  # one for each run of the game
 DEPTH_TARGET = "DepthBuffer Pre Alpha 1"
 NODATA = 65535
 SCALE = 0.01  # m per step: centimetres
@@ -133,8 +134,8 @@ def parse_water(text: str) -> dict[str, np.ndarray]:
 
 # ---------------------------------------------------------------------------------------------------------- the plugin
 class PluginLog:
-  def __init__(self, path: str = PLUGIN_LOG):
-    self.path = path
+  def __init__(self, path: str | None = None):
+    self.path = path or max(glob.glob(PLUGIN_LOGS))  # the running game's is the newest: their names carry the start time
 
   def mark(self) -> int:
     return os.path.getsize(self.path)

@@ -19,4 +19,6 @@ add_dependencies(gta5op shv_lib)
 target_link_libraries(gta5op PRIVATE ${SHV_LIB})
 set_target_properties(gta5op PROPERTIES SUFFIX ".asi")
 
+set(GTA5OP_BUILD "unstamped" CACHE STRING "the build's time and label, shown in the core's log and state")
+set_source_files_properties(src/core.cpp PROPERTIES COMPILE_DEFINITIONS "GTA5OP_BUILD=\"${GTA5OP_BUILD}\"")
 add_library(gta5op_core SHARED src/core.cpp src/capture.cpp src/net.cpp src/ortho.cpp src/present_hook.cpp src/script_hook.cpp)

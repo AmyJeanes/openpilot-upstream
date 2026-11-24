@@ -1,4 +1,5 @@
-// gta5op_core.dll: the openpilot camera, vehicle state and controls, run once per game frame by the loader.
+// The core (gta5op\core\gta5op_core_<build time>.dll): the openpilot camera, vehicle state and controls, run once per game
+// frame by the loader.
 #include <winsock2.h>
 #include <windows.h>
 #include <mmsystem.h>
@@ -94,6 +95,10 @@ struct Config {
   bool sounds = true;         // the bridge's engage and disengage sounds
   float soundVolume = 0.5f;   // of their full scale
 };
+
+#ifndef GTA5OP_BUILD
+#define GTA5OP_BUILD "unstamped"  // build.ps1 gives the build time and its label
+#endif
 
 const char *BRIDGE_FILE = "C:\\Users\\Public\\gta5op-bridge.txt";
 
@@ -353,17 +358,24 @@ std::string AiState(Vehicle v);
 
 void Log(const std::string &msg) {
   std::lock_guard lk(g_logMutex);
-  // shared, so the log can be followed while the game runs
-  FILE *f = _wfsopen((g_dir + L"\\gta5op.log").c_str(), L"a", _SH_DENYNO);
-  // (the game has been seen to hold every file that was in its folder when it started against writing: a log of this
-  // run's own then, which is a new file)
-  if (!f) f = _wfsopen((g_dir + L"\\gta5op." + std::to_wstring(GetCurrentProcessId()) + L".log").c_str(), L"a", _SH_DENYNO);
-  if (f) {
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    fprintf(f, "[%02d:%02d:%02d.%03d] core: %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, msg.c_str());
-    fclose(f);
-  }
+  WriteLog(g_dir, "core", msg);
+}
+
+// This core's file name, as the loader found it in gta5op\core.
+std::string CoreFile() {
+  HMODULE self = nullptr;
+  wchar_t path[MAX_PATH] = L"";
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&CoreFile), &self))
+    GetModuleFileNameW(self, path, MAX_PATH);
+  return std::filesystem::path(path).filename().string();
+}
+
+// "plugin":{core (the running core's file), build (its build time and label), log (this run's log, in gta5op\logs)}
+std::string PluginState() {
+  static const std::string s = "\"plugin\":{\"core\":\"" + CoreFile() + "\",\"build\":\"" GTA5OP_BUILD "\",\"log\":\"" +
+                               std::filesystem::path(LogName()).string() + "\"}";
+  return s;
 }
 
 std::string IniPath() { return std::filesystem::path(g_dir + L"\\gta5op.ini").string(); }
@@ -3525,7 +3537,8 @@ void Publish(double now, bool inVehicle) {
   if (g_free.on) s << "," << FreeCamState();
   std::string witness = Witness(now), lights = LightsState(now);
   RecordLights(now, lights, witness);
-  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << witness << "," << lights << "}";
+  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << witness << "," << lights
+    << "," << PluginState() << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
 }
@@ -4729,7 +4742,7 @@ extern "C" __declspec(dllexport) void CoreInit(const CoreHost *host) {
   g_dir = host->dir;
   ReadConfig();
   g_gps.on = g_cfg.gpsRoute;
-  Log("init: bridge " + (g_cfg.bridge.empty() ? std::string("from ") + BRIDGE_FILE : g_cfg.bridge) + ", vfov " + Num(g_cfg.vfov) +
+  Log("init: core " + CoreFile() + ", build " GTA5OP_BUILD ", bridge " + (g_cfg.bridge.empty() ? std::string("from ") + BRIDGE_FILE : g_cfg.bridge) + ", vfov " + Num(g_cfg.vfov) +
       ", lens " + (g_cfg.lens ? "on" : "off"));
   g_link.Start(BridgeAddress, Log);
 }
