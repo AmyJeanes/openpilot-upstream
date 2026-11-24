@@ -1303,9 +1303,11 @@ void ApplyControls(float dt, double now) {
     // edge it about holds the speed.
     g_ctl.lonI = 0;
     float err = speed + g_ctl.reverse;  // > 0: not going back fast enough
-    g_ctl.tooFast = err < (g_ctl.tooFast ? -0.2f : -0.8f);  // backing down a slope: the handbrake, and no pedal
+    // backing down a slope the car gains speed with the pedal at its edge: the handbrake then, with the pedal kept
+    // where it is (seen in the game: let go there, the reverse lights went out for a moment in the middle of a move)
+    g_ctl.tooFast = err < (g_ctl.tooFast ? -0.2f : -0.5f);
     float edge = g_cfg.pedalPulse > 0 ? g_cfg.brakeEdge : 0.15f;
-    float brake = g_ctl.tooFast ? 0.0f : std::clamp(edge + g_cfg.reverseGain * err, edge, 0.6f);
+    float brake = std::clamp(edge + g_cfg.reverseGain * err, edge, 0.6f);
     handbrake(g_ctl.tooFast);
     pedals(0, brake, 0, brake, false);
     return;
