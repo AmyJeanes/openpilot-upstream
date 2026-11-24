@@ -51,18 +51,21 @@ struct Config {
   float curvGain = 3.4f;  // initial low-speed path curvature (1/m) per unit of steer bias, learned per car while driving
   float latKi = 1.0f;     // 1/s, integral on the yaw rate error, in units of the feed-forward
   // with no throttle the game slows a car hard, about -(coastAccel + coastPerSpeed * v); steertest with throttle=0 measures it
-  float coastAccel = 3.1f;     // m/s^2
-  float coastPerSpeed = 0.04f;  // m/s^2 per m/s
-  float brakeGain = 8.0f;      // m/s^2 at full brake beyond coasting, roughly
-  // The game takes up a pedal only from about a quarter of its travel, and there gives a lot at once: a throttle under
-  // throttleEdge does nothing (the car coasts), at it gives about throttleEdgeDrive m/s^2 over coasting, which about
-  // holds the speed; the brake likewise. What lies between nothing and the edge is given by pulsing the pedal, at its
-  // edge for a share of the frames (pedalPulse: the frames a pulse lasts; 0: no pulsing, the pedals as they were)
-  float throttleEdge = 0.27f, throttleEdgeDrive = 3.2f;
-  float brakeEdge = 0.28f, brakeEdgeGain = 3.0f;
+  float coastAccel = 3.11f;     // m/s^2
+  float coastPerSpeed = 0.026f;  // m/s^2 per m/s
+  // The game takes up a pedal only from a quarter of its travel (0.25, the same for every car), and there gives a lot at
+  // once: a throttle under throttleEdge does nothing (the car coasts), at it gives about throttleEdgeDrive m/s^2 over
+  // coasting, which about holds the speed. The brake likewise gives brakeEdgeGain beyond coasting at brakeEdge, and
+  // goes on from there as steeply as if a brake of 1.0 gave brakeGain: the Model 3's is all on (11 m/s^2 beyond
+  // coasting) by 0.4, a stock sedan's by 0.6 (brakeGain 23.5). What lies between nothing and an edge is given by
+  // pulsing the pedal, at its edge for a share of the frames (pedalPulse: the frames a pulse lasts; 0: no pulsing, the
+  // pedals as they were). Measured with steertest; the map driver sends each car's figures (lon).
+  float brakeGain = 57.0f;
+  float throttleEdge = 0.27f, throttleEdgeDrive = 3.4f;
+  float brakeEdge = 0.26f, brakeEdgeGain = 0.75f;
   int pedalPulse = 1;
   float holdSpeed = 0.1f;   // m/s: a stop is held (the handbrake) once the car is this slow
-  float reverseGain = 0.4f;  // backing up: pedal over its edge per m/s short of the speed asked
+  float reverseGain = 0.05f;  // backing up: pedal over its edge per m/s short of the speed asked (0.07 over is 1.5 m/s^2)
   bool brakeLights = true;  // the brake lights lit while the car is slowed or held, whichever pedal does it
   int keyEngage = VK_INSERT;  // F5-F8 are GTA's character switch
   int keyLeft = VK_LEFT;
@@ -352,6 +355,9 @@ void Log(const std::string &msg) {
   std::lock_guard lk(g_logMutex);
   // shared, so the log can be followed while the game runs
   FILE *f = _wfsopen((g_dir + L"\\gta5op.log").c_str(), L"a", _SH_DENYNO);
+  // (the game has been seen to hold every file that was in its folder when it started against writing: a log of this
+  // run's own then, which is a new file)
+  if (!f) f = _wfsopen((g_dir + L"\\gta5op." + std::to_wstring(GetCurrentProcessId()) + L".log").c_str(), L"a", _SH_DENYNO);
   if (f) {
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -387,7 +393,8 @@ void ReadConfig() {
   c.latKi = num("lat_ki", c.latKi);
   c.coastAccel = num("coast_accel", c.coastAccel);
   c.coastPerSpeed = num("coast_per_speed", c.coastPerSpeed);
-  c.brakeGain = num("brake_gain", c.brakeGain);
+  // (under 20: an ini from when this was what full brake was taken to give, 8)
+  if (num("brake_gain", c.brakeGain) >= 20) c.brakeGain = num("brake_gain", c.brakeGain);
   c.throttleEdge = num("throttle_edge", c.throttleEdge);
   c.throttleEdgeDrive = num("throttle_edge_drive", c.throttleEdgeDrive);
   c.brakeEdge = num("brake_edge", c.brakeEdge);

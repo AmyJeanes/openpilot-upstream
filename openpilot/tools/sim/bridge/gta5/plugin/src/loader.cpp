@@ -34,6 +34,8 @@ void Log(const std::string &msg) {
   OutputDebugStringA(("gta5op: " + msg + "\n").c_str());
   // shared, so the log can be followed while the game runs
   FILE *f = _wfsopen((g_dir / L"gta5op.log").c_str(), L"a", _SH_DENYNO);
+  // (held against writing by the game itself, as above: a log of this run's own, which is a new file)
+  if (!f) f = _wfsopen((g_dir / (L"gta5op." + std::to_wstring(GetCurrentProcessId()) + L".log")).c_str(), L"a", _SH_DENYNO);
   if (f) {
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -56,10 +58,16 @@ void UnloadCore() {
 
 void LoadCore(const fs::path &src, fs::file_time_type stamp) {
   UnloadCore();
-  // load a copy, so the build can overwrite the original while it is in use
-  fs::path copy = g_dir / (L"gta5op_core.loaded" + std::to_wstring(++g_loadCount) + L".dll");
+  // load a copy, so the build can overwrite the original while it is in use. A copy left by a game that was killed may
+  // not be writable (the game has been seen to hold every file that was in its folder when it started): the next name
+  // then, or nothing would be loaded at all
+  fs::path copy;
   std::error_code ec;
-  fs::copy_file(src, copy, fs::copy_options::overwrite_existing, ec);
+  for (int tries = 0; tries < 100; tries++) {
+    copy = g_dir / (L"gta5op_core.loaded" + std::to_wstring(++g_loadCount) + L".dll");
+    fs::copy_file(src, copy, fs::copy_options::overwrite_existing, ec);
+    if (!ec) break;
+  }
   if (ec) {
     Log("copying the core failed: " + ec.message());
     return;
