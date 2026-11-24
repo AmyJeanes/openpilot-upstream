@@ -3,6 +3,8 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_4.h>
+#include <objbase.h>
+#include <wincodec.h>
 #include <winrt/base.h>
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -19,6 +22,8 @@
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "windowscodecs.lib")
 
 using winrt::com_ptr;
 
@@ -78,6 +83,12 @@ std::function<void(const HookFrame &)> g_onFrame;
 std::atomic<int> g_grabState{0};
 std::atomic<uint64_t> g_grabN{0};
 std::string g_grabPath;
+// a grab asked for with a width is saved as a JPEG at most that wide (SaveJpeg); quiet: not logged when it goes well
+int g_grabWidth = 0, g_grabQuality = 80;
+bool g_grabQuiet = false;
+// a grab no frame came for within its wait (no presents: the game minimised or loading) is given up, so that it
+// neither blocks the next one nor saves a frame from long after it was asked for
+std::atomic<double> g_grabAsked{0}, g_grabWait{1.0};
 // a grab can take one of the game's own textures instead (SetGrabSource), in the state the game leaves it in at present
 std::atomic<ID3D12Resource *> g_grabSrc{nullptr};
 std::atomic<UINT> g_grabSrcState{0};
@@ -88,6 +99,43 @@ int g_srcGrabLeft = 0;
 
 void Log(const std::string &s) {
   if (g_log) g_log("present hook: " + s);
+}
+
+// gives up a grab asked for longer ago than its wait and not yet taken
+void ExpireGrab(double now) {
+  int asked = 1;
+  if (g_grabState == 1 && now - g_grabAsked > g_grabWait && g_grabState.compare_exchange_strong(asked, 0))
+    Log("grab: given up, no frame came in time");
+}
+
+// 24-bit BGR rows (w * 3 bytes each) as a JPEG, by Windows' own encoder
+bool WriteJpeg(const uint8_t *bgr, int w, int h, const std::string &path, int quality) {
+  static thread_local bool com = false;
+  if (!com) CoInitializeEx(nullptr, COINIT_MULTITHREADED), com = true;
+  com_ptr<IWICImagingFactory> factory;
+  com_ptr<IWICStream> stream;
+  com_ptr<IWICBitmapEncoder> encoder;
+  com_ptr<IWICBitmapFrameEncode> frame;
+  com_ptr<IPropertyBag2> props;
+  std::wstring wide(path.begin(), path.end());
+  if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
+      FAILED(factory->CreateStream(stream.put())) || FAILED(stream->InitializeFromFilename(wide.c_str(), GENERIC_WRITE)) ||
+      FAILED(factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, encoder.put())) ||
+      FAILED(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache)) || FAILED(encoder->CreateNewFrame(frame.put(), props.put())))
+    return false;
+  wchar_t name[] = L"ImageQuality";
+  PROPBAG2 option{};
+  option.pstrName = name;
+  VARIANT value{};
+  value.vt = VT_R4;
+  value.fltVal = std::clamp(quality, 1, 100) / 100.0f;
+  props->Write(1, &option, &value);
+  WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+  if (FAILED(frame->Initialize(props.get())) || FAILED(frame->SetSize(UINT(w), UINT(h))) || FAILED(frame->SetPixelFormat(&format)) ||
+      !IsEqualGUID(format, GUID_WICPixelFormat24bppBGR))
+    return false;
+  return SUCCEEDED(frame->WritePixels(UINT(h), UINT(w) * 3, UINT(w) * 3 * UINT(h), const_cast<BYTE *>(bgr))) && SUCCEEDED(frame->Commit()) &&
+         SUCCEEDED(encoder->Commit());
 }
 
 bool Patch(VtableEntry &e, void **vtable, int index, void *hook) {
@@ -379,7 +427,42 @@ struct Renderer {
       src.insert(dot == std::string::npos ? src.size() : dot, "_src");
       SaveBmp(srcGrab.get(), srcFp, src);
     }
-    SaveBmp(grab.get(), grabFp, g_grabPath);
+    if (g_grabWidth > 0) SaveJpeg(grab.get(), grabFp, g_grabPath, g_grabWidth, g_grabQuality);
+    else SaveBmp(grab.get(), grabFp, g_grabPath);
+  }
+
+  // The grab as a JPEG at most `width` wide, whole pixels averaged (2560 wide gives 1280): a fiftieth of the BMP's size,
+  // which makes a grab cheap enough to take twice a second
+  void SaveJpeg(ID3D12Resource *buf, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &grabFp, const std::string &path, int width, int quality) {
+    DXGI_FORMAT fmt = grabFp.Footprint.Format;
+    bool bgra = fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8X8_UNORM || fmt == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    bool rgba = fmt == DXGI_FORMAT_R8G8B8A8_UNORM || fmt == DXGI_FORMAT_R8G8B8A8_TYPELESS || fmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    if (!bgra && !rgba) return SaveBmp(buf, grabFp, path);  // goes to a .raw file
+    void *p = nullptr;
+    D3D12_RANGE range{0, SIZE_T(grabFp.Footprint.RowPitch) * grabFp.Footprint.Height};
+    if (!buf || FAILED(buf->Map(0, &range, &p))) return Log("grab: map failed");
+    int w = int(grabFp.Footprint.Width), h = int(grabFp.Footprint.Height);
+    int k = std::max(1, (w + width - 1) / width), ow = w / k, oh = h / k;
+    std::vector<uint8_t> out(size_t(ow) * oh * 3);
+    for (int y = 0; y < oh; y++) {
+      uint8_t *o = out.data() + size_t(y) * ow * 3;
+      for (int x = 0; x < ow; x++, o += 3) {
+        unsigned sum[3] = {0, 0, 0};
+        for (int j = 0; j < k; j++) {
+          const uint8_t *s = static_cast<const uint8_t *>(p) + size_t(y * k + j) * grabFp.Footprint.RowPitch + size_t(x) * k * 4;
+          for (int i = 0; i < k; i++, s += 4) sum[0] += s[0], sum[1] += s[1], sum[2] += s[2];
+        }
+        unsigned n = unsigned(k * k);
+        o[0] = uint8_t(sum[rgba ? 2 : 0] / n), o[1] = uint8_t(sum[1] / n), o[2] = uint8_t(sum[rgba ? 0 : 2] / n);
+      }
+    }
+    D3D12_RANGE none{0, 0};
+    buf->Unmap(0, &none);
+    // whole when it appears: a reader polls for the final name
+    if (!WriteJpeg(out.data(), ow, oh, path + ".part", quality) || !MoveFileExA((path + ".part").c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+      return Log("grab: can't write " + path);
+    if (!g_grabQuiet) Log("grab: saved " + path + " (" + std::to_string(ow) + "x" + std::to_string(oh) + ", jpeg)");
   }
 
   // other formats than 8-bit RGBA/BGRA go to a .raw file instead: width, height, row pitch, DXGI format (u32 each),
@@ -533,7 +616,11 @@ struct Renderer {
     ID3D12CommandList *lists[] = {list.get()};
     queue->ExecuteCommandLists(1, lists);
     queue->Signal(fence.get(), n);
-    if (grabbing && (!grabbedSrc || --g_srcGrabLeft == 0)) g_grabN = n, g_grabState = 2;
+    if (grabbing && (!grabbedSrc || --g_srcGrabLeft == 0)) {
+      int asked = 1;  // not one given up meanwhile (ExpireGrab)
+      g_grabN = n;
+      g_grabState.compare_exchange_strong(asked, 2);
+    }
     allocFence[f] = n;
     presents = n;
     g_recorded = n;
@@ -741,9 +828,13 @@ void TracePresent() {
 }
 
 void OnPresent(IDXGISwapChain *sc, UINT flags) {
-  if (!g_enabled || (flags & DXGI_PRESENT_TEST)) return;
+  // a pending grab is taken with the hook otherwise off: with no openpilot frames about, recording a present copies it
+  // and changes nothing on the screen
+  if ((!g_enabled && g_grabState == 0) || (flags & DXGI_PRESENT_TEST)) return;
   if (g_trace.state == 1 || g_trace.state == 2) TracePresent();
   double t = QpcSeconds();
+  ExpireGrab(t);
+  if (!g_enabled && g_grabState == 0) return;
   std::lock_guard lk(g_presentMutex);
   if (sc != g_r.swap) {
     std::unique_lock flk(g_frameMutex);
@@ -906,9 +997,13 @@ void Uninstall() {
 
 void SetEnabled(bool on) { g_enabled = on; }
 
-bool RequestGrab(const std::string &path) {
+bool RequestGrab(const std::string &path, int width, int quality, double wait, bool quiet) {
+  ExpireGrab(QpcSeconds());
   if (g_grabState != 0) return false;
   g_grabPath = path;
+  g_grabWidth = width, g_grabQuality = quality, g_grabQuiet = quiet;
+  g_grabWait = wait > 0 ? wait : 1.0;
+  g_grabAsked = QpcSeconds();
   g_grabState = 1;
   return true;
 }

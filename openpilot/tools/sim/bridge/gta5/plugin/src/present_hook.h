@@ -24,8 +24,11 @@ bool Install(std::function<void(const std::string &)> log, std::function<void(co
 void Uninstall();
 // while on, frames with the interleave marker go to onFrame and are replaced on screen
 void SetEnabled(bool on);
-// saves the player's next frame (as the screen shows it) to a 32-bit BMP at path; false while one is pending
-bool RequestGrab(const std::string &path);
+// saves the player's next frame (as the screen shows it) to a 32-bit BMP at path; false while one is pending. It is
+// taken whether or not the hook is enabled (SetEnabled), on any camera. width > 0: saved as a JPEG of that quality
+// instead, at most that wide (2560 gives 1280). One no frame came for within `wait` s is given up. quiet: not logged
+// when it goes well.
+bool RequestGrab(const std::string &path, int width = 0, int quality = 80, double wait = 1.0, bool quiet = false);
 // grabs take this ID3D12Resource of the game's (one of its render targets, in `state` at present) instead of the player's
 // frame; nullptr goes back to the frame
 void SetGrabSource(void *resource, unsigned state);

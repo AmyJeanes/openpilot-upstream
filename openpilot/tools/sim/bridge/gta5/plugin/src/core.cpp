@@ -4028,9 +4028,15 @@ void HandleMessage(const Message &m, double now) {
     bool ok = g_hook == Hook::On && !path.empty() && present_hook::RequestTrace(path, static_cast<unsigned>(MsgNum(m, "state", 0xC0)));
     Log("trace " + path + (ok ? "" : ": not taken (no present hook, no grab source, or one pending)"));
   } else if (type == "grab") {
+    // the player's frame on whatever camera is on, the gameplay camera too. "w": as a JPEG at most that wide ("q": its
+    // quality) instead of a whole BMP; "wait": given up if no frame came within that many s; "quiet": no log when taken
     std::string path = MsgStr(m, "path");
-    bool ok = g_hook == Hook::On && !path.empty() && present_hook::RequestGrab(path);
-    Log("grab " + path + (ok ? "" : ": not taken (no present hook, or one pending)"));
+    if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off)
+      g_hook = present_hook::Install(Log, [](const HookFrame &f) { g_capture.ProcessShared(f); }) ? Hook::On : Hook::Failed;
+    bool quiet = MsgBool(m, "quiet", false);
+    bool ok = g_hook == Hook::On && !path.empty() &&
+              present_hook::RequestGrab(path, static_cast<int>(MsgNum(m, "w", 0)), static_cast<int>(MsgNum(m, "q", 80)), MsgNum(m, "wait", 1.0), quiet);
+    if (!ok || !quiet) Log("grab " + path + (ok ? "" : ": not taken (no present hook, or one pending)"));
   } else if (type == "ortho") {
     // orthographic renders (ortho.cpp): op=scan fov= tol= x= y= z= | dump addr= n= | watch addr= secs=; addr is hex, or exe+hex
     std::string op = MsgStr(m, "op"), a = MsgStr(m, "addr");
