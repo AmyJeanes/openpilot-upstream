@@ -97,6 +97,21 @@ inline void FREEZE_ENTITY_POSITION(Entity e, BOOL t) { Invoke(0x428CA6DBD1094446
 inline void SET_ENTITY_VISIBLE(Entity e, BOOL on, BOOL unk) { Invoke(0xEA1C610A04DB6BBB, e, on, unk); }
 inline void SET_ENTITY_COLLISION(Entity e, BOOL on, BOOL keepPhysics) { Invoke(0x1A9205C1B9EE827F, e, on, keepPhysics); }
 
+// objects and doors (gates, barrier arms). A door's hash is the one a script registered it under (ADD_DOOR_TO_SYSTEM)
+inline BOOL IS_ENTITY_STATIC(Entity e) { return Invoke<BOOL>(0x1218E6886D3D8327, e); }
+inline BOOL DOES_ENTITY_HAVE_PHYSICS(Entity e) { return Invoke<BOOL>(0xDA95EA3317CC5064, e); }
+inline BOOL IS_ENTITY_A_MISSION_ENTITY(Entity e) { return Invoke<BOOL>(0x0A7B270912999B3C, e); }
+inline BOOL GET_MISSION_FLAG() { return Invoke<BOOL>(0xA33CDCCDA663159E); }
+// searches 0.5 m round the place; the hash is written to an 8-byte slot
+inline BOOL DOOR_SYSTEM_FIND_EXISTING_DOOR(float x, float y, float z, Hash model, uint64_t *door) { return Invoke<BOOL>(0x589F80B325CC82C5, x, y, z, model, door); }
+inline BOOL IS_DOOR_REGISTERED_WITH_SYSTEM(Hash door) { return Invoke<BOOL>(0xC153C43EA202C8C1, door); }
+inline float DOOR_SYSTEM_GET_OPEN_RATIO(Hash door) { return Invoke<float>(0x65499865FCA6E5EC, door); }
+inline int DOOR_SYSTEM_GET_DOOR_STATE(Hash door) { return Invoke<int>(0x160AA1B32F6139B8, door); }
+inline int DOOR_SYSTEM_GET_DOOR_PENDING_STATE(Hash door) { return Invoke<int>(0x4BC2854478F3A749, door); }
+inline float DOOR_SYSTEM_GET_AUTOMATIC_DISTANCE(Hash door) { return Invoke<float>(0xE851471AEFC3374F, door); }
+// the nearest door object of the model, registered or not
+inline void GET_STATE_OF_CLOSEST_DOOR_OF_TYPE(Hash model, float x, float y, float z, uint64_t *locked, float *open) { Invoke(0xEDC1A5B84AEF33FF, model, x, y, z, locked, open); }
+
 // vehicles
 inline Hash GET_HASH_KEY(const char *s) { return Invoke<Hash>(0xD24D37CC275948CC, s); }
 // street hashes are written to 8-byte slots

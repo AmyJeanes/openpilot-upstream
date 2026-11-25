@@ -3504,6 +3504,217 @@ void UpdateCalmWater() {
   SET_WIND_SPEED(0.0f);
 }
 
+// *** gates ***
+
+// every object in the game's pool (the props that are entities of their own: doors, gates and barrier arms among
+// them), into handles; -1 without ScriptHookV's pool walk
+using ObjectHandles = std::array<int, 8192>;
+int AllObjects(ObjectHandles &handles) {
+  using GetAll = int (*)(int *, int);
+  static GetAll getAll = [] {
+    HMODULE shv = GetModuleHandleW(L"ScriptHookV.dll");
+    return shv ? reinterpret_cast<GetAll>(GetProcAddress(shv, "?worldGetAllObjects@@YAHPEAHH@Z")) : nullptr;
+  }();
+  int size = static_cast<int>(handles.size());
+  return getAll ? std::clamp(getAll(handles.data(), size), 0, size) : -1;
+}
+
+// Gates, as the map driver knows them (drive.py, gates.json), read as the lights are: the gates command's
+// list="id,x,y,z,r[,model|model...];..." names places (the middle of a gate's line, r m round it, and the models that
+// are its moving parts once they are known: without them every object there at least GATE_LONG m long is reported,
+// which is how they are learnt).
+// The state then carries "gates":{"ok":1,"t":clock,"mission":0|1,"g":[[id,[part,...]],...]} for the places within
+// GATE_NEAR m of the player, read every GATE_EVERY s, each part
+//   [handle, model, kind, x, y, z, pitch, roll, yaw, open, locked, state, static, physics, spin, speed, x0, y0, x1, y1]
+//   kind    1 a door in the game's door system (a script registered it); 2 a door object outside it: one that
+//           GET_STATE_OF_CLOSEST_DOOR_OF_TYPE has called locked or given an open ratio since it was found; 3 the rest
+//           (the game gives 0, 0 for a model that is no door, and for an unlocked door standing shut: a 3 may be either)
+//   open    the door's open ratio (0 shut, to 1 or -1)
+//   locked  0|1 (kind 1: its door-system state is 1, 2, 4 or 6; else as the game says)
+//   state   kind 1: the door-system state (0 unlocked, 1 locked, 2 locked until the player has left, 3 unlocked, 4
+//           locked, 5 open and 6 closed for this frame by a script), else null
+//   spin    deg/s its rotation changed at since the last reading; speed m/s
+//   x0..y1  its model's bounds across and along, in its own frame (m): where it lies, with its place and yaw
+// or {"ok":0,"why"} with no list or no way of walking the object pool. The pool is walked once a GATE_FIND s, and only
+// with a listed place near; the readings between are of the handles it found.
+constexpr float GATE_NEAR = 150.0f;
+constexpr double GATE_EVERY = 0.2, GATE_FIND = 1.0;
+constexpr size_t GATE_PARTS = 24;
+constexpr float GATE_LONG = 1.5f;
+
+struct GatePart {
+  Entity e = 0;
+  Hash model = 0, door = 0;
+  Vector3 rot{};
+  double at = 0;
+  float spin = 0;
+  Vector3 mn{}, mx{};  // its model's bounds
+  bool door2 = false;  // has answered as a door outside the door system
+};
+
+struct GatePlace {
+  int id = 0;
+  float x = 0, y = 0, z = 0, r = 0;
+  std::vector<Hash> models;
+  std::vector<GatePart> parts;
+};
+
+struct Gates {
+  std::vector<GatePlace> list;
+  double nextFind = 0, nextRead = 0;
+  std::string out;
+} g_gates;
+
+struct DoorReading {
+  int kind = 3, locked = -1, state = -1, pending = -1;
+  float open = 0, autoDist = 0;
+  Hash door = 0;
+};
+
+// what the game says of an object as a door; door is its door-system hash where one was found before
+DoorReading ReadDoor(Hash model, const Vector3 &p, Hash door) {
+  DoorReading d;
+  uint64_t h = 0;
+  if (!door && DOOR_SYSTEM_FIND_EXISTING_DOOR(p.x, p.y, p.z, model, &h)) door = static_cast<Hash>(h);
+  if (door && IS_DOOR_REGISTERED_WITH_SYSTEM(door)) {
+    d.kind = 1, d.door = door;
+    d.state = DOOR_SYSTEM_GET_DOOR_STATE(door), d.pending = DOOR_SYSTEM_GET_DOOR_PENDING_STATE(door);
+    d.open = DOOR_SYSTEM_GET_OPEN_RATIO(door), d.autoDist = DOOR_SYSTEM_GET_AUTOMATIC_DISTANCE(door);
+    d.locked = d.state == 1 || d.state == 2 || d.state == 4 || d.state == 6;
+    return d;
+  }
+  // outside the door system: the game answers for the nearest door object of the model, 0 and 0 for a model that is
+  // no door
+  uint64_t locked = 0;
+  float open = 0;
+  GET_STATE_OF_CLOSEST_DOOR_OF_TYPE(model, p.x, p.y, p.z, &locked, &open);
+  d.locked = static_cast<uint32_t>(locked) != 0, d.open = open;
+  if (d.locked || open != 0) d.kind = 2;
+  return d;
+}
+
+float RotChange(const Vector3 &a, const Vector3 &b) {
+  return std::max({std::fabs(WrapDeg(a.x - b.x)), std::fabs(WrapDeg(a.y - b.y)), std::fabs(WrapDeg(a.z - b.z))});
+}
+
+void FindGateParts(const Vector3 &at) {
+  bool any = false;
+  for (GatePlace &g : g_gates.list) {
+    bool inReach = std::hypot(g.x - at.x, g.y - at.y) < GATE_NEAR;
+    if (!inReach) g.parts.clear();
+    std::erase_if(g.parts, [](const GatePart &p) { return !DOES_ENTITY_EXIST(p.e); });
+    any |= inReach;
+  }
+  if (!any) return;
+  static ObjectHandles handles;
+  int n = AllObjects(handles);
+  for (int i = 0; i < n; i++) {
+    Entity e = handles[i];
+    if (!DOES_ENTITY_EXIST(e)) continue;
+    Vector3 p = GET_ENTITY_COORDS(e, FALSE);
+    for (GatePlace &g : g_gates.list) {
+      if (std::hypot(g.x - p.x, g.y - p.y) > g.r || std::fabs(g.z - p.z) > 8.0f || std::hypot(g.x - at.x, g.y - at.y) >= GATE_NEAR) continue;
+      if (g.parts.size() >= GATE_PARTS || std::any_of(g.parts.begin(), g.parts.end(), [&](const GatePart &q) { return q.e == e; })) continue;
+      Hash model = GET_ENTITY_MODEL(e);
+      if (!g.models.empty() && std::find(g.models.begin(), g.models.end(), model) == g.models.end()) continue;
+      GatePart part;
+      part.e = e, part.model = model;
+      GET_MODEL_DIMENSIONS(model, &part.mn, &part.mx);
+      // with no models named, only what is long enough to bar a lane: a busy place has more posts, cones and lamps than GATE_PARTS
+      if (g.models.empty() && std::max(part.mx.x - part.mn.x, part.mx.y - part.mn.y) < GATE_LONG) continue;
+      g.parts.push_back(part);
+    }
+  }
+}
+
+std::string GatesState(double now) {
+  Gates &G = g_gates;
+  if (G.list.empty()) return "\"gates\":{\"ok\":0,\"why\":\"no list\"}";
+  if (now < G.nextRead && !G.out.empty()) return G.out;
+  G.nextRead = now + GATE_EVERY;
+  static ObjectHandles none;
+  static const bool pool = AllObjects(none) >= 0;
+  if (!pool) return G.out = "\"gates\":{\"ok\":0,\"why\":\"no object pool walk (ScriptHookV)\"}";
+  Vector3 at = GET_ENTITY_COORDS(PLAYER_PED_ID(), FALSE);
+  if (now >= G.nextFind) {
+    G.nextFind = now + GATE_FIND;
+    FindGateParts(at);
+  }
+  std::string list;
+  char buf[400];
+  for (GatePlace &g : G.list) {
+    if (std::hypot(g.x - at.x, g.y - at.y) >= GATE_NEAR) continue;
+    std::string parts;
+    for (GatePart &p : g.parts) {
+      if (!DOES_ENTITY_EXIST(p.e)) continue;
+      Vector3 q = GET_ENTITY_COORDS(p.e, FALSE), rot = GET_ENTITY_ROTATION(p.e, 2);
+      if (p.at > 0 && now > p.at) p.spin = RotChange(rot, p.rot) / static_cast<float>(now - p.at);
+      p.rot = rot, p.at = now;
+      DoorReading d = ReadDoor(p.model, q, p.door);
+      p.door = d.door;
+      if (d.kind == 2) p.door2 = true;
+      else if (d.kind == 3 && p.door2) d.kind = 2;
+      std::string open = Num(d.open), locked = std::to_string(d.locked);
+      std::string state = d.state < 0 ? "null" : std::to_string(d.state);
+      snprintf(buf, sizeof(buf), "%s[%d,\"0x%08X\",%d,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%s,%s,%s,%d,%d,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f]", parts.empty() ? "" : ",", p.e, p.model, d.kind,
+               q.x, q.y, q.z, rot.x, rot.y, rot.z, open.c_str(), locked.c_str(), state.c_str(),
+               IS_ENTITY_STATIC(p.e) ? 1 : 0, DOES_ENTITY_HAVE_PHYSICS(p.e) ? 1 : 0, p.spin, GET_ENTITY_SPEED(p.e), p.mn.x, p.mn.y, p.mx.x, p.mx.y);
+      parts += buf;
+    }
+    list += (list.empty() ? "" : ",") + ("[" + std::to_string(g.id) + ",[" + parts + "]]");
+  }
+  return G.out = "\"gates\":{\"ok\":1,\"t\":" + Num(now) + ",\"mission\":" + (GET_MISSION_FLAG() ? "1" : "0") + ",\"g\":[" + list + "]}";
+}
+
+// the gates command's list
+void SetGates(const std::string &text) {
+  std::vector<GatePlace> list;
+  std::stringstream ss(text);
+  std::string item;
+  while (std::getline(ss, item, ';')) {
+    GatePlace g;
+    char models[256] = "";
+    if (sscanf_s(item.c_str(), "%d,%f,%f,%f,%f,%255s", &g.id, &g.x, &g.y, &g.z, &g.r, models, static_cast<unsigned>(sizeof(models))) < 5) continue;
+    std::stringstream ms(models);
+    std::string model;
+    while (std::getline(ms, model, '|'))
+      if (!model.empty()) g.models.push_back(static_cast<Hash>(std::strtoul(model.c_str(), nullptr, 0)));
+    // a place kept from the list before keeps the parts found for it
+    for (GatePlace &old : g_gates.list)
+      if (old.id == g.id && old.x == g.x && old.y == g.y && old.r == g.r && old.models == g.models) g.parts = std::move(old.parts);
+    list.push_back(std::move(g));
+  }
+  g_gates.list = std::move(list);
+  g_gates.nextFind = g_gates.nextRead = 0;
+  g_gates.out.clear();
+}
+
+// The gateprobe command: every object within r m of a place, one log line each, with more than the state carries (its
+// model's size, whether a script owns it, the door system's pending state and automatic distance): for finding out
+// what a gate is made of.
+void GateProbe(const std::string &id, float x, float y, float z, float r) {
+  static ObjectHandles handles;
+  int n = AllObjects(handles), found = 0;
+  for (int i = 0; i < n; i++) {
+    Entity e = handles[i];
+    if (!DOES_ENTITY_EXIST(e)) continue;
+    Vector3 p = GET_ENTITY_COORDS(e, FALSE);
+    if (std::hypot(x - p.x, y - p.y) > r || std::fabs(z - p.z) > 8.0f) continue;
+    Hash model = GET_ENTITY_MODEL(e);
+    Vector3 rot = GET_ENTITY_ROTATION(e, 2), mn{}, mx{};
+    GET_MODEL_DIMENSIONS(model, &mn, &mx);
+    DoorReading d = ReadDoor(model, p, 0);
+    char buf[420];
+    snprintf(buf, sizeof(buf), "gateprobe %s: handle %d model 0x%08X kind %d at %.2f,%.2f,%.2f rot %.1f,%.1f,%.1f size %.2f,%.2f,%.2f..%.2f,%.2f,%.2f static %d physics %d mission %d "
+             "door 0x%08X state %d pending %d open %.3f locked %d auto %.2f",
+             id.c_str(), e, model, d.kind, p.x, p.y, p.z, rot.x, rot.y, rot.z, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, IS_ENTITY_STATIC(e) ? 1 : 0,
+             DOES_ENTITY_HAVE_PHYSICS(e) ? 1 : 0, IS_ENTITY_A_MISSION_ENTITY(e) ? 1 : 0, d.door, d.state, d.pending, d.open, d.locked, d.autoDist);
+    Log(buf);
+    found++;
+  }
+  Log("gateprobe " + id + ": " + std::to_string(found) + " of " + std::to_string(n) + " objects within " + Num(r) + " m of " + Num(x) + "," + Num(y) + "," + Num(z));
+}
+
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
@@ -3537,7 +3748,7 @@ void Publish(double now, bool inVehicle) {
   if (g_free.on) s << "," << FreeCamState();
   std::string witness = Witness(now), lights = LightsState(now);
   RecordLights(now, lights, witness);
-  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << witness << "," << lights
+  s << "," << WorldState(now) << "," << DensityState() << "," << ShadowsState() << "," << ClockState(now) << "," << witness << "," << lights << "," << GatesState(now)
     << "," << PluginState() << "}";
   std::lock_guard lk(g_stateMutex);
   g_state = s.str();
@@ -4583,6 +4794,12 @@ void HandleMessage(const Message &m, double now) {
     g_hands.say = MsgBool(m, "say", g_hands.say);
     Log("hands " + std::string(g_hands.want ? "off the wheel: " : "left alone: ") + g_hands.dict + " / " + g_hands.clip + ", flag " + std::to_string(g_hands.flag) +
         ", arm ik " + (g_hands.armIk ? "on" : "off") + (g_hands.scripted ? ", masks " + g_hands.filter + " kept, " + g_hands.aimFilter + " let go while aiming and " + Num(g_hands.aimHold) + " s after" : std::string(", whole upper body")));
+  } else if (type == "gates") {
+    SetGates(MsgStr(m, "list"));
+    Log("gates: " + std::to_string(g_gates.list.size()) + " places watched");
+  } else if (type == "gateprobe") {
+    GateProbe(MsgStr(m, "id"), static_cast<float>(MsgNum(m, "x")), static_cast<float>(MsgNum(m, "y")), static_cast<float>(MsgNum(m, "z")),
+              std::clamp(static_cast<float>(MsgNum(m, "r", 10.0)), 0.5f, 60.0f));
   } else if (type == "gas") {
     g_testGasUntil = now + MsgNum(m, "secs", 1.0);  // as if the driver pressed the gas
   } else if (type == "lights") {
