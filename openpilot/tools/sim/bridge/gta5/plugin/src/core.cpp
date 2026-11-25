@@ -2556,15 +2556,65 @@ int AllPeds(VehicleHandles &handles) {
 // car's origin for each hit, comma separated pairs in brackets. The hits on ground that faces up are kept beside them
 // (g_obstRise: "x,y,h", h m above the ground under the car): the road rising ahead as a rule, but a trailer's loading
 // ramp or a bank too, which only the map's heights tell from it (the driver has those).
+// Every hit is also kept whole (g_obstRays: "x,y,h,kind,model,nx,ny,nz,ray"), undersides too: kind is the entity's
+// type as the game gives it (0 the map, 1 a ped, 2 a vehicle, 3 an object), model its model's hash (0 for the map),
+// nx, ny the surface's normal m right and forward of the car and nz up (the world's up, not the car's), ray the line
+// that met it (side 0..2 left to right times 3, plus height 0..2 low to top, plus 10 on the lines' far part, plus
+// 100 for a far part's hit behind what the same line's near part met: those are in neither of the other lists).
 constexpr float OBST_AHEAD = 36.0f, OBST_SEG = 12.0f, OBST_LOW = 0.3f, OBST_HIGH = 0.9f, OBST_TOP = 0.15f, OBST_WIDEN = 0.2f, OBST_FACE = 0.6f;
 constexpr double OBST_EVERY = 0.07;  // a round is one half of the lines' length: each half every other round
 constexpr int OBST_FLAGS = 1 | 16;
 
-std::string g_obstRise;
+std::string g_obstRise, g_obstRays;
+
+using ObjectHandles = std::array<int, 8192>;
+int AllObjects(ObjectHandles &handles);
+
+// a model read that cannot take the script down with it
+static int ModelOrFault(Entity e, unsigned *model) {
+  __try {
+    *model = static_cast<unsigned>(GET_ENTITY_MODEL(e));
+    return 1;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+  }
+}
+
+// What a ray's hit entity is: 3 an object, 2 a vehicle, 1 a ped, 0 the map, and its model for the first three. Told by
+// finding the handle in the game's pools, never by asking the game about the handle itself: the handle a probe gives
+// for a hit on the map is no script entity, and GET_ENTITY_TYPE on one faulted in the game and ended the script.
+static int HitKind(Entity e, double now, unsigned *model) {
+  static std::unordered_map<int, int> known;
+  static double next = 0;
+  *model = 0;
+  if (!e) return 0;
+  if (now >= next) {
+    next = now + 0.5;
+    known.clear();
+    static ObjectHandles objects;
+    static VehicleHandles others;
+    int n = AllObjects(objects);
+    for (int i = 0; i < n; i++) known[objects[i]] = 3;
+    n = AllVehicles(others);
+    for (int i = 0; i < n; i++) known[others[i]] = 2;
+    n = AllPeds(others);
+    for (int i = 0; i < n; i++) known[others[i]] = 1;
+  }
+  auto it = known.find(e);
+  if (it == known.end()) return 0;
+  static bool told = false;
+  if (!ModelOrFault(e, model) && !told) {
+    told = true;
+    Log("obstacle rays: a hit entity's model could not be read");
+  }
+  return it->second;
+}
 
 std::string Obstacles(double now) {
   constexpr int SIDES = 3, HEIGHTS = 3;
   static std::array<int, SIDES * HEIGHTS> tests{};  // nine: under the game's ten at once
+  static std::string freshRays, nearRays;
+  static unsigned freshMet = 0, nearMet = 0;  // the lines whose near part met something, a bit each: this round's, the last near round's
   static bool pending = false;
   static double next = 0;
   static bool farHalf = false;  // the round in hand is the lines' far part
@@ -2583,10 +2633,25 @@ std::string Obstacles(double now) {
         waiting = true;
         continue;
       }
+      int line = static_cast<int>(&test - tests.data()), ray = line + (farHalf ? 10 : 0);
       test = 0;
-      if (result != 2 || !hit || normal.z < -OBST_FACE || !v) continue;  // not a thing's underside
+      if (result != 2 || !hit || !v) continue;
+      // a line whose near part met something has its far part behind that: where the road rises the far part
+      // begins under the ground, and meets the upright faces inside it (a bridge's abutment under its deck)
+      bool behind = farHalf && (nearMet >> line & 1);
+      if (!farHalf) freshMet |= 1u << line;
+      if (behind) ray += 100;
       Vector3 rel = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, end.x, end.y, end.z);
-      char buf[64];
+      char buf[160];
+      {
+        unsigned model = 0;
+        int kind = HitKind(e, now, &model);
+        float h = g_m.heading * DEG, up = end.z - (GET_ENTITY_COORDS(v, TRUE).z + bottom);
+        snprintf(buf, sizeof(buf), "%s[%.2f,%.2f,%.2f,%d,%u,%.2f,%.2f,%.2f,%d]", freshRays.empty() ? "" : ",", rel.x, rel.y, up, kind, model,
+                 normal.x * std::cos(h) + normal.y * std::sin(h), -normal.x * std::sin(h) + normal.y * std::cos(h), normal.z, ray);
+        freshRays += buf;
+      }
+      if (behind || normal.z < -OBST_FACE) continue;  // not a thing's underside
       if (normal.z > OBST_FACE) {
         snprintf(buf, sizeof(buf), "%s[%.1f,%.1f,%.2f]", freshRise.empty() ? "" : ",", rel.x, rel.y, end.z - (GET_ENTITY_COORDS(v, TRUE).z + bottom));
         freshRise += buf;
@@ -2599,12 +2664,15 @@ std::string Obstacles(double now) {
     // the list is the last near round's hits and the last far round's
     auto join = [](const std::string &a, const std::string &b) { return a.empty() || b.empty() ? a + b : a + "," + b; };
     if (farHalf) {
-      list = join(nearHits, fresh), g_obstRise = join(nearRise, freshRise);
+      list = join(nearHits, fresh), g_obstRise = join(nearRise, freshRise), g_obstRays = join(nearRays, freshRays);
     } else {
-      nearHits.swap(fresh), nearRise.swap(freshRise);
+      nearHits.swap(fresh), nearRise.swap(freshRise), nearRays.swap(freshRays);
+      nearMet = freshMet;
     }
+    freshMet = 0;
     fresh.clear();
     freshRise.clear();
+    freshRays.clear();
     pending = false;
   }
   if (now < next || !v || !DOES_ENTITY_EXIST(v)) return list;
@@ -2640,7 +2708,8 @@ std::string Obstacles(double now) {
 // same while it exists, for the bridge's tracking) and whether it waits at a red light (or queues behind one, as the AI
 // counts it: IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS); each pedestrian on
 // foot's place and velocity, within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits;
-// "rise":[[x, y, h], ...]: its hits on ground that faces up
+// "rise":[[x, y, h], ...]: its hits on ground that faces up; "rays":[[x, y, h, kind, model, nx, ny, nz, ray], ...]:
+// every hit with what was hit and how its surface faces
 std::string Nearby(double now) {
   static std::string out;
   static double next = 0;
@@ -2710,7 +2779,7 @@ std::string Nearby(double now) {
   }
   out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
         num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "],\"p\":[" + pedList + "],\"obst\":[" +
-        Obstacles(now) + "],\"obstAhead\":" + num(OBST_AHEAD) + ",\"rise\":[" + g_obstRise + "]}";
+        Obstacles(now) + "],\"obstAhead\":" + num(OBST_AHEAD) + ",\"rise\":[" + g_obstRise + "],\"rays\":[" + g_obstRays + "]}";
   return out;
 }
 
@@ -3523,7 +3592,6 @@ void UpdateCalmWater() {
 
 // every object in the game's pool (the props that are entities of their own: doors, gates and barrier arms among
 // them), into handles; -1 without ScriptHookV's pool walk
-using ObjectHandles = std::array<int, 8192>;
 int AllObjects(ObjectHandles &handles) {
   using GetAll = int (*)(int *, int);
   static GetAll getAll = [] {
