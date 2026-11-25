@@ -284,6 +284,8 @@ inline int REQUEST_SCALEFORM_MOVIE(const char *name) { return Invoke<int>(0x11FE
 inline BOOL HAS_SCALEFORM_MOVIE_LOADED(int movie) { return Invoke<BOOL>(0x85F01B8D5B90570E, movie); }
 inline BOOL BEGIN_SCALEFORM_MOVIE_METHOD(int movie, const char *method) { return Invoke<BOOL>(0xF6E48914C7A8694E, movie, method); }
 inline void END_SCALEFORM_MOVIE_METHOD() { Invoke(0xC6796A8FFA375E53); }
+// the big map (the minimap enlarged, as the game's own key shows it); switching it lays the minimap out afresh
+inline void SET_BIGMAP_ACTIVE(BOOL toggleBigMap, BOOL showFullMap) { Invoke(0x231C8F89D0539D8F, toggleBigMap, showFullMap); }
 // GTA's own GPS directions from the player to a point: direction (3 left, 4 right, 5 straight, 6/7 sharp left/right; 1
 // still working it out) and the distance to the next junction in decimetres, written to 8-byte slots
 inline int GENERATE_DIRECTIONS_TO_COORD(float x, float y, float z, BOOL p3, uint64_t *direction, uint64_t *p5, uint64_t *dist) {

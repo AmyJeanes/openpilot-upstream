@@ -1621,6 +1621,9 @@ struct DebugOverlay {
   int polys = 0;                      // drawn last frame
   bool recording = false;  // the bridge is recording: drawn only when forced
   double t = -1e9;         // when the lines came
+  double took = 0, tookMax = 0, tookT = 0;  // s drawing took since tookT, over `draws` frames
+  int draws = 0;
+  double drawMs = 0, drawMaxMs = 0;  // ms a frame, mean and most, over the last 2 s
   DebugOverlay() { std::fill(std::begin(layerWidth), std::end(layerWidth), 1.0f); }
 } g_debug;
 std::atomic<int> g_debugPresses{0};
@@ -1864,9 +1867,10 @@ void SortByDistance(std::vector<DebugLine> &lines, float x, float y) {
   lines.swap(out);
 }
 
-// gta5_overlay.py's polylines: a kind letter, then decimetres from the origin, each point after the first as the change
-// from the one before; polylines separated by ';'
-void ParseDebugGeo(const std::string &s, float ox, float oy, float oz, std::vector<DebugLine> &out, int &vertices) {
+// gta5_overlay.py's polylines: a kind letter, then decimetres (or `step` m) from the origin, each point after the first
+// as the change from the one before; polylines separated by ';'. Densified only for the ground: at the map's heights
+// the points between would lie on the same straight segment, and cost draw calls.
+void ParseDebugGeo(const std::string &s, float ox, float oy, float oz, float step, bool densify, std::vector<DebugLine> &out, int &vertices) {
   out.clear();
   vertices = 0;
   const char *c = s.c_str(), *end = c + s.size();
@@ -1879,14 +1883,14 @@ void ParseDebugGeo(const std::string &s, float ox, float oy, float oz, std::vect
       if (next == c) break;
       c = next;
       acc[n % 3] += v;
-      if (n % 3 == 2) line.pts.push_back({ox + acc[0] * 0.1f, oy + acc[1] * 0.1f, oz + acc[2] * 0.1f});
+      if (n % 3 == 2) line.pts.push_back({ox + acc[0] * step, oy + acc[1] * step, oz + acc[2] * step});
       if (c < end && *c == ',') c++;
     }
     while (c < end && *c != ';') c++;
     if (c < end) c++;
     vertices += static_cast<int>(line.pts.size());
     if (!line.pts.empty()) {
-      Densify(line);
+      if (densify) Densify(line);
       out.push_back(std::move(line));
     }
   }
@@ -2139,7 +2143,8 @@ std::string DebugState(double now) {
          ",\"ground\":" + (d.ground ? "true" : "false") + ",\"thin\":" + (d.thin ? "true" : "false") + ",\"width\":" + Num(d.width) +
          ",\"dist\":" + Num(d.dist) + ",\"grow\":" + Num(d.grow) + ",\"sides\":" + std::to_string(d.sides) + ",\"flip\":" + (d.flip ? "true" : "false") +
          ",\"lines\":" + std::to_string(d.lines.size()) + ",\"vertices\":" + std::to_string(d.vertices) + ",\"polys\":" + std::to_string(d.polys) +
-         ",\"grounded\":" + std::to_string(d.grounded) + ",\"offGround\":" + std::to_string(d.offGround) + ",\"age\":" + Num(std::min(now - d.t, 1e6)) + "}";
+         ",\"grounded\":" + std::to_string(d.grounded) + ",\"offGround\":" + std::to_string(d.offGround) + ",\"age\":" + Num(std::min(now - d.t, 1e6)) +
+         ",\"drawMs\":" + Num(d.drawMs) + ",\"drawMaxMs\":" + Num(d.drawMaxMs) + ",\"cm\":true}";  // cm: debugGeo takes u (numbers to the metre)
 }
 
 // our route as a custom GPS route on the minimap and map (gpsroute command, gps_route in the ini), from the bridge's
@@ -2154,6 +2159,7 @@ struct GpsRoute {
   bool dist = false;
   int minimap = 0;  // the minimap movie's handle
   int gap = 0;      // frames the route stays off the map, for the game to start its sat-nav afresh
+  int bigmap = -1;  // frames the big map stays on to lay the minimap out again after the movie was asked for (0: done)
 } g_gps;
 
 void ShowGpsRoute() {
@@ -2172,14 +2178,23 @@ void ShowGpsRoute() {
 
 // The game has no switch for the sat-nav of a custom route, and a route that doesn't follow the player has it too. It
 // gives the minimap movie the distance anew at each metre, which shows it, so the movie is told to hide it every frame.
+// Asking for the movie leaves the minimap blank (an empty box, until the pause menu lays it out again); the big map
+// shown for a frame lays it out the same way, so that follows each ask.
 void HideGpsDistance() {
+  if (g_gps.bigmap > 0 && --g_gps.bigmap == 0) SET_BIGMAP_ACTIVE(FALSE, FALSE);
   if (g_gps.gap && --g_gps.gap == 0) ShowGpsRoute();
   if (!g_gps.shown || g_gps.dist) return;
   if (!g_gps.minimap) {
     g_gps.minimap = REQUEST_SCALEFORM_MOVIE("minimap");
+    g_gps.bigmap = -1;
     Log("minimap movie " + std::to_string(g_gps.minimap) + ", for the sat-nav");
   }
   if (!g_gps.minimap || !HAS_SCALEFORM_MOVIE_LOADED(g_gps.minimap)) return;
+  if (g_gps.bigmap < 0) {
+    SET_BIGMAP_ACTIVE(TRUE, FALSE);
+    g_gps.bigmap = 2;
+    Log("minimap laid out again after the movie was asked for");
+  }
   if (BEGIN_SCALEFORM_MOVIE_METHOD(g_gps.minimap, "HIDE_SATNAV")) END_SCALEFORM_MOVIE_METHOD();
 }
 
@@ -4351,8 +4366,10 @@ void HandleMessage(const Message &m, double now) {
         ", to " + Num(g_debug.dist) + " m");
   } else if (type == "debugGeo") {
     if (!g_debug.on) return;
+    // u: numbers to the metre (10 unless given: decimetres)
+    float step = 1.0f / static_cast<float>(std::clamp(MsgNum(m, "u", 10), 1.0, 1000.0));
     ParseDebugGeo(MsgStr(m, "g"), static_cast<float>(MsgNum(m, "ox")), static_cast<float>(MsgNum(m, "oy")), static_cast<float>(MsgNum(m, "oz")),
-                  g_debug.lines, g_debug.vertices);
+                  step, g_debug.ground && !g_debug.thin, g_debug.lines, g_debug.vertices);
     P3 at = DebugOrigin();
     SortByDistance(g_debug.lines, at.x, at.y);
     if (g_debug.ground && !g_debug.thin) GroundFromCache(g_debug, now);
@@ -5101,6 +5118,12 @@ extern "C" __declspec(dllexport) void CoreTick() {
     DrawDebug(now);
     double took = QpcSeconds() - t0;
     g_drawSum += took, g_drawMax = std::max(g_drawMax, took);
+    DebugOverlay &d = g_debug;
+    d.took += took, d.tookMax = std::max(d.tookMax, took), d.draws++;
+    if (now - d.tookT >= 2.0) {
+      d.drawMs = 1000 * d.took / std::max(d.draws, 1), d.drawMaxMs = 1000 * d.tookMax;
+      d.took = d.tookMax = 0, d.draws = 0, d.tookT = now;
+    }
   }
   TakeWaypoint(now);
   HideGpsDistance();
@@ -5156,6 +5179,7 @@ extern "C" __declspec(dllexport) void CoreShutdown() {
   ortho::Shutdown();
   g_gps.on = false;  // the route goes with this core; a reloaded one starts from gps_route in the ini
   ShowGpsRoute();
+  if (g_gps.bigmap > 0) SET_BIGMAP_ACTIVE(FALSE, FALSE);
   ReleaseWaypoint(true);  // and gives the map its waypoint back
   if (g_hook == Hook::On) present_hook::Uninstall();
   g_capture.Stop();
