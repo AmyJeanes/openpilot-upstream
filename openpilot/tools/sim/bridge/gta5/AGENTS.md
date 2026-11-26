@@ -65,4 +65,4 @@ From PowerShell on Windows (Visual Studio with the C++ workload), through the WS
   `{"type":"setup","model":"0x0040B009"}`.
 - The game runs the 15 Sep build: the 27 Oct patch broke ScriptHookV (1158.13). If `ScriptHookV.log` stops saying
   1158_13 after a Steam update, copy `GTA5_Enhanced.exe` and `_BE.exe` back from Steam's
-  `steamapps\contentpp_3240220\depot_3240225`.
+  `steamapps\content\app_3240220\depot_3240225`.
