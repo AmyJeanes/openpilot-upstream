@@ -7,7 +7,7 @@ import os, pathlib, struct, zlib, functools
 import numpy as np
 
 TILE, RES, N = 64.0, 0.05, 1280
-MAP = pathlib.Path(os.environ.get('GTA5MAP', '~/gta5map')).expanduser()  # ynddump's paths.jsonl
+MAP = pathlib.Path(os.environ.get('GTA5MAP', os.environ.get('GTA5OP_DATA', '/mnt/e/gta5op') + '/game')).expanduser()  # ynddump's paths.jsonl
 PATHS = MAP / 'paths.jsonl'
 NONE, ROAD, KERB, WALK, GUTTER = 0, 1, 2, 3, 4
 SEG = np.dtype([('x1', '<f4'), ('y1', '<f4'), ('z1', '<f4'), ('x2', '<f4'), ('y2', '<f4'), ('z2', '<f4'), ('w', '<f4'),

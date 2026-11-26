@@ -7,13 +7,11 @@ of height; "end" says what stopped it: kerb, walk, none, step = a height jump, f
 paint lines crossed: offset right of centre, polyline id, colour, style, height."""
 import json, math, os, sys, collections
 import numpy as np
-sys.path.insert(0, "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "roadpaint"))
 import rp
 import src
 
-TILES = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles"
-PAINT = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/polylines.jsonl"
-PATHS = os.path.expanduser("~/gta5map/paths.jsonl")
+TILES, PAINT, PATHS = src.TILES, src.PAINT, src.PATHS
 PED_SPECIALS = {10, 14, 15, 16}
 REACH, DS, ZSTEP = 30.0, 0.05, 0.3
 END = {0: "none", 2: "kerb", 3: "walk", 4: "gutter"}

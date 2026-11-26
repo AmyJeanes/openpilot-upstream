@@ -1,5 +1,7 @@
 # GTA V web map
 
+Moved to the gta5-map repository with the other map tools (see [../README.md](../README.md)); this copy is not updated.
+
 A zoomable map of Los Santos (satellite, hybrid and street views) from the ortho captures, in MapLibre GL with PMTiles.
 The tiles use the repo's lat0 Web Mercator frame (`gframe.py`, the same as `navmodel/frame.py`, lat0 34): z22 is about
 3.1 cm/px, so map zoom 21 with 256 px raster tiles shows the 3 cm captures 1:1.

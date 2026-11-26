@@ -1,12 +1,12 @@
 """surface.py x0 x1 y0 y1 out.jpg: the game files' road-surface raster (roadpaint v2 tiles) over an area, top layer
 left, the layer below it right: road grey, kerb red, pavement tan, gutter orange, paint white/yellow."""
-import sys
+import os, sys
 import numpy as np
 import cv2
-sys.path.insert(0, "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "roadpaint"))
 import rp
 
-D = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles"
+D = os.environ.get("GTA5OP_DATA", "/mnt/e/gta5op") + "/game/files/rp_all/tiles"
 x0, x1, y0, y1 = map(float, sys.argv[1:5])
 step = 0.1
 xs = np.arange(x0, x1, step) + step / 2

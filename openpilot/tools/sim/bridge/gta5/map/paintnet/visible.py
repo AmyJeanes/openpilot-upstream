@@ -13,12 +13,13 @@ import numpy as np
 import cv2
 from pmtiles.reader import MmapSource
 from pmtiles.tile import deserialize_header, deserialize_directory, find_tile, zxy_to_tileid
-sys.path.insert(0, "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "webmap"))
 import gframe
 import scan
 
 Z = 21
-BANDS_JSON = "/mnt/e/gta5_webmap/under_bands/bands.json"
+MAPS = os.environ.get("GTA5OP_DATA", "/mnt/e/gta5op") + "/maps"
+BANDS_JSON = f"{MAPS}/under_bands/bands.json"
 
 
 class Reader:
@@ -40,12 +41,12 @@ class Reader:
       o, n = self.h["leaf_directory_offset"] + r.offset, r.length
 
 
-SRC = {"sat": Reader("/mnt/e/gta5_webmap/sat.pmtiles"), "under": Reader("/mnt/e/gta5_webmap/under.pmtiles")}
+SRC = {"sat": Reader(f"{MAPS}/sat.pmtiles"), "under": Reader(f"{MAPS}/under.pmtiles")}
 # the under-deck imagery by height (undertiles.py --band): under.pmtiles shows the lowest level of a stack, so paint on a
 # middle level is read from the band holding its own height (unknown where no shot shows that level)
 BANDS = json.load(open(BANDS_JSON)) if os.path.exists(BANDS_JSON) else []
 for b in BANDS:
-  SRC[f"z{b['lo']}"] = Reader(f"/mnt/e/gta5_webmap/{b['file']}")
+  SRC[f"z{b['lo']}"] = Reader(f"{MAPS}/{b['file']}")
 
 
 def under_grey(x, y, z):

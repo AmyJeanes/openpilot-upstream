@@ -14,7 +14,7 @@
 # stalls the bridge's frames, and the plugin doesn't draw it on recordings anyway) unless it runs with all of it.
 # openpilot runs alongside, as for record.sh (modeld's outputs and desire input go into gta5.npz; it stays disengaged).
 REPO=${REPO:-$(cd "$(dirname "$0")/../../../../.." && pwd)}
-VENV=${VENV:-$HOME/git/openpilot-slowroads/.venv}  # a worktree has none of its own
+VENV=${VENV:-$REPO/.venv}
 T=~/gta5test
 export BRIDGE_EXTRA="${BRIDGE_EXTRA:-GTA5_EXPERT=1 GTA5_RECORD=/mnt/e/gta5rec GTA5_DEBUG_OVERLAY=off GTA5_GPSROUTE=off}"
 STOP=${STOP:-$T/recruns/STOP}

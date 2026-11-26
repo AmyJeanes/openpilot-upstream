@@ -1,11 +1,15 @@
 """The game-file sources the chain reads (paint lines, markings, GTA's path nodes and links), parsed once per process and
-kept parsed in ~/.cache/paintnet (JSON lines parse in seconds, a pickle loads in a fraction of that)."""
+kept parsed in $GTA5OP_HOME/cache/paintnet (JSON lines parse in seconds, a pickle loads in a fraction of that)."""
 import functools, json, os, pathlib, pickle
 
-PAINT = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/polylines.jsonl"
-FEATS = "/mnt/e/gta5_scratch/gamefiles_v2/rp_all/features.jsonl"
-PATHS = os.path.expanduser("~/gta5map/paths.jsonl")
-CACHE = pathlib.Path("~/.cache/paintnet").expanduser()
+DATA = os.environ.get("GTA5OP_DATA", "/mnt/e/gta5op")
+HOME = os.environ.get("GTA5OP_HOME", os.path.expanduser("~/gta5op"))
+GAME = f"{DATA}/game/files/rp_all"
+PAINT = f"{GAME}/polylines.jsonl"
+FEATS = f"{GAME}/features.jsonl"
+TILES = f"{GAME}/tiles"
+PATHS = f"{DATA}/game/paths.jsonl"
+CACHE = pathlib.Path(HOME) / "cache" / "paintnet"
 
 
 @functools.cache

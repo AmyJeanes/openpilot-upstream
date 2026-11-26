@@ -7,6 +7,11 @@ shows the roads, the car and its route in a browser.
 
 The map is the game's data, so it isn't in the repository; build it from your copy of the game.
 
+**Moved:** the map-building tools `paintnet/`, `webmap/` (with `rangeserver.py`), `roadpaint/` and `imgcheck/` now live
+and are maintained in the gta5-map repository (AmyJeanes/gta5-map). The copies here stay until the plugin and bridge
+leave this fork, and are not updated. Their data paths default to `GTA5OP_DATA` (`/mnt/e/gta5op`) and `GTA5OP_HOME`
+(`~/gta5op`).
+
 ## Building the map
 1. Dump the path nodes and street names from the game's archives with `ynddump` (Windows, .NET 8 SDK). It builds on
    [CodeWalker](https://github.com/dexyfex/CodeWalker)'s library, which reads the Enhanced build from source, and only

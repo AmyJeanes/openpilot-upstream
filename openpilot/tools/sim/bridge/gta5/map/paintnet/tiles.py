@@ -39,10 +39,10 @@ def cells(size, area):
 def warm(boxes):
   """the surface raster tiles every box reads, copied into the cache before boxes run side by side (each copy is
   written once, by one process)."""
-  sys.path[:0] = [str(HERE), "/home/amy/git/openpilot-slowroads/openpilot/tools/sim/bridge/gta5/map/roadpaint"]
+  sys.path[:0] = [str(HERE), str(HERE.parent / "roadpaint")]
   import rp, src
   src.fast_tiles(rp)
-  d = pathlib.Path("/mnt/e/gta5_scratch/gamefiles_v2/rp_all/tiles")
+  d = pathlib.Path(src.TILES)
   names = set(os.listdir(d))
   want = {f"{tx}_{ty}.bin" for x0, x1, y0, y1 in boxes
           for tx in range(math.floor((x0 - 2 * rp.TILE) / rp.TILE), math.floor((x1 + 2 * rp.TILE) / rp.TILE) + 1)
@@ -113,7 +113,7 @@ def run(work, o):
 
 
 def merge(work, dest):
-  sys.path.insert(0, "/home/amy/git/op-ortho/openpilot/tools/sim/bridge/gta5/map/webmap")
+  sys.path.insert(0, str(HERE.parent / "webmap"))
   import numpy as np
   import gframe
   work, dest = pathlib.Path(work), pathlib.Path(dest)
