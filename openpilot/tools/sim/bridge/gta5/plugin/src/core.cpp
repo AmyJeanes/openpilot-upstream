@@ -3367,7 +3367,8 @@ std::string MountState() {
 
 // A camera flown with the mouse and keys (freecam command, F6), for looking around the map. The player (its car, if in
 // one) is held frozen, hidden, without collision and invincible above the camera: the game streams the world and its
-// collision only around the player. Off puts it back where it was.
+// collision only around the player. Off puts it back where it was; T puts it on the surface nearest below the camera,
+// facing the camera's way, and ends the camera as off does.
 struct FreeCam {
   bool on = false, hud = true, day = false;
   Cam cam = 0;
@@ -3384,9 +3385,10 @@ struct FreeCam {
   double inputUntil = 0;
   Entity restoring = 0;  // put back, held frozen until the game has its collision there
   double restoreUntil = 0;
+  bool landing = false;  // the car was put down by T a little over the ground: set on its wheels once let go
   double lockUntil = 0;  // held by a script (freecam lock=secs): the keys and mouse neither move it nor end it
 } g_free;
-std::atomic<int> g_freeToggles{0}, g_freeOffs{0}, g_freeSpeedSteps{0};
+std::atomic<int> g_freeToggles{0}, g_freeOffs{0}, g_freeSpeedSteps{0}, g_freeLands{0};
 bool g_safe = false;  // the "safe" message: the player left be and not to be killed
 bool g_parked = false;  // the park command's state
 
@@ -3414,7 +3416,7 @@ void FreeCamOn() {
   g_top.on = false;  // one script camera at a time
   ortho::BoxOff(Log);
   g_free.held = g_veh.handle ? static_cast<Entity>(g_veh.handle) : static_cast<Entity>(ped);
-  if (g_free.restoring == g_free.held) g_free.restoring = 0;
+  if (g_free.restoring == g_free.held) g_free.restoring = 0, g_free.landing = false;
   g_free.from = GET_ENTITY_COORDS(g_free.held, TRUE);
   g_free.fromHeading = GET_ENTITY_HEADING(g_free.held);
   g_free.parked = g_parked;
@@ -3458,6 +3460,21 @@ void FreeCamOff(double now, bool shutdown) {
   Log("freecam off");
 }
 
+// T: off, with the player (in its car) put on the surface nearest below the camera, a deck rather than the road under
+// it, facing the camera's heading; the camera stays on if nothing below has its collision loaded
+void FreeCamLand(double now) {
+  float ground = 0;
+  if (!GET_GROUND_Z_FOR_3D_COORD(g_free.x, g_free.y, g_free.z, &ground, FALSE, FALSE)) {
+    Log("freecam: no ground under the camera at " + Num(g_free.x) + "," + Num(g_free.y) + "," + Num(g_free.z));
+    return;
+  }
+  g_free.from.x = g_free.x, g_free.from.y = g_free.y, g_free.from.z = ground + 1.0f;
+  g_free.fromHeading = g_free.heading;
+  g_free.landing = g_free.held == static_cast<Entity>(g_veh.handle) && !g_free.parked;
+  Log("freecam: landing at " + Num(g_free.x) + "," + Num(g_free.y) + "," + Num(ground) + " heading " + Num(g_free.heading));
+  FreeCamOff(now, false);
+}
+
 void UpdateFreeCam(double now, float dt) {
   if (g_free.restoring) {
     Entity e = g_free.restoring;
@@ -3465,13 +3482,15 @@ void UpdateFreeCam(double now, float dt) {
     if (!DOES_ENTITY_EXIST(e)) g_free.restoring = 0;
     else if (HAS_COLLISION_LOADED_AROUND_ENTITY(e) || now >= g_free.restoreUntil) {
       FREEZE_ENTITY_POSITION(e, FALSE);
-      g_free.restoring = 0;
+      if (g_free.landing) SET_VEHICLE_ON_GROUND_PROPERLY(e, 5.0f);
+      g_free.restoring = 0, g_free.landing = false;
       Log("freecam: player released");
     }
   }
-  int toggles = g_freeToggles.exchange(0), offs = g_freeOffs.exchange(0), steps = g_freeSpeedSteps.exchange(0);
+  int toggles = g_freeToggles.exchange(0), offs = g_freeOffs.exchange(0), steps = g_freeSpeedSteps.exchange(0), lands = g_freeLands.exchange(0);
   bool locked = g_free.on && now < g_free.lockUntil;
-  if (locked) toggles = offs = steps = 0;
+  if (locked) toggles = offs = steps = lands = 0;
+  if (g_free.on && lands) FreeCamLand(now);
   if (g_free.on && (offs || toggles % 2)) return FreeCamOff(now, false);
   if (!g_free.on && toggles % 2) FreeCamOn(), Log("freecam on (key) at " + Num(g_free.x) + "," + Num(g_free.y) + "," + Num(g_free.z));
   if (!g_free.on) return;
@@ -3534,7 +3553,7 @@ void UpdateFreeCam(double now, float dt) {
              g_free.pitch, g_free.speed);
     DrawText(line, 0.985f, 0.015f, 0.38f, 255, 255, 255);
     // the game cuts a text component at 99 characters
-    DrawText("WASD, mouse, Space/E up, Ctrl/Q down, Shift x4, Alt x0.25, wheel or +/- speed, F6 off", 0.985f, 0.045f, 0.3f, 200, 200, 200);
+    DrawText("WASD, mouse, Space/E up, Ctrl/Q down, Shift x4, Alt x0.25, wheel/+/- speed, T land here, F6 off", 0.985f, 0.045f, 0.3f, 200, 200, 200);
   }
 }
 
@@ -5317,7 +5336,8 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   else if (static_cast<int>(key) == g_cfg.keyRules) g_rulesPresses++;
   else if (static_cast<int>(key) == g_cfg.keyTraffic) g_trafficPresses++;
   else if (key == VK_F6) g_freeToggles++;
-  else if (key == VK_BACK) g_freeOffs++;  // these three count only while the free camera is on
+  else if (key == VK_BACK) g_freeOffs++;  // these four count only while the free camera is on
+  else if (key == 'T') g_freeLands++;
   else if (key == VK_OEM_PLUS || key == VK_ADD) g_freeSpeedSteps++;
   else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) g_freeSpeedSteps--;
 }
