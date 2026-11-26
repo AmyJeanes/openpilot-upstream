@@ -56,6 +56,5 @@ From PowerShell on Windows (Visual Studio with the C++ workload), through the WS
   `camera forward=` and similar are not saved until restart; likewise it cannot replace a sound file.
 - F5-F8 are GTA's character switch, so openpilot uses Insert. The Home key freezes the game: never send it.
 - The repo's relative `.venv/bin/git-lfs` filter leaves LFS pointer files in new worktrees (sounds then play as
-  silence). Create worktrees with `-c filter.lfs.smudge= ...` style overrides (`-c filter.lfs.*`) pointing at the
-  system `git-lfs`, then `git lfs pull`.
-- Rendering textures mid-frame fails on the 3X (nav UI); render at the frame boundary instead.
+  silence). Create worktrees with `-c filter.lfs.*` overrides, then `git lfs pull`.
+- Rendering textures mid-frame fails on the 3X (nav UI).
