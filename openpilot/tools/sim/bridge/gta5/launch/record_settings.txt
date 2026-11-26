@@ -1,0 +1,6 @@
+# The AI expert's settings for record_run.py (gta5_cmd.py expert options, k=v), read again before each trip.
+# The tuned G1 set (notes/ai_tune_runs.txt); without this file record_run.py uses the same.
+task=coord speed=18 ramp=1.0 lead=3 launch=1.5 decel=0.8 turn_speed=4 arrive=gentle targets=smooth speed_by_class=residential:10,service:8,primary:12,trunk:16,motorway:18,ramp:12,default:10 decel_fast=0.6
+ahead_min=100 ahead_max=160 speed_step=0.2 style=1075845291 unstick=1 ability=1.0
+# speed is a ceiling; speed_by_class caps each road class (Valhalla classes) below it and decel_fast slows gently
+# from above 12 m/s (b5fff7520).
