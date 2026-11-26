@@ -378,6 +378,7 @@ inline void DISPLAY_ONSCREEN_KEYBOARD(int type, const char *title, const char *p
 }
 inline int UPDATE_ONSCREEN_KEYBOARD() { return Invoke<int>(0x0CF2B696BBF945AE); }  // 0 typing, 1 entered, 2 cancelled
 inline const char *GET_ONSCREEN_KEYBOARD_RESULT() { return Invoke<const char *>(0x8362B09B91893647); }
+inline void CANCEL_ONSCREEN_KEYBOARD() { Invoke(0x58A39BE597CE99CD); }
 inline void BEGIN_TEXT_COMMAND_DISPLAY_TEXT(const char *fmt) { Invoke(0x25FBB336DF1804CB, fmt); }
 inline void ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(const char *s) { Invoke(0x6C188BE134E074AA, s); }
 inline void END_TEXT_COMMAND_DISPLAY_TEXT(float x, float y, int p2) { Invoke(0xCD015E5BB0D96A57, x, y, p2); }

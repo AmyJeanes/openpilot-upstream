@@ -1537,6 +1537,7 @@ void MarkNote(double now) {
       g_markPending = now, g_markReady = false;
     }
     if (!g_markReady && g_link.Connected() && now - g_markPending < MARK_WAIT_S) return;
+    Log("mark: the text box opens " + Num(now - g_markPending) + " s after the key" + (g_markReady ? "" : ", without word of the pictures"));
     g_markPending = 0;
     DISPLAY_ONSCREEN_KEYBOARD(0, "", "", "", "", "", "", 250);  // no stock title: they name a length that is not this one
     g_typing = true;
@@ -4810,6 +4811,11 @@ void HandleMessage(const Message &m, double now) {
     g_markPresses++;  // as if the mark key were pressed
   } else if (type == "markReady") {
     g_markReady = true;  // the bridge has its pictures of a mark: the note's text box may open
+  } else if (type == "markNote") {
+    // tests: the text box closed as Enter closes it, with this note (posted keys never reach the game's text box)
+    CANCEL_ONSCREEN_KEYBOARD();
+    if (g_typing) g_markNote = MsgStr(m, "note"), g_markPresses++, g_typing = false, g_markAsk = 0;
+    Log("markNote: the text box closed");
   } else if (type == "cruise") {
     // as if the cruise speed keys were pressed: up or down, by 5 with five=1
     auto &k = MsgStr(m, "dir") == "up" ? g_speedUp : g_speedDown;
