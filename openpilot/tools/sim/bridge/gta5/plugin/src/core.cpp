@@ -1567,9 +1567,11 @@ std::string MarkState() {
          ",\"markNote\":\"" + note + "\",\"markFor\":\"" + (g_markDrive ? "drive" : "mark") + "\"";
 }
 
-// The record key (F9) or the record command starts and stops a recording of the player's own driving: the bridge logs
-// the car's path while the state says `recording`, and at the stop asks for a note in the mark's box (Enter keeps the
-// drive, Esc drops it). Only while the player drives: never while the map driver's controls or the AI drive the car.
+// The record key (F9) or the record command starts and stops a recording of the player's own driving, and at the stop
+// asks for a note in the mark's box (Enter keeps the drive, Esc drops it). Only while the player drives: never while
+// the map driver's controls or the AI drive the car. The car is sampled here every REC_EVERY s and the samples are
+// kept till the next recording; the state carries those the bridge has not said it has (recHave), REC_CHUNK at a time,
+// so neither the state's rate nor a slow link loses any.
 std::atomic<int> g_recPresses{0};
 struct Recording {
   bool on = false;
@@ -1579,7 +1581,13 @@ struct Recording {
   Vector3 last{};
   std::string say;  // why it stopped short or would not start, shown for a moment
   double sayUntil = 0;
+  int id = 0;  // recordings started
+  std::vector<std::array<float, 6>> pts;  // x, y, z, heading, speed, s since the start
+  double nextPt = 0;
+  size_t have = 0;  // samples the bridge has
 } g_rec;
+constexpr double REC_EVERY = 0.1;
+constexpr size_t REC_CHUNK = 100;
 constexpr float REC_MIN_M = 10.0f;   // a shorter drive is dropped without a note
 constexpr float REC_JUMP_M = 30.0f;  // a step this long in a frame is the car set down elsewhere, not driven
 
@@ -1595,10 +1603,12 @@ void StepRecord(Vehicle v, double now) {
       Log("record: refused, " + no);
       return;
     }
-    g_rec.on = true, g_rec.t0 = now, g_rec.m = 0, g_rec.last = g_m.pos;
+    g_rec.on = true, g_rec.t0 = g_rec.nextPt = now, g_rec.m = 0, g_rec.last = g_m.pos;
+    g_rec.id++, g_rec.pts.clear(), g_rec.have = 0;
     Log("record: on at " + Vec(g_m.pos));
   } else if (g_rec.on && (!want || driven || !v)) {
     g_rec.on = false;
+    if (v) g_rec.pts.push_back({g_m.pos.x, g_m.pos.y, g_m.pos.z, g_m.heading, g_m.v, static_cast<float>(now - g_rec.t0)});
     bool keep = g_rec.m >= REC_MIN_M;
     Log("record: off after " + Num(now - g_rec.t0) + " s and " + Num(g_rec.m) + " m" +
         (driven ? ", the map driver took the car" : !v ? ", out of the car" : "") + (keep ? "" : ": too short, dropped"));
@@ -1609,12 +1619,24 @@ void StepRecord(Vehicle v, double now) {
     float step = std::hypot(g_m.pos.x - g_rec.last.x, g_m.pos.y - g_rec.last.y, g_m.pos.z - g_rec.last.z);
     if (step < REC_JUMP_M) g_rec.m += step;
     g_rec.last = g_m.pos;
+    if (now >= g_rec.nextPt) {
+      g_rec.pts.push_back({g_m.pos.x, g_m.pos.y, g_m.pos.z, g_m.heading, g_m.v, static_cast<float>(now - g_rec.t0)});
+      g_rec.nextPt = std::max(g_rec.nextPt + REC_EVERY, now);
+    }
   }
 }
 
 std::string RecState(double now) {
-  return std::string(",\"recording\":") + (g_rec.on ? "true" : "false") + ",\"recT\":" + Num(g_rec.on ? now - g_rec.t0 : 0) +
-         ",\"recM\":" + Num(g_rec.m);
+  std::string out = std::string(",\"recording\":") + (g_rec.on ? "true" : "false") + ",\"recT\":" + Num(g_rec.on ? now - g_rec.t0 : 0) +
+                    ",\"recM\":" + Num(g_rec.m) + ",\"recId\":" + std::to_string(g_rec.id) + ",\"recN\":" + std::to_string(g_rec.pts.size()) +
+                    ",\"recFrom\":" + std::to_string(g_rec.have) + ",\"recPts\":[";
+  char buf[96];
+  for (size_t i = g_rec.have; i < std::min(g_rec.pts.size(), g_rec.have + REC_CHUNK); i++) {
+    const auto &q = g_rec.pts[i];
+    snprintf(buf, sizeof(buf), "%s[%.2f,%.2f,%.2f,%.1f,%.2f,%.2f]", i > g_rec.have ? "," : "", q[0], q[1], q[2], q[3], q[4], q[5]);
+    out += buf;
+  }
+  return out + "]";
 }
 
 // "REC" with the time and distance so far, at the top right under the free camera's lines
@@ -4880,6 +4902,9 @@ void HandleMessage(const Message &m, double now) {
     g_markPresses++;  // as if the mark key were pressed
   } else if (type == "record") {
     g_rec.want = m.count("on") ? (MsgBool(m, "on") ? 1 : 0) : (g_rec.on ? 0 : 1);  // as the record key, or on or off
+  } else if (type == "recHave") {
+    // the bridge has this recording's first n samples (any fewer than it was sent: they are sent again)
+    if (static_cast<int>(MsgNum(m, "id", -1)) == g_rec.id) g_rec.have = std::min(static_cast<size_t>(std::max(MsgNum(m, "n", 0), 0.0)), g_rec.pts.size());
   } else if (type == "markReady") {
     g_markReady = true;  // the bridge has its pictures of a mark: the note's text box may open
   } else if (type == "markNote") {
