@@ -66,3 +66,8 @@ From PowerShell on Windows (Visual Studio with the C++ workload), through the WS
 - The game runs the 15 Sep build: the 27 Oct patch broke ScriptHookV (1158.13). If `ScriptHookV.log` stops saying
   1158_13 after a Steam update, copy `GTA5_Enhanced.exe` and `_BE.exe` back from Steam's
   `steamapps\content\app_3240220\depot_3240225`.
+- The plugin's keys (End, F6, T, ...) can be tested without focusing the game: a `PostMessage` WM_KEYDOWN to its
+  window reaches ScriptHookV's key handler. The game's own text box never sees posted keys; close it with the debug
+  message `{"type":"markNote","note":"..."}`.
+- A plugin-only build needs no LFS files: a worktree checked out with the LFS smudge skipped builds and installs (the
+  install only warns that the sounds are pointers and leaves the installed ones).
