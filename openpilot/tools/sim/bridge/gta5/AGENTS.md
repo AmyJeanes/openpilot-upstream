@@ -29,7 +29,7 @@ AmyJeanes/openpilot-upstream), checkout `~/gta5op/openpilot`. Only commit and pu
 From PowerShell on Windows (Visual Studio with the C++ workload), through the WSL share:
 
 ```powershell
-& '\wsl.localhost\Ubuntu\home\amy\gta5op\openpilot\openpilot\tools\sim\bridge\gta5\plugin\build.ps1' -Install -Label x
+& '\\wsl.localhost\Ubuntu\home\amy\gta5op\openpilot\openpilot\tools\sim\bridge\gta5\plugin\build.ps1' -Install -Label x
 ```
 
 - `-Label` is a word (letters, digits, dots, hyphens) that goes into the core's file name, the log's init line and the
@@ -42,7 +42,7 @@ From PowerShell on Windows (Visual Studio with the C++ workload), through the WS
   and every core of that run; the newest twenty are kept. The bridge state's `plugin` names the running core, build
   and log.
 - The build compiles a local copy of the source, with its cache in `%LOCALAPPDATA%\gta5op` (`src`, `build`), because
-  MSVC and CMake handle `\wsl.localhost` badly.
+  MSVC and CMake handle `\\wsl.localhost` badly.
 - A "vswhere.exe is not recognized" line in the output is harmless; the build still runs.
 
 ## Do not retry
