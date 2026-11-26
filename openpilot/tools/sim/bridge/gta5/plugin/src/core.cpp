@@ -1520,14 +1520,24 @@ void DrawMarked(double now) {
   if (now < until) DrawText("Bookmarked " + std::to_string(n), 0.985f, 0.69f, 0.55f, 255, 210, 80);
 }
 
-// The mark key asks for a note in the game's own text box: Enter keeps the mark (the note may be empty), Esc drops it
+// The mark key asks for a note in the game's own text box: Enter keeps the mark (the note may be empty), Esc drops it.
+// The box waits (markPending) until the bridge has its pictures of the moment, which it says with markReady, or for
+// MARK_WAIT_S at most: a grab hides the HUD but not the box
 std::atomic<int> g_markAsk{0};
 std::atomic<bool> g_typing{false};  // the text box is up: keys are the note's, not the plugin's
 std::string g_markNote;
+double g_markPending = 0;  // when the key was pressed, while the box waits
+bool g_markReady = false;
+constexpr double MARK_WAIT_S = 2.0;
 
-void MarkNote() {
+void MarkNote(double now) {
   if (!g_typing) {
-    if (!g_markAsk.exchange(0)) return;
+    if (!g_markPending) {
+      if (!g_markAsk.exchange(0)) return;
+      g_markPending = now, g_markReady = false;
+    }
+    if (!g_markReady && g_link.Connected() && now - g_markPending < MARK_WAIT_S) return;
+    g_markPending = 0;
     DISPLAY_ONSCREEN_KEYBOARD(0, "", "", "", "", "", "", 250);  // no stock title: they name a length that is not this one
     g_typing = true;
     return;
@@ -1547,7 +1557,8 @@ std::string MarkState() {
   std::string note;
   for (char c : g_markNote)
     if (c >= 32 && c < 127) note += c == '"' ? '\'' : c == '\\' ? '/' : c;
-  return std::string(",\"marking\":") + (g_typing ? "true" : "false") + ",\"markNote\":\"" + note + "\"";
+  return std::string(",\"marking\":") + (g_typing ? "true" : "false") + ",\"markPending\":" + (g_markPending ? "true" : "false") +
+         ",\"markNote\":\"" + note + "\"";
 }
 
 // The map page's flags (flags command), each a pillar in its state's colour with its number and note above it
@@ -4778,6 +4789,8 @@ void HandleMessage(const Message &m, double now) {
     g_engagePresses++;  // as if the engage key were pressed
   } else if (type == "mark") {
     g_markPresses++;  // as if the mark key were pressed
+  } else if (type == "markReady") {
+    g_markReady = true;  // the bridge has its pictures of a mark: the note's text box may open
   } else if (type == "cruise") {
     // as if the cruise speed keys were pressed: up or down, by 5 with five=1
     auto &k = MsgStr(m, "dir") == "up" ? g_speedUp : g_speedDown;
@@ -5207,7 +5220,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   bool clear = (g_debug.keyOff && !g_debug.on) || (g_shot.on && g_shot.lines);
   if (view < 0 && !clear) DrawPins();
   if (view < 0 && !clear) DrawFlags();
-  if (view < 0) MarkNote();
+  if (view < 0) MarkNote(now);
   if (int presses = g_debugPresses.exchange(0)) {
     static const char *const LEVELS[] = {"off", "route ahead", "full"};
     g_debug.level = (g_debug.level + presses) % 3;
