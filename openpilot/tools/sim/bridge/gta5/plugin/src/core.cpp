@@ -299,6 +299,18 @@ struct Hud {
   double t = -1e9;
 } g_hud;
 
+// A grab asked for with hud=0 or lines=0 (flag pictures): the HUD and the plugin's text, or the map's lines, flags and
+// pins, are hidden from the tick it comes on, and the grab is asked of the present hook SHOT_TICKS ticks later, once frames
+// drawn without them reach the screen; hidden until the grab has its frame or is given up
+struct Shot {
+  bool on = false, hud = false, lines = false, armed = false;  // hud, lines: hidden
+  int ticks = 0, w = 0, q = 80;
+  std::string path;
+  double wait = 1.0, until = 0;
+  bool quiet = false;
+} g_shot;
+constexpr int SHOT_TICKS = 3;
+
 // the bridge's latest event text (an engage, a hand-back and why), below the set speed until it expires
 struct HudEvent {
   std::string text;
@@ -1399,6 +1411,7 @@ void UpdateIndicator() {
 }
 
 void DrawText(const std::string &text, float x, float y, float scale, int r, int g, int b, int a = 255) {
+  if (g_shot.on && g_shot.hud) return;
   SET_TEXT_FONT(4);
   SET_TEXT_SCALE(scale, scale);
   SET_TEXT_COLOUR(r, g, b, a);
@@ -1408,6 +1421,23 @@ void DrawText(const std::string &text, float x, float y, float scale, int r, int
   BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING");
   ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME(text.c_str());
   END_TEXT_COMMAND_DISPLAY_TEXT(0.0f, y, 0);
+}
+
+// a grab with the HUD or the map's lines hidden (g_shot): asked of the present hook once they have been hidden for
+// SHOT_TICKS ticks, and over once it has its frame or is given up
+void StepShot(double now) {
+  if (!g_shot.on) return;
+  if (!g_shot.armed) {
+    if (++g_shot.ticks < SHOT_TICKS) return;
+    g_shot.armed = present_hook::RequestGrab(g_shot.path, g_shot.w, g_shot.q, g_shot.wait, g_shot.quiet);
+    if (!g_shot.armed) {
+      Log("grab " + g_shot.path + ": not taken (one pending)");
+      g_shot.on = false;
+    }
+    g_shot.until = now + g_shot.wait + 0.5;
+    return;
+  }
+  if (!present_hook::GrabWaiting() || now > g_shot.until) g_shot.on = false;
 }
 
 // the car's speed and openpilot's set speed at the right of the screen, green while engaged, and the bridge's last event
@@ -4464,9 +4494,14 @@ void HandleMessage(const Message &m, double now) {
     std::string path = MsgStr(m, "path");
     if (g_cfg.interleave && g_cfg.presentHook && g_hook == Hook::Off)
       g_hook = present_hook::Install(Log, [](const HookFrame &f) { g_capture.ProcessShared(f); }) ? Hook::On : Hook::Failed;
-    bool quiet = MsgBool(m, "quiet", false);
-    bool ok = g_hook == Hook::On && !path.empty() &&
-              present_hook::RequestGrab(path, static_cast<int>(MsgNum(m, "w", 0)), static_cast<int>(MsgNum(m, "q", 80)), MsgNum(m, "wait", 1.0), quiet);
+    // "hud": 0 hides the HUD and the plugin's text, "lines": 0 the map's lines, flags and pins, for the frame (StepShot)
+    bool quiet = MsgBool(m, "quiet", false), hud = MsgBool(m, "hud", true), lines = MsgBool(m, "lines", true);
+    int w = static_cast<int>(MsgNum(m, "w", 0)), q = static_cast<int>(MsgNum(m, "q", 80));
+    bool ok = g_hook == Hook::On && !path.empty() && !g_shot.on;
+    if (ok && (!hud || !lines))
+      g_shot = Shot{true, !hud, !lines, false, 0, w, q, path, MsgNum(m, "wait", 1.0), 0, quiet};
+    else
+      ok = ok && present_hook::RequestGrab(path, w, q, MsgNum(m, "wait", 1.0), quiet);
     if (!ok || !quiet) Log("grab " + path + (ok ? "" : ": not taken (no present hook, or one pending)"));
   } else if (type == "ortho") {
     // orthographic renders (ortho.cpp): op=scan fov= tol= x= y= z= | dump addr= n= | watch addr= secs=; addr is hex, or exe+hex
@@ -5135,6 +5170,8 @@ extern "C" __declspec(dllexport) void CoreTick() {
   UpdateCalmWater();
   int view = g_cam ? UpdateCameraFrame(now, dt, hooked && g_cfg.splitViews) : -1;
   if (view < 0 && g_top.on && !g_top.hud) HIDE_HUD_AND_RADAR_THIS_FRAME();
+  StepShot(now);
+  if (view < 0 && g_shot.on && g_shot.hud) HIDE_HUD_AND_RADAR_THIS_FRAME(), HIDE_HELP_TEXT_THIS_FRAME(), THEFEED_HIDE_THIS_FRAME();
   // The wide lens reaches the radar in the corner, so the capture blacks it out. Hiding the radar on openpilot's frames
   // moves the feed down onto its place and back, so notifications jump on the player's screen.
   if (IS_RADAR_HIDDEN()) {
@@ -5167,7 +5204,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (connected && v && view < 0 && (g_top.hud || !g_top.on) && !g_free.on) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
   // the overlay key's "off" is for watching the drive: the flags and pins go too, until the key or a debug command
-  bool clear = g_debug.keyOff && !g_debug.on;
+  bool clear = (g_debug.keyOff && !g_debug.on) || (g_shot.on && g_shot.lines);
   if (view < 0 && !clear) DrawPins();
   if (view < 0 && !clear) DrawFlags();
   if (view < 0) MarkNote();
@@ -5181,7 +5218,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
     Log(std::string("debug ") + LEVELS[g_debug.level] + " (key)");
   }
   // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
-  if (view < 0) {
+  if (view < 0 && !(g_shot.on && g_shot.lines)) {
     double t0 = QpcSeconds();
     DrawDebug(now);
     double took = QpcSeconds() - t0;

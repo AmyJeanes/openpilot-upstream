@@ -1008,6 +1008,8 @@ bool RequestGrab(const std::string &path, int width, int quality, double wait, b
   return true;
 }
 
+bool GrabWaiting() { return g_grabState == 1; }
+
 bool Reused(uint64_t n) { return g_recorded - n >= FRAMES - 1; }
 
 bool RequestTrace(const std::string &path, unsigned assumedState) {

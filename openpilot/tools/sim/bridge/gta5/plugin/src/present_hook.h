@@ -29,6 +29,8 @@ void SetEnabled(bool on);
 // instead, at most that wide (2560 gives 1280). One no frame came for within `wait` s is given up. quiet: not logged
 // when it goes well.
 bool RequestGrab(const std::string &path, int width = 0, int quality = 80, double wait = 1.0, bool quiet = false);
+// whether a grab asked for still waits for its frame
+bool GrabWaiting();
 // grabs take this ID3D12Resource of the game's (one of its render targets, in `state` at present) instead of the player's
 // frame; nullptr goes back to the frame
 void SetGrabSource(void *resource, unsigned state);
