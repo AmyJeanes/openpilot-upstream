@@ -2,7 +2,7 @@
 
 Drives GTA V Enhanced with openpilot. [README.md](README.md) is the user-facing guide (setup, running, controls,
 commands); this file is what an agent needs beyond it. Work happens on branch `gta5` (tracks `fork/gta5` on
-AmyJeanes/openpilot-upstream), checkout `~/gta5op/openpilot`. Only commit and push when Amy says so.
+AmyJeanes/openpilot-upstream), checkout `~/gta5op/openpilot`. Agents may commit and push `gta5` once tests pass; never rewrite or delete `keep/*`.
 
 ## What lives here
 
@@ -56,3 +56,13 @@ From PowerShell on Windows (Visual Studio with the C++ workload), through the WS
 - The repo's relative `.venv/bin/git-lfs` filter leaves LFS pointer files in new worktrees (sounds then play as
   silence). Create worktrees with `-c filter.lfs.*` overrides, then `git lfs pull`.
 - Rendering textures mid-frame fails on the 3X (nav UI).
+- Build the checkout with `MODELD_DEV=CUDA scons`: plain `scons` recompiles the model pkls for CPU and modeld then
+  dies with a JitError. Compile pkls with BEAM=2.
+
+## Facts
+
+- Amy's Model 3 car mod is model `0x0040B009`; respawn it with the debug command
+  `{"type":"setup","model":"0x0040B009"}`.
+- The game runs the 15 Sep build: the 27 Oct patch broke ScriptHookV (1158.13). If `ScriptHookV.log` stops saying
+  1158_13 after a Steam update, copy `GTA5_Enhanced.exe` and `_BE.exe` back from Steam's
+  `steamapps\contentpp_3240220\depot_3240225`.
