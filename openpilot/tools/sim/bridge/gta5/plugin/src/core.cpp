@@ -75,6 +75,7 @@ struct Config {
   int keySpeedDown = VK_DOWN;
   int keyDebug = VK_DELETE;  // the map debug overlay: off, the route ahead alone, every layer, in turn
   int keyMark = VK_END;  // a bookmark: the bridge logs where and when, for review
+  int keyRecord = VK_F9;  // the player's own drive recorded for the map, on and off
   int keyRules = VK_NEXT;  // Page Down: the map driver heeds stop signs and lights, or does not (Home freezes the game until Esc)
   int keyTraffic = VK_PRIOR;  // Page Up: the map driver's traffic mode (the game's traffic left on, and heeded), on or off
   int keyTest = VK_INSERT;  // Ctrl+Insert: a test press, counted for the map driver
@@ -434,6 +435,7 @@ void ReadConfig() {
   c.keySpeedDown = key("key_speed_down", c.keySpeedDown);
   c.keyDebug = key("key_debug", c.keyDebug);
   c.keyMark = key("key_mark", c.keyMark);
+  c.keyRecord = key("key_record", c.keyRecord);
   c.keyRules = key("key_rules", c.keyRules);
   c.keyTraffic = key("key_traffic", c.keyTraffic);
   std::string test = str("key_test", "");  // a code, or ctrl+ and a code
@@ -1529,15 +1531,18 @@ std::string g_markNote;
 double g_markPending = 0;  // when the key was pressed, while the box waits
 bool g_markReady = false;
 constexpr double MARK_WAIT_S = 2.0;
+// a recorded drive's note uses the same box (StepRecord): its pictures were taken as the drive began, so it opens at once
+bool g_driveNote = false;  // the next box asked for is a drive's
+bool g_markDrive = false;  // the box up, or last up, is a drive's: the state's markFor
 
 void MarkNote(double now) {
   if (!g_typing) {
     if (!g_markPending) {
       if (!g_markAsk.exchange(0)) return;
-      g_markPending = now, g_markReady = false;
+      g_markPending = now, g_markReady = g_markDrive = g_driveNote, g_driveNote = false;
     }
     if (!g_markReady && g_link.Connected() && now - g_markPending < MARK_WAIT_S) return;
-    Log("mark: the text box opens " + Num(now - g_markPending) + " s after the key" + (g_markReady ? "" : ", without word of the pictures"));
+    Log(std::string(g_markDrive ? "drive" : "mark") + ": the text box opens " + Num(now - g_markPending) + " s after the key" + (g_markReady ? "" : ", without word of the pictures"));
     g_markPending = 0;
     DISPLAY_ONSCREEN_KEYBOARD(0, "", "", "", "", "", "", 250);  // no stock title: they name a length that is not this one
     g_typing = true;
@@ -1559,7 +1564,71 @@ std::string MarkState() {
   for (char c : g_markNote)
     if (c >= 32 && c < 127) note += c == '"' ? '\'' : c == '\\' ? '/' : c;
   return std::string(",\"marking\":") + (g_typing ? "true" : "false") + ",\"markPending\":" + (g_markPending ? "true" : "false") +
-         ",\"markNote\":\"" + note + "\"";
+         ",\"markNote\":\"" + note + "\",\"markFor\":\"" + (g_markDrive ? "drive" : "mark") + "\"";
+}
+
+// The record key (F9) or the record command starts and stops a recording of the player's own driving: the bridge logs
+// the car's path while the state says `recording`, and at the stop asks for a note in the mark's box (Enter keeps the
+// drive, Esc drops it). Only while the player drives: never while the map driver's controls or the AI drive the car.
+std::atomic<int> g_recPresses{0};
+struct Recording {
+  bool on = false;
+  int want = -1;  // the record command's: 1 start, 0 stop
+  double t0 = 0;
+  float m = 0;  // driven so far
+  Vector3 last{};
+  std::string say;  // why it stopped short or would not start, shown for a moment
+  double sayUntil = 0;
+} g_rec;
+constexpr float REC_MIN_M = 10.0f;   // a shorter drive is dropped without a note
+constexpr float REC_JUMP_M = 30.0f;  // a step this long in a frame is the car set down elsewhere, not driven
+
+void StepRecord(Vehicle v, double now) {
+  int presses = g_recPresses.exchange(0);
+  bool want = g_rec.want >= 0 ? g_rec.want == 1 : (presses % 2 ? !g_rec.on : g_rec.on);
+  g_rec.want = -1;
+  bool driven = g_ctl.wasLive || g_ai.on;
+  if (want && !g_rec.on) {
+    std::string no = !v ? "not on foot" : driven ? "not while the map driver drives" : g_typing || g_markPending ? "not while a note is asked for" : "";
+    if (!no.empty()) {
+      g_rec.say = "REC: " + no, g_rec.sayUntil = now + 3.0;
+      Log("record: refused, " + no);
+      return;
+    }
+    g_rec.on = true, g_rec.t0 = now, g_rec.m = 0, g_rec.last = g_m.pos;
+    Log("record: on at " + Vec(g_m.pos));
+  } else if (g_rec.on && (!want || driven || !v)) {
+    g_rec.on = false;
+    bool keep = g_rec.m >= REC_MIN_M;
+    Log("record: off after " + Num(now - g_rec.t0) + " s and " + Num(g_rec.m) + " m" +
+        (driven ? ", the map driver took the car" : !v ? ", out of the car" : "") + (keep ? "" : ": too short, dropped"));
+    if (keep) g_driveNote = true, g_markAsk++;
+    else g_rec.say = "REC: under 10 m, dropped", g_rec.sayUntil = now + 3.0;
+  }
+  if (g_rec.on) {
+    float step = std::hypot(g_m.pos.x - g_rec.last.x, g_m.pos.y - g_rec.last.y, g_m.pos.z - g_rec.last.z);
+    if (step < REC_JUMP_M) g_rec.m += step;
+    g_rec.last = g_m.pos;
+  }
+}
+
+std::string RecState(double now) {
+  return std::string(",\"recording\":") + (g_rec.on ? "true" : "false") + ",\"recT\":" + Num(g_rec.on ? now - g_rec.t0 : 0) +
+         ",\"recM\":" + Num(g_rec.m);
+}
+
+// "REC" with the time and distance so far, at the top right under the free camera's lines
+void DrawRecord(double now) {
+  if (g_rec.on) {
+    int s = static_cast<int>(now - g_rec.t0);
+    char buf[48];
+    snprintf(buf, sizeof(buf), "REC  %d:%02d  %.0f m", s / 60, s % 60, g_rec.m);
+    DrawText(buf, 0.985f, 0.085f, 0.6f, 255, 60, 60);
+  } else if (g_typing && g_markDrive) {
+    DrawText("The drive's note: Enter keeps the drive, Esc drops it", 0.985f, 0.085f, 0.45f, 255, 120, 120);
+  } else if (now < g_rec.sayUntil) {
+    DrawText(g_rec.say, 0.985f, 0.085f, 0.45f, 255, 120, 120);
+  }
 }
 
 // The map page's flags (flags command), each a pillar in its state's colour with its number and note above it
@@ -3862,7 +3931,7 @@ void GateProbe(const std::string &id, float x, float y, float z, float r) {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"rulesPresses\":" << g_rulesPresses.load() << ",\"trafficPresses\":" << g_trafficPresses.load() << ",\"testPresses\":" << g_testPresses.load() << MarkState() << ",\"leftPresses\":" << g_leftCount.load()
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"rulesPresses\":" << g_rulesPresses.load() << ",\"trafficPresses\":" << g_trafficPresses.load() << ",\"testPresses\":" << g_testPresses.load() << MarkState() << RecState(now) << ",\"leftPresses\":" << g_leftCount.load()
     << ",\"rightPresses\":" << g_rightCount.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
@@ -4809,6 +4878,8 @@ void HandleMessage(const Message &m, double now) {
     g_engagePresses++;  // as if the engage key were pressed
   } else if (type == "mark") {
     g_markPresses++;  // as if the mark key were pressed
+  } else if (type == "record") {
+    g_rec.want = m.count("on") ? (MsgBool(m, "on") ? 1 : 0) : (g_rec.on ? 0 : 1);  // as the record key, or on or off
   } else if (type == "markReady") {
     g_markReady = true;  // the bridge has its pictures of a mark: the note's text box may open
   } else if (type == "markNote") {
@@ -5241,6 +5312,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
   // on the player's frames only, which keeps it out of the openpilot camera's
   if (connected && v && view < 0 && (g_top.hud || !g_top.on) && !g_free.on) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
+  if (view < 0) DrawRecord(now);
   // the overlay key's "off" is for watching the drive: the flags and pins go too, until the key or a debug command
   bool clear = (g_debug.keyOff && !g_debug.on) || (g_shot.on && g_shot.lines);
   if (view < 0 && !clear) DrawPins();
@@ -5295,6 +5367,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
     Obstacles(now);  // each frame: a probe's result is only there to read for a frame or two, and the state is built less often
   }
   StepAi(ped, v, now);
+  StepRecord(v, now);
   // the AI drives alone: openpilot's commands, even a stale one still arriving, wait until it's off
   if (v && !g_ai.on) ApplyControls(dt, now);
   StepHandsOff(ped, v, g_ctl.wasLive && !g_ai.on, now, dt);
@@ -5339,6 +5412,7 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
   else if (static_cast<int>(key) == g_cfg.keyDebug) g_debugPresses++;
   else if (static_cast<int>(key) == g_cfg.keyMark) g_markAsk++;
+  else if (static_cast<int>(key) == g_cfg.keyRecord) g_recPresses++;
   else if (static_cast<int>(key) == g_cfg.keyRules) g_rulesPresses++;
   else if (static_cast<int>(key) == g_cfg.keyTraffic) g_trafficPresses++;
   else if (key == VK_F6) g_freeToggles++;

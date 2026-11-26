@@ -58,6 +58,7 @@ openpilot's UI window above the game's (`pin_ui.ps1`; `GTA5_PIN_UI=0` turns that
 | Shift + up / down arrow | Cruise speed to the next multiple of 5 up / down |
 | Left / right arrow | Left / right blinker: a lane change at 20 mph or more, below that the next turn (it cancels once taken) |
 | Delete | Map debug overlay on / off (`key_debug` in gta5op.ini) |
+| F9 | Record your own drive for the map driver (gta5-map `ingame.py`), on / off; not while it drives (`key_record`) |
 
 The bridge's keys also work in terminal 2: `1` resume/accel, `2` set/decel, `3` cancel, `q` quit.
 
