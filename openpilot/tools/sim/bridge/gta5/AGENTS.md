@@ -44,8 +44,6 @@ From PowerShell on Windows (Visual Studio with the C++ workload), through the WS
 - The build compiles a local copy of the source, with its cache in `%LOCALAPPDATA%\gta5op` (`src`, `build`), because
   MSVC and CMake handle `\wsl.localhost` badly.
 - A "vswhere.exe is not recognized" line in the output is harmless; the build still runs.
-- Background and the lock investigation: `C:\Users\Amy\.agents\tasks\openpilot-gta5\night\r9_hotswap.md` (or the
-  archive if it has moved).
 
 ## Do not retry
 
