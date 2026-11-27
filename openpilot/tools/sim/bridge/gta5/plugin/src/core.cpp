@@ -5477,11 +5477,17 @@ extern "C" __declspec(dllexport) void CoreTick() {
     Log(std::string("park: player ") + (IS_PED_DEAD_OR_DYING(ped, TRUE) ? "dead" : "out of the car") + ", health " +
         std::to_string(GET_ENTITY_HEALTH(ped)) + ", car " + (g_veh.handle && DOES_ENTITY_EXIST(g_veh.handle) ? "exists" : "gone"));
   parkLost = lost;
-  if (connected) {
-    // police chases after a scrape with traffic would end any drive
+  // safe mode (the map driver testing on its own): no wanted level, as a police chase after a scrape with traffic
+  // would end the test. Otherwise the game's own, given back when safe mode goes off
+  static bool capped = false;
+  bool cap = connected && g_safe;
+  if (cap) {
     SET_MAX_WANTED_LEVEL(0);
     CLEAR_PLAYER_WANTED_LEVEL(PLAYER_ID());
+  } else if (capped) {
+    SET_MAX_WANTED_LEVEL(5);
   }
+  capped = cap;
   // up arrow, the default speed key, otherwise takes out the phone
   if (connected && v) DISABLE_CONTROL_ACTION(0, INPUT_PHONE, TRUE);
 
