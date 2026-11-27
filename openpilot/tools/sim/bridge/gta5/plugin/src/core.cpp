@@ -80,6 +80,8 @@ struct Config {
   int keyTraffic = VK_PRIOR;  // Page Up: the map driver's traffic mode (the game's traffic left on, and heeded), on or off
   int keyTest = VK_INSERT;  // Ctrl+Insert: a test press, counted for the map driver
   bool keyTestCtrl = true;  // the test key counts only with a Ctrl key held, and then not as the key alone
+  int keyReport = VK_END;  // Ctrl+End: a behaviour report, counted for the map driver (End alone is the mark key)
+  bool keyReportCtrl = true;
   bool gpsRoute = false;   // our route on the game's minimap and map
   bool interleave = false;  // render the openpilot camera only on the frames it captures, the player's camera otherwise
   int interleaveLag = 0;    // game frames from a camera switch to the frame it renders in
@@ -130,6 +132,7 @@ std::atomic<int> g_markPresses{0};  // a running count; the bridge logs each new
 std::atomic<int> g_rulesPresses{0};  // a running count; the map driver switches its stop handling at each new one
 std::atomic<int> g_trafficPresses{0};  // likewise for its traffic mode
 std::atomic<int> g_testPresses{0};  // a running count of the test key, for the map driver
+std::atomic<int> g_reportPresses{0};  // likewise the report key: the map driver keeps a behaviour report at each new one
 std::atomic<int> g_leftCount{0}, g_rightCount{0};  // the arrow keys' running counts, for the bridge
 // the bridge takes the arrow keys as its own (the map driver's prompts) and sets the indicator itself
 std::atomic<bool> g_bridgeArrows{false};
@@ -448,6 +451,11 @@ void ReadConfig() {
   if (!test.empty()) {
     c.keyTestCtrl = _strnicmp(test.c_str(), "ctrl+", 5) == 0;
     c.keyTest = static_cast<int>(strtol(test.c_str() + (c.keyTestCtrl ? 5 : 0), nullptr, 0));
+  }
+  std::string report = str("key_report", "");  // likewise
+  if (!report.empty()) {
+    c.keyReportCtrl = _strnicmp(report.c_str(), "ctrl+", 5) == 0;
+    c.keyReport = static_cast<int>(strtol(report.c_str() + (c.keyReportCtrl ? 5 : 0), nullptr, 0));
   }
   c.gpsRoute = num("gps_route", 0) != 0;
   c.interleave = num("interleave", 0) != 0;
@@ -4015,7 +4023,7 @@ void GateProbe(const std::string &id, float x, float y, float z, float r) {
 void Publish(double now, bool inVehicle) {
   std::ostringstream s;
   s << "{\"t\":" << Num(now) << ",\"inVehicle\":" << (inVehicle ? "true" : "false") << ",\"paused\":" << (IS_PAUSE_MENU_ACTIVE() ? "true" : "false")
-    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"rulesPresses\":" << g_rulesPresses.load() << ",\"trafficPresses\":" << g_trafficPresses.load() << ",\"testPresses\":" << g_testPresses.load() << MarkState() << RecState(now) << ",\"leftPresses\":" << g_leftCount.load()
+    << ",\"engagePresses\":" << g_engagePresses.load() << ",\"markPresses\":" << g_markPresses.load() << ",\"rulesPresses\":" << g_rulesPresses.load() << ",\"trafficPresses\":" << g_trafficPresses.load() << ",\"testPresses\":" << g_testPresses.load() << ",\"reportPresses\":" << g_reportPresses.load() << MarkState() << RecState(now) << ",\"leftPresses\":" << g_leftCount.load()
     << ",\"rightPresses\":" << g_rightCount.load() << ",\"speedUpPresses\":" << g_speedUp.presses
     << ",\"speedDownPresses\":" << g_speedDown.presses << ",\"speedUp5Presses\":" << g_speedUp.presses5
     << ",\"speedDown5Presses\":" << g_speedDown.presses5 << ",\"resets\":" << g_m.resets;
@@ -5526,6 +5534,7 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   if (g_typing) return;
   // before the engage key: with Ctrl held, Insert is the test key alone
   if (static_cast<int>(key) == g_cfg.keyTest && (!g_cfg.keyTestCtrl || GetAsyncKeyState(VK_CONTROL) < 0)) g_testPresses++;
+  else if (static_cast<int>(key) == g_cfg.keyReport && (!g_cfg.keyReportCtrl || GetAsyncKeyState(VK_CONTROL) < 0)) g_reportPresses++;  // before the mark key, likewise
   else if (static_cast<int>(key) == g_cfg.keyEngage) (g_aiOn ? g_aiAbortPresses : g_engagePresses)++;
   else if (static_cast<int>(key) == g_cfg.keyLeft) PressArrow(false);
   else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
