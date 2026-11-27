@@ -207,6 +207,7 @@ struct Motion {
   bool valid = false;
   float v = 0, aMeas = 0, yawRate = 0, heading = 0, pitch = 0, roll = 0;
   float grade = 0, bank = 0;  // radians: nose up, right side down
+  bool allWheels = true;
   Vector3 pos{}, rotVel{}, steerBone{};
   int resets = 0;
   int collisions = 0;  // frames the car touched something, counted up so a 20 Hz reader misses none
@@ -232,6 +233,10 @@ struct Control {
   bool pulseOn = false;
   int pulseLeft = 0;
   float steerOut = 0, throttleOut = 0, brakeOut = 0;
+  float gradeF = 0;      // the grade through a filter, for the throttle's share against gravity
+  float drive = 0;       // the throttle's drive (m/s^2 over coasting) last frame, which rises no faster than DRIVE_RISE
+  double gripUntil = -1; // the throttle held back until then: a wheel off the ground, or a spinning wheel catching
+  int gripCuts = 0;      // times that began, counted up so a 20 Hz reader misses none
 } g_ctl;
 
 // The path curvature per unit of steer bias. The game turns the wheels less the faster the car goes: steertest on the
@@ -1033,6 +1038,7 @@ void Measure(float dt) {
   g_m.bank = std::asin(std::clamp(pos.z - right.z, -1.0f, 1.0f));
   g_m.rotVel = GET_ENTITY_ROTATION_VELOCITY(v);
   g_m.collisions += HAS_ENTITY_COLLIDED_WITH_ANYTHING(v) ? 1 : 0;
+  g_m.allWheels = IS_VEHICLE_ON_ALL_WHEELS(v);
   g_m.bodyHealth = GET_VEHICLE_BODY_HEALTH(v);
   if (g_veh.wheelLf >= 0) g_m.steerBone = GET_ENTITY_BONE_OBJECT_ROTATION(v, g_veh.wheelLf);
   g_m.valid = true;
@@ -1258,7 +1264,7 @@ void ApplyControls(float dt, double now) {
     if (g_ctl.wasLive) ReleaseControls();
     g_ctl.wasLive = false;
     g_curvGain.applied.clear();
-    g_ctl.latI = g_ctl.lonI = 0;
+    g_ctl.latI = g_ctl.lonI = g_ctl.drive = 0;
     g_ctl.braking = false;
     g_ctl.steerOut = g_ctl.throttleOut = g_ctl.brakeOut = 0;
     return;
@@ -1335,6 +1341,7 @@ void ApplyControls(float dt, double now) {
     float edge = g_cfg.pedalPulse > 0 ? g_cfg.brakeEdge : 0.15f;
     float brake = std::clamp(edge + g_cfg.reverseGain * err, edge, 0.6f);
     handbrake(g_ctl.tooFast);
+    g_ctl.drive = 0;
     pedals(0, brake, 0, brake, false);
     return;
   }
@@ -1348,14 +1355,25 @@ void ApplyControls(float dt, double now) {
   }
   if (g_user.gas) g_ctl.lonI = 0;
   // a real Model 3 delivers the requested acceleration on any grade (openpilot sends it open loop), so add what gravity
-  // takes away; the coasting model and throttle table are flat-road ones
-  float grade = 9.81f * std::sin(g_m.grade);
+  // takes away; the coasting model and throttle table are flat-road ones. The body pitches over every bump of a rough
+  // track, and a nose thrown up for a moment asked for full throttle on a loose climb: the grade is taken through 0.4 s.
+  g_ctl.gradeF += (1.0f - std::exp(-dt / 0.4f)) * (g_m.grade - g_ctl.gradeF);
+  float grade = 9.81f * std::sin(g_ctl.gradeF);
+  // Grip: with a wheel off the ground, or the car gaining speed far faster than asked (a wheel spun on loose ground and
+  // caught, kicking the car up a climb at twice the speed asked), the throttle is held back to GRIP_DRIVE for a moment.
+  constexpr float GRIP_DRIVE = 4.0f, KICK = 4.0f;
+  if (!g_user.gas && (!g_m.allWheels || g_m.aMeas > std::max(accel, 0.0f) + KICK)) {
+    if (now >= g_ctl.gripUntil) g_ctl.gripCuts++;
+    g_ctl.gripUntil = now + 0.5;
+  }
+  bool grip = now < g_ctl.gripUntil;
   // all the braking asked for goes through, down to what full brake gives
   float u = std::clamp(std::clamp(accel, -12.0f, 2.5f) + g_ctl.lonI, -12.0f, 8.5f) + grade;
   if (speed < -0.5f && !g_user.gas) {
     // rolling backwards with no reverse asked for (a hill): the throttle stops it (the brake would back it up more)
     handbrake(false);
     float throttle = std::clamp(-0.4f * speed, std::max(0.2f, g_cfg.pedalPulse > 0 ? g_cfg.throttleEdge : 0.0f), 0.6f);
+    g_ctl.drive = std::min(g_ctl.drive, 3.5f);  // about this throttle's, to rise from once it drives on
     pedals(throttle, 0, throttle, 0, false);
     return;
   }
@@ -1370,11 +1388,17 @@ void ApplyControls(float dt, double now) {
                                              : accel < 0 && speed > -0.5f && speed < (hard ? 0.5f : std::min(g_cfg.holdSpeed, 0.5f)));
   handbrake(hold);
   float throttle = 0, brake = 0, throttleMean = 0, brakeMean = 0;
+  // the throttle's drive rises at most DRIVE_RISE a second (a jump from part to full throttle spun a wheel on a climb);
+  // it falls at once
+  constexpr float DRIVE_RISE = 8.0f;
+  float drive = hold || hard ? 0.0f : std::min(u - coast, g_ctl.drive + DRIVE_RISE * dt);
+  if (grip) drive = std::min(drive, GRIP_DRIVE);
+  g_ctl.drive = std::max(drive, 0.0f);
   if (hold) {
   } else if (hard) {
     brake = BrakeFor(coast - u, brakeMean);
   } else {
-    throttle = ThrottleFor(u - coast, throttleMean);
+    throttle = ThrottleFor(drive, throttleMean);
   }
   if (g_user.gas) throttle = throttleMean = 1.0f;
   // the lights as a car's own show them: braking, held, or slowed about as hard as its brake lights come on for
@@ -3971,7 +3995,9 @@ void Publish(double now, bool inVehicle) {
       << ",\"out\":{\"steer\":" << Num(g_ctl.steerOut) << ",\"throttle\":" << Num(g_ctl.throttleOut) << ",\"brake\":" << Num(g_ctl.brakeOut)
       << ",\"latI\":" << Num(g_ctl.latI) << ",\"curvGain\":" << Num(g_curvGain.At(g_m.v)) << ",\"curvGainLow\":" << Num(g_curvGain.low)
       << ",\"gainSchedule\":" << (g_curvGain.schedule ? "true" : "false") << ",\"lonI\":" << Num(g_ctl.lonI) << ",\"hold\":" << (g_ctl.holding ? "true" : "false")
-      << ",\"gear\":" << g_ctl.gear << ",\"brakeLights\":" << (g_ctl.braking ? "true" : "false") << "}"
+      << ",\"gear\":" << g_ctl.gear << ",\"brakeLights\":" << (g_ctl.braking ? "true" : "false")
+      << ",\"grip\":" << (now < g_ctl.gripUntil ? "true" : "false") << ",\"gripCuts\":" << g_ctl.gripCuts << "}"
+      << ",\"allWheels\":" << (g_m.allWheels ? "true" : "false")
       << ",\"collisions\":" << g_m.collisions << ",\"bodyHealth\":" << Num(g_m.bodyHealth)
       << ",\"camHeight\":" << Num(CameraHeight(now)) << ",\"vehicleAhead\":" << Num(VehicleAhead(now));
     float ahead = 0, left = 0, speed = 0;

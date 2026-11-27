@@ -138,6 +138,7 @@ inline void SET_VEHICLE_TYRES_CAN_BURST(Vehicle v, BOOL on) { Invoke(0xEB9DC3C7D
 inline void SET_VEHICLE_WHEELS_CAN_BREAK(Vehicle v, BOOL on) { Invoke(0x29B18B4FD460CA8F, v, on); }
 inline void SET_VEHICLE_ENGINE_CAN_DEGRADE(Vehicle v, BOOL on) { Invoke(0x983765856F2564F9, v, on); }
 inline BOOL HAS_ENTITY_COLLIDED_WITH_ANYTHING(Entity e) { return Invoke<BOOL>(0x8BAD02F0368D9E14, e); }
+inline BOOL IS_VEHICLE_ON_ALL_WHEELS(Vehicle v) { return Invoke<BOOL>(0xB104CD1BABF302E2, v); }
 inline float GET_VEHICLE_BODY_HEALTH(Vehicle v) { return Invoke<float>(0xF271147EB7B40F12, v); }
 inline void SET_VEHICLE_MOD_KIT(Vehicle v, int kit) { Invoke(0x1F2AA07F00B3217A, v, kit); }
 // a mod shop part: modType's slot (10 roof, ...), modIndex into the kit's parts for it; -1 from GET_VEHICLE_MOD is stock
