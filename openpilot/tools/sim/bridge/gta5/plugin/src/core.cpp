@@ -1786,6 +1786,7 @@ struct DebugOverlay {
   std::string fullLayers = layers;       // the debug key's full level; its path level is the route alone
   std::string legend;                    // "k:what;k:what": a line of text for each, in kind k's colour, above the status line
   int level = 0;                         // the debug key's: 0 off, 1 the driver's plan, 2 and the route, 3 every layer
+  int kept = -1;                         // the level the key last chose, kept over a core reload (debug_level.txt; -1 none)
   float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
   float alpha = 1.0f;   // every strip's opacity scaled: under 1, the road shows through the lines
@@ -1815,6 +1816,19 @@ struct PlanLine {
 } g_plan;
 constexpr double PLAN_STALE = 0.6;
 std::atomic<int> g_debugPresses{0};
+
+// the debug key's level (DebugOverlay::level) put in force: on, and the layers it shows
+void DebugLevel(int level) {
+  g_debug.level = level;
+  g_debug.on = level > 0;
+  g_debug.keyOff = level == 0;
+  g_debug.layers = level == 1 ? "V" : level == 2 ? "rPCKDV" : g_debug.fullLayers;
+  g_debug.lines.clear(), g_debug.vertices = 0;  // the bridge sends the new level's lines
+}
+
+// the level the key chose, kept in debug_level.txt beside gta5op.ini: a reloaded core and the driver's debug command
+// when it connects take it up again, rather than every layer
+std::wstring DebugLevelPath() { return g_dir + L"\\debug_level.txt"; }
 constexpr double DEBUG_STALE = 3.0;  // s without new lines: the bridge stopped sending them
 constexpr float DEBUG_DENSE = 3.0f;  // m at most between a strip's points, so it follows the ground between them
 constexpr float PROBE_ABOVE = 2.0f, PROBE_MAX_DZ = 2.5f;  // m above a point the ground is looked for from, and kept within
@@ -4648,6 +4662,8 @@ void HandleMessage(const Message &m, double now) {
     std::string layers = MsgStr(m, "layers");
     if (!layers.empty()) g_debug.layers = g_debug.fullLayers = layers;
     g_debug.level = g_debug.on ? 3 : 0;
+    if (m.count("level")) DebugLevel(std::clamp(static_cast<int>(MsgNum(m, "level", 3)), 0, 3));
+    else if (g_debug.on && g_debug.kept >= 0) DebugLevel(g_debug.kept);  // the key's last choice, not every layer
     g_debug.force = MsgBool(m, "force", g_debug.force);
     g_debug.ground = MsgBool(m, "ground", g_debug.ground);
     g_debug.thin = MsgBool(m, "thin", g_debug.thin);
@@ -5323,6 +5339,8 @@ extern "C" __declspec(dllexport) void CoreInit(const CoreHost *host) {
   g_dir = host->dir;
   ReadConfig();
   g_gps.on = g_cfg.gpsRoute;
+  if (std::ifstream f(DebugLevelPath()); f >> g_debug.kept) g_debug.kept = std::clamp(g_debug.kept, 0, 3);
+  else g_debug.kept = -1;
   Log("init: core " + CoreFile() + ", build " GTA5OP_BUILD ", bridge " + (g_cfg.bridge.empty() ? std::string("from ") + BRIDGE_FILE : g_cfg.bridge) + ", vfov " + Num(g_cfg.vfov) +
       ", lens " + (g_cfg.lens ? "on" : "off"));
   g_link.Start(BridgeAddress, Log);
@@ -5457,11 +5475,9 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (int presses = g_debugPresses.exchange(0)) {
     // the driver's plan alone, then with the route (P: the route made on the map page, CKD: its corridor), then all
     static const char *const LEVELS[] = {"off", "plan", "plan and route", "full"};
-    g_debug.level = (g_debug.level + presses) % 4;
-    g_debug.on = g_debug.level > 0;
-    g_debug.keyOff = g_debug.level == 0;
-    g_debug.layers = g_debug.level == 1 ? "V" : g_debug.level == 2 ? "rPCKDV" : g_debug.fullLayers;
-    g_debug.lines.clear(), g_debug.vertices = 0;  // the bridge sends the new level's lines
+    DebugLevel((g_debug.level + presses) % 4);
+    g_debug.kept = g_debug.level;
+    std::ofstream(DebugLevelPath()) << g_debug.level;
     Log(std::string("debug ") + LEVELS[g_debug.level] + " (key)");
   }
   // never with the marker: openpilot's frames are the ones the capture finds the marker in, so these never reach them
