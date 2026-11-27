@@ -133,6 +133,7 @@ std::atomic<int> g_rulesPresses{0};  // a running count; the map driver switches
 std::atomic<int> g_trafficPresses{0};  // likewise for its traffic mode
 std::atomic<int> g_testPresses{0};  // a running count of the test key, for the map driver
 std::atomic<int> g_reportPresses{0};  // likewise the report key: the map driver keeps a behaviour report at each new one
+std::atomic<int> g_reportNotes{0};  // a running count of notes typed for those reports (the state's markNote with markFor "report")
 std::atomic<int> g_leftCount{0}, g_rightCount{0};  // the arrow keys' running counts, for the bridge
 // the bridge takes the arrow keys as its own (the map driver's prompts) and sets the indicator itself
 std::atomic<bool> g_bridgeArrows{false};
@@ -1578,18 +1579,22 @@ std::string g_markNote;
 double g_markPending = 0;  // when the key was pressed, while the box waits
 bool g_markReady = false;
 constexpr double MARK_WAIT_S = 2.0;
-// a recorded drive's note uses the same box (StepRecord): its pictures were taken as the drive began, so it opens at once
+// a recorded drive's note uses the same box (StepRecord): its pictures were taken as the drive began, so it opens at once;
+// so does a behaviour report's (the report key), as the map driver kept its report at the press
 bool g_driveNote = false;  // the next box asked for is a drive's
+bool g_reportNote = false;  // or a behaviour report's
 bool g_markDrive = false;  // the box up, or last up, is a drive's: the state's markFor
+bool g_markReport = false;  // or a behaviour report's
 
 void MarkNote(double now) {
   if (!g_typing) {
     if (!g_markPending) {
       if (!g_markAsk.exchange(0)) return;
-      g_markPending = now, g_markReady = g_markDrive = g_driveNote, g_driveNote = false;
+      g_markPending = now, g_markDrive = g_driveNote, g_markReport = g_reportNote, g_markReady = g_markDrive || g_markReport;
+      g_driveNote = g_reportNote = false;
     }
     if (!g_markReady && g_link.Connected() && now - g_markPending < MARK_WAIT_S) return;
-    Log(std::string(g_markDrive ? "drive" : "mark") + ": the text box opens " + Num(now - g_markPending) + " s after the key" + (g_markReady ? "" : ", without word of the pictures"));
+    Log(std::string(g_markDrive ? "drive" : g_markReport ? "report" : "mark") + ": the text box opens " + Num(now - g_markPending) + " s after the key" + (g_markReady ? "" : ", without word of the pictures"));
     g_markPending = 0;
     DISPLAY_ONSCREEN_KEYBOARD(0, "", "", "", "", "", "", 250);  // no stock title: they name a length that is not this one
     g_typing = true;
@@ -1600,7 +1605,7 @@ void MarkNote(double now) {
   if (state == 1) {
     const char *text = GET_ONSCREEN_KEYBOARD_RESULT();
     g_markNote = text ? text : "";
-    g_markPresses++;
+    (g_markReport ? g_reportNotes : g_markPresses)++;
   }
   g_typing = false;
   g_markAsk = 0;
@@ -1611,7 +1616,7 @@ std::string MarkState() {
   for (char c : g_markNote)
     if (c >= 32 && c < 127) note += c == '"' ? '\'' : c == '\\' ? '/' : c;
   return std::string(",\"marking\":") + (g_typing ? "true" : "false") + ",\"markPending\":" + (g_markPending ? "true" : "false") +
-         ",\"markNote\":\"" + note + "\",\"markFor\":\"" + (g_markDrive ? "drive" : "mark") + "\"";
+         ",\"markNote\":\"" + note + "\",\"markFor\":\"" + (g_markDrive ? "drive" : g_markReport ? "report" : "mark") + "\",\"reportNotes\":" + std::to_string(g_reportNotes.load());
 }
 
 // The record key (F9) or the record command starts and stops a recording of the player's own driving, and at the stop
@@ -5036,7 +5041,7 @@ void HandleMessage(const Message &m, double now) {
   } else if (type == "markNote") {
     // tests: the text box closed as Enter closes it, with this note (posted keys never reach the game's text box)
     CANCEL_ONSCREEN_KEYBOARD();
-    if (g_typing) g_markNote = MsgStr(m, "note"), g_markPresses++, g_typing = false, g_markAsk = 0;
+    if (g_typing) g_markNote = MsgStr(m, "note"), (g_markReport ? g_reportNotes : g_markPresses)++, g_typing = false, g_markAsk = 0;
     Log("markNote: the text box closed");
   } else if (type == "cruise") {
     // as if the cruise speed keys were pressed: up or down, by 5 with five=1
@@ -5566,7 +5571,10 @@ extern "C" __declspec(dllexport) void CoreKey(DWORD key) {
   if (g_typing) return;
   // before the engage key: with Ctrl held, Insert is the test key alone
   if (static_cast<int>(key) == g_cfg.keyTest && (!g_cfg.keyTestCtrl || GetAsyncKeyState(VK_CONTROL) < 0)) g_testPresses++;
-  else if (static_cast<int>(key) == g_cfg.keyReport && (!g_cfg.keyReportCtrl || GetAsyncKeyState(VK_CONTROL) < 0)) g_reportPresses++;  // before the mark key, likewise
+  else if (static_cast<int>(key) == g_cfg.keyReport && (!g_cfg.keyReportCtrl || GetAsyncKeyState(VK_CONTROL) < 0)) {  // before the mark key, likewise
+    g_reportPresses++;
+    if (!g_markPending && !g_markAsk) g_reportNote = true, g_markAsk++;  // then a note for it, unless a box is already coming
+  }
   else if (static_cast<int>(key) == g_cfg.keyEngage) (g_aiOn ? g_aiAbortPresses : g_engagePresses)++;
   else if (static_cast<int>(key) == g_cfg.keyLeft) PressArrow(false);
   else if (static_cast<int>(key) == g_cfg.keyRight) PressArrow(true);
