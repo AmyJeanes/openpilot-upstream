@@ -2444,6 +2444,8 @@ void ReleaseWaypoint(bool restore) {
   Log(std::string("waypoint ") + (restore ? "given back" : "reached") + " at " + Num(g_waypoint.x) + "," + Num(g_waypoint.y));
 }
 
+constexpr float WAYPOINT_AGAIN = 25.0f;  // m: a waypoint set this near the held one takes it off (TakeWaypoint)
+
 void TakeWaypoint(double now) {
   static double next = 0;
   if (now < next) return;
@@ -2461,6 +2463,14 @@ void TakeWaypoint(double now) {
   if (g_gps.shown <= 0 || !IS_WAYPOINT_ACTIVE()) return;
   Vector3 w = GET_BLIP_INFO_ID_COORD(GET_FIRST_BLIP_INFO_ID(GET_WAYPOINT_BLIP_ENUM_ID()));
   SET_WAYPOINT_OFF();
+  if (g_waypoint.held && std::hypot(w.x - g_waypoint.x, w.y - g_waypoint.y) < WAYPOINT_AGAIN) {
+    // set again on the one held (its blip is no waypoint of the map's, so the map has none to take off): as on the
+    // game's map, a waypoint set where one is takes it off
+    g_waypoint.held = false;
+    RemoveWaypointMarker();
+    Log("waypoint taken off at " + Num(g_waypoint.x) + "," + Num(g_waypoint.y) + ": set again on the held one");
+    return;
+  }
   RemoveWaypointMarker();
   g_waypoint = {true, w.x, w.y, w.z, ADD_BLIP_FOR_COORD(w.x, w.y, w.z)};
   if (g_waypoint.marker) {
