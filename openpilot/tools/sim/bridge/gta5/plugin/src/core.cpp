@@ -4654,6 +4654,16 @@ void HandleMessage(const Message &m, double now) {
         float x, y, z;
         if (std::sscanf(tok.c_str(), "%f,%f,%f", &x, &y, &z) == 3) pts.push_back({x, y, z});
       }
+      // on the game's own ground: the map's heights are off from the road by varying amounts on some hills, where the
+      // line popped in and out of the surface (the cache GroundStep keeps, so each place is probed once)
+      for (P3 &p : pts) {
+        float z;
+        if (!GroundCached(p, now, z)) {
+          if (!GET_GROUND_Z_FOR_3D_COORD(p.x, p.y, p.z + PROBE_ABOVE, &z, FALSE, FALSE)) z = NAN;
+          g_ground.insert_or_assign(GroundKey(p), GroundHit{z, now});
+        }
+        if (OnGround(kind, p.z, z)) p.z = z;
+      }
       if (pts.size() >= 2) g_plan.lines.emplace_back(kind, std::move(pts));
     }
     g_plan.t = now;
