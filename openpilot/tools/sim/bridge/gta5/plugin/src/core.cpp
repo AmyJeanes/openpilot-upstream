@@ -237,6 +237,7 @@ struct Control {
   float drive = 0;       // the throttle's drive (m/s^2 over coasting) last frame, which rises no faster than DRIVE_RISE
   double gripUntil = -1; // the throttle held back until then: a spinning wheel caught
   int gripCuts = 0;      // times that began, counted up so a 20 Hz reader misses none
+  float revI = 0;        // backing up: reverse pedal added while the car is still short of the speed asked
 } g_ctl;
 
 // The path curvature per unit of steer bias. The game turns the wheels less the faster the car goes: steertest on the
@@ -1335,16 +1336,24 @@ void ApplyControls(float dt, double now) {
     // edge it about holds the speed.
     g_ctl.lonI = 0;
     float err = speed + g_ctl.reverse;  // > 0: not going back fast enough
+    // backing up a slope (the car facing down it) gravity takes what the pedal at its edge gives, and the car stood: the
+    // pedal for the grade as the throttle has it going forwards (REV_PER_ACCEL from reverseGain's 0.07 over the edge for
+    // 1.5 m/s^2), and a share summed while it is still short
+    constexpr float REV_PER_ACCEL = 0.047f, REV_I_MAX = 0.3f;
+    g_ctl.gradeF += (1.0f - std::exp(-dt / 0.4f)) * (g_m.grade - g_ctl.gradeF);
+    float climb = std::max(-9.81f * std::sin(g_ctl.gradeF), 0.0f);
+    g_ctl.revI = err > 0.2f ? std::min(g_ctl.revI + 0.1f * err * dt, REV_I_MAX) : std::max(g_ctl.revI - 0.2f * dt, 0.0f);
     // backing down a slope the car gains speed with the pedal at its edge: the handbrake then, with the pedal kept
     // where it is (seen in the game: let go there, the reverse lights went out for a moment in the middle of a move)
     g_ctl.tooFast = err < (g_ctl.tooFast ? -0.2f : -0.5f);
     float edge = g_cfg.pedalPulse > 0 ? g_cfg.brakeEdge : 0.15f;
-    float brake = std::clamp(edge + g_cfg.reverseGain * err, edge, 0.6f);
+    float brake = std::clamp(edge + g_cfg.reverseGain * err + REV_PER_ACCEL * climb + g_ctl.revI, edge, 0.9f);
     handbrake(g_ctl.tooFast);
     g_ctl.drive = 0;
     pedals(0, brake, 0, brake, false);
     return;
   }
+  g_ctl.revI = 0;
   bool stopped = std::fabs(speed) < 0.3f;
   if (stopped && accel <= 0) {
     g_ctl.lonI = 0;  // holding at a stop can't decelerate further; integrating that would block pulling away
