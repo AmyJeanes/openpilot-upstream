@@ -150,6 +150,7 @@ struct VehicleInfo {
   Hash model = 0;
   std::string name;  // the model's display name
   float wheelBase = 2.7f;
+  float midY = 0;  // the middle of the model's length, m forward of its origin
   float mountX = 0, mountY = 0, mountZ = 1.0f;  // the camera's position on the car, m right, forward and up of its origin
   float baseX = 0, baseY = 0, baseZ = 1.0f;     // the same before the mount's jitter
   std::string mountSource;  // how the base was found: bone, dims, ini (comma mount); probe, bones (dashcam)
@@ -958,6 +959,7 @@ void OnVehicleChanged(Vehicle v) {
     if (isalnum(static_cast<unsigned char>(*c)) || *c == '_' || *c == ' ') g_veh.name += *c;
   Vector3 mn{}, mx{};
   GET_MODEL_DIMENSIONS(g_veh.model, &mn, &mx);
+  g_veh.midY = (mn.y + mx.y) / 2;
   CommaMount();
   ApplyMount();
   if (g_mount.mode == "dashcam") g_veh.dashcamAt = QpcSeconds() + 0.3;
@@ -1827,6 +1829,17 @@ struct PlanLine {
   double t = -1e9;
 } g_plan;
 constexpr double PLAN_STALE = 0.6;
+
+// the plan forwards drawn from the middle of the vehicle where it is this frame: laid from where it was when the driver
+// last sent it, from a point that on a long vehicle, or as the vehicle moved on since, lay off its middle or behind it
+std::vector<P3> PinnedPlan(const std::vector<P3> &pts) {
+  float h = g_m.heading * static_cast<float>(DEG), fx = -std::sin(h), fy = std::cos(h);
+  P3 mid{g_m.pos.x + fx * g_veh.midY, g_m.pos.y + fy * g_veh.midY, pts[0].z};
+  std::vector<P3> out{mid};
+  for (const P3 &p : pts)
+    if ((p.x - mid.x) * fx + (p.y - mid.y) * fy > 0.5f) out.push_back(p);
+  return out.size() >= 2 ? out : pts;
+}
 std::atomic<int> g_debugPresses{0};
 
 // the debug key's level (DebugOverlay::level) put in force: on, and the layers it shows
@@ -2349,7 +2362,7 @@ void DrawDebug(double now) {
     d.alpha = 1.0f;  // the plan at its own alpha, over the more translucent rest
     for (const auto &[kind, pts] : g_plan.lines) {
       const KindStyle &s = StyleOf(kind);
-      budget -= DrawStrip(pts, s, s.width * d.width, s.lift + lift, view, budget);
+      budget -= DrawStrip(kind == 'V' && g_veh.handle ? PinnedPlan(pts) : pts, s, s.width * d.width, s.lift + lift, view, budget);
     }
     d.alpha = translucent;
   }
