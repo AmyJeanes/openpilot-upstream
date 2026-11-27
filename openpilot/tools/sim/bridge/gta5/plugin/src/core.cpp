@@ -261,9 +261,13 @@ float GainShape(float v) {
   return GAIN_SHAPE[i - 1] + (GAIN_SHAPE[i] - GAIN_SHAPE[i - 1]) * (v - GAIN_SPEED[i - 1]) / (GAIN_SPEED[i] - GAIN_SPEED[i - 1]);
 }
 
+// curv_gain is the Model 3's; another vehicle starts from it scaled by wheelbase, as the curvature a wheel angle gives
+// goes with 1/wheelbase. A start far off is never learned from: the fit takes a sample only near its prediction
+constexpr float GAIN_WHEELBASE_M = 2.85f, GAIN_MAX = 12.0f;
 struct CurvGain {
   bool schedule = true;  // false: one gain for all speeds, fitted above 5 m/s (the old way, for A/B tests)
   float low = 3.4f;  // at low speed with the schedule, at any speed without
+  float seed = 3.4f;  // where low began for this vehicle: the fit's prior
   double num = 0, den = 0, nextLog = 0;
   int collisions = 0;
   double cleanFrom = 0;  // no fitting before then: a collision's yaw has nothing to do with the steering
@@ -274,7 +278,7 @@ struct CurvGain {
 void ResetCurvGain(bool schedule) {
   g_curvGain = CurvGain{};
   g_curvGain.schedule = schedule;
-  g_curvGain.low = schedule ? g_cfg.curvGain : 1.55f;
+  g_curvGain.low = g_curvGain.seed = schedule ? g_cfg.curvGain : 1.55f;
 }
 
 double g_latLogUntil = 0;  // logs the steering loop each frame until then
@@ -963,9 +967,11 @@ void OnVehicleChanged(Vehicle v) {
     Vector3 la = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, a.x, a.y, a.z), lb = GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(v, b.x, b.y, b.z);
     float wb = la.y - lb.y;
     if (wb > 1.0f && wb < 8.0f) g_veh.wheelBase = wb;
+    if (wb > 1.0f && wb < 8.0f && g_curvGain.schedule)
+      g_curvGain.low = g_curvGain.seed = std::clamp(g_cfg.curvGain * GAIN_WHEELBASE_M / wb, 1.0f, GAIN_MAX);
   }
   Log("vehicle " + std::to_string(v) + ": wheelbase " + Num(g_veh.wheelBase) + " m, mount " + Num(g_veh.mountY) + " fwd, " +
-      Num(g_veh.mountZ) + " up (model z " + Num(mn.z) + ".." + Num(mx.z) + ")");
+      Num(g_veh.mountZ) + " up (model z " + Num(mn.z) + ".." + Num(mx.z) + "), steering gain from " + Num(g_curvGain.low));
 }
 
 bool GameFocused() {
@@ -1139,7 +1145,7 @@ void UpdateCurvGain(float dt, double now) {
     if (!clean) return;
     g.num += a * (k * x - g.num);
     g.den += a * (x * x - g.den);
-    g.low = static_cast<float>(std::clamp((g.num + PRIOR * g_cfg.curvGain) / (g.den + PRIOR), 1.0, 8.0));
+    g.low = static_cast<float>(std::clamp((g.num + PRIOR * g.seed) / (g.den + PRIOR), 1.0, static_cast<double>(GAIN_MAX)));
   }
   if (now >= g.nextLog) {
     g.nextLog = now + 10;
