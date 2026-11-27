@@ -1768,7 +1768,7 @@ struct DebugOverlay {
   std::string layers = "edsjrnmaxptqz";  // layer letters (DebugLayer); f fills junction areas
   std::string fullLayers = layers;       // the debug key's full level; its path level is the route alone
   std::string legend;                    // "k:what;k:what": a line of text for each, in kind k's colour, above the status line
-  int level = 0;                         // the debug key's: 0 off, 1 the route ahead, 2 every layer
+  int level = 0;                         // the debug key's: 0 off, 1 the driver's plan, 2 and the route, 3 every layer
   float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
   float alpha = 1.0f;   // every strip's opacity scaled: under 1, the road shows through the lines
@@ -1858,8 +1858,8 @@ constexpr KindStyle STYLES[] = {
     {'C', 120, 225, 255, 200, 0.30f, 2, 2, 0.210f},     // the route's corridor: the outer edges of the lanes it may use
     {'K', 255, 150, 40, 210, 0.30f, 2, 2, 0.215f},      // a lane in it that peels off: its edges, up to its deadline
     {'D', 255, 60, 40, 235, 0.60f, 0, 0, 0.220f},       // that deadline, a bar across the lane
-    {'V', 90, 205, 255, 255, 0.20f, 0, 0, 0.260f},      // the map driver's plan: where it means to be over the next seconds
-    {'v', 255, 170, 40, 255, 0.20f, 0, 0, 0.260f},      // and where it means to go backwards
+    {'V', 90, 205, 255, 255, 1.10f, 0, 0, 0.260f},      // the map driver's plan: where it means to be over the next seconds
+    {'v', 255, 170, 40, 255, 1.10f, 0, 0, 0.260f},      // and where it means to go backwards
 };
 constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
 
@@ -2302,10 +2302,13 @@ void DrawDebug(double now) {
     budget -= DrawStrip(l.pts, s, width, s.lift + lift, view, budget);
   }
   if (has('V') && now - g_plan.t < PLAN_STALE) {
+    float translucent = d.alpha;
+    d.alpha = 1.0f;  // the plan solid, over the translucent rest
     for (const auto &[kind, pts] : g_plan.lines) {
       const KindStyle &s = StyleOf(kind);
       budget -= DrawStrip(pts, s, s.width * d.width, s.lift + lift, view, budget);
     }
+    d.alpha = translucent;
   }
   d.polys = g_debugPolys = d.maxPolys - budget;
 }
@@ -4617,7 +4620,7 @@ void HandleMessage(const Message &m, double now) {
     g_debug.on = MsgBool(m, "on", g_debug.on);
     std::string layers = MsgStr(m, "layers");
     if (!layers.empty()) g_debug.layers = g_debug.fullLayers = layers;
-    g_debug.level = g_debug.on ? 2 : 0;
+    g_debug.level = g_debug.on ? 3 : 0;
     g_debug.force = MsgBool(m, "force", g_debug.force);
     g_debug.ground = MsgBool(m, "ground", g_debug.ground);
     g_debug.thin = MsgBool(m, "thin", g_debug.thin);
@@ -5414,11 +5417,12 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (view < 0 && !clear) DrawFlags();
   if (view < 0) MarkNote(now);
   if (int presses = g_debugPresses.exchange(0)) {
-    static const char *const LEVELS[] = {"off", "route ahead", "full"};
-    g_debug.level = (g_debug.level + presses) % 3;
+    // the driver's plan alone, then with the route (P: the route made on the map page, CKD: its corridor), then all
+    static const char *const LEVELS[] = {"off", "plan", "plan and route", "full"};
+    g_debug.level = (g_debug.level + presses) % 4;
     g_debug.on = g_debug.level > 0;
     g_debug.keyOff = g_debug.level == 0;
-    g_debug.layers = g_debug.level == 1 ? "rPCKDV" : g_debug.fullLayers;  // P: the route made on the map page; CKD: its corridor
+    g_debug.layers = g_debug.level == 1 ? "V" : g_debug.level == 2 ? "rPCKDV" : g_debug.fullLayers;
     g_debug.lines.clear(), g_debug.vertices = 0;  // the bridge sends the new level's lines
     Log(std::string("debug ") + LEVELS[g_debug.level] + " (key)");
   }
