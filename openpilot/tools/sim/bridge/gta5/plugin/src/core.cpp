@@ -1858,8 +1858,8 @@ constexpr KindStyle STYLES[] = {
     {'C', 120, 225, 255, 200, 0.30f, 2, 2, 0.210f},     // the route's corridor: the outer edges of the lanes it may use
     {'K', 255, 150, 40, 210, 0.30f, 2, 2, 0.215f},      // a lane in it that peels off: its edges, up to its deadline
     {'D', 255, 60, 40, 235, 0.60f, 0, 0, 0.220f},       // that deadline, a bar across the lane
-    {'V', 90, 205, 255, 255, 1.10f, 0, 0, 0.260f},      // the map driver's plan: where it means to be over the next seconds
-    {'v', 255, 170, 40, 255, 1.10f, 0, 0, 0.260f},      // and where it means to go backwards
+    {'V', 30, 110, 255, 205, 1.10f, 0, 0, 0.260f},      // the map driver's plan: where it means to be over the next seconds
+    {'v', 255, 150, 20, 205, 1.10f, 0, 0, 0.260f},      // and where it means to go backwards
 };
 constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
 
@@ -2303,7 +2303,7 @@ void DrawDebug(double now) {
   }
   if (has('V') && now - g_plan.t < PLAN_STALE) {
     float translucent = d.alpha;
-    d.alpha = 1.0f;  // the plan solid, over the translucent rest
+    d.alpha = 1.0f;  // the plan at its own alpha, over the more translucent rest
     for (const auto &[kind, pts] : g_plan.lines) {
       const KindStyle &s = StyleOf(kind);
       budget -= DrawStrip(pts, s, s.width * d.width, s.lift + lift, view, budget);
