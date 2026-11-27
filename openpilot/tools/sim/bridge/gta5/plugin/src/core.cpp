@@ -2905,12 +2905,12 @@ std::string Obstacles(double now) {
 }
 
 // the vehicles around the car, as "nearby":{"dims":[our model's min x, max x, min y, max y], "ahead":NEARBY_AHEAD,
-// "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...], "p":[[x, y, vx, vy],
+// "side":NEARBY_SIDE_AHEAD, "v":[[x, y, heading, vx, vy, min x, max x, min y, max y, driven], ...], "p":[[x, y, vx, vy, z],
 // ...]}: each vehicle's origin (m right and forward of ours), heading (deg left of ours), velocity (m/s right and forward,
 // in our frame), its model's bounds (m, in its own frame), whether anyone is in its driver's seat, its entity handle (the
 // same while it exists, for the bridge's tracking) and whether it waits at a red light (or queues behind one, as the AI
 // counts it: IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS); each pedestrian on
-// foot's place and velocity, within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits;
+// foot's place, velocity and world height (its middle, about a metre up), within NEARBY_PED_*; "obst":[[x, y], ...], "obstAhead":OBST_AHEAD: Obstacles' hits;
 // "rise":[[x, y, h], ...]: its hits on ground that faces up; "rays":[[x, y, h, kind, model, nx, ny, nz, ray], ...]:
 // every hit with what was hit and how its surface faces
 std::string Nearby(double now) {
@@ -2978,7 +2978,7 @@ std::string Nearby(double now) {
     Vector3 vel = GET_ENTITY_VELOCITY(ped);
     float vx = vel.x * std::cos(h) + vel.y * std::sin(h), vy = -vel.x * std::sin(h) + vel.y * std::cos(h);
     if (!pedList.empty()) pedList += ",";
-    pedList += "[" + num(rel.x) + "," + num(rel.y) + "," + num(vx) + "," + num(vy) + "]";
+    pedList += "[" + num(rel.x) + "," + num(rel.y) + "," + num(vx) + "," + num(vy) + "," + num(q.z) + "]";
   }
   out = "\"nearby\":{\"dims\":[" + num(ownMin.x) + "," + num(ownMax.x) + "," + num(ownMin.y) + "," + num(ownMax.y) + "],\"ahead\":" +
         num(NEARBY_AHEAD) + ",\"side\":" + num(NEARBY_SIDE_AHEAD) + ",\"v\":[" + list + "],\"p\":[" + pedList + "],\"obst\":[" +
