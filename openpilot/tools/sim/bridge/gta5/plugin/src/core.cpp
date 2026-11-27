@@ -1376,6 +1376,7 @@ void ApplyControls(float dt, double now) {
     // at least what holds the car against the grade: at the pedal's edge alone it rolled back down a 45 % climb for 20 s
     float holdMean = 0;
     ThrottleFor(std::max(grade, 0.0f) + 1.0f, holdMean);
+    g_ctl.drive = std::max(grade, 0.0f) + 1.0f;  // driving on, the throttle rises from there
     float throttle = std::clamp(std::max(-0.4f * speed, holdMean), std::max(0.2f, g_cfg.pedalPulse > 0 ? g_cfg.throttleEdge : 0.0f), 0.8f);
     pedals(throttle, 0, throttle, 0, false);
     return;
@@ -1391,10 +1392,12 @@ void ApplyControls(float dt, double now) {
                                              : accel < 0 && speed > -0.5f && speed < (hard ? 0.5f : std::min(g_cfg.holdSpeed, 0.5f)));
   handbrake(hold);
   float throttle = 0, brake = 0, throttleMean = 0, brakeMean = 0;
-  // on the move the throttle's drive rises at most DRIVE_RISE a second (a jump from part to full throttle spun a wheel
-  // on a climb); it falls at once. Pulling away it is not held back: a hill start needs it all
+  // the throttle's drive rises at most DRIVE_RISE a second (a jump from part to full throttle spun a wheel on a climb,
+  // and pulling away at full throttle spun them on loose ground); it falls at once. Pulling away it rises from what holds
+  // the car against the grade, so that a hill start doesn't roll back first
   constexpr float DRIVE_RISE = 8.0f;
-  float drive = hold || hard ? 0.0f : std::min(u - coast, speed > 3.0f ? g_ctl.drive + DRIVE_RISE * dt : 99.0f);
+  float from = speed < 3.0f ? std::max(g_ctl.drive, std::max(grade, 0.0f) + g_cfg.coastAccel) : g_ctl.drive;
+  float drive = hold || hard ? 0.0f : std::min(u - coast, from + DRIVE_RISE * dt);
   if (grip) drive = std::min(drive, GRIP_DRIVE);
   g_ctl.drive = std::max(drive, 0.0f);
   if (hold) {
