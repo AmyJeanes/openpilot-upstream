@@ -1793,7 +1793,7 @@ struct DebugOverlay {
 // The map driver's plan for the next few seconds (drive.py plan_line): a thin line of its own, sent ten times a second
 // apart from the overlay (worked out again every half second), and dropped when it stops coming.
 struct PlanLine {
-  std::vector<P3> pts;
+  std::vector<std::pair<char, std::vector<P3>>> lines;  // each in its kind's style: V forwards, v backwards
   double t = -1e9;
 } g_plan;
 constexpr double PLAN_STALE = 0.6;
@@ -1810,6 +1810,7 @@ char DebugLayer(char kind) {
   switch (kind) {
     case 'l': case 'k': return 's';
     case 'b': return 'r';
+    case 'v': return 'V';
     case 'g': return 'm';
     case 'w': case 'c': case 'y': return 'd';
     case 'L': case 'T': case 'R': return 'a';
@@ -1858,6 +1859,7 @@ constexpr KindStyle STYLES[] = {
     {'K', 255, 150, 40, 210, 0.30f, 2, 2, 0.215f},      // a lane in it that peels off: its edges, up to its deadline
     {'D', 255, 60, 40, 235, 0.60f, 0, 0, 0.220f},       // that deadline, a bar across the lane
     {'V', 90, 205, 255, 255, 0.20f, 0, 0, 0.260f},      // the map driver's plan: where it means to be over the next seconds
+    {'v', 255, 170, 40, 255, 0.20f, 0, 0, 0.260f},      // and where it means to go backwards
 };
 constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
 
@@ -2299,9 +2301,11 @@ void DrawDebug(double now) {
     }
     budget -= DrawStrip(l.pts, s, width, s.lift + lift, view, budget);
   }
-  if (has(DebugLayer('V')) && now - g_plan.t < PLAN_STALE && g_plan.pts.size() >= 2) {
-    const KindStyle &s = StyleOf('V');
-    budget -= DrawStrip(g_plan.pts, s, s.width * d.width, s.lift + lift, view, budget);
+  if (has('V') && now - g_plan.t < PLAN_STALE) {
+    for (const auto &[kind, pts] : g_plan.lines) {
+      const KindStyle &s = StyleOf(kind);
+      budget -= DrawStrip(pts, s, s.width * d.width, s.lift + lift, view, budget);
+    }
   }
   d.polys = g_debugPolys = d.maxPolys - budget;
 }
@@ -4634,13 +4638,20 @@ void HandleMessage(const Message &m, double now) {
         (g_debug.thin ? ", thin" : ", width " + Num(g_debug.width) + (g_debug.ground ? " on the ground" : " at the map's heights")) +
         ", to " + Num(g_debug.dist) + " m");
   } else if (type == "plan") {
-    // g: "x,y,z;x,y,z;..." in metres; none: no plan
-    g_plan.pts.clear();
-    std::stringstream ss(MsgStr(m, "g"));
-    std::string tok;
-    while (std::getline(ss, tok, ';')) {
-      float x, y, z;
-      if (std::sscanf(tok.c_str(), "%f,%f,%f", &x, &y, &z) == 3) g_plan.pts.push_back({x, y, z});
+    // g: lines "k:x,y,z;x,y,z;...|k:..." in metres, k the kind (V when left out); empty: no plan
+    g_plan.lines.clear();
+    std::stringstream segs(MsgStr(m, "g"));
+    std::string seg, tok;
+    while (std::getline(segs, seg, '|')) {
+      char kind = 'V';
+      if (seg.size() > 2 && seg[1] == ':') kind = seg[0], seg = seg.substr(2);
+      std::vector<P3> pts;
+      std::stringstream ss(seg);
+      while (std::getline(ss, tok, ';')) {
+        float x, y, z;
+        if (std::sscanf(tok.c_str(), "%f,%f,%f", &x, &y, &z) == 3) pts.push_back({x, y, z});
+      }
+      if (pts.size() >= 2) g_plan.lines.emplace_back(kind, std::move(pts));
     }
     g_plan.t = now;
   } else if (type == "debugGeo") {
