@@ -262,8 +262,9 @@ float GainShape(float v) {
 }
 
 // curv_gain is the Model 3's; another vehicle starts from it scaled by wheelbase, as the curvature a wheel angle gives
-// goes with 1/wheelbase. A start far off is never learned from: the fit takes a sample only near its prediction
-constexpr float GAIN_WHEELBASE_M = 2.85f, GAIN_MAX = 12.0f;
+// goes with 1/wheelbase. A start far off is never learned from: the fit takes a sample only near its prediction.
+// A motorbike leans into a turn rather than steering as a car does: its own start, as measured on one (1.52 m)
+constexpr float GAIN_WHEELBASE_M = 2.85f, GAIN_MAX = 12.0f, GAIN_BIKE = 2.3f;
 struct CurvGain {
   bool schedule = true;  // false: one gain for all speeds, fitted above 5 m/s (the old way, for A/B tests)
   float low = 3.4f;  // at low speed with the schedule, at any speed without
@@ -968,7 +969,7 @@ void OnVehicleChanged(Vehicle v) {
     float wb = la.y - lb.y;
     if (wb > 1.0f && wb < 8.0f) g_veh.wheelBase = wb;
     if (wb > 1.0f && wb < 8.0f && g_curvGain.schedule)
-      g_curvGain.low = g_curvGain.seed = std::clamp(g_cfg.curvGain * GAIN_WHEELBASE_M / wb, 1.0f, GAIN_MAX);
+      g_curvGain.low = g_curvGain.seed = IS_THIS_MODEL_A_BIKE(g_veh.model) ? GAIN_BIKE : std::clamp(g_cfg.curvGain * GAIN_WHEELBASE_M / wb, 1.0f, GAIN_MAX);
   }
   Log("vehicle " + std::to_string(v) + ": wheelbase " + Num(g_veh.wheelBase) + " m, mount " + Num(g_veh.mountY) + " fwd, " +
       Num(g_veh.mountZ) + " up (model z " + Num(mn.z) + ".." + Num(mx.z) + "), steering gain from " + Num(g_curvGain.low));
