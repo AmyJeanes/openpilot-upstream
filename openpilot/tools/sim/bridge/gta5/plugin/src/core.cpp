@@ -2223,7 +2223,7 @@ void DrawDebug(double now) {
     d.polys = g_debugPolys = 0;
     return;
   }
-  {
+  if (d.level >= 3) {  // the key's plan and route levels show those alone
     std::stringstream entries(d.legend);
     std::string entry;
     // the last entry sits just over the status line, however many there are
@@ -5421,8 +5421,9 @@ extern "C" __declspec(dllexport) void CoreTick() {
   if (connected && v && view < 0 && (g_top.hud || !g_top.on) && !g_free.on) DrawSpeed(now);
   if (view < 0) DrawMarked(now);
   if (view < 0) DrawRecord(now);
-  // the overlay key's "off" is for watching the drive: the flags and pins go too, until the key or a debug command
-  bool clear = (g_debug.keyOff && !g_debug.on) || (g_shot.on && g_shot.lines);
+  // the overlay key's "off" is for watching the drive: the flags and pins go too, until the key or a debug command; its
+  // plan and route levels show those alone
+  bool clear = (g_debug.keyOff && !g_debug.on) || (g_debug.on && g_debug.level < 3) || (g_shot.on && g_shot.lines);
   if (view < 0 && !clear) DrawPins();
   if (view < 0 && !clear) DrawFlags();
   if (view < 0) MarkNote(now);
