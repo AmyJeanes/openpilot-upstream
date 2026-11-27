@@ -1771,6 +1771,7 @@ struct DebugOverlay {
   int level = 0;                         // the debug key's: 0 off, 1 the route ahead, 2 every layer
   float lift = 0.05f;   // m above the ground, added to each kind's own (and DIST_LIFT's)
   float width = 1.0f;   // every kind's width scaled
+  float alpha = 1.0f;   // every strip's opacity scaled: under 1, the road shows through the lines
   float layerWidth[128];  // and each layer's, by its letter
   float dist = 120.0f;  // m from the camera drawn
   float grow = 0.0f;    // m from the camera strips widen beyond, to keep about as many pixels wide; 0: never
@@ -1789,6 +1790,13 @@ struct DebugOverlay {
   double drawMs = 0, drawMaxMs = 0;  // ms a frame, mean and most, over the last 2 s
   DebugOverlay() { std::fill(std::begin(layerWidth), std::end(layerWidth), 1.0f); }
 } g_debug;
+// The map driver's plan for the next few seconds (drive.py plan_line): a thin line of its own, sent ten times a second
+// apart from the overlay (worked out again every half second), and dropped when it stops coming.
+struct PlanLine {
+  std::vector<P3> pts;
+  double t = -1e9;
+} g_plan;
+constexpr double PLAN_STALE = 0.6;
 std::atomic<int> g_debugPresses{0};
 constexpr double DEBUG_STALE = 3.0;  // s without new lines: the bridge stopped sending them
 constexpr float DEBUG_DENSE = 3.0f;  // m at most between a strip's points, so it follows the ground between them
@@ -1846,6 +1854,10 @@ constexpr KindStyle STYLES[] = {
     {'n', 255, 255, 255, 235, 0.25f, 2, 1.5f, 0.150f},  // nav's lane plan, over the route
     {'z', 255, 170, 0, 90, 0.20f, 0, 0, 0.165f},        // a blind-spot zone's outline, clear
     {'Z', 255, 40, 20, 110, 2.40f, 0, 0, 0.165f},       // an occupied blind-spot zone, filled down its middle
+    {'C', 120, 225, 255, 200, 0.30f, 2, 2, 0.210f},     // the route's corridor: the outer edges of the lanes it may use
+    {'K', 255, 150, 40, 210, 0.30f, 2, 2, 0.215f},      // a lane in it that peels off: its edges, up to its deadline
+    {'D', 255, 60, 40, 235, 0.60f, 0, 0, 0.220f},       // that deadline, a bar across the lane
+    {'V', 90, 205, 255, 255, 0.20f, 0, 0, 0.260f},      // the map driver's plan: where it means to be over the next seconds
 };
 constexpr KindStyle OTHER_STYLE = {'?', 255, 255, 255, 235, 0.2f, 0, 0, 0.03f};
 
@@ -2104,7 +2116,7 @@ int DrawStrip(const std::vector<P3> &pts, const KindStyle &s, float width, float
   }
   int used = 0, per = (g_debug.sides >= 2 ? 4 : 2) * (inner > 0 ? 2 : 1);
   auto out = [&](size_t i) { return dist[i] > v.dist; };
-  const int cr = rgba ? rgba[0] : s.r, cg = rgba ? rgba[1] : s.g, cb = rgba ? rgba[2] : s.b, ca = rgba ? rgba[3] : s.a;
+  const int cr = rgba ? rgba[0] : s.r, cg = rgba ? rgba[1] : s.g, cb = rgba ? rgba[2] : s.b, ca = static_cast<int>((rgba ? rgba[3] : s.a) * g_debug.alpha);
   // a piece of the strip from end 0 to end 1 (corner(end, side), side -1 its left edge to 1 its right), whole or its edges
   auto piece = [&](auto corner) {
     auto quad = [&](float lo, float hi) {
@@ -2286,6 +2298,10 @@ void DrawDebug(double now) {
       budget -= DrawStrip(l.pts, s, width + 2 * CASING, s.lift + lift - 0.0075f, view, budget, CASING_RGBA, width / (width + 2 * CASING));
     }
     budget -= DrawStrip(l.pts, s, width, s.lift + lift, view, budget);
+  }
+  if (has(DebugLayer('V')) && now - g_plan.t < PLAN_STALE && g_plan.pts.size() >= 2) {
+    const KindStyle &s = StyleOf('V');
+    budget -= DrawStrip(g_plan.pts, s, s.width * d.width, s.lift + lift, view, budget);
   }
   d.polys = g_debugPolys = d.maxPolys - budget;
 }
@@ -4604,6 +4620,7 @@ void HandleMessage(const Message &m, double now) {
     g_debug.casing = MsgBool(m, "casing", g_debug.casing);
     g_debug.lift = std::clamp(static_cast<float>(MsgNum(m, "lift", g_debug.lift)), -1.0f, 3.0f);
     g_debug.width = std::clamp(static_cast<float>(MsgNum(m, "width", g_debug.width)), 0.1f, 20.0f);
+    g_debug.alpha = std::clamp(static_cast<float>(MsgNum(m, "alpha", g_debug.alpha)), 0.05f, 1.0f);
     g_debug.dist = std::clamp(static_cast<float>(MsgNum(m, "dist", g_debug.dist)), 5.0f, 1000.0f);
     g_debug.grow = std::clamp(static_cast<float>(MsgNum(m, "grow", g_debug.grow)), 0.0f, 1000.0f);
     g_debug.sides = MsgNum(m, "sides", g_debug.sides) >= 2 ? 2 : 1;
@@ -4616,6 +4633,16 @@ void HandleMessage(const Message &m, double now) {
     Log("debug " + std::string(g_debug.on ? "on" : "off") + ", layers " + g_debug.layers + (g_debug.force ? ", forced" : "") +
         (g_debug.thin ? ", thin" : ", width " + Num(g_debug.width) + (g_debug.ground ? " on the ground" : " at the map's heights")) +
         ", to " + Num(g_debug.dist) + " m");
+  } else if (type == "plan") {
+    // g: "x,y,z;x,y,z;..." in metres; none: no plan
+    g_plan.pts.clear();
+    std::stringstream ss(MsgStr(m, "g"));
+    std::string tok;
+    while (std::getline(ss, tok, ';')) {
+      float x, y, z;
+      if (std::sscanf(tok.c_str(), "%f,%f,%f", &x, &y, &z) == 3) g_plan.pts.push_back({x, y, z});
+    }
+    g_plan.t = now;
   } else if (type == "debugGeo") {
     if (!g_debug.on) return;
     // u: numbers to the metre (10 unless given: decimetres)
@@ -5380,7 +5407,7 @@ extern "C" __declspec(dllexport) void CoreTick() {
     g_debug.level = (g_debug.level + presses) % 3;
     g_debug.on = g_debug.level > 0;
     g_debug.keyOff = g_debug.level == 0;
-    g_debug.layers = g_debug.level == 1 ? "rP" : g_debug.fullLayers;  // P: the route made on the map page
+    g_debug.layers = g_debug.level == 1 ? "rPCKDV" : g_debug.fullLayers;  // P: the route made on the map page; CKD: its corridor
     g_debug.lines.clear(), g_debug.vertices = 0;  // the bridge sends the new level's lines
     Log(std::string("debug ") + LEVELS[g_debug.level] + " (key)");
   }
